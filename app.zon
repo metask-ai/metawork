@@ -94,6 +94,7 @@
             .{ .name = "metawork.tasks.create", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.sendInput", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.stop", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.setApprovalMode", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.selectModel", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.restore", .origins = .{"zero://app"} },

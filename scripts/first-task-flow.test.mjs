@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { submitTaskInstruction } from "../frontend/src/features/composer/submitTaskInstruction.ts";
+import { TaskSubmissionSession } from "../frontend/src/features/composer/submitTaskInstruction.ts";
 import { chooseWorkspaceAndMigrateDraft } from "../frontend/src/features/workspaces/chooseWorkspace.ts";
 
 test("a failed authoritative refresh cannot move or lose the source draft", async () => {
@@ -48,558 +48,173 @@ test("choosing a Workspace without a migratable draft only changes draft context
   assert.deepEqual(calls, ["choose", "refresh"]);
 });
 
-test("the first send uses Host generations and creates one Task before its Run", async () => {
-  const calls = [];
-  const created = [];
-  const modelSelection = {
-    targetModelRef: { sourceId: "metask", modelId: "model-2" },
-    expectedSourceGeneration: "19",
-    expectedCatalogGeneration: "29",
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((a, b) => {
+    resolve = a;
+    reject = b;
+  });
+  return { promise, resolve, reject };
+};
+const text = (value) => ({ kind: "text", text: value });
+function sessionFixture(taskId = null) {
+  const creation = deferred(),
+    receipts = new Map(),
+    calls = [];
+  let current = true,
+    creates = 0;
+  const session = new TaskSubmissionSession({
+    taskId,
+    create: () => {
+      creates++;
+      return creation.promise;
+    },
+    send: (operationId, taskId, input) => {
+      calls.push([operationId, taskId, input]);
+      const reply = deferred();
+      receipts.set(operationId, reply);
+      return reply.promise;
+    },
+    stop: async (id) => {
+      calls.push(["stop", id]);
+    },
+    current: () => current,
+    onCreated: (id) => calls.push(["created", id]),
+  });
+  return {
+    session,
+    creation,
+    receipts,
+    calls,
+    creates: () => creates,
+    replace: () => {
+      current = false;
+    },
   };
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask(
-        workspace,
-        expectedExecutionGeneration,
-        expectedSelectionRevision,
-        selectedModel,
-        expectedSkillCatalogRevision,
-        expectedSkillSelectionRevision,
-        approvalMode,
-      ) {
-        calls.push([
-          "create",
-          workspace,
-          expectedExecutionGeneration,
-          expectedSelectionRevision,
-          selectedModel,
-          expectedSkillCatalogRevision,
-          expectedSkillSelectionRevision,
-          approvalMode,
-        ]);
-        return {
-          accepted: true,
-          taskId: "41",
-          bindingEpoch: "8",
-          reason: null,
-        };
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        assert.match(operationId, /^[!-~]{1,64}$/);
-        assert.deepEqual(expectedExecution, { kind: "idle", lastRunId: null });
-        calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return {
-          outcome: "started",
-          taskId,
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: "9",
-          reason: null,
-        };
-      },
-    },
-    taskId: null,
-    workspace: {
-      kind: "manual",
-      workspaceId: "7",
-      expectedWorkspaceEpoch: "5",
-    },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Ship a working product" },
-    onTaskCreated: (taskId) => created.push(taskId),
-  });
-  assert.deepEqual(calls, [
-    [
-      "create",
-      { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
-      "19",
-      "23",
-      modelSelection,
-      null,
-      null,
-      "manual",
-    ],
-    ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
-  ]);
-  assert.deepEqual(created, ["41"]);
-  assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
+}
+const created = {
+  accepted: true,
+  taskId: "9",
+  bindingEpoch: "2",
+  reason: null,
+};
+const accept = (id) => ({
+  taskId: "9",
+  operationId: id,
+  outcome: "accepted",
+  reason: null,
+});
+test("creation is shared and A B C are delivered before any receipt", async () => {
+  const f = sessionFixture();
+  const results = ["A", "B", "C"].map((id) =>
+    f.session.submit(id, text(id), () => {}),
+  );
+  assert.equal(f.creates(), 1);
+  assert.deepEqual(f.calls, []);
+  f.creation.resolve(created);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    f.calls.map((call) => call[0]),
+    ["created", "A", "B", "C"],
+  );
+  for (const id of ["C", "A", "B"]) f.receipts.get(id).resolve(accept(id));
+  assert.deepEqual(
+    (await Promise.all(results)).map((result) => result.kind),
+    ["accepted", "accepted", "accepted"],
+  );
+});
+test("existing Task sends synchronously without waiting for any previous reply", async () => {
+  const f = sessionFixture("9");
+  const a = f.session.submit("A", text("A"), () => {});
+  const b = f.session.submit("B", text("B"), () => {});
+  assert.deepEqual(
+    f.calls.map((call) => call[0]),
+    ["A", "B"],
+  );
+  assert.equal(f.creates(), 0);
+  f.receipts.get("B").resolve(accept("B"));
+  f.receipts.get("A").resolve(accept("A"));
+  await Promise.all([a, b]);
+});
+test("stop during creation cancels only earlier messages and precedes later sends", async () => {
+  const f = sessionFixture();
+  const a = f.session.submit("A", text("A"), () => {});
+  const stopping = f.session.stop();
+  const b = f.session.submit("B", text("B"), () => {});
+  f.creation.resolve(created);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    f.calls.map((call) => call[0]),
+    ["created", "stop", "B"],
+  );
+  assert.equal((await a).kind, "cancelled");
+  f.receipts.get("B").resolve(accept("B"));
+  await Promise.all([stopping, b]);
+});
+test("failed or unknown creation never recreates or replays submitted messages", async () => {
+  for (const refused of [true, false]) {
+    const f = sessionFixture();
+    const a = f.session.submit("A", text("A"), () => {});
+    if (refused)
+      f.creation.resolve({ accepted: false, reason: "catalog_unavailable" });
+    else f.creation.reject(new Error("lost"));
+    assert.equal((await a).kind, refused ? "create_rejected" : "unknown");
+    const b = await f.session.submit("B", text("B"), () => {});
+    assert.equal(b.kind, refused ? "create_rejected" : "unknown");
+    assert.equal(f.creates(), 1);
+    assert.deepEqual(f.calls, []);
+  }
+});
+test("connection replacement prevents delivery after late creation", async () => {
+  const f = sessionFixture();
+  const a = f.session.submit("A", text("A"), () => {});
+  f.replace();
+  f.creation.resolve(created);
+  assert.equal((await a).kind, "unknown");
+  assert.deepEqual(f.calls, []);
+});
+test("lost A receipt does not block B and is never automatically resent", async () => {
+  const f = sessionFixture("9");
+  const a = f.session.submit("A", text("A"), () => {});
+  const b = f.session.submit("B", text("B"), () => {});
+  f.receipts.get("A").reject(new Error("lost"));
+  f.receipts.get("B").resolve(accept("B"));
+  assert.equal((await a).kind, "unknown");
+  assert.equal((await b).kind, "accepted");
+  assert.equal(f.calls.length, 2);
+});
+test("creation buffer is bounded and reserves no additional create request", async () => {
+  const f = sessionFixture();
+  const results = Array.from({ length: 64 }, (_, i) =>
+    f.session.submit(String(i), text(String(i)), () => {}),
+  );
+  assert.deepEqual(
+    await f.session.submit("overflow", text("overflow"), () => {}),
+    { kind: "create_rejected", reason: "capacity_reached" },
+  );
+  const stop = f.session.stop();
+  f.creation.resolve(created);
+  await stop;
+  assert.ok(
+    (await Promise.all(results)).every((result) => result.kind === "cancelled"),
+  );
+  assert.equal(f.creates(), 1);
 });
 
-test("the first Skill send pins its selected catalog before typed execution", async () => {
-  const calls = [];
-  const input = {
-    kind: "skill",
-    skillId: "builtin.review",
-    catalogRevision: "17",
-    selectionRevision: "23",
-    argumentValues: ["src/main.zig"],
-  };
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask(...args) {
-        calls.push(["create", ...args]);
-        return {
-          accepted: true,
-          taskId: "41",
-          bindingEpoch: "8",
-          reason: null,
-        };
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return {
-          outcome: "started",
-          taskId: "41",
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: "9",
-          reason: null,
-        };
-      },
-    },
-    taskId: null,
-    workspace: {
-      kind: "manual",
-      workspaceId: "7",
-      expectedWorkspaceEpoch: "5",
-    },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "full_access",
-    input,
-    onTaskCreated() {},
-  });
-  assert.deepEqual(calls, [
-    [
-      "create",
-      { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
-      "19",
-      "23",
-      null,
-      "17",
-      "23",
-      "full_access",
-    ],
-    ["run", "41", "8", input],
-  ]);
-  assert.deepEqual(result, { kind: "started", taskId: "41", created: true });
-});
-
-test("a creation failure never starts a Run or invents a Task", async () => {
-  let runCalled = false;
-  let createdCalled = false;
-  const failure = new Error("credential missing");
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        throw failure;
-      },
-      async sendInput() {
-        runCalled = true;
-      },
-    },
-    taskId: null,
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Keep this text" },
-    onTaskCreated: () => {
-      createdCalled = true;
-    },
-  });
-  assert.deepEqual(result, { kind: "create_failed", error: failure });
-  assert.equal(runCalled, false);
-  assert.equal(createdCalled, false);
-});
-
-test("a Host-rejected creation preserves the structured product reason", async () => {
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        return {
-          accepted: false,
-          taskId: null,
-          bindingEpoch: null,
-          reason: "execution_changed",
-        };
-      },
-      async sendInput() {
-        assert.fail("a rejected creation cannot start a Run");
-      },
-    },
-    taskId: null,
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Keep this text" },
-    onTaskCreated: () => assert.fail("a rejected creation has no Task"),
-  });
-  assert.deepEqual(result, {
-    kind: "create_rejected",
-    reason: "execution_changed",
-  });
-});
-
-test("the first send can request an Automatic Workspace without a prior identity", async () => {
-  const calls = [];
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask(...args) {
-        calls.push(["create", ...args]);
-        return { accepted: true, taskId: "1", bindingEpoch: "1", reason: null };
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return {
-          outcome: "started",
-          taskId: "1",
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: "1",
-          reason: null,
-        };
-      },
-    },
-    taskId: null,
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Do not bypass trust" },
-    onTaskCreated: (taskId) => calls.push(["created", taskId]),
-  });
-  assert.deepEqual(calls, [
-    ["create", { kind: "automatic" }, "19", "23", null, null, null, "manual"],
-    ["created", "1"],
-    ["run", "1", "1", { kind: "text", text: "Do not bypass trust" }],
-  ]);
-  assert.deepEqual(result, { kind: "started", taskId: "1", created: true });
-});
-
-test("a Run failure reports the real created Task for draft recovery", async () => {
-  const failure = new Error("executor full");
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        return {
-          accepted: true,
-          taskId: "42",
-          bindingEpoch: "3",
-          reason: null,
-        };
-      },
-      async sendInput() {
-        throw failure;
-      },
-    },
-    taskId: null,
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Recover me" },
-    onTaskCreated() {},
-  });
-  assert.deepEqual(result, {
-    kind: "run_failed",
-    taskId: "42",
-    created: true,
-    error: failure,
-  });
-});
-
-test("sending on an existing Task uses its binding epoch and never creates", async () => {
-  let createCalled = false;
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        createCalled = true;
-        return {
-          accepted: true,
-          taskId: "unexpected",
-          bindingEpoch: "99",
-          reason: null,
-        };
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        assert.equal(taskId, "9");
-        assert.equal(expectedBindingEpoch, "12");
-        assert.deepEqual(input, { kind: "text", text: "Continue" });
-        return {
-          outcome: "started",
-          taskId,
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: "10",
-          reason: null,
-        };
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: "12",
-    approvalMode: "manual",
-    input: { kind: "text", text: "Continue" },
-    onTaskCreated() {
-      assert.fail("existing Task must not create a Task");
-    },
-  });
-  assert.equal(createCalled, false);
-  assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
-});
-
-test("a detached Task restores before its first continued Run", async () => {
-  const calls = [];
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        assert.fail("existing Task must not create a Task");
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return {
-          outcome: "started",
-          taskId,
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: "11",
-          reason: null,
-        };
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: "12",
-    approvalMode: "manual",
-    input: { kind: "text", text: "Continue after restart" },
-    continuationRecoveryAvailable: true,
-    ensureContinuation: async (taskId, bindingEpoch) => {
-      calls.push(["restore", taskId, bindingEpoch]);
-      return { kind: "ready", bindingEpoch: "13" };
-    },
-    onTaskCreated() {
-      assert.fail("existing Task must not create a Task");
-    },
-  });
-  assert.deepEqual(calls, [
-    ["restore", "9", "12"],
-    ["run", "9", "13", { kind: "text", text: "Continue after restart" }],
-  ]);
-  assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
-});
-
-test("a failed detached restore never sends the pending Run", async () => {
-  let runCalled = false;
-  const failure = new Error("restore failed");
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        assert.fail("existing Task must not create a Task");
-      },
-      async sendInput() {
-        runCalled = true;
-        return {
-          outcome: "started",
-          taskId: "9",
-          inputId: null,
-          sequence: null,
-          runId: "11",
-          reason: null,
-        };
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: "12",
-    approvalMode: "manual",
-    input: { kind: "text", text: "Keep this draft" },
-    continuationRecoveryAvailable: true,
-    ensureContinuation: async () => ({ kind: "failed", error: failure }),
-    onTaskCreated() {},
-  });
-  assert.deepEqual(result, {
-    kind: "continuation_failed",
-    taskId: "9",
-    created: false,
-    error: failure,
-  });
-  assert.equal(runCalled, false);
-});
-
-test("a recovered Run CAS rejection uses the adopted epoch once and never retries", async () => {
-  const calls = [];
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        assert.fail("existing Task must not create a Task");
-      },
-      async sendInput(
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      ) {
-        calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return {
-          outcome: "rejected",
-          taskId,
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: null,
-          reason: "binding_changed",
-        };
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: "12",
-    approvalMode: "manual",
-    input: { kind: "text", text: "Keep this draft after CAS rejection" },
-    continuationRecoveryAvailable: true,
-    ensureContinuation: async () => ({
-      kind: "ready",
-      bindingEpoch: "13",
-    }),
-    onTaskCreated() {},
-  });
-  assert.deepEqual(calls, [
-    [
-      "run",
-      "9",
-      "13",
-      { kind: "text", text: "Keep this draft after CAS rejection" },
-    ],
-  ]);
-  assert.deepEqual(result, {
-    kind: "run_rejected",
-    taskId: "9",
-    created: false,
-    reason: "binding_changed",
-  });
-});
-
-test("a Host-rejected Run preserves the structured product reason", async () => {
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        assert.fail("existing Task must not create a Task");
-      },
-      async sendInput(operationId, taskId) {
-        return {
-          outcome: "rejected",
-          taskId,
-          operationId,
-          inputId: null,
-          sequence: null,
-          runId: null,
-          reason: "binding_changed",
-        };
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: "12",
-    approvalMode: "manual",
-    input: { kind: "text", text: "Continue" },
-    onTaskCreated() {},
-  });
-  assert.deepEqual(result, {
-    kind: "run_rejected",
-    taskId: "9",
-    created: false,
-    reason: "binding_changed",
-  });
-});
-
-test("an existing Task without a binding epoch fails closed", async () => {
-  let runCalled = false;
-  const result = await submitTaskInstruction({
-    client: {
-      async createTask() {
-        assert.fail("existing Task must not create a Task");
-      },
-      async sendInput() {
-        runCalled = true;
-      },
-    },
-    taskId: "9",
-    workspace: { kind: "automatic" },
-    expectedExecutionGeneration: "19",
-    expectedSelectionRevision: "23",
-    modelSelection: null,
-    expectedBindingEpoch: null,
-    approvalMode: "manual",
-    input: { kind: "text", text: "Continue" },
-    onTaskCreated() {},
-  });
-  assert.equal(result.kind, "run_failed");
-  assert.equal(runCalled, false);
+test("stop immediately settles the local cancellation before delayed creation replies", async () => {
+  const f = sessionFixture();
+  let cancelled = 0;
+  const a = f.session.submit(
+    "A",
+    text("A"),
+    () => {},
+    () => cancelled++,
+  );
+  const stopping = f.session.stop();
+  assert.equal(cancelled, 1);
+  assert.deepEqual(f.calls, []);
+  f.creation.resolve(created);
+  await stopping;
+  assert.equal((await a).kind, "cancelled");
+  assert.equal(cancelled, 1);
 });

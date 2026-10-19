@@ -1,215 +1,137 @@
-import { newComposerOperationId } from "./drafts.ts";
 import type {
-  TaskCreateReason,
   TaskCreateResult,
-  NewTaskModelSelectionIntent,
-  ApprovalMode,
-  TaskRestoreReason,
   TaskRunInput,
-  SendInputReason,
   SendInputResult,
-  InputTarget,
-  TaskWorkspaceIntent,
+  TaskView,
+  TaskCreateReason,
+  SendInputReason,
 } from "../../bridge/contracts.ts";
 
-export type TaskSubmissionClient = {
-  createTask: (
-    workspace: TaskWorkspaceIntent,
-    expectedExecutionGeneration: string,
-    expectedSelectionRevision: string,
-    modelSelection: NewTaskModelSelectionIntent | null,
-    expectedSkillCatalogRevision: string | null,
-    expectedSkillSelectionRevision: string | null,
-    approvalMode: ApprovalMode,
-  ) => Promise<TaskCreateResult>;
-  sendInput: (
-    operationId: string,
-    taskId: string,
-    expectedBindingEpoch: string,
-    expectedExecution: InputTarget,
-    input: TaskRunInput,
-  ) => Promise<SendInputResult>;
-};
-
-export type EnsureTaskContinuationResult =
-  | { kind: "ready"; bindingEpoch: string }
-  | { kind: "rejected"; reason: TaskRestoreReason }
-  | { kind: "failed"; error: unknown };
+export const maxLocalTaskSubmissions = 64;
 
 export type TaskSubmissionResult =
-  | { kind: "started"; taskId: string; created: boolean }
-  | { kind: "input_unknown"; taskId: string; created: boolean }
+  | { kind: "accepted"; taskId: string }
+  | { kind: "rejected"; taskId: string; reason: SendInputReason }
+  | { kind: "unknown"; taskId: string | null }
   | { kind: "create_rejected"; reason: TaskCreateReason }
-  | { kind: "create_failed"; error: unknown }
-  | {
-      kind: "run_rejected";
-      taskId: string;
-      created: boolean;
-      reason: SendInputReason;
-    }
-  | {
-      kind: "continuation_rejected";
-      taskId: string;
-      created: boolean;
-      reason: TaskRestoreReason;
-    }
-  | {
-      kind: "continuation_failed";
-      taskId: string;
-      created: boolean;
-      error: unknown;
-    }
-  | { kind: "run_failed"; taskId: string; created: boolean; error: unknown };
+  | { kind: "cancelled"; taskId: string | null };
 
-export async function submitTaskInstruction({
-  client,
-  taskId,
-  workspace,
-  expectedExecutionGeneration,
-  expectedSelectionRevision,
-  modelSelection,
-  expectedBindingEpoch,
-  approvalMode,
-  input,
-  continuationRecoveryAvailable = false,
-  ensureContinuation,
-  ensureSkills,
-  onTaskCreated,
-  operationId = newComposerOperationId(),
-  expectedLastRunId = null,
-  onBeforeSend,
-}: {
-  client: TaskSubmissionClient;
+type SessionOptions = {
   taskId: string | null;
-  workspace: TaskWorkspaceIntent;
-  expectedExecutionGeneration: string;
-  expectedSelectionRevision: string;
-  modelSelection: NewTaskModelSelectionIntent | null;
-  expectedBindingEpoch: string | null;
-  approvalMode: ApprovalMode;
-  input: TaskRunInput;
-  continuationRecoveryAvailable?: boolean;
-  ensureContinuation?: (
+  create: () => Promise<TaskCreateResult>;
+  send: (
+    operationId: string,
     taskId: string,
-    expectedBindingEpoch: string,
-  ) => Promise<EnsureTaskContinuationResult>;
-  ensureSkills?: (
-    taskId: string,
-    bindingEpoch: string,
-  ) => Promise<{ kind: "ready" } | { kind: "failed"; error: unknown }>;
-  onTaskCreated: (taskId: string) => void;
-  operationId?: string;
-  expectedLastRunId?: string | null;
-  onBeforeSend?: (taskId: string, operationId: string) => void;
-}): Promise<TaskSubmissionResult> {
-  let targetTaskId = taskId;
-  let targetBindingEpoch = expectedBindingEpoch;
-  let created = false;
-  if (!targetTaskId) {
-    try {
-      const createdTask = await client.createTask(
-        workspace,
-        expectedExecutionGeneration,
-        expectedSelectionRevision,
-        modelSelection,
-        input.kind === "skill" ? input.catalogRevision : null,
-        input.kind === "skill" ? input.selectionRevision : null,
-        approvalMode,
-      );
-      if (!createdTask.accepted)
-        return { kind: "create_rejected", reason: createdTask.reason };
-      targetTaskId = createdTask.taskId;
-      targetBindingEpoch = createdTask.bindingEpoch;
-    } catch (error) {
-      return { kind: "create_failed", error };
-    }
-    created = true;
-    onTaskCreated(targetTaskId);
+    input: TaskRunInput,
+  ) => Promise<SendInputResult>;
+  stop: (taskId: string) => Promise<unknown>;
+  current: () => boolean;
+  onCreated: (taskId: string) => void;
+};
+
+/** Renderer owns identity acquisition, never execution readiness or preparation. */
+export class TaskSubmissionSession {
+  private creation: Promise<TaskCreateResult> | null = null;
+  private taskId: string | null;
+  private pending = new Set<{
+    cancelled: boolean;
+    delivered: boolean;
+    onCancelled: () => void;
+  }>();
+
+  private options: SessionOptions;
+
+  constructor(options: SessionOptions) {
+    this.options = options;
+    this.taskId = options.taskId;
   }
 
-  if (!targetBindingEpoch)
-    return {
-      kind: "run_failed",
-      taskId: targetTaskId,
-      created,
-      error: new Error("Task execution binding is unavailable"),
-    };
-  if (continuationRecoveryAvailable) {
-    if (!ensureContinuation)
-      return {
-        kind: "continuation_failed",
-        taskId: targetTaskId,
-        created,
-        error: new Error("Task continuation recovery is unavailable"),
-      };
-    let continuation: EnsureTaskContinuationResult;
-    try {
-      continuation = await ensureContinuation(targetTaskId, targetBindingEpoch);
-    } catch (error) {
-      return {
-        kind: "continuation_failed",
-        taskId: targetTaskId,
-        created,
-        error,
-      };
+  private identity(): Promise<TaskCreateResult> {
+    if (!this.creation) {
+      try {
+        this.creation = this.options.create().then((result) => {
+          if (result.accepted) {
+            this.taskId = result.taskId;
+            if (this.options.current()) this.options.onCreated(result.taskId);
+          }
+          return result;
+        });
+      } catch (error) {
+        this.creation = Promise.reject(error);
+      }
     }
-    if (continuation.kind === "rejected")
-      return {
-        kind: "continuation_rejected",
-        taskId: targetTaskId,
-        created,
-        reason: continuation.reason,
-      };
-    if (continuation.kind === "failed")
-      return {
-        kind: "continuation_failed",
-        taskId: targetTaskId,
-        created,
-        error: continuation.error,
-      };
-    targetBindingEpoch = continuation.bindingEpoch;
+    return this.creation;
   }
-  if (ensureSkills) {
+
+  async submit(
+    operationId: string,
+    input: TaskRunInput,
+    onTarget: (taskId: string) => void,
+    onCancelled: () => void = () => undefined,
+  ): Promise<TaskSubmissionResult> {
+    if (this.pending.size >= maxLocalTaskSubmissions)
+      return { kind: "create_rejected", reason: "capacity_reached" };
+    const entry = { cancelled: false, delivered: false, onCancelled };
+    this.pending.add(entry);
     try {
-      const skills = await ensureSkills(targetTaskId, targetBindingEpoch);
-      if (skills.kind === "failed")
-        return {
-          kind: "run_failed",
-          taskId: targetTaskId,
-          created,
-          error: skills.error,
-        };
-    } catch (error) {
-      return { kind: "run_failed", taskId: targetTaskId, created, error };
+      let taskId = this.taskId;
+      if (!taskId) {
+        const created = await this.identity();
+        if (!created.accepted)
+          return { kind: "create_rejected", reason: created.reason };
+        taskId = created.taskId;
+      }
+      if (entry.cancelled) return { kind: "cancelled", taskId };
+      if (!this.options.current()) return { kind: "unknown", taskId };
+      entry.delivered = true;
+      onTarget(taskId);
+      // Invoked in click/identity-promise registration order, independently
+      // of all preceding send responses. The Bridge owns transport ordering.
+      const result = await this.options.send(operationId, taskId, input);
+      if (!this.options.current()) return { kind: "unknown", taskId };
+      return result.outcome === "accepted"
+        ? { kind: "accepted", taskId }
+        : { kind: "rejected", taskId, reason: result.reason };
+    } catch {
+      return { kind: "unknown", taskId: this.taskId };
+    } finally {
+      this.pending.delete(entry);
     }
   }
-  try {
-    onBeforeSend?.(targetTaskId, operationId);
-    const run = await client.sendInput(
-      operationId,
-      targetTaskId,
-      targetBindingEpoch,
-      { kind: "idle", lastRunId: expectedLastRunId },
-      input,
-    );
-    if (run.outcome === "unknown")
-      return { kind: "input_unknown", taskId: targetTaskId, created };
-    if (run.outcome === "submitted")
-      throw new Error("Unexpected current-Run receipt for an idle target");
-    if (run.outcome === "rejected")
-      return {
-        kind: "run_rejected",
-        taskId: targetTaskId,
-        created,
-        reason: run.reason,
-      };
-  } catch (error) {
-    return {
-      kind: "run_failed",
-      taskId: targetTaskId,
-      created,
-      error,
-    };
+
+  async stop(): Promise<void> {
+    for (const entry of this.pending)
+      if (!entry.delivered && !entry.cancelled) {
+        entry.cancelled = true;
+        entry.onCancelled();
+      }
+    if (this.taskId) {
+      await this.options.stop(this.taskId);
+      return;
+    }
+    if (!this.creation) return;
+    // This callback precedes sends clicked after stop while creation is pending.
+    const created = await this.creation;
+    if (created.accepted && this.options.current())
+      await this.options.stop(created.taskId);
   }
-  return { kind: "started", taskId: targetTaskId, created };
+}
+
+export function taskHasSubmission(
+  task: TaskView | undefined,
+  operationId: string,
+): boolean {
+  return Boolean(
+    task &&
+    (task.inputSubmissions.some(
+      (record) => record.submission.operationId === operationId,
+    ) ||
+      task.runs.some(
+        (run) =>
+          run.submission?.operationId === operationId ||
+          run.additionalInputs.some(
+            (record) => record.operationId === operationId,
+          ),
+      )),
+  );
 }

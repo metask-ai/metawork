@@ -1,4 +1,4 @@
-import type { InputTarget } from "./contracts.ts";
+import { object } from "./wire-codec.ts";
 import { decodeSendInputResult } from "./decode-contracts.ts";
 import {
   commands,
@@ -820,37 +820,24 @@ export class BridgeClient {
     );
   }
 
-  async sendInput(
-    operationId: string,
-    taskId: string,
-    expectedBindingEpoch: string,
-    expectedExecution: InputTarget,
-    input: TaskRunInput,
-  ) {
-    const result = decodeSendInputResult(
-      await this.invoke(commands.sendInput, {
-        operationId,
-        taskId,
-        expectedBindingEpoch,
-        expectedExecution,
-        input,
-      }),
+  async sendInput(operationId: string, taskId: string, input: TaskRunInput) {
+    return decodeSendInputResult(
+      await this.invoke(commands.sendInput, { operationId, taskId, input }),
       taskId,
       operationId,
     );
-    if (
-      (expectedExecution.kind === "run" &&
-        result.outcome !== "rejected" &&
-        (result.outcome === "started" ||
-          result.runId !== expectedExecution.runId)) ||
-      (expectedExecution.kind === "idle" &&
-        (result.outcome === "submitted" || result.outcome === "unknown"))
-    )
+  }
+
+  async stopTask(taskId: string) {
+    const item = object(await this.invoke(commands.stop, { taskId }), "$", [
+      "taskId",
+      "stopRequested",
+    ]);
+    if (item.taskId !== taskId || item.stopRequested !== true)
       throw new RendererBridgeContractError(
         "invalid_response",
-        "Input receipt does not match its execution target",
+        "Invalid task stop result",
       );
-    return result;
   }
 
   createAttachmentAdd(recover: () => Promise<void>) {

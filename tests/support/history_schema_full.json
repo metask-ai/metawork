@@ -10,7 +10,7 @@
       "epoch": 3,
       "kind": "manual",
       "canonical_root": "/history",
-      "display_name": "Workspace\u0000世",
+      "display_name": "Workspace\u0000\u4e16",
       "visible": true,
       "recent_order": 9
     }
@@ -23,7 +23,7 @@
       "workspace_id": 3,
       "workspace_epoch": 2,
       "workspace_root": "/history",
-      "title": "task\u0000title 世",
+      "title": "task\u0000title \u4e16",
       "title_redacted": true,
       "archived": true,
       "permission_profile": "full_access",
@@ -32,7 +32,7 @@
         "epoch": 19,
         "execution_generation": 17,
         "protocol": "openai_responses",
-        "model": "model-世"
+        "model": "model-\u4e16"
       },
       "next_run_generation": 14,
       "active_operation": null,
@@ -43,7 +43,7 @@
           "generation": 13,
           "execution_generation": 17,
           "execution_protocol": "openai_responses",
-          "execution_model": "model-世",
+          "execution_model": "model-\u4e16",
           "permission_profile": "full_access",
           "permission_interaction": "interactive",
           "input": {
@@ -53,13 +53,18 @@
             "catalog_revision": "catalog-r",
             "invocation_name": "inspect",
             "display_name": "Inspect",
-            "argument_values": ["arg\u0000one", "arg-two 世"],
+            "argument_values": [
+              "arg\u0000one",
+              "arg-two \u4e16"
+            ],
             "attachments": null,
             "redacted": true
           },
-          "assistant": "note\nanswer\u0000世",
+          "assistant": "note\nanswer\u0000\u4e16",
           "assistant_redacted": true,
-          "commentary_ends": [5],
+          "commentary_ends": [
+            5
+          ],
           "assistant_output_kind": "final",
           "assistant_output_start": 5,
           "submitted_at_unix_ms": 1789700000123,
@@ -79,7 +84,7 @@
               "order": 5,
               "name": "Read",
               "input": "input\u0000one",
-              "progress": "progress 世",
+              "progress": "progress \u4e16",
               "content": "content\u0000two",
               "state": "completed",
               "is_error": false,
@@ -148,7 +153,13 @@
               "order": null,
               "state": "adopted"
             }
-          ]
+          ],
+          "submission": {
+            "operation_id": "sql-root",
+            "received_at_unix_ms": 900,
+            "anchor_run_id": null,
+            "after_output_count": 0
+          }
         }
       ],
       "compacts": [
@@ -208,7 +219,7 @@
           "logical_session_id": "logical-session",
           "last_run_id": 11,
           "last_compact_id": 23,
-          "model": "model-世"
+          "model": "model-\u4e16"
         },
         "anchor": {
           "terminal": {
@@ -219,7 +230,28 @@
         }
       },
       "checkpoint_anchor": "available",
-      "checkpoint_attempt": "io_failed"
+      "checkpoint_attempt": "io_failed",
+      "input_submissions": [
+        {
+          "submission": {
+            "operation_id": "sql-pending",
+            "received_at_unix_ms": 1000,
+            "anchor_run_id": 11,
+            "after_output_count": 1
+          },
+          "input": {
+            "kind": "text",
+            "text": "safe waiting input",
+            "skill_id": null,
+            "catalog_revision": null,
+            "invocation_name": null,
+            "display_name": null,
+            "argument_values": null,
+            "redacted": false
+          },
+          "state": "waiting"
+        }
+      ]
     }
   ],
   "failures": [

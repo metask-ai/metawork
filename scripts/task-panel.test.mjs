@@ -5114,7 +5114,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   let resolveStop, rejectStop;
   const calls = [];
-  ctx.mock.method(BridgeClient.prototype, "cancel", (...ids) => {
+  ctx.mock.method(BridgeClient.prototype, "stopTask", (...ids) => {
     calls.push(ids);
     return new Promise((resolve, reject) => {
       resolveStop = resolve;
@@ -5123,7 +5123,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   });
   fireEvent.click(await findRecentTaskButton(/First task/));
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
-  assert.deepEqual(calls, [["3", "7"]]);
+  assert.deepEqual(calls, [["3"]]);
   assert.ok(screen.getByText("Requesting stop…"));
   assert.equal(
     screen.getByRole("button", { name: "Stop task" }).disabled,
@@ -6365,7 +6365,7 @@ for (const outcome of ["committed", "timeout"]) {
       rejectStop,
       calls = 0,
       reads = 0;
-    ctx.mock.method(BridgeClient.prototype, "cancel", () => {
+    ctx.mock.method(BridgeClient.prototype, "stopTask", () => {
       calls++;
       return new Promise((resolve, reject) => {
         resolveStop = resolve;
@@ -6388,7 +6388,7 @@ for (const outcome of ["committed", "timeout"]) {
       outcome === "committed"
         ? resolveStop()
         : rejectStop(
-            new BridgeCommandTimeoutError("metawork.tasks.cancel", 10000),
+            new BridgeCommandTimeoutError("metawork.tasks.stop", 10000),
           ),
     );
     assert.equal(reads, 5);

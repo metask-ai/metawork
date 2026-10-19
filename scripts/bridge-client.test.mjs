@@ -981,15 +981,12 @@ test("Run wire preserves expanded UTF-8 text with JSON escapes", async () => {
   await client.run("1", "1", { kind: "text", text });
 });
 
-test("sendInput binds one operation to one execution target", async () => {
+test("sendInput addresses Task acceptance and validates its exact operation", async () => {
   const calls = [];
   const receipt = {
     operationId: "input-1",
     taskId: "1",
-    outcome: "submitted",
-    runId: "3",
-    inputId: "1",
-    sequence: 1,
+    outcome: "accepted",
     reason: null,
   };
   const client = new BridgeClient({
@@ -998,48 +995,25 @@ test("sendInput binds one operation to one execution target", async () => {
       return receipt;
     }),
   });
-  const target = { kind: "run", runId: "3" };
   const input = { kind: "text", text: "follow up" };
-  assert.deepEqual(
-    await client.sendInput("input-1", "1", "2", target, input),
-    receipt,
-  );
+  assert.deepEqual(await client.sendInput("input-1", "1", input), receipt);
   assert.deepEqual(calls, [
     {
       command: "metawork.tasks.sendInput",
-      payload: {
-        operationId: "input-1",
-        taskId: "1",
-        expectedBindingEpoch: "2",
-        expectedExecution: target,
-        input,
-      },
+      payload: { operationId: "input-1", taskId: "1", input },
     },
   ]);
   for (const change of [
     { operationId: "other" },
-    { runId: "4" },
-    { outcome: "started", inputId: null, sequence: null },
+    { taskId: "2" },
+    { outcome: "submitted" },
+    { reason: "task_busy" },
   ]) {
+    const original = { ...receipt };
     Object.assign(receipt, change);
-    await assert.rejects(client.sendInput("input-1", "1", "2", target, input));
-    Object.assign(receipt, {
-      operationId: "input-1",
-      runId: "3",
-      outcome: "submitted",
-      inputId: "1",
-      sequence: 1,
-    });
+    await assert.rejects(client.sendInput("input-1", "1", input));
+    Object.assign(receipt, original);
   }
-  await assert.rejects(
-    client.sendInput(
-      "input-1",
-      "1",
-      "2",
-      { kind: "idle", lastRunId: null },
-      input,
-    ),
-  );
 });
 
 test("input timeout and late response never resend or retarget", async () => {
@@ -1055,23 +1029,14 @@ test("input timeout and late response never resend or retarget", async () => {
     }),
   });
   await assert.rejects(
-    client.sendInput(
-      "lost",
-      "1",
-      "1",
-      { kind: "run", runId: "3" },
-      { kind: "text", text: "next" },
-    ),
+    client.sendInput("lost", "1", { kind: "text", text: "next" }),
     BridgeCommandTimeoutError,
   );
   assert.equal(calls, 1);
   resolve({
     operationId: "lost",
     taskId: "1",
-    outcome: "submitted",
-    runId: "3",
-    inputId: "1",
-    sequence: 1,
+    outcome: "accepted",
     reason: null,
   });
   await new Promise((done) => setTimeout(done, 2));

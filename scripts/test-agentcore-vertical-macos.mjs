@@ -657,7 +657,7 @@ desktopVertical: try {
     await verifyActiveRestart();
     await stopApplication("active input verification complete");
     process.stdout.write(
-      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, merged final-output continuation, stop/failure, ordinary user messages, Skill refusal, timeout reconciliation, draft focus and restart.\n",
+      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, merged final-output continuation, stop/failure, ordinary user messages, Skill waiting, timeout reconciliation, draft focus and restart.\n",
     );
     break desktopVertical;
   }
@@ -1533,9 +1533,9 @@ desktopVertical: try {
     throw new Error(
       `provider served ${provider.served}/${expectedProviderResponses} expected responses`,
     );
-  if (provider.titleCompletions !== 1)
+  if (provider.titleCompletions !== 2)
     throw new Error(
-      `automatic title Completion served ${provider.titleCompletions}/1 responses`,
+      `automatic title Completion served ${provider.titleCompletions}/2 responses`,
     );
   if (provider.error) throw provider.error;
   const providerInput = JSON.stringify(provider.requests);
@@ -2905,10 +2905,10 @@ async function sendInRenderer(taskId, text) {
     await poll(
       () =>
         webview.evaluate(
-          `document.querySelector('.composer-send')?.disabled===false && document.querySelector('.composer-stop')===null`,
+          `document.querySelector('.composer-send')?.disabled===false && document.querySelector('.composer-stop')!==null`,
         ),
       commandTimeoutMs,
-      "content shows Send only",
+      "content shows Send and Task Stop",
     );
     await webview.evaluate(`(() => {
       const transport=window.chrome.webview, post=transport.postMessage;
@@ -3000,7 +3000,7 @@ async function sendInRenderer(taskId, text) {
             webview.evaluate(`(() => {
           if(innerWidth>${width} || innerWidth<${width}-32) return false;
           const message=document.querySelector('.additional-input'), actions=[...document.querySelectorAll('.composer-send,.composer-stop')];
-          if(!message || actions.length!==1 || !actions[0].classList.contains('composer-send')) return false;
+          if(!message || actions.length!==2 || !actions.some(action=>action.classList.contains('composer-send'))) return false;
           const bubble=message.querySelector('.ai-message[data-role="user"]');
           if(!bubble) throw new Error('interjection must use the shared user message');
           const shared=document.querySelector('.ai-exchange > .ai-message[data-role="user"]');
@@ -3437,6 +3437,7 @@ async function removeWorkspaceWithRetry() {
 function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
+  let nextTitleGate = null;
   let reviewRequests = 0;
   let inputReviewRequests = 0;
   let officeReviewRequests = 0;
@@ -3579,6 +3580,12 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
               "automatic title Completion did not preserve its frozen Anthropic request",
             );
           titleCompletions += 1;
+          if (nextTitleGate) {
+            const held = nextTitleGate;
+            nextTitleGate = null;
+            held.entered = true;
+            await held.promise;
+          }
           response.writeHead(200, {
             "content-type": "application/json",
             connection: "close",
@@ -3647,6 +3654,16 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   return {
     enqueue(...fixtures) {
       queue.splice(served, 0, ...fixtures);
+    },
+    holdNextTitle() {
+      assert.equal(nextTitleGate, null);
+      let release;
+      const promise = new Promise((resolve) => {
+        release = resolve;
+      });
+      const held = { entered: false, promise, release };
+      nextTitleGate = held;
+      return held;
     },
     get inputReviewRequests() {
       return inputReviewRequests;

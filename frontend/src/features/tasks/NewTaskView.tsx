@@ -42,11 +42,13 @@ export function TaskWorkspace({
   hasWorkspace,
   taskContent,
   composer,
+  pendingContent,
 }: {
   newTask: boolean;
   hasWorkspace: boolean;
   taskContent?: ReactNode;
   composer: ReactNode;
+  pendingContent?: ReactNode;
 }) {
   const { t } = useI18n();
   return (
@@ -67,6 +69,7 @@ export function TaskWorkspace({
           ) : (
             taskContent
           )}
+          {newTask && pendingContent}
           {composer}
         </div>
       </section>

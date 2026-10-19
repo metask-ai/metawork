@@ -3184,8 +3184,8 @@ test("active input shared fixture preserves exact receipts and adoption history"
     ),
   );
   assert.deepEqual(
-    decodeSendInputResult(wire.submitted, "1", "input-1"),
-    wire.submitted,
+    decodeSendInputResult(wire.accepted, "1", "input-1"),
+    wire.accepted,
   );
   assert.deepEqual(
     decodeSendInputResult(wire.rejected, "1", "input-late"),
@@ -3197,7 +3197,6 @@ test("active input shared fixture preserves exact receipts and adoption history"
   task.currentRunId = "1";
   task.activeOperation.id = "1";
   task.runs[0].id = "1";
-  task.sendInputResult = wire.submitted;
   task.inputReady = true;
   task.runs[0].additionalInputs = [wire.history];
   assert.deepEqual(
@@ -3261,10 +3260,10 @@ test("active input shared fixture preserves exact receipts and adoption history"
   assert.throws(() => decodeWorkbenchSnapshot(failedSource));
   transferred.tasks[0].runs.pop();
   assert.throws(() => decodeWorkbenchSnapshot(transferred));
-  assert.throws(() => decodeSendInputResult(wire.submitted, "1", "other"));
+  assert.throws(() => decodeSendInputResult(wire.accepted, "1", "other"));
   assert.throws(() =>
     decodeSendInputResult(
-      { ...wire.submitted, sequence: null },
+      { ...wire.accepted, reason: "too_late" },
       "1",
       "input-1",
     ),
@@ -3296,14 +3295,17 @@ test("unavailable Host attachment fixture stays decodable without advertising im
 test("field mismatch locates missing schema fields without exposing input keys or values", () => {
   const value = clone(fixture);
   delete value.tasks[0].inputReady;
-  delete value.tasks[0].sendInputResult;
+  delete value.tasks[0].inputSubmissions;
   const privateKey = "private-input-key-".repeat(1000);
   value.tasks[0][privateKey] = "private-input-value";
   assert.throws(
     () => decodeWorkbenchSnapshot(value),
     (error) => {
       assert.match(error.message, /\$\.tasks\[0\]/);
-      assert.match(error.message, /missing \(2\): inputReady, sendInputResult/);
+      assert.match(
+        error.message,
+        /missing \(2\): inputReady, inputSubmissions/,
+      );
       assert.match(error.message, /unexpected fields: 1/);
       assert.doesNotMatch(error.message, /private-input/);
       assert.ok(error.message.length < 512);
@@ -3376,5 +3378,43 @@ test("actual interrupted Compact fixture is accepted by the existing snapshot de
       ),
     ),
   ];
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+});
+
+test("Task waiting input and reception metadata are strict safe projections", () => {
+  const value = clone(fixture),
+    task = value.tasks[0];
+  const metadata = {
+    operationId: "queued",
+    receivedAtUnixMs: "1792390000000",
+    anchorRunId: task.runs[0].id,
+    afterOutputCount: 0,
+  };
+  task.inputSubmissions = [
+    {
+      submission: metadata,
+      input: { kind: "text", text: "waiting", redacted: false },
+      state: "waiting",
+      reason: null,
+    },
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+  for (const change of [
+    (t) => (t.inputAcceptance.reason = "task_busy"),
+    (t) => (t.inputSubmissions[0].state = "submitting"),
+    (t) => (t.inputSubmissions[0].reason = "capacity_reached"),
+    (t) => (t.inputSubmissions[0].submission.receivedAtUnixMs = "0"),
+    (t) =>
+      (t.inputSubmissions[0].submission.receivedAtUnixMs = "8640000000000001"),
+    (t) => (t.inputSubmissions[0].submission.afterOutputCount = 0.5),
+    (t) => (t.inputSubmissions[0].submission.anchorRunId = "0"),
+    (t) => (t.inputSubmissions[0].payload = "private executable input"),
+    (t) => delete t.inputSubmissions[0].submission.operationId,
+  ]) {
+    const invalid = clone(value);
+    change(invalid.tasks[0]);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  task.inputSubmissions[0].state = "interrupted";
   assert.deepEqual(decodeWorkbenchSnapshot(value), value);
 });

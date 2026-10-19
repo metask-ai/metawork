@@ -19,6 +19,8 @@ import { compactPhases } from "./contracts.ts";
 import {
   sendInputReasons,
   type SendInputResult,
+  type InputSubmission,
+  type WaitingInputView,
   type AdditionalInputView,
 } from "./contracts.ts";
 import {
@@ -2369,6 +2371,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "permissionInteraction",
     "execution",
     "input",
+    "submission",
     "additionalInputs",
     "output",
     "activity",
@@ -2545,6 +2548,10 @@ function decodeRun(value: unknown, path: string): RunView {
       permissionInteractions,
     ),
     execution,
+    submission:
+      item.submission === null
+        ? null
+        : decodeInputSubmission(item.submission, `${path}.submission`),
     input: decodeRunInput(item.input, `${path}.input`),
     additionalInputs: decodeAdditionalInputs(
       item.additionalInputs,
@@ -3154,7 +3161,8 @@ function inputOperationId(value: unknown, path: string): string {
 function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "inputReady",
-    "sendInputResult",
+    "inputAcceptance",
+    "inputSubmissions",
     "id",
     "recentOrder",
     "title",
@@ -3497,15 +3505,52 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.uiHistory`,
     decodeUiRecord,
   );
-  const sendInputResult =
-    item.sendInputResult === null
-      ? null
-      : decodeSendInputResult(
-          item.sendInputResult,
-          positiveWireId(item.id, `${path}.id`),
-          undefined,
-          `${path}.sendInputResult`,
-        );
+  const acceptance = object(item.inputAcceptance, `${path}.inputAcceptance`, [
+    "available",
+    "reason",
+  ]);
+  const inputAcceptance = {
+    available: booleanValue(
+      acceptance.available,
+      `${path}.inputAcceptance.available`,
+    ),
+    reason:
+      acceptance.reason === null
+        ? null
+        : enumValue(
+            acceptance.reason,
+            `${path}.inputAcceptance.reason`,
+            sendInputReasons,
+          ),
+  };
+  if (inputAcceptance.available !== (inputAcceptance.reason === null))
+    fail(path, "inconsistent input acceptance");
+  const inputSubmissions = arrayValue(
+    item.inputSubmissions,
+    `${path}.inputSubmissions`,
+    (raw, p): WaitingInputView => {
+      const entry = object(raw, p, ["submission", "input", "state", "reason"]);
+      const state = enumValue(entry.state, `${p}.state`, [
+        "waiting",
+        "failed",
+        "cancelled",
+        "interrupted",
+      ] as const);
+      const reason =
+        entry.reason === null
+          ? null
+          : enumValue(entry.reason, `${p}.reason`, sendInputReasons);
+      if ((state === "waiting" || state === "interrupted") && reason !== null)
+        fail(p, "waiting or restored input has no failure reason");
+      return {
+        submission: decodeInputSubmission(entry.submission, `${p}.submission`),
+        input: decodeRunInput(entry.input, `${p}.input`),
+        state,
+        reason,
+      };
+    },
+  );
+  if (inputSubmissions.length > 64) fail(path, "too many input submissions");
   const runIds = new Set(runs.map((run) => run.id));
   if (
     (context.pressure !== null && !runIds.has(context.pressure.sourceRunId)) ||
@@ -3625,7 +3670,8 @@ function decodeTask(value: unknown, path: string): TaskView {
     fail(path, "continuation and recovery cannot both be available");
   return {
     inputReady: booleanValue(item.inputReady, `${path}.inputReady`),
-    sendInputResult,
+    inputAcceptance,
+    inputSubmissions,
     id: positiveWireId(item.id, `${path}.id`),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
@@ -6082,6 +6128,7 @@ function decodeAdditionalInputs(
   const records = arrayValue(value, path, (raw, p) => {
     const item = object(raw, p, [
       "id",
+      "submission",
       "afterOutputCount",
       "transferredToRunId",
       "continuationReason",
@@ -6156,6 +6203,10 @@ function decodeAdditionalInputs(
     if (afterOutputCount > maxCommentarySegmentsPerRun + 1)
       fail(`${p}.afterOutputCount`, "input anchor exceeds the output capacity");
     return {
+      submission:
+        item.submission === null
+          ? null
+          : decodeInputSubmission(item.submission, `${p}.submission`),
       id,
       afterOutputCount,
       operationId: inputOperationId(item.operationId, `${p}.operationId`),
@@ -6173,6 +6224,35 @@ function decodeAdditionalInputs(
   return records;
 }
 
+function decodeInputSubmission(value: unknown, path: string): InputSubmission {
+  const item = object(value, path, [
+    "operationId",
+    "receivedAtUnixMs",
+    "anchorRunId",
+    "afterOutputCount",
+  ]);
+  const afterOutputCount = nonNegativeNumber(
+    item.afterOutputCount,
+    `${path}.afterOutputCount`,
+  );
+  if (afterOutputCount > 257) fail(path, "input anchor exceeds output limit");
+  const receivedAtUnixMs =
+    item.receivedAtUnixMs === null
+      ? null
+      : positiveU64WireId(item.receivedAtUnixMs, `${path}.receivedAtUnixMs`);
+  if (receivedAtUnixMs !== null && BigInt(receivedAtUnixMs) > 8640000000000000n)
+    fail(path, "expected displayable reception timestamp");
+  return {
+    operationId: inputOperationId(item.operationId, `${path}.operationId`),
+    receivedAtUnixMs,
+    anchorRunId:
+      item.anchorRunId === null
+        ? null
+        : positiveU64WireId(item.anchorRunId, `${path}.anchorRunId`),
+    afterOutputCount,
+  };
+}
+
 export function decodeSendInputResult(
   value: unknown,
   expectedTaskId: string,
@@ -6183,9 +6263,6 @@ export function decodeSendInputResult(
     "taskId",
     "operationId",
     "outcome",
-    "runId",
-    "inputId",
-    "sequence",
     "reason",
   ]);
   const taskId = positiveU64WireId(item.taskId, `${path}.taskId`);
@@ -6196,64 +6273,17 @@ export function decodeSendInputResult(
   )
     fail(path, "input result identity mismatch");
   const outcome = enumValue(item.outcome, `${path}.outcome`, [
-    "started",
-    "submitted",
+    "accepted",
     "rejected",
-    "unknown",
   ] as const);
-  if (outcome === "rejected") {
-    if (item.runId !== null || item.inputId !== null || item.sequence !== null)
-      fail(path, "a refusal cannot report accepted identities");
+  if (outcome === "rejected")
     return {
       taskId,
       operationId,
       outcome,
-      runId: null,
-      inputId: null,
-      sequence: null,
       reason: enumValue(item.reason, `${path}.reason`, sendInputReasons),
     };
-  }
   if (item.reason !== null)
-    fail(
-      path,
-      "accepted or uncertain submissions cannot have a refusal reason",
-    );
-  const runId = positiveU64WireId(item.runId, `${path}.runId`);
-  if (outcome === "started") {
-    if (item.inputId !== null || item.sequence !== null)
-      fail(path, "root input has no additional receipt");
-    return {
-      taskId,
-      operationId,
-      outcome,
-      runId,
-      inputId: null,
-      sequence: null,
-      reason: null,
-    };
-  }
-  const inputId = positiveU64WireId(item.inputId, `${path}.inputId`);
-  if (outcome === "unknown") {
-    if (item.sequence !== null)
-      fail(path, "an uncertain submission has no validated receipt");
-    return {
-      taskId,
-      operationId,
-      outcome,
-      runId,
-      inputId,
-      sequence: null,
-      reason: null,
-    };
-  }
-  return {
-    taskId,
-    operationId,
-    outcome,
-    runId,
-    inputId,
-    sequence: inputSequence(item.sequence, `${path}.sequence`),
-    reason: null,
-  };
+    fail(path, "accepted input cannot have a refusal reason");
+  return { taskId, operationId, outcome, reason: null };
 }

@@ -260,44 +260,12 @@ export function readTaskDraft(taskId: string): ComposerDraft {
 }
 
 const versionPrefix = "metawork.task-draft-version.v1.";
-const localVersions = new Map<string, string>();
 export function newComposerOperationId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
 }
-export function taskDraftVersion(taskId: string): string {
-  const cached = localVersions.get(taskId);
-  if (cached) return cached;
-  let version: string | null = null;
-  try {
-    version =
-      composerSessionStorage()?.getItem(`${versionPrefix}${taskId}`) ?? null;
-  } catch {
-    /* Local state still works. */
-  }
-  if (!version || !/^[a-zA-Z0-9-]{1,64}$/.test(version))
-    version = newComposerOperationId();
-  localVersions.set(taskId, version);
-  try {
-    composerSessionStorage()?.setItem(`${versionPrefix}${taskId}`, version);
-  } catch {
-    /* Keep the current in-memory version. */
-  }
-  return version;
-}
-function advanceTaskDraftVersion(taskId: string): void {
-  const version = newComposerOperationId();
-  localVersions.set(taskId, version);
-  try {
-    composerSessionStorage()?.setItem(`${versionPrefix}${taskId}`, version);
-  } catch {
-    /* Keep the current in-memory version. */
-  }
-}
-
 export function writeTaskDraft(taskId: string, value: ComposerDraft): void {
-  advanceTaskDraftVersion(taskId);
   try {
     const target = composerSessionStorage();
     if (!target) return;
@@ -354,8 +322,6 @@ export function clearNewTaskDraft(workspaceId: string): void {
 }
 
 export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {
-  for (const id of localVersions.keys())
-    if (!validTaskIds.has(id)) localVersions.delete(id);
   try {
     const target = composerSessionStorage();
     if (!target) return;

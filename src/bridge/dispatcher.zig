@@ -355,6 +355,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.send_input, .function = sendInput },
+            .{ .name = commands.stop, .function = stopTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
             .{ .name = commands.append_attachment_receive, .function = appendAttachmentReceive },
@@ -2954,12 +2955,10 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         try handlers.validateInputOperationId(parsed.value.operationId);
-        const target = try handlers.parseInputTarget(parsed.value.expectedExecution);
         var input = try handlers.parseTaskRunInput(parsed.value.input);
         defer input.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
-        const binding_epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
-        if (task_id == 0 or binding_epoch == 0) return error.InvalidBridgePayload;
+        if (task_id == 0) return error.InvalidBridgePayload;
         const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
         var attachment_ids: [attachment_grant.max_grants]u64 = undefined;
         var attachment_acceptance: AttachmentGrantAcceptance = undefined;
@@ -2979,7 +2978,6 @@ pub const Dispatcher = struct {
                 } };
             },
             .multimodal => |multimodal| multimodal_input: {
-                if (target == .run) break :multimodal_input .{ .multimodal = .{ .text = multimodal.text, .attachment_ids = &.{} } };
                 if (multimodal.text.len > (product_control.Limits{}).max_user_message_bytes)
                     return error.InvalidBridgePayload;
                 const ids = self.attachment_grants.resolve(
@@ -3005,7 +3003,7 @@ pub const Dispatcher = struct {
             },
         };
         const control = try self.requireProductControl();
-        const result = control.sendInput(parsed.value.operationId, task_id, binding_epoch, target, workbench_input) catch |err| {
+        const result = control.sendInput(parsed.value.operationId, task_id, workbench_input) catch |err| {
             if (err == error.InvalidInput) return error.InvalidBridgePayload;
             if (err == error.UnknownTask) {
                 var rejected: product_control.SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(parsed.value.operationId.len), .reason = .task_unavailable };
@@ -4491,6 +4489,21 @@ pub const Dispatcher = struct {
             task_id,
             null,
         );
+    }
+
+    fn stopTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        _ = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        var parsed = try handlers.parsePayload(handlers.TaskStop, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        if (task_id == 0) return error.InvalidBridgePayload;
+        try (try self.requireProductControl()).stopTask(task_id);
+        self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"stopRequested\":true}}", .{task_id});
     }
 
     fn cancelTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -7327,7 +7340,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try std.testing.expect(dispatcher.receive_active == null);
 }
 
-test "active input dispatch preserves receipt after response encoding loss and scopes identity" {
+test "active input dispatch accepts FIFO without waiting for responses and scopes identity" {
     const fixture = @import("lifecycle_fixture");
     const Host = struct {
         fn wake(_: ?*anyopaque) anyerror!void {}
@@ -7405,13 +7418,24 @@ test "active input dispatch preserves receipt after response encoding loss and s
     const snapshot = try control.writeSnapshot(&snapshot_buffer);
     var parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), snapshot, .{});
     defer parsed.deinit();
-    const receipt = parsed.value.object.get("tasks").?.array.items[0].object.get("sendInputResult").?.object;
-    const expected = wire.value.object.get("submitted").?.object;
-    const projected_input = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items[0].object;
+    const projected_task = parsed.value.object.get("tasks").?.array.items[0].object;
+    try std.testing.expect(projected_task.get("sendInputResult") == null);
+    const projected_input = projected_task.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items[0].object;
+    const submission = projected_input.get("submission").?.object;
+    try std.testing.expectEqualStrings("input-1", submission.get("operationId").?.string);
     try std.testing.expectEqual(wire.value.object.get("history").?.object.get("afterOutputCount").?.integer, projected_input.get("afterOutputCount").?.integer);
-    try std.testing.expectEqualStrings(expected.get("operationId").?.string, receipt.get("operationId").?.string);
-    try std.testing.expectEqualStrings(expected.get("runId").?.string, receipt.get("runId").?.string);
-    try std.testing.expectEqualStrings(expected.get("outcome").?.string, receipt.get("outcome").?.string);
-    try std.testing.expectEqual(expected.get("sequence").?.integer, receipt.get("sequence").?.integer);
+    // Dispatch through the registered Native Bridge, without observing A's
+    // lost response or B's response before delivering C. Response observation
+    // does not gate or reorder the main-thread acceptance transactions.
+    var response_b: [4096]u8 = undefined;
+    const b = Host.dispatch(native, source, &response_b, commands.send_input, "{\"operationId\":\"input-2\",\"taskId\":\"1\",\"input\":{\"kind\":\"text\",\"text\":\"B\"}}");
+    const c = Host.dispatch(native, source, &output, commands.send_input, "{\"operationId\":\"input-3\",\"taskId\":\"1\",\"input\":{\"kind\":\"text\",\"text\":\"C\"}}");
+    try std.testing.expect(std.mem.indexOf(u8, c, "\"outcome\":\"accepted\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b, "\"outcome\":\"accepted\"") != null);
+    const run = task.durable.runs[0].?;
+    for ([_][]const u8{ "input-1", "input-2", "input-3" }, 0..) |op, index| {
+        try std.testing.expectEqualStrings(op, run.additional_inputs[index].?.submission.?.operationId());
+        try std.testing.expectEqual(@as(?u32, @intCast(index + 1)), run.additional_inputs[index].?.sequence);
+    }
     try std.testing.expect(task.durable.runs[1] == null);
 }

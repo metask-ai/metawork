@@ -199,28 +199,18 @@ pub const TextProjection = struct {
 
 pub const AttachmentKind = task_state.AttachmentKind;
 pub const AttachmentFormat = task_state.AttachmentFormat;
-pub const MultimodalAttachment = struct {
-    kind: AttachmentKind,
-    format: ?AttachmentFormat,
-    display_name: []const u8,
-    bytes: []const u8,
-    reference: []const u8 = &.{},
-    size_bytes: ?u64 = null,
-    source_format: ?AttachmentFormat = null,
-};
+pub const MultimodalAttachment = task_state.MultimodalAttachment;
+pub const RunInput = task_state.RunInput;
+pub const Submission = task_state.Submission;
+pub const InputSubmission = task_state.InputSubmission;
 
-pub const RunInput = union(enum) {
-    text: []const u8,
-    skill: struct {
-        skill_id: []const u8,
-        catalog_revision: []const u8,
-        selection_revision: u64,
-        argument_values: []const []const u8,
-    },
-    multimodal: struct {
-        text: []const u8,
-        attachments: []const MultimodalAttachment,
-    },
+pub const InputAction = union(enum) {
+    none,
+    wait,
+    continuation: u64,
+    submit: struct { index: usize, run_id: u64 },
+    start: usize,
+    fail: struct { index: usize, reason: SendInputReason },
 };
 
 pub const RunAcceptanceEffect = struct {
@@ -276,6 +266,7 @@ const review_authorization = "The user selected automatic review when creating t
 
 pub const OperationLimits = struct {
     max_user_message_bytes: usize,
+    max_pending_inputs_per_task: usize = 64,
     max_catalog_projection_bytes: usize,
     max_tool_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
@@ -1074,6 +1065,7 @@ pub const RecoveryAdmissionEffects = struct {
 
 pub const ProjectionEffects = struct {
     now_ms: ?u64 = null,
+    max_pending_inputs_per_task: usize = 64,
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
@@ -1781,6 +1773,219 @@ pub const Runtime = struct {
         };
     }
 
+    /// Message acceptance is Task-local and independent of execution readiness.
+    pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle)
+            return error.TaskClosing;
+        if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
+        for (operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidInput;
+        for (task.input_submissions.items) |record| if (std.mem.eql(u8, operation_id, record.submission.operationId())) return error.InvalidInput;
+        for (task.durable.runs) |entry| if (entry) |run| {
+            if (run.submission) |submission| if (std.mem.eql(u8, operation_id, submission.operationId())) return error.InvalidInput;
+            for (run.additional_inputs) |additional| if (additional) |record| {
+                if (std.mem.eql(u8, operation_id, record.operationId())) return error.InvalidInput;
+            };
+        };
+        var retired: ?usize = null;
+        if (task.input_submissions.items.len >= effects.limits.max_pending_inputs_per_task) {
+            for (task.input_submissions.items, 0..) |record, index| if (record.state != .waiting) {
+                retired = index;
+                break;
+            };
+            if (retired == null) return error.ProjectionCapacity;
+        } else try task.input_submissions.ensureUnusedCapacity(self.allocator, 1);
+        const text = switch (input) {
+            .text => |value| value,
+            .multimodal => |value| value.text,
+            .skill => null,
+        };
+        if (text) |value| {
+            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidInput;
+            if (input == .text and std.mem.trim(u8, value, " \t\r\n").len == 0) return error.MissingInstruction;
+            if (value.len > effects.limits.max_user_message_bytes) return error.ProjectionCapacity;
+        }
+        var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
+        _ = try validateRunInput(task, input, effects.limits, &parts);
+        var payload = try task_state.OwnedRunInput.clone(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes);
+        errdefer payload.deinit(self.allocator);
+        const credential = if (task.runtime.executionConst()) |execution| execution.secret else &.{};
+        var safe = try copyRunInput(self, task, input, credential, effects);
+        errdefer deinitRunInput(self, effects.release, &safe);
+        try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
+        errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+        var submission: Submission = .{ .operation_id_len = @intCast(operation_id.len), .received_at_unix_ms = effects.run_clock.nowUnixMs() };
+        @memcpy(submission.operation_id[0..operation_id.len], operation_id);
+        for (task.durable.runs) |entry| if (entry) |run| {
+            if (run.id > (submission.anchor_run_id orelse 0)) {
+                submission.anchor_run_id = run.id;
+                submission.after_output_count = run.outputPartCount();
+            }
+        };
+        if (retired) |index| {
+            var previous = task.input_submissions.orderedRemove(index);
+            self.releaseSubmissionPayload(&previous);
+            deinitRunInput(self, effects.release, &previous.input);
+            effects.release.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+        }
+        task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
+        self.pending_input_bytes += payload.bytes.len;
+        task.durable.recent_order = self.takeRecentOrder();
+        return submission;
+    }
+
+    pub fn inputAction(self: *Runtime, task_id: u64) InputAction {
+        const task = self.find(task_id) orelse return .none;
+        if (task.durable.archived or task.deletion != .idle) return .none;
+        if (self.inputContinuation(task_id)) |source| return .{ .continuation = source.id };
+        var next: ?usize = null;
+        for (task.input_submissions.items, 0..) |record, index| if (record.state == .waiting and record.payload != null) {
+            next = index;
+            break;
+        };
+        const index = next orelse return .none;
+        if (task.runtime.close_failed) return .{ .fail = .{ .index = index, .reason = .binding_unavailable } };
+        if (task.approval_change != null or task.runtime.cancel_requested or task.runtime.close_requested) return .wait;
+        switch (task.runtime.active_operation) {
+            .compact, .restore => return .wait,
+            .none => {
+                if (task.runtime.worker_leases.hasLive()) return .wait;
+                return .{ .start = index };
+            },
+            .run => |id| {
+                if (task.input_submissions.items[index].payload.?.input != .text) return .wait;
+                const run = task_state.findRun(task.durable.runs, id) orelse return .wait;
+                if (run.input == .skill or task_state.terminalPayload(run) != null or
+                    run.agent_handoff.load(.acquire) != .running or
+                    run.pending_termination.load(.acquire) != .none) return .wait;
+                var has_slot = false;
+                for (run.additional_inputs) |entry| if (entry == null) {
+                    has_slot = true;
+                    break;
+                };
+                if (!has_slot) return .wait;
+                var lease = run.run_control.tryAcquireLease() orelse return .wait;
+                defer lease.deinit();
+                if (!lease.inputObservation().ready) return .wait;
+                return .{ .submit = .{ .index = index, .run_id = id } };
+            },
+        }
+    }
+
+    pub fn pendingInput(self: *Runtime, task_id: u64, index: usize) ?*InputSubmission {
+        const task = self.find(task_id) orelse return null;
+        if (index >= task.input_submissions.items.len) return null;
+        return &task.input_submissions.items[index];
+    }
+
+    pub fn beginInputPreparation(self: *Runtime, task_id: u64, index: usize) bool {
+        const record = self.pendingInput(task_id, index) orelse return false;
+        if (record.state != .waiting or record.preparation_attempted) return false;
+        record.preparation_attempted = true;
+        return true;
+    }
+
+    pub fn cancelInputPreparation(self: *Runtime, task_id: u64, effects: OperationEffects) void {
+        const task = self.find(task_id) orelse return;
+        if (task.runtime.restore_job) |job| {
+            job.requestCancellation();
+            _ = effects.executor.cancel(job);
+        }
+    }
+
+    /// Task decides when an original is cancelled or handed to a real Run;
+    /// composition executes that resource action in the attachment owner.
+    pub fn takeInputResourceAction(self: *Runtime, task_id: u64) ?struct { resource_id: u64, keep_original: bool } {
+        const task = self.find(task_id) orelse return null;
+        for (task.input_submissions.items) |*record| {
+            if (record.state == .waiting or record.input != .multimodal) continue;
+            for (record.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
+                const id = item.resource_id;
+                item.resource_id = 0;
+                return .{ .resource_id = id, .keep_original = false };
+            };
+        }
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            if (run.input != .multimodal) continue;
+            for (run.input.multimodal.attachments) |*item| if (item.resource_id != 0) {
+                const id = item.resource_id;
+                item.resource_id = 0;
+                return .{ .resource_id = id, .keep_original = true };
+            };
+        };
+        return null;
+    }
+
+    fn releaseSubmissionPayload(self: *Runtime, record: *InputSubmission) void {
+        if (record.payload) |*payload| {
+            std.debug.assert(payload.bytes.len <= self.pending_input_bytes);
+            self.pending_input_bytes -= payload.bytes.len;
+            payload.deinit(self.allocator);
+            record.payload = null;
+        }
+    }
+
+    /// Freeze the current batch by changing its records, never a sticky Task flag.
+    pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
+        const task = self.find(task_id) orelse return false;
+        var changed = false;
+        for (task.input_submissions.items) |*record| {
+            if (record.state != .waiting) continue;
+            record.state = if (reason == .continuation_cancelled) .cancelled else .failed;
+            record.reason = reason;
+            self.releaseSubmissionPayload(record);
+            changed = true;
+        }
+        return changed;
+    }
+
+    pub fn stopInputs(self: *Runtime, task_id: u64) bool {
+        const task = self.find(task_id) orelse return false;
+        const changed = self.cancelWaitingInputs(task_id, .continuation_cancelled);
+        const continuation_changed = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
+        if (task.runtime.active_operation == .run) {
+            if (task_state.findRun(task.durable.runs, task.runtime.active_operation.run)) |run|
+                run.input_stop_requested = true;
+        }
+        return changed or continuation_changed;
+    }
+
+    pub fn failWaitingInput(self: *Runtime, task_id: u64, index: usize, reason: SendInputReason) void {
+        const record = self.pendingInput(task_id, index) orelse return;
+        if (record.state != .waiting) return;
+        record.state = .failed;
+        record.reason = reason;
+        self.releaseSubmissionPayload(record);
+    }
+
+    /// Admission has already installed the real Run; only move correlation here.
+    pub fn finishWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, input_id: ?u64, effects: ReleaseEffects) void {
+        const task = self.find(task_id) orelse return;
+        if (index >= task.input_submissions.items.len) return;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return;
+        const record = &task.input_submissions.items[index];
+        if (input_id) |id| {
+            for (&run.additional_inputs) |*entry| if (entry.*) |*additional| {
+                if (additional.id == id) additional.submission = record.submission;
+            };
+        } else {
+            run.submission = record.submission;
+            // Messages accepted before the first Run existed keep their
+            // relative position after this root and before its first output.
+            // Earlier failed/cancelled records stay before this root.
+            for (task.input_submissions.items[index + 1 ..]) |*later| {
+                if (later.submission.anchor_run_id == null) {
+                    later.submission.anchor_run_id = run_id;
+                    later.submission.after_output_count = 0;
+                }
+            }
+        }
+        self.releaseSubmissionPayload(record);
+        deinitRunInput(self, effects, &record.input);
+        if (input_id == null) effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+        _ = task.input_submissions.orderedRemove(index);
+    }
+
     /// Eligibility never depends on checkpoint storage health.
     pub fn beginSendInputOperation(self: *Runtime, task_id: u64, operation_id: []const u8) RunError!*task_state.SendInputResult {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -1794,6 +1999,29 @@ pub const Runtime = struct {
     /// Immediately targets this Run. Safe history is reserved before the SDK
     /// effect; neither a rejection nor an uncertain result can schedule work.
     pub fn submitInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, text: []const u8, effects: OperationEffects) RunError!void {
+        return self.submitInputImpl(task_id, binding_epoch, run_id, text, effects, null);
+    }
+
+    pub fn submitWaitingInput(self: *Runtime, task_id: u64, index: usize, run_id: u64, effects: OperationEffects) RunError!SendInputResult {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const record = self.pendingInput(task_id, index) orelse return error.InvalidInput;
+        const input = (record.payload orelse return error.InvalidInput).input;
+        if (input != .text or record.state != .waiting) return error.UnsupportedInput;
+        _ = try self.beginSendInputOperation(task_id, record.submission.operationId());
+        self.submitInputImpl(task_id, task.durable.binding_epoch, run_id, input.text, effects, index) catch |err| return err;
+        const result = task.send_input_result.?;
+        switch (result.outcome) {
+            .submitted, .unknown => self.finishWaitingInput(task_id, index, run_id, result.input_id, effects.release),
+            .rejected => switch (result.reason orelse .invalid_input) {
+                .run_changed, .run_not_ready, .run_stopping, .too_late, .task_busy => {},
+                else => self.failWaitingInput(task_id, index, result.reason orelse .invalid_input),
+            },
+            .started => unreachable,
+        }
+        return result;
+    }
+
+    fn submitInputImpl(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, text: []const u8, effects: OperationEffects, queued_index: ?usize) RunError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.durable.binding_epoch != binding_epoch) return error.BindingEpochMismatch;
         if (self.inputContinuation(task_id) != null) return error.TaskBusy;
@@ -1820,15 +2048,19 @@ pub const Runtime = struct {
             break;
         };
         const index = slot orelse return error.ProjectionCapacity;
-        if (text.len > agent.max_submitted_input_bytes - self.pending_input_bytes)
+        if (queued_index == null and text.len > agent.max_submitted_input_bytes - self.pending_input_bytes)
             return error.ProjectionCapacity;
-        const raw = try self.allocator.dupe(u8, text);
-        self.pending_input_bytes += raw.len;
-        var raw_owned = true;
+        const raw = if (queued_index) |queued| task.input_submissions.items[queued].payload.?.bytes else try self.allocator.dupe(u8, text);
+        if (queued_index == null) self.pending_input_bytes += raw.len;
+        var raw_owned = queued_index == null;
         defer if (raw_owned) self.releaseInputPayload(raw);
-        try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
-        errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
-        const projected = try effects.text.project(text, effects.limits.max_user_message_bytes, run.redaction_secret, 0);
+        if (queued_index == null) try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
+        errdefer if (queued_index == null) effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+        const projected: ProjectedText = if (queued_index) |queued| .{
+            .value = task.input_submissions.items[queued].input.text.value,
+            .redacted = task.input_submissions.items[queued].input.text.redacted,
+            .truncated = false,
+        } else try effects.text.project(text, effects.limits.max_user_message_bytes, run.redaction_secret, 0);
         const result = &task.send_input_result.?;
         const id = run.next_input_id;
         run.next_input_id += 1;
@@ -1847,6 +2079,7 @@ pub const Runtime = struct {
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
                 raw_owned = false;
+                if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.sequence = sequence;
                 run.input_continuation_cancelled = false;
                 run.input_continuation_failure = null;
@@ -1856,13 +2089,16 @@ pub const Runtime = struct {
             },
             .unknown => {
                 raw_owned = false;
+                if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.state = .unknown;
                 result.outcome = .unknown;
                 result.input_id = id;
             },
             .rejected => |reason| {
-                effects.text.discardCandidate(projected.value);
-                effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+                if (queued_index == null) {
+                    effects.text.discardCandidate(projected.value);
+                    effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+                }
                 run.additional_inputs[index] = null;
                 result.reason = switch (reason) {
                     .stale_run => .run_changed,
@@ -1878,6 +2114,17 @@ pub const Runtime = struct {
                 result.run_id = null;
             },
         }
+    }
+
+    fn transferQueuedText(self: *Runtime, task: *task_state.Task, index: usize) void {
+        const record = &task.input_submissions.items[index];
+        const payload = record.payload.?;
+        std.debug.assert(payload.input == .text and payload.input.text.ptr == payload.bytes.ptr);
+        self.allocator.free(payload.arguments);
+        self.allocator.free(payload.attachments);
+        record.payload = null;
+        // The Run now owns the exact raw buffer, safe projection and charge.
+        record.input = .{ .text = .{ .value = &.{} } };
     }
 
     fn releaseInputPayload(self: *Runtime, raw: []u8) void {
@@ -1952,6 +2199,43 @@ pub const Runtime = struct {
         return merged;
     }
 
+    pub fn prepareInputContinuation(self: *Runtime, task_id: u64, max_bytes: usize) union(enum) {
+        wait,
+        ended,
+        ready: struct { source_id: u64, binding_epoch: u64, text: []u8 },
+    } {
+        const task = self.find(task_id) orelse return .wait;
+        const source = self.inputContinuation(task_id) orelse return .wait;
+        if (task.runtime.worker_leases.hasLive() or !source.event_stream_finalized or source.input_continuation_schedule_gate) return .wait;
+        switch (source.checkpoint.state.load(.acquire)) {
+            .exporting, .candidate_ready, .failure_ready => return .wait,
+            .settled => if (source.coverage != .covered) {
+                _ = self.cancelInputContinuation(task_id, source.id, .checkpoint_failed);
+                return .ended;
+            },
+            .none => {},
+        }
+        if (source.input_continuation_binding_epoch != task.durable.binding_epoch) {
+            _ = self.cancelInputContinuation(task_id, source.id, .binding_changed);
+            return .ended;
+        }
+        source.input_continuation_pending = false;
+        source.input_continuation_attempted = true;
+        const text = self.mergeInputContinuation(source, max_bytes) catch |err| {
+            source.input_continuation_failure = if (err == error.InputContinuationTooLarge) .combined_input_too_large else .resource_limit;
+            self.discardInputPayloads(source);
+            return .ended;
+        };
+        return .{ .ready = .{ .source_id = source.id, .binding_epoch = source.input_continuation_binding_epoch, .text = text } };
+    }
+
+    pub fn finishInputContinuation(self: *Runtime, task_id: u64, source_id: u64, reason: ?SendInputReason) void {
+        const task = self.find(task_id) orelse return;
+        const source = task_state.findRun(task.durable.runs, source_id) orelse return;
+        if (reason) |failure| source.input_continuation_failure = failure;
+        self.discardInputPayloads(source);
+    }
+
     pub fn markInputTransferred(self: *Runtime, task_id: u64, source_id: u64, target_id: ?u64) void {
         const task = self.find(task_id) orelse unreachable;
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
@@ -1971,8 +2255,24 @@ pub const Runtime = struct {
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
     ) RunError!PreparedRun {
-        return self.prepareRun(task_id, expected_binding_epoch, input, workspace, effects);
+        return self.prepareRun(task_id, expected_binding_epoch, input, workspace, effects, .manual);
     }
+
+    pub fn startWaitingRun(self: *Runtime, task_id: u64, index: usize, workspace: WorkspaceOrderEffect, effects: OperationEffects) RunError!PreparedRun {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const record = self.pendingInput(task_id, index) orelse return error.InvalidInput;
+        if (record.state != .waiting or record.payload == null) return error.InvalidInput;
+        return self.prepareRun(task_id, task.durable.binding_epoch, record.payload.?.input, workspace, effects, .{ .queued = index });
+    }
+
+    pub fn startInputContinuation(self: *Runtime, task_id: u64, binding_epoch: u64, source_id: u64, input: RunInput, workspace: WorkspaceOrderEffect, effects: OperationEffects) RunError!PreparedRun {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const source = task_state.findRun(task.durable.runs, source_id) orelse return error.RunChanged;
+        if (!source.input_continuation_attempted or source.input_continuation_pending or source.input_continuation_cancelled) return error.RunChanged;
+        return self.prepareRun(task_id, binding_epoch, input, workspace, effects, .continuation);
+    }
+
+    const RunInputOrigin = union(enum) { manual, queued: usize, continuation };
 
     fn prepareRun(
         self: *Runtime,
@@ -1981,12 +2281,14 @@ pub const Runtime = struct {
         input: RunInput,
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
+        origin: RunInputOrigin,
     ) RunError!PreparedRun {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
         _ = try taskExecutionInput(task);
+        if (origin == .manual and hasWaitingInputs(task)) return error.TaskBusy;
         if (self.inputContinuation(task_id) != null) return error.TaskBusy;
         if (task_policy.hasActiveOperation(task) or
             checkpointMutationPending(task, effects.worker.checkpoint.store_health))
@@ -2009,6 +2311,7 @@ pub const Runtime = struct {
         errdefer if (record_owned) discardRun(self, task, slot, effects.release);
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
+        if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
 
         var run_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
         var run_lease_owned = true;
@@ -2363,7 +2666,7 @@ pub const Runtime = struct {
         const identity = reviewIdentity(task, run, pending.request_id, request.policy_generation);
         task.runtime.permission_review.identity = identity;
         task.runtime.permission_review.phase = .reviewing;
-        if (inputBlocksAutomaticAllow(run)) {
+        if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) {
             _ = self.finishPermissionReview(identity);
             return null;
         }
@@ -2463,7 +2766,7 @@ pub const Runtime = struct {
         };
         const choice: PermissionChoice = switch (suggestion.decision) {
             .needs_user => return false,
-            .allow_once => if (inputBlocksAutomaticAllow(run)) return false else .allow_once,
+            .allow_once => if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) return false else .allow_once,
             .deny => .deny_once,
         };
         // Check the exact current SDK request, not just a saved UI observation.
@@ -2871,6 +3174,7 @@ pub const Runtime = struct {
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
+            _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
             _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             acknowledgeLatestCompletion(task);
@@ -3021,9 +3325,10 @@ pub const Runtime = struct {
     ) bool {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.durable.workspace_id != workspace_id or
-                !task.runtime.hasAttachedSession()) continue;
+            if (task.durable.workspace_id != workspace_id) continue;
+            _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing);
             _ = self.cancelInputContinuation(task.durable.id, null, .workspace_removing);
+            if (!task.runtime.hasAttachedSession()) continue;
             if (effect.release(task.durable.id) == .failed) return false;
         }
         return true;
@@ -4113,6 +4418,7 @@ pub const Runtime = struct {
             count += 1;
             const external = effects.authority(projectionAuthorityQuery(task));
             const recovery = self.recoveryProjectionWithAuthority(task, external);
+            const acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task);
             var available_modes: [3]task_state.ApprovalMode = undefined;
             const modes = self.availableApprovalModes(task, external, &available_modes);
             task_view.writeProjection(writer, .{
@@ -4122,6 +4428,7 @@ pub const Runtime = struct {
                 .model_selection_availability = external.model_selection_availability,
                 .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
+                .input_acceptance_reason = acceptance_reason,
                 .text = effects.text,
                 .catalog = effects.catalog,
                 .pending_ui = .{
@@ -4365,6 +4672,18 @@ pub const Runtime = struct {
             );
     }
 
+    fn inputAcceptanceReason(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, max_pending: usize) ?SendInputReason {
+        if (authority.shutting_down) return .shutting_down;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return .task_unavailable;
+        if (!authority.workspace_identity_exact or !authority.automatic_owner_exact) return .workspace_unavailable;
+        var pending: usize = 0;
+        for (task.input_submissions.items) |record| if (record.state == .waiting) {
+            pending += 1;
+        };
+        if (pending >= max_pending or self.pending_input_bytes >= agent.max_submitted_input_bytes) return .capacity_reached;
+        return null;
+    }
+
     pub fn continuationProjection(
         self: *const Runtime,
         task_id: u64,
@@ -4578,6 +4897,10 @@ pub const Runtime = struct {
             changed = true;
         }
         if (!run.terminal_observed) {
+            const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
+            if (terminal.outcome != .completed and !stopped_batch) {
+                _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
+            }
             for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state == .adopted or record.state == .transferred) continue;
                 record.state = .unknown;
@@ -5445,6 +5768,10 @@ fn redactTaskProjection(
     effects: RedactionEffects,
 ) void {
     if (task.send_input_result) |*result| _ = effects.redact(result.operation_id[0..result.operation_id_len], credential);
+    for (task.input_submissions.items) |*record| {
+        redactInputProjection(&record.input, credential, effects);
+        _ = effects.redact(record.submission.operation_id[0..record.submission.operation_id_len], credential);
+    }
     task.durable.title_redacted = effects.redact(task.durable.title, credential) or
         task.durable.title_redacted;
     _ = effects.redact(task.durable.workspace_root, credential);
@@ -5452,9 +5779,11 @@ fn redactTaskProjection(
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         redactInputProjection(&run.input, credential, effects);
+        if (run.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
         for (&run.additional_inputs) |*message| if (message.*) |*record| {
             record.redacted = effects.redact(record.text, credential) or record.redacted;
             _ = effects.redact(record.operation_id[0..record.operation_id_len], credential);
+            if (record.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
         };
         run.assistant_redacted = effects.redact(
             run.assistant.list.items,
@@ -6662,6 +6991,7 @@ fn copyRunInput(
                     0,
                 );
                 record.* = .{
+                    .resource_id = item.resource_id,
                     .kind = item.kind,
                     .format = item.source_format orelse item.format,
                     .display_name = display.value,
@@ -7191,6 +7521,11 @@ fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     return lease.inputObservation().blocksAutomaticAllow();
 }
 
+fn hasWaitingInputs(task: *const task_state.Task) bool {
+    for (task.input_submissions.items) |record| if (record.state == .waiting) return true;
+    return false;
+}
+
 fn latestReviewContext(run: *const task_state.RunRecord) []const u8 {
     if (run.commentary_count == 0) return "No closed Agent commentary is available; prior Tool output is omitted.";
     const end: usize = @intCast(run.commentary_ends[run.commentary_count - 1]);
@@ -7542,6 +7877,13 @@ fn deinitTask(
     std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
     std.debug.assert(task.runtime.restore_catalog == null);
+    for (task.input_submissions.items) |*record| {
+        self.releaseSubmissionPayload(record);
+        deinitRunInput(self, effects, &record.input);
+        effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+    }
+    task.input_submissions.deinit(self.allocator);
+    task.input_submissions = .empty;
     releaseAttachmentNoFail(self, task, effects, .cold_start);
     for (task.durable.runs) |*entry| if (entry.*) |*run|
         deinitRun(self, effects, run);
@@ -8060,4 +8402,219 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     try std.testing.expectError(error.UnsupportedPermissionProfile, runtime.beginApprovalChange(1, 1, 3, .full_access, effects));
     try std.testing.expect(task.approval_change == null);
     try std.testing.expectEqual(settled_generation, task.runtime.permission_review.generation);
+}
+
+const InputTestProjection = struct {
+    allocator: std.mem.Allocator,
+    charged: usize = 0,
+
+    fn from(context: *anyopaque) *InputTestProjection {
+        return @ptrCast(@alignCast(context));
+    }
+    fn project(context: *anyopaque, value: []const u8, max: usize, _: []const u8, _: usize) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
+        if (value.len > max) return error.ProjectionCapacity;
+        const self = from(context);
+        const bytes = try self.allocator.dupe(u8, value);
+        self.charged += bytes.len;
+        return .{ .value = bytes, .truncated = false, .redacted = false };
+    }
+    fn discard(context: *anyopaque, value: []u8) void {
+        const self = from(context);
+        self.charged -= value.len;
+        self.allocator.free(value);
+    }
+    fn reserve(context: *anyopaque, bytes: usize) error{ProjectionCapacity}!void {
+        from(context).charged += bytes;
+    }
+    fn release(context: *anyopaque, bytes: usize) void {
+        from(context).charged -= bytes;
+    }
+    fn restore(context: *anyopaque, bytes: usize) void {
+        from(context).charged += bytes;
+    }
+    fn allocate(context: *anyopaque, bytes: usize) (std.mem.Allocator.Error || error{ProjectionCapacity})![]u8 {
+        const self = from(context);
+        const result = try self.allocator.alloc(u8, bytes);
+        self.charged += bytes;
+        return result;
+    }
+    fn redact(_: *anyopaque, _: []const u8) void {}
+    fn now(_: ?*anyopaque) ?u64 {
+        return 1000;
+    }
+    fn effects(self: *InputTestProjection) OperationEffects {
+        return .{
+            .text = .{ .context = self, .project_fn = project, .discard_candidate_fn = discard, .discard_previous_fn = discard, .restore_previous_fn = restore, .allocate_capacity_fn = allocate, .reserve_bytes_fn = reserve, .release_bytes_fn = release },
+            .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release },
+            .executor = undefined,
+            .worker = undefined,
+            .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_tools_per_run = 1, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },
+            .run_clock = .{ .now_unix_ms_fn = now },
+        };
+    }
+    fn clear(self: *InputTestProjection, runtime: *Runtime) void {
+        const task = runtime.find(1).?;
+        for (task.input_submissions.items) |*record| {
+            runtime.releaseSubmissionPayload(record);
+            deinitRunInput(runtime, self.effects().release, &record.input);
+            self.charged -= task_state.additional_input_projection_bytes;
+        }
+        task.input_submissions.deinit(runtime.allocator);
+        runtime.tasks[0] = null;
+        std.debug.assert(self.charged == 0);
+        std.debug.assert(runtime.pending_input_bytes == 0);
+    }
+};
+
+test "Task receives ordered owned messages during maintenance and stop only cancels the existing batch" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    const effects = projection.effects();
+    const task = runtime.find(1).?;
+    task.runtime.active_operation = .{ .compact = 7 };
+    var first = "message A".*;
+    _ = try runtime.receiveInput(1, "A", .{ .text = &first }, effects);
+    @memset(&first, 'x');
+    task.runtime.active_operation = .{ .restore = .{ .id = 8 } };
+    _ = try runtime.receiveInput(1, "B", .{ .text = "message B" }, effects);
+    try std.testing.expectEqualStrings("message A", task.input_submissions.items[0].payload.?.input.text);
+    try std.testing.expectEqualStrings("message A", task.input_submissions.items[0].input.text.value);
+    try std.testing.expectEqual(@as(?u64, 1000), task.input_submissions.items[0].submission.received_at_unix_ms);
+    try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
+    try std.testing.expect(runtime.stopInputs(1));
+    try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
+    _ = try runtime.receiveInput(1, "C", .{ .text = "after stop" }, effects);
+    try std.testing.expectEqual(.cancelled, task.input_submissions.items[0].state);
+    try std.testing.expectEqual(.cancelled, task.input_submissions.items[1].state);
+    try std.testing.expectEqual(.waiting, task.input_submissions.items[2].state);
+    task.runtime.active_operation = .none;
+    var lease = try task.runtime.worker_leases.acquire();
+    try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
+    lease.deinit();
+    try std.testing.expectEqual(InputAction{ .start = 2 }, runtime.inputAction(1));
+    runtime.failWaitingInput(1, 2, .admission_failed);
+    try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
+    try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
+}
+
+test "Task message acceptance rejects real limits atomically without depending on a Session" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    var effects = projection.effects();
+    effects.limits.max_pending_inputs_per_task = 1;
+    try std.testing.expectError(error.MissingInstruction, runtime.receiveInput(1, "empty", .{ .text = "  " }, effects));
+    _ = try runtime.receiveInput(1, "first", .{ .text = "first" }, effects);
+    const raw_bytes = runtime.pending_input_bytes;
+    const projected = projection.charged;
+    try std.testing.expectError(error.ProjectionCapacity, runtime.receiveInput(1, "second", .{ .text = "second" }, effects));
+    try std.testing.expectEqual(raw_bytes, runtime.pending_input_bytes);
+    try std.testing.expectEqual(projected, projection.charged);
+    try std.testing.expectError(error.InvalidInput, runtime.receiveInput(1, "first", .{ .text = "duplicate" }, effects));
+    runtime.find(1).?.durable.archived = true;
+    try std.testing.expectError(error.TaskClosing, runtime.receiveInput(1, "archived", .{ .text = "third" }, effects));
+    runtime.find(1).?.durable.archived = false;
+    _ = runtime.stopInputs(1);
+    _ = try runtime.receiveInput(1, "after-stop", .{ .text = "new intent" }, effects);
+    try std.testing.expectEqual(@as(usize, 1), runtime.find(1).?.input_submissions.items.len);
+    try std.testing.expectEqualStrings("after-stop", runtime.find(1).?.input_submissions.items[0].submission.operationId());
+}
+
+test "Task message acceptance allocation failures leave no payload or projection debt" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var runtime = try Runtime.init(allocator, 1);
+            defer runtime.deinitStorage();
+            runtime.tasks[0] = testModelIntentTask();
+            var projection: InputTestProjection = .{ .allocator = allocator };
+            defer projection.clear(&runtime);
+            _ = try runtime.receiveInput(1, "operation", .{ .text = "owned message" }, projection.effects());
+        }
+    }.run, .{});
+}
+
+test "Task owned input preserves Skill and media slices across caller release and allocation failure" {
+    const Checks = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var argument = "argument".*;
+            var bytes = "image bytes".*;
+            var skill = try task_state.OwnedRunInput.clone(allocator, .{ .skill = .{ .skill_id = "skill", .catalog_revision = "revision", .selection_revision = 3, .argument_values = &.{&argument} } }, 1024);
+            defer skill.deinit(allocator);
+            var image = try task_state.OwnedRunInput.clone(allocator, .{ .multimodal = .{ .text = "describe", .attachments = &.{.{ .kind = .image, .format = .png, .display_name = "image.png", .bytes = &bytes, .reference = "Task-owned reference" }} } }, 1024);
+            defer image.deinit(allocator);
+            @memset(&argument, 'x');
+            @memset(&bytes, 'x');
+            try std.testing.expectEqualStrings("argument", skill.input.skill.argument_values[0]);
+            try std.testing.expectEqualStrings("image bytes", image.input.multimodal.attachments[0].bytes);
+            try std.testing.expectEqualStrings("Task-owned reference", image.input.multimodal.attachments[0].reference);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Checks.run, .{});
+}
+
+test "Task authority removal ends waiting input even when the Session is detached" {
+    const NeverRelease = struct {
+        fn release(_: *anyopaque, _: u64) SessionReleaseOutcome {
+            unreachable;
+        }
+    };
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    _ = try runtime.receiveInput(1, "detached-intent", .{ .text = "pending restore" }, projection.effects());
+    try std.testing.expect(runtime.releaseWorkspaceSessions(1, .{ .context = &projection, .release_fn = NeverRelease.release }));
+    const record = runtime.find(1).?.input_submissions.items[0];
+    try std.testing.expectEqual(.failed, record.state);
+    try std.testing.expectEqual(.workspace_removing, record.reason.?);
+    try std.testing.expect(record.payload == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
+}
+
+test "Task first root resolves only later unanchored messages without moving older failures" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    _ = try runtime.receiveInput(1, "earlier-failed", .{ .text = "old failure" }, projection.effects());
+    runtime.failWaitingInput(1, 0, .admission_failed);
+    _ = try runtime.receiveInput(1, "first-root", .{ .text = "root" }, projection.effects());
+    _ = try runtime.receiveInput(1, "later-message", .{ .text = "later" }, projection.effects());
+    // Only identity and submission are observed by this ownership move.
+    var root: task_state.RunRecord = undefined;
+    root.id = 9;
+    var runs = [_]?task_state.RunRecord{root};
+    const task = runtime.find(1).?;
+    task.durable.runs = &runs;
+    runtime.finishWaitingInput(1, 1, 9, null, projection.effects().release);
+    try std.testing.expectEqualStrings("first-root", runs[0].?.submission.?.operationId());
+    try std.testing.expect(task.input_submissions.items[0].submission.anchor_run_id == null);
+    try std.testing.expectEqual(@as(?u64, 9), task.input_submissions.items[1].submission.anchor_run_id);
+    try std.testing.expectEqual(@as(u32, 0), task.input_submissions.items[1].submission.after_output_count);
+}
+
+test "Task known Session close failure ends the message instead of waiting forever" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    const task = runtime.find(1).?;
+    task.runtime.close_requested = true;
+    _ = try runtime.receiveInput(1, "during-close", .{ .text = "new intent" }, projection.effects());
+    try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
+    task.runtime.close_failed = true;
+    const failure = runtime.inputAction(1).fail;
+    try std.testing.expectEqual(.binding_unavailable, failure.reason);
+    runtime.failWaitingInput(1, failure.index, failure.reason);
+    try std.testing.expectEqual(.failed, task.input_submissions.items[0].state);
+    try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
+    try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
 }

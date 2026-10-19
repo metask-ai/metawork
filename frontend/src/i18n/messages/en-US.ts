@@ -641,9 +641,15 @@ export const enUS = {
     "Only text can be added during a run. Your draft is preserved.",
   "input.not_ready":
     "This run is not accepting input. Your draft is preserved.",
+  "input.submitting": "Submitting…",
+  "input.waiting": "Waiting",
+  "input.cancelled": "Stopped",
+  "input.unexecuted": "Not executed",
   "input.submitted": "Message sent.",
   "input.unknown":
     "Submission is unconfirmed. Check the run history; the message will not be resent automatically.",
+  "input.local_capacity":
+    "Local submission storage is full. Your draft is kept; sync and check earlier submissions before sending more.",
   "input.continuation_wait":
     "Processing submitted messages; edit your draft or stop",
   "mutation.reason.continuation_cancelled": "Further processing was cancelled.",

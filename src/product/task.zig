@@ -25,6 +25,9 @@ pub const PermissionReviewEffects = runtime.PermissionReviewEffects;
 pub const PermissionReviewOutcome = runtime.PermissionReviewOutcome;
 pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
+pub const Submission = runtime.Submission;
+pub const InputSubmission = runtime.InputSubmission;
+pub const InputAction = runtime.InputAction;
 pub const RunError = runtime.RunError;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;
@@ -70,6 +73,7 @@ pub const ProjectionError = view.Error;
 pub const ProjectionText = view.TextProjection;
 pub const writeInput = view.writeInput;
 pub const writeSendInputResult = view.writeSendInputResult;
+pub const writeInputAcceptance = view.writeInputAcceptance;
 pub const ModelSelectionAvailability = view.ModelSelectionAvailability;
 pub const history = @import("product_task_persistence");
 pub const checkpoint_store = @import("product_task_checkpoint_store");
@@ -91,4 +95,5 @@ pub const testing = if (builtin.is_test) struct {
 } else struct {};
 
 pub const SendInputResult = runtime.SendInputResult;
+pub const InputAcceptance = state.InputAcceptance;
 pub const SendInputReason = runtime.SendInputReason;
