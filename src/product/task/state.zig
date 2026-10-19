@@ -412,6 +412,119 @@ pub const RunInputRecord = union(enum) {
     },
 };
 
+pub const MultimodalAttachment = struct {
+    kind: AttachmentKind,
+    format: ?AttachmentFormat,
+    display_name: []const u8,
+    bytes: []const u8,
+    reference: []const u8 = &.{},
+    size_bytes: ?u64 = null,
+    source_format: ?AttachmentFormat = null,
+};
+
+/// Borrowed command input. An accepted submission owns its slices separately.
+pub const RunInput = union(enum) {
+    text: []const u8,
+    skill: struct {
+        skill_id: []const u8,
+        catalog_revision: []const u8,
+        selection_revision: u64,
+        argument_values: []const []const u8,
+    },
+    multimodal: struct { text: []const u8, attachments: []const MultimodalAttachment },
+};
+
+pub const Submission = struct {
+    operation_id: [64]u8 = @splat(0),
+    operation_id_len: u8,
+    received_at_unix_ms: ?u64 = null,
+    anchor_run_id: ?u64 = null,
+    after_output_count: u32 = 0,
+
+    pub fn operationId(self: *const Submission) []const u8 {
+        return self.operation_id[0..self.operation_id_len];
+    }
+};
+
+/// One owned execution buffer; never serialized or reconstructed from history.
+pub const OwnedRunInput = struct {
+    input: RunInput,
+    bytes: []u8,
+    arguments: []([]const u8) = &.{},
+    attachments: []MultimodalAttachment = &.{},
+
+    pub fn clone(allocator: std.mem.Allocator, input: RunInput, budget: usize) error{ OutOfMemory, ProjectionCapacity }!OwnedRunInput {
+        var length: usize = 0;
+        switch (input) {
+            .text => |text| length = text.len,
+            .skill => |skill| {
+                length = std.math.add(usize, skill.skill_id.len, skill.catalog_revision.len) catch return error.ProjectionCapacity;
+                for (skill.argument_values) |value| length = std.math.add(usize, length, value.len) catch return error.ProjectionCapacity;
+            },
+            .multimodal => |media| {
+                length = media.text.len;
+                for (media.attachments) |part| {
+                    for ([_][]const u8{ part.display_name, part.bytes, part.reference }) |value|
+                        length = std.math.add(usize, length, value.len) catch return error.ProjectionCapacity;
+                }
+            },
+        }
+        if (length > budget) return error.ProjectionCapacity;
+        const bytes = try allocator.alloc(u8, length);
+        errdefer allocator.free(bytes);
+        const arguments = try allocator.alloc([]const u8, if (input == .skill) input.skill.argument_values.len else 0);
+        errdefer allocator.free(arguments);
+        const attachments = try allocator.alloc(MultimodalAttachment, if (input == .multimodal) input.multimodal.attachments.len else 0);
+        var offset: usize = 0;
+        const owned: RunInput = switch (input) {
+            .text => |text| .{ .text = copy(bytes, &offset, text) },
+            .skill => |skill| blk: {
+                const id = copy(bytes, &offset, skill.skill_id);
+                const revision = copy(bytes, &offset, skill.catalog_revision);
+                for (arguments, skill.argument_values) |*target, value| target.* = copy(bytes, &offset, value);
+                break :blk .{ .skill = .{ .skill_id = id, .catalog_revision = revision, .selection_revision = skill.selection_revision, .argument_values = arguments } };
+            },
+            .multimodal => |media| blk: {
+                const text = copy(bytes, &offset, media.text);
+                for (attachments, media.attachments) |*target, part| {
+                    target.* = part;
+                    target.display_name = copy(bytes, &offset, part.display_name);
+                    target.bytes = copy(bytes, &offset, part.bytes);
+                    target.reference = copy(bytes, &offset, part.reference);
+                }
+                break :blk .{ .multimodal = .{ .text = text, .attachments = attachments } };
+            },
+        };
+        return .{ .input = owned, .bytes = bytes, .arguments = arguments, .attachments = attachments };
+    }
+
+    fn copy(bytes: []u8, offset: *usize, value: []const u8) []const u8 {
+        const result = bytes[offset.*..][0..value.len];
+        @memcpy(result, value);
+        offset.* += value.len;
+        return result;
+    }
+
+    pub fn deinit(self: *OwnedRunInput, allocator: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, self.bytes);
+        allocator.free(self.bytes);
+        allocator.free(self.arguments);
+        allocator.free(self.attachments);
+        self.* = undefined;
+    }
+};
+
+pub const InputSubmission = struct {
+    submission: Submission,
+    input: RunInputRecord,
+    payload: ?OwnedRunInput,
+    state: enum { waiting, failed, cancelled, interrupted } = .waiting,
+    /// Runtime-only explanation; history only retains the safe terminal state.
+    reason: ?SendInputReason = null,
+    /// A required preparation is attempted once for this accepted message.
+    preparation_attempted: bool = false,
+};
+
 // Fixed message metadata is charged to the shared projection budget. Its
 // sixfold JSON allowance covers identities and adoption structure even when
 // redaction leaves the safe text empty.
@@ -437,6 +550,7 @@ pub const AdditionalInput = struct {
     raw_text: ?[]u8 = null,
     /// Cancellation belongs to this accepted input, not later sends in the Run.
     continuation_cancel_reason: ?SendInputReason = null,
+    submission: ?Submission = null,
 
     pub fn operationId(self: *const AdditionalInput) []const u8 {
         return self.operation_id[0..self.operation_id_len];
@@ -617,9 +731,11 @@ pub const RunRecord = struct {
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
     input: RunInputRecord,
+    submission: ?Submission = null,
     additional_inputs: [agent.max_submitted_inputs]?AdditionalInput = @splat(null),
     input_continuation_pending: bool = false,
     input_continuation_cancelled: bool = false,
+    input_stop_requested: bool = false,
     input_continuation_attempted: bool = false,
     input_continuation_schedule_gate: bool = false,
     input_continuation_binding_epoch: u64 = 0,
@@ -880,6 +996,7 @@ pub const Task = struct {
     model_intent_prepared: bool = false,
     /// A bounded correlation receipt, never a deferred input.
     send_input_result: ?SendInputResult = null,
+    input_submissions: std.ArrayList(InputSubmission) = .empty,
     conversation_observation: ConversationObservation = .{},
     /// Runtime-only first catalog binding; never persisted or used for recovery eligibility.
     initial_catalog_preparation: enum { uninitialized, loading, unavailable } = .uninitialized,
