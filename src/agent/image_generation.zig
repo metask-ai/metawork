@@ -3,11 +3,14 @@ const std = @import("std");
 const http = @import("agent_http_transport");
 
 pub const max_active_calls = 4;
+// At most six JSON bytes per path byte, plus fixed fields and a usize decimal.
+pub const min_result_bytes = Receipt.max_path_bytes * 6 + 128;
+pub const ResultHeader = struct { allocation_len: usize };
 pub const Limits = struct {
     prompt_bytes: usize = 16 * 1024,
     response_bytes: usize = 128 * 1024,
     image_bytes: usize = 64 * 1024,
-    result_bytes: usize = 1024,
+    result_bytes: usize = min_result_bytes,
     memory_bytes: usize = 4 * 1024 * 1024,
     sends_per_run: usize = 4,
     timeout_ms: u32 = 10_000,
@@ -16,13 +19,13 @@ pub const Limits = struct {
         return self.prompt_bytes > 0 and self.prompt_bytes <= 16 * 1024 and
             self.response_bytes > 0 and self.response_bytes <= 1024 * 1024 and
             self.image_bytes > 0 and self.image_bytes <= self.response_bytes and
-            self.result_bytes >= 256 and self.result_bytes <= 4096 and
+            self.result_bytes >= min_result_bytes and self.result_bytes <= 4096 and
             self.sends_per_run > 0 and self.timeout_ms > 0 and self.memory_bytes >= self.workingBytes();
     }
 
     pub fn workingBytes(self: Limits) usize {
-        // Request escaping, response, fixed JSON arena, decoded bytes and headers.
-        return self.prompt_bytes * 7 + 8192 + self.response_bytes * 5 + self.image_bytes;
+        // Request, response/JSON scratch, image, and the result allocated before effects.
+        return self.prompt_bytes * 7 + 8192 + self.response_bytes * 5 + self.image_bytes + self.result_bytes + @sizeOf(ResultHeader);
     }
 };
 
@@ -39,12 +42,13 @@ pub const Failure = enum {
 };
 
 pub const Receipt = struct {
-    path: [512]u8 = undefined,
+    pub const max_path_bytes = 512;
+    path: [max_path_bytes]u8 = undefined,
     path_len: usize = 0,
     size_bytes: usize,
 
     pub fn init(path: []const u8, size: usize) error{InvalidPath}!Receipt {
-        if (path.len == 0 or path.len > 512 or path[0] == '/' or
+        if (path.len == 0 or path.len > max_path_bytes or path[0] == '/' or
             std.mem.indexOfAny(u8, path, "\\:\x00\r\n") != null or !std.unicode.utf8ValidateSlice(path))
             return error.InvalidPath;
         var parts = std.mem.splitScalar(u8, path, '/');
@@ -179,15 +183,16 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         .headers = &.{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "Authorization", .value = bearer, .sensitive = true } },
         .body = request,
     }, &call.cancellation, buffer) catch return .{ .failed = .outcome_unknown };
-    if (response.status < 200 or response.status >= 300) return .{ .failed = .provider_rejected };
     if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
-    const decoded = decode(allocator, response.body, limits) catch |err| return .{ .failed = switch (err) {
+    if (response.status < 200 or response.status >= 300) return .{ .failed = .provider_rejected };
+    const decoded = decode(allocator, response.body, limits) catch |err| return .{ .failed = if (call.cancellation.isRequested()) .outcome_unknown else switch (err) {
         error.UnsupportedOutput => .unsupported_output,
         else => .invalid_response,
     } };
     defer allocator.free(decoded);
-    if (call.cancellation.isRequested()) return .{ .failed = .cancelled };
-    const receipt = binding.output.commit_fn(binding.output.context, decoded, &call.cancellation) catch return .{ .failed = .output_failed };
+    if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
+    const receipt = binding.output.commit_fn(binding.output.context, decoded, &call.cancellation) catch |err|
+        return .{ .failed = if (err == error.Cancelled or err == error.Canceled or call.cancellation.isRequested()) .outcome_unknown else .output_failed };
     return .{ .saved = receipt };
 }
 
@@ -272,4 +277,67 @@ test "image response decoding preserves PNG bytes and rejects malformed or redir
     broken[20] ^= 1;
     try std.testing.expectError(error.InvalidResponse, validatePng(broken));
     try std.testing.expectError(error.InvalidResponse, validatePng(png[0 .. png.len - 1]));
+}
+
+test "cancellation before send is cancelled and every post-send cancellation is outcome unknown" {
+    const Fixture = struct {
+        const Phase = enum { before_send, response, decoded, output };
+        body: []const u8,
+        phase: Phase,
+        decode_token: ?*http.Cancellation = null,
+        requests: usize = 0,
+        writes: usize = 0,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const bytes = std.testing.allocator.rawAlloc(len, alignment, ra);
+            if (len == @embedFile("testdata/generated.png").len) if (self.decode_token) |token| {
+                self.decode_token = null;
+                token.request();
+            };
+            return bytes;
+        }
+        fn resize(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+            return std.testing.allocator.rawResize(bytes, alignment, len, ra);
+        }
+        fn remap(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(bytes, alignment, len, ra);
+        }
+        fn free(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            std.testing.allocator.rawFree(bytes, alignment, ra);
+        }
+        fn fetch(context: ?*anyopaque, _: http.HttpRequest, token: *const http.Cancellation, buffer: []u8) http.Error!http.Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.requests += 1;
+            if (self.phase == .response) @constCast(token).request();
+            if (self.phase == .decoded) self.decode_token = @constCast(token);
+            @memcpy(buffer[0..self.body.len], self.body);
+            return .{ .status = 200, .body = buffer[0..self.body.len] };
+        }
+        fn output(context: *anyopaque, _: []const u8, token: *const http.Cancellation) !Receipt {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.writes += 1;
+            @constCast(token).request();
+            return error.Cancelled;
+        }
+    };
+    const png = @embedFile("testdata/generated.png");
+    var encoded: [std.base64.standard.Encoder.calcSize(png.len)]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&encoded, png);
+    const body = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .data = .{.{ .b64_json = &encoded }} }, .{});
+    defer std.testing.allocator.free(body);
+    for (std.enums.values(Fixture.Phase)) |phase| {
+        var fixture: Fixture = .{ .phase = phase, .body = body };
+        const transport: http.Transport = .{ .context = &fixture, .perform_fn = Fixture.fetch };
+        var binding = try OwnedBinding.init(std.testing.allocator, .{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &fixture, .commit_fn = Fixture.output } });
+        defer binding.deinit(std.testing.allocator);
+        var call: Call = .{ .cancellation = http.Cancellation.init(transport), .deadline_ns = 0, .io = std.testing.io };
+        if (phase == .before_send) call.cancellation.request();
+        const outcome = perform(fixture.allocator(), transport, &binding, "red pixel", .{}, &call);
+        try std.testing.expectEqual(if (phase == .before_send) Failure.cancelled else Failure.outcome_unknown, outcome.failed);
+        try std.testing.expectEqual(@as(usize, if (phase == .before_send) 0 else 1), fixture.requests);
+        try std.testing.expectEqual(@as(usize, if (phase == .output) 1 else 0), fixture.writes);
+    }
 }

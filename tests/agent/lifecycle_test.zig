@@ -206,6 +206,88 @@ test "GenerateImage callback holding lease before registration observes close an
     try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
 }
 
+test "GenerateImage preallocates result before sending and performs no allocation after commit" {
+    const Probe = struct {
+        allocator: *std.testing.FailingAllocator,
+        runtime: *lifecycle.Runtime = undefined,
+        body: []const u8,
+        requests: usize = 0,
+        commits: usize = 0,
+        fn fetch(context: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, buffer: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.requests += 1;
+            @memcpy(buffer[0..self.body.len], self.body);
+            return .{ .status = 200, .body = buffer[0..self.body.len] };
+        }
+        fn commit(context: *anyopaque, bytes: []const u8, _: *const lifecycle.CompletionCancellation) !lifecycle.ImageGenerationReceipt {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.commits += 1;
+            // The minimum budget is still held, including result capacity.
+            try std.testing.expectEqual(self.runtime.image_budget.limit, self.runtime.image_budget.used.load(.acquire));
+            try std.testing.expect(!self.runtime.image_budget.acquire(1));
+            // Everything after commit must succeed with all future allocations disabled.
+            self.allocator.fail_index = self.allocator.alloc_index;
+            return lifecycle.ImageGenerationReceipt.init("saved.png", bytes.len);
+        }
+    };
+    const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/agent/testdata/generated.png", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(png);
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(png.len));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, png);
+    const body = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .data = .{.{ .b64_json = b64 }} }, .{});
+    defer std.testing.allocator.free(body);
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe: Probe = .{ .allocator = &failing, .body = body };
+    var limits: lifecycle.ImageGenerationLimits = .{};
+    limits.memory_bytes = limits.workingBytes();
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &probe, .perform_fn = Probe.fetch }, .limits = limits });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    probe.runtime = runtime;
+    const session = try openSession(runtime);
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &probe, .commit_fn = Probe.commit } });
+    const id = try session.prepareRun(.{ .text = "result ownership under pressure" });
+    var work: ImageRunWork = .{ .session = session, .id = id };
+    const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        fake_core.releaseControlled();
+        thread.join();
+        work.result.?.deinit();
+    }
+    fake_core.waitRunEntered();
+    var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+    failing.fail_index = failing.alloc_index;
+    invocation.execute();
+    try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+    try std.testing.expectEqualStrings("{\"status\":\"capacity\"}", try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }));
+    try std.testing.expectEqual(@as(usize, 0), probe.requests);
+    try std.testing.expectEqual(@as(usize, 0), probe.commits);
+    invocation.release();
+    failing.fail_index = std.math.maxInt(usize);
+    invocation.execute();
+    try std.testing.expectEqual(wire.HOST_OK, invocation.status);
+    try std.testing.expectEqual(@as(usize, 1), probe.requests);
+    try std.testing.expectEqual(@as(usize, 1), probe.commits);
+    try std.testing.expect(std.mem.indexOf(u8, try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }), "\"status\":\"saved\"") != null);
+    try std.testing.expect(runtime.image_budget.used.load(.acquire) > 0);
+    var blocked: ImageInvocation = .{ .tool = invocation.tool, .identity = invocation.identity };
+    blocked.execute(); // A retained result leaves insufficient working capacity.
+    try std.testing.expectEqual(wire.HOST_FAILED, blocked.status);
+    try std.testing.expectEqualStrings("{\"status\":\"capacity\"}", try sdk.borrowedBytes(.{ .ptr = blocked.result.ptr, .len = blocked.result.len }));
+    try std.testing.expectEqual(@as(usize, 1), probe.requests);
+    blocked.release();
+    invocation.release();
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), runtime.image_results_created.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), runtime.image_results_released.load(.acquire));
+}
+
 test "active input correlates adoption before receipt and never changes the Run" {
     const Mode = struct { adopt: bool, omit_event: bool = false, fail_run: bool = false };
     for ([_]Mode{ .{ .adopt = false }, .{ .adopt = true }, .{ .adopt = true, .omit_event = true }, .{ .adopt = true, .fail_run = true } }) |mode| {

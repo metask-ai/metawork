@@ -444,7 +444,7 @@ test "GenerateImage test output refuses conflicts and cleans partial files befor
         h.sink.cancel_before_commit = fault == 2;
         if (fault == 0) try h.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-1.png", .data = "sentinel" });
         try execute(try h.session(.full_access, true));
-        try h.evidence(1, 0, "output_failed");
+        try h.evidence(1, 0, if (fault == 2) "outcome_unknown" else "output_failed");
         if (fault == 0) {
             const bytes = try h.tmp.dir.readFileAlloc(std.testing.io, "image-1.png", std.testing.allocator, .limited(100));
             defer std.testing.allocator.free(bytes);
@@ -453,30 +453,32 @@ test "GenerateImage test output refuses conflicts and cleans partial files befor
     }
 }
 
-test "GenerateImage committed fact survives cancellation and oversized result encoding" {
+test "GenerateImage committed fact survives cancellation and long receipt is delivered" {
     var h: Harness = undefined;
     try h.init("success", .{});
     defer h.deinit();
     h.sink.cancel_after_commit = true;
     try execute(try h.session(.full_access, true));
     try h.evidence(1, 1, "saved");
-    var failed: Harness = undefined;
-    try failed.init("success", .{ .result_bytes = 256 });
-    defer failed.deinit();
-    failed.sink.long_name = true;
-    try execute(try failed.session(.full_access, true));
-    try std.testing.expectEqual(@as(usize, 1), failed.sink.saved);
-    try std.testing.expectEqual(@as(usize, 0), failed.runtime.image_results_created.load(.acquire));
+    var long: Harness = undefined;
+    try long.init("success", .{});
+    defer long.deinit();
+    long.sink.long_name = true;
+    try execute(try long.session(.full_access, true));
+    try std.testing.expectEqual(@as(usize, 1), long.sink.saved);
+    try std.testing.expectEqual(@as(usize, 1), long.runtime.image_results_created.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), long.runtime.image_results_released.load(.acquire));
     const name = [_]u8{'a'} ** 200;
-    const bytes = try failed.tmp.dir.readFileAlloc(std.testing.io, &name, std.testing.allocator, .limited(1024));
+    const bytes = try long.tmp.dir.readFileAlloc(std.testing.io, &name, std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(bytes);
     const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(png);
     try std.testing.expectEqualSlices(u8, png, bytes);
-    const trace = try failed.trace();
+    const trace = try long.trace();
     defer std.testing.allocator.free(trace);
     try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"image\""));
-    try std.testing.expectEqual(@as(usize, 0), count(trace, "\\\"status\\\":\\\"saved\\\""));
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "\\\"status\\\":\\\"saved\\\""));
+    try std.testing.expect(std.mem.indexOf(u8, trace, &name) != null);
 }
 
 test "GenerateImage Runtime working budget bounds parallel calls and returns to zero" {

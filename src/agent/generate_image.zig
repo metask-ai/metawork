@@ -42,3 +42,18 @@ test "GenerateImage arguments reject execution configuration and duplicate keys"
     defer std.testing.allocator.free(value);
     try std.testing.expect(std.mem.startsWith(u8, value, "http://"));
 }
+
+test "GenerateImage every valid receipt fits the minimum result budget including JSON escaping" {
+    const path = [_]u8{1} ** image.Receipt.max_path_bytes;
+    const receipt = try image.Receipt.init(&path, std.math.maxInt(usize));
+    var buffer: [image.min_result_bytes]u8 = undefined;
+    const encoded = try result(&buffer, .{ .saved = receipt });
+    const decoded = try std.json.parseFromSlice(struct { status: []const u8, path: []const u8, media_type: []const u8, size_bytes: usize }, std.testing.allocator, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualSlices(u8, &path, decoded.value.path);
+    try std.testing.expectEqual(std.math.maxInt(usize), decoded.value.size_bytes);
+    try std.testing.expect(!(image.Limits{ .result_bytes = 256 }).validate());
+    var limits: image.Limits = .{};
+    limits.memory_bytes = limits.workingBytes();
+    try std.testing.expect(limits.validate());
+}

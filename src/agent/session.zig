@@ -2306,30 +2306,49 @@ pub const Session = struct {
         runtime.sessions_mutex.unlock(runtime.io);
         const self = retained orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
-        const outcome = self.performImage(arguments);
         const options = runtime.image_test orelse return wire.HOST_FATAL;
-        const result_reservation = options.limits.result_bytes + @sizeOf(ImageResultHeader);
-        if (!runtime.image_budget.acquire(result_reservation)) return wire.HOST_FAILED;
-        var reserved = result_reservation;
+        // Keep working and result capacity in one reservation through publication.
+        // Allocate the owned result before sending or committing anything.
+        const limits = options.limits;
+        if (!runtime.image_budget.acquire(limits.workingBytes()))
+            return staticImageFailure(runtime, result_out, image_capacity_result);
+        var reserved = limits.workingBytes();
         defer runtime.image_budget.release(reserved);
-        var result_buffer: [4096]u8 = undefined;
-        const encoded = generate_image.result(result_buffer[0..options.limits.result_bytes], outcome) catch return wire.HOST_FAILED;
-        const allocation_len = @sizeOf(ImageResultHeader) + encoded.len;
-        const allocation = runtime.allocator.alloc(u8, allocation_len) catch return wire.HOST_FAILED;
+        const allocation_len = @sizeOf(ImageResultHeader) + limits.result_bytes;
+        const allocation = runtime.allocator.alloc(u8, allocation_len) catch
+            return staticImageFailure(runtime, result_out, image_capacity_result);
+        var transferred = false;
+        defer if (!transferred) runtime.allocator.free(allocation);
+        const outcome = self.performImage(arguments);
+        const encoded = generate_image.result(allocation[@sizeOf(ImageResultHeader)..], outcome) catch
+            return staticImageFailure(runtime, result_out, image_unknown_result);
         reserved -= allocation_len;
+        transferred = true;
         std.mem.bytesAsValue(ImageResultHeader, allocation[0..@sizeOf(ImageResultHeader)]).* = .{ .allocation_len = allocation_len };
-        @memcpy(allocation[@sizeOf(ImageResultHeader)..], encoded);
-        result_out.* = .{ .ptr = allocation.ptr + @sizeOf(ImageResultHeader), .len = encoded.len };
+        result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
         _ = runtime.image_results_created.fetchAdd(1, .monotonic);
         return if (outcome == .saved) wire.HOST_OK else wire.HOST_FAILED;
     }
 
-    const ImageResultHeader = struct { allocation_len: usize };
+    const ImageResultHeader = image_generation.ResultHeader;
+    const image_capacity_result = "{\"status\":\"capacity\"}";
+    const image_unknown_result = "{\"status\":\"outcome_unknown\"}";
+
+    fn staticImageFailure(runtime: *Runtime, output: *wire.OwnedBytesV1, bytes: []const u8) u32 {
+        output.* = .{ .ptr = @constCast(bytes.ptr), .len = bytes.len };
+        _ = runtime.image_results_created.fetchAdd(1, .monotonic);
+        return wire.HOST_FAILED;
+    }
 
     pub fn releaseImageResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
         const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
         const result_out = out orelse return;
         const ptr = result_out.ptr orelse return;
+        if (ptr == image_capacity_result.ptr or ptr == image_unknown_result.ptr) {
+            _ = runtime.image_results_released.fetchAdd(1, .monotonic);
+            result_out.* = emptyOwnedBytes();
+            return;
+        }
         const allocation_ptr = ptr - @sizeOf(ImageResultHeader);
         const header = std.mem.bytesAsValue(ImageResultHeader, allocation_ptr[0..@sizeOf(ImageResultHeader)]).*;
         runtime.allocator.free(allocation_ptr[0..header.allocation_len]);
@@ -2344,9 +2363,6 @@ pub const Session = struct {
         const limits = options.limits;
         if (arguments.len > limits.prompt_bytes * 6 + 64) return .{ .failed = .invalid_arguments };
         const bytes = sdk.borrowedBytes(arguments) catch return .{ .failed = .invalid_arguments };
-        const working = limits.workingBytes();
-        if (!runtime.image_budget.acquire(working)) return .{ .failed = .capacity };
-        defer runtime.image_budget.release(working);
         const prompt = generate_image.prompt(runtime.allocator, bytes, limits.prompt_bytes) catch return .{ .failed = .invalid_arguments };
         defer runtime.allocator.free(prompt);
         var call: image_generation.Call = .{
