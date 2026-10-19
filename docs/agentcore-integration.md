@@ -196,6 +196,8 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 当前锁定合同的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`；MetaWork Agent 在 Agent 模块中统一注册并允许固定 built-in 集合，Product Control 和 Application 不持有 profile 或 wire name。启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
 
+图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。这些输入与 client 能力不改变正式 Host Tool Gate。
+
 ## 5. Host envelope 与产品状态
 
 Host 可以在 AgentCore event 外增加产品路由 envelope：

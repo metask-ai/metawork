@@ -185,4 +185,5 @@ pub const ImageGenerationTestBinding = session_impl.ImageGenerationTestBinding;
 pub const ImageGenerationOutput = session_impl.ImageGenerationOutput;
 pub const ImageGenerationReceipt = session_impl.ImageGenerationReceipt;
 pub const ImageGenerationLimits = session_impl.ImageGenerationLimits;
+pub const image_generation_limits = session_impl.image_generation_limits;
 pub const Session = session_impl.Session;

@@ -16,17 +16,26 @@ pub const Limits = struct {
     timeout_ms: u32 = 10_000,
 
     pub fn validate(self: Limits) bool {
-        return self.prompt_bytes > 0 and self.prompt_bytes <= 16 * 1024 and
-            self.response_bytes > 0 and self.response_bytes <= 1024 * 1024 and
-            self.image_bytes > 0 and self.image_bytes <= self.response_bytes and
+        return self.prompt_bytes > 0 and self.prompt_bytes <= production_limits.prompt_bytes and
+            self.response_bytes > 0 and self.response_bytes <= production_limits.response_bytes and
+            self.image_bytes > 0 and self.image_bytes <= production_limits.image_bytes and self.image_bytes <= self.response_bytes and
             self.result_bytes >= min_result_bytes and self.result_bytes <= 4096 and
-            self.sends_per_run > 0 and self.timeout_ms > 0 and self.memory_bytes >= self.workingBytes();
+            self.sends_per_run > 0 and self.sends_per_run <= production_limits.sends_per_run and
+            self.timeout_ms > 0 and self.timeout_ms <= production_limits.timeout_ms and
+            self.memory_bytes <= production_limits.memory_bytes and self.memory_bytes >= self.workingBytes();
     }
 
     pub fn workingBytes(self: Limits) usize {
         // Request, response/JSON scratch, image, and the result allocated before effects.
         return self.prompt_bytes * 7 + 8192 + self.response_bytes * 5 + self.image_bytes + self.result_bytes + @sizeOf(ResultHeader);
     }
+};
+
+pub const production_limits: Limits = .{
+    .response_bytes = 16 * 1024 * 1024,
+    .image_bytes = 10 * 1024 * 1024,
+    .memory_bytes = 256 * 1024 * 1024,
+    .timeout_ms = 180_000,
 };
 
 pub const Failure = enum {
@@ -73,7 +82,7 @@ pub const Output = struct {
     commit_fn: *const fn (*anyopaque, []const u8, *const http.Cancellation) anyerror!Receipt,
 };
 
-pub const TestBinding = struct {
+pub const BindingInput = struct {
     endpoint: []const u8,
     model: []const u8,
     credential: []const u8,
@@ -86,11 +95,21 @@ pub const OwnedBinding = struct {
     credential: []u8,
     output: Output,
 
-    pub fn init(allocator: std.mem.Allocator, input: TestBinding) !OwnedBinding {
+    pub fn init(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
+        try validateEndpoint(input.endpoint);
+        return copy(allocator, input);
+    }
+
+    pub fn initForTesting(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
         try validateTestEndpoint(input.endpoint);
+        return copy(allocator, input);
+    }
+
+    fn copy(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
         if (input.model.len == 0 or input.model.len > 256 or !std.unicode.utf8ValidateSlice(input.model) or
             input.credential.len == 0 or input.credential.len > 4096 or
             std.mem.indexOfAny(u8, input.credential, "\r\n\x00") != null) return error.InvalidBinding;
+        for (input.model) |byte| if (std.ascii.isControl(byte)) return error.InvalidBinding;
         const endpoint = try allocator.dupe(u8, input.endpoint);
         errdefer allocator.free(endpoint);
         const model = try allocator.dupe(u8, input.model);
@@ -107,6 +126,24 @@ pub const OwnedBinding = struct {
         self.* = undefined;
     }
 };
+
+pub fn validateEndpoint(value: []const u8) error{InvalidBinding}!void {
+    if (value.len == 0 or value.len > 2048 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidBinding;
+    for (value) |byte| if (std.ascii.isControl(byte) or byte == ' ' or byte == '\\') return error.InvalidBinding;
+    const uri = std.Uri.parse(value) catch return error.InvalidBinding;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "https") or uri.user != null or uri.password != null or
+        uri.query != null or uri.fragment != null or uri.port == 0)
+        return error.InvalidBinding;
+    const host = uri.host orelse return error.InvalidBinding;
+    const host_bytes = switch (host) {
+        .raw, .percent_encoded => |bytes| bytes,
+    };
+    if (host_bytes.len == 0 or std.mem.indexOfScalar(u8, host_bytes, '%') != null) return error.InvalidBinding;
+    const path = switch (uri.path) {
+        .raw, .percent_encoded => |bytes| bytes,
+    };
+    if (path.len == 0 or path[0] != '/') return error.InvalidBinding;
+}
 
 pub fn validateTestEndpoint(value: []const u8) !void {
     // Only the isolated initializer consumes this target. Product init has no override.
@@ -253,6 +290,133 @@ test "fixture targets cannot escape the loopback image endpoint" {
         try std.testing.expectError(error.InvalidBinding, validateTestEndpoint(value));
 }
 
+test "production image limits bound every input and allow two maximum working reservations" {
+    try std.testing.expect(production_limits.validate());
+    try std.testing.expect((Limits{}).validate());
+    inline for (.{ "prompt_bytes", "response_bytes", "image_bytes", "memory_bytes", "sends_per_run", "timeout_ms" }) |field| {
+        var oversized = production_limits;
+        @field(oversized, field) += 1;
+        try std.testing.expect(!oversized.validate());
+    }
+    var budget: Budget = .{ .limit = production_limits.memory_bytes };
+    const working = production_limits.workingBytes();
+    try std.testing.expect(budget.acquire(working));
+    try std.testing.expect(budget.acquire(working));
+    try std.testing.expect(!budget.acquire(working));
+    budget.release(working);
+    try std.testing.expect(budget.acquire(working));
+    budget.release(working);
+    budget.release(working);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+test "production target structure and isolated fixture admission remain separate" {
+    const Fixture = struct {
+        fn output(_: *anyopaque, _: []const u8, _: *const http.Cancellation) !Receipt {
+            return error.Unexpected;
+        }
+    };
+    var context: u8 = 0;
+    var input: BindingInput = .{
+        .endpoint = "https://images.example.test/v1/images/generations",
+        .model = "fixture-model",
+        .credential = "synthetic-secret",
+        .output = .{ .context = &context, .commit_fn = Fixture.output },
+    };
+    var binding = try OwnedBinding.init(std.testing.allocator, input);
+    defer binding.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(input.endpoint, binding.endpoint);
+    try std.testing.expectError(error.InvalidBinding, OwnedBinding.initForTesting(std.testing.allocator, input));
+    for ([_][]const u8{
+        "http://127.0.0.1:1/v1/images/generations",
+        "https://user:secret@images.example.test/v1/images/generations",
+        "https://images.example.test/v1/images/generations?token=secret",
+        "https://images.example.test/v1/images/generations#fragment",
+        "https://images.example.test:0/v1/images/generations",
+        "https://images.example.test",
+        "https://images.example.test\\@other.test/v1/images/generations",
+        "https://images%2eexample.test/v1/images/generations",
+        "https://images.example.test/\r\n",
+    }) |endpoint| try std.testing.expectError(error.InvalidBinding, validateEndpoint(endpoint));
+    input.credential = "secret\r\nInjected: yes";
+    try std.testing.expectError(error.InvalidBinding, OwnedBinding.init(std.testing.allocator, input));
+    input.credential = "synthetic-secret";
+    input.model = "model\n";
+    try std.testing.expectError(error.InvalidBinding, OwnedBinding.init(std.testing.allocator, input));
+}
+
+test "production image codec delivers a PNG beyond fixture byte limits through a fake transport" {
+    const allocator = std.testing.allocator;
+    const small_png = @embedFile("testdata/generated.png");
+    // A legal ancillary text chunk grows a real PNG without storing a large
+    // binary fixture or relying on a native decoder. Pixel data stays intact.
+    const text_len = 2 * 1024 * 1024;
+    const offset = 33;
+    const png = try allocator.alloc(u8, small_png.len + text_len + 12);
+    defer allocator.free(png);
+    @memcpy(png[0..offset], small_png[0..offset]);
+    std.mem.writeInt(u32, png[offset..][0..4], text_len, .big);
+    @memcpy(png[offset + 4 ..][0..4], "tEXt");
+    @memset(png[offset + 8 ..][0..text_len], 'x');
+    @memcpy(png[offset + 8 ..][0..8], "Fixture\x00");
+    std.mem.writeInt(u32, png[offset + 8 + text_len ..][0..4], std.hash.Crc32.hash(png[offset + 4 ..][0 .. text_len + 4]), .big);
+    @memcpy(png[offset + text_len + 12 ..], small_png[offset..]);
+    try validatePng(png);
+    const encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(png.len));
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, png);
+    const body = try std.json.Stringify.valueAlloc(allocator, .{ .data = .{.{ .b64_json = encoded }} }, .{});
+    defer allocator.free(body);
+    try std.testing.expect(body.len > 1024 * 1024);
+    try std.testing.expectError(error.InvalidResponse, decode(allocator, body, .{}));
+    const Fixture = struct {
+        png: []const u8,
+        body: []const u8,
+        requests: usize = 0,
+        writes: usize = 0,
+        fn fetch(context: ?*anyopaque, request: http.HttpRequest, _: *const http.Cancellation, buffer: []u8) http.Error!http.Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.requests += 1;
+            if (!std.mem.eql(u8, request.url, "https://images.example.test/v1/images/generations")) return error.Unexpected;
+            var has_auth = false;
+            for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) {
+                if (!header.sensitive or !std.mem.eql(u8, header.value, "Bearer synthetic-secret")) return error.Unexpected;
+                has_auth = true;
+            };
+            if (!has_auth) return error.Unexpected;
+            const parsed = std.json.parseFromSlice(struct { model: []const u8, prompt: []const u8, n: u8, response_format: []const u8 }, std.testing.allocator, request.body, .{}) catch return error.InvalidHttp;
+            defer parsed.deinit();
+            if (!std.mem.eql(u8, parsed.value.model, "fixture-model") or !std.mem.eql(u8, parsed.value.prompt, "a detailed scene") or
+                parsed.value.n != 1 or !std.mem.eql(u8, parsed.value.response_format, "b64_json")) return error.Unexpected;
+            if (buffer.len < self.body.len) return error.ResponseTooLarge;
+            @memcpy(buffer[0..self.body.len], self.body);
+            return .{ .status = 200, .body = buffer[0..self.body.len] };
+        }
+        fn output(context: *anyopaque, bytes: []const u8, _: *const http.Cancellation) !Receipt {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.writes += 1;
+            try std.testing.expectEqualSlices(u8, self.png, bytes);
+            return Receipt.init("generated-images/fixture.png", bytes.len);
+        }
+    };
+    var fixture: Fixture = .{ .png = png, .body = body };
+    const transport: http.Transport = .{ .context = &fixture, .perform_fn = Fixture.fetch };
+    var binding = try OwnedBinding.init(allocator, .{
+        .endpoint = "https://images.example.test/v1/images/generations",
+        .model = "fixture-model",
+        .credential = "synthetic-secret",
+        .output = .{ .context = &fixture, .commit_fn = Fixture.output },
+    });
+    defer binding.deinit(allocator);
+    var call: Call = .{ .cancellation = http.Cancellation.init(transport), .deadline_ns = 0, .io = std.testing.io };
+    const outcome = perform(allocator, transport, &binding, "a detailed scene", production_limits, &call);
+    try std.testing.expectEqual(png.len, outcome.saved.size_bytes);
+    try std.testing.expectEqualStrings("generated-images/fixture.png", outcome.saved.pathView());
+    try std.testing.expectEqual(@as(usize, 1), fixture.requests);
+    try std.testing.expectEqual(@as(usize, 1), fixture.writes);
+    try std.testing.expect(call.sent);
+}
+
 test "image receipts cannot choose a different workspace" {
     for ([_][]const u8{ "../other.png", "/absolute.png", "C:\\image.png", "a//image.png", "./image.png" }) |path|
         try std.testing.expectError(error.InvalidPath, Receipt.init(path, 1));
@@ -331,7 +495,7 @@ test "cancellation before send is cancelled and every post-send cancellation is 
     for (std.enums.values(Fixture.Phase)) |phase| {
         var fixture: Fixture = .{ .phase = phase, .body = body };
         const transport: http.Transport = .{ .context = &fixture, .perform_fn = Fixture.fetch };
-        var binding = try OwnedBinding.init(std.testing.allocator, .{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &fixture, .commit_fn = Fixture.output } });
+        var binding = try OwnedBinding.initForTesting(std.testing.allocator, .{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &fixture, .commit_fn = Fixture.output } });
         defer binding.deinit(std.testing.allocator);
         var call: Call = .{ .cancellation = http.Cancellation.init(transport), .deadline_ns = 0, .io = std.testing.io };
         if (phase == .before_send) call.cancellation.request();

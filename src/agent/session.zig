@@ -30,10 +30,11 @@ pub const ImageGenerationTestOptions = struct {
     transport: image_http.Transport,
     limits: image_generation.Limits = .{},
 };
-pub const ImageGenerationTestBinding = image_generation.TestBinding;
+pub const ImageGenerationTestBinding = image_generation.BindingInput;
 pub const ImageGenerationOutput = image_generation.Output;
 pub const ImageGenerationReceipt = image_generation.Receipt;
 pub const ImageGenerationLimits = image_generation.Limits;
+pub const image_generation_limits = image_generation.production_limits;
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const MultimodalInputLimits = multimodal.InputLimits;
@@ -2275,7 +2276,7 @@ pub const Session = struct {
     pub fn configureImageGenerationForTesting(self: *Session, input: ?ImageGenerationTestBinding) !void {
         if (self.agent_runtime.image_test == null) return error.InvalidLimits;
         var owned: ?image_generation.OwnedBinding = if (input) |binding|
-            try image_generation.OwnedBinding.init(self.agent_runtime.allocator, binding)
+            try image_generation.OwnedBinding.initForTesting(self.agent_runtime.allocator, binding)
         else
             null;
         errdefer if (owned) |*binding| binding.deinit(self.agent_runtime.allocator);

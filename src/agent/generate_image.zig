@@ -3,7 +3,7 @@ const std = @import("std");
 const image = @import("image_generation.zig");
 
 pub const name = "GenerateImage";
-pub const description = "Generate one new image from a prompt and save it in the current workspace. Every invocation creates a new image, including identical prompts. Available only when the host supplies image execution configuration. On outcome_unknown the request may already have been accepted or charged; do not blindly retry. The result is a saved file reference, not a claim that you have viewed the image.";
+pub const description = "Generate one new PNG image from a prompt and save it in the current workspace. Every invocation is a new generation intent and may be charged, including identical prompts. Available only when the host supplies image execution configuration. A failed or interrupted call may already have generated or charged for an image; do not automatically retry. Make another call only for an explicit new generation intent. The result is a saved file reference, not a claim that you have viewed the image.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested image."}},"required":["prompt"],"additionalProperties":false}
 ;
