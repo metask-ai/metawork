@@ -21,7 +21,7 @@ export async function runActiveInputVertical({
 }) {
   const read = async (id) =>
     (await snapshot()).tasks.find((task) => task.id === id);
-  async function create(title, approvalMode = "manual") {
+  async function create(title, approvalMode = "manual", rename = true) {
     const admission = (await snapshot()).newTaskAdmission;
     const result = await invoke("metawork.tasks.create", {
       workspace: {
@@ -37,7 +37,8 @@ export async function runActiveInputVertical({
       approvalMode,
     });
     assert.equal(result.accepted, true, JSON.stringify(result));
-    await invoke("metawork.tasks.rename", { taskId: result.taskId, title });
+    if (rename)
+      await invoke("metawork.tasks.rename", { taskId: result.taskId, title });
     return read(result.taskId);
   }
   function gate(body) {
@@ -63,19 +64,27 @@ export async function runActiveInputVertical({
     const result = await invoke("metawork.tasks.sendInput", {
       operationId: `start-${task.id}`,
       taskId: task.id,
-      expectedBindingEpoch: task.binding.epoch,
-      expectedExecution: { kind: "idle", lastRunId: null },
       input,
     });
-    assert.equal(result.outcome, "started", JSON.stringify(result));
-    return result.runId;
+    assert.equal(result.outcome, "accepted", JSON.stringify(result));
+    const current = await poll(
+      async () => {
+        const state = await read(task.id);
+        return (
+          state.runs.find(
+            (run) => run.submission?.operationId === `start-${task.id}`,
+          ) ?? null
+        );
+      },
+      10_000,
+      "accepted root enters its Run",
+    );
+    return current.id;
   }
   async function submit(task, runId, text, operationId) {
     return invoke("metawork.tasks.sendInput", {
       operationId,
       taskId: task.id,
-      expectedBindingEpoch: task.binding.epoch,
-      expectedExecution: { kind: "run", runId },
       input: { kind: "text", text },
     });
   }
@@ -105,10 +114,14 @@ export async function runActiveInputVertical({
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+  const permissionMarker = join(
+    workspaceRoot,
+    "active-input-permission-needed.txt",
+  );
   const command =
     process.platform === "win32"
-      ? 'powershell -NoProfile -Command "Write-Output active-input"'
-      : "printf active-input";
+      ? `powershell -NoProfile -Command "Set-Content -LiteralPath '${permissionMarker.replaceAll("'", "''")}' -Value active-input"`
+      : `touch '${permissionMarker.replaceAll("'", "'\\''")}'`;
   const adopted = await create("Current Run input audit");
   const parent = gate(
     toolSse(
@@ -151,7 +164,7 @@ export async function runActiveInputVertical({
     else
       assert.equal(
         (await submit(adopted, runId, text, "active-first")).outcome,
-        "submitted",
+        "accepted",
       );
     let current = await read(adopted.id);
     assert.equal(current.runs.length, 1);
@@ -176,7 +189,7 @@ export async function runActiveInputVertical({
           "active-ui-wait",
         )
       ).outcome,
-      "submitted",
+      "accepted",
     );
     current = await read(adopted.id);
     assert.equal(current.pendingUi.requestId, pending.requestId);
@@ -214,6 +227,7 @@ export async function runActiveInputVertical({
     ),
   );
   await assertNoSuccessor(adopted);
+  await assert.rejects(access(permissionMarker), { code: "ENOENT" });
   if (retainedDraft && verifyRendererDraft)
     await verifyRendererDraft(adopted.id, retainedDraft);
 
@@ -270,7 +284,7 @@ export async function runActiveInputVertical({
           "review-veto",
         )
       ).outcome,
-      "submitted",
+      "accepted",
     );
   } finally {
     provider.releaseReview();
@@ -370,11 +384,11 @@ export async function runActiveInputVertical({
         mode === "final" ? first : "Do not continue after Stop or failure",
         `input-${mode}`,
       );
-      assert.equal(receipt.outcome, "submitted", JSON.stringify(receipt));
+      assert.equal(receipt.outcome, "accepted", JSON.stringify(receipt));
       if (mode === "final") {
         assert.equal(
           (await submit(task, id, second, "input-final-second")).outcome,
-          "submitted",
+          "accepted",
         );
         assert.deepEqual(
           (await read(task.id)).runs[0].additionalInputs.map(
@@ -428,17 +442,26 @@ export async function runActiveInputVertical({
       assert.equal(result.runs[0].additionalInputs[0].state, "unadopted");
       await assertNoSuccessor(task);
     }
+    provider.enqueue({
+      body: textSse(
+        `new-${mode}`,
+        "A new explicit message is accepted after the previous Run.",
+      ),
+      initialDelayMs: 0,
+      frameDelayMs: 0,
+    });
     const late = await submit(
       task,
       id,
-      "Late text cannot become a new Run",
+      "A new explicit intent",
       `late-${mode}`,
     );
-    assert.equal(late.outcome, "rejected");
-    assert.equal((await read(task.id)).runs.length, mode === "final" ? 2 : 1);
+    assert.equal(late.outcome, "accepted");
+    const withNew = await settled(task.id);
+    assert.equal(withNew.runs.length, mode === "final" ? 3 : 2);
   }
 
-  const skill = await create("Skill Run rejects interjection");
+  const skill = await create("Skill Run retains the next message");
   const skillReply = gate(textSse("skill-final", "typed Skill complete"));
   const skillId = await start(
     skill,
@@ -453,16 +476,90 @@ export async function runActiveInputVertical({
   );
   try {
     await waitGate(skillReply);
-    assert.equal(
-      (await submit(skill, skillId, "must stay a draft", "skill-refusal"))
-        .reason,
-      "unsupported_input",
+    provider.enqueue({
+      body: textSse("after-skill", "The waiting message ran after the Skill."),
+      initialDelayMs: 0,
+      frameDelayMs: 0,
+    });
+    const waiting = await submit(
+      skill,
+      skillId,
+      "wait behind the Skill",
+      "after-skill",
     );
+    assert.equal(waiting.outcome, "accepted");
+    assert.equal((await read(skill.id)).inputSubmissions[0].state, "waiting");
     assert.equal((await read(skill.id)).runs[0].additionalInputs.length, 0);
   } finally {
     skillReply.release();
   }
-  await settled(skill.id);
+  const afterSkill = await settled(skill.id);
+  assert.equal(afterSkill.runs.length, 2);
+
+  // Reproduces the original failure window with the real canonical Core:
+  // the root is completed while its independent title worker still owns a lease.
+  const titleTask = await create(
+    "Title cleanup accepts input",
+    "manual",
+    false,
+  );
+  const titleGate = provider.holdNextTitle();
+  const titleRoot = await start(titleTask, { kind: "text", text: "Review" }, [
+    {
+      body: textSse("title-root", "Root finished"),
+      initialDelayMs: 0,
+      frameDelayMs: 0,
+    },
+  ]);
+  try {
+    await poll(
+      async () => titleGate.entered,
+      10_000,
+      "title completion held after root terminal",
+    );
+    provider.enqueue({
+      body: textSse("after-title", "After title"),
+      initialDelayMs: 0,
+      frameDelayMs: 0,
+    });
+    for (const id of ["A", "B", "C"]) {
+      const result = await submit(
+        titleTask,
+        titleRoot,
+        `waiting ${id}`,
+        `title-${id}`,
+      );
+      assert.equal(result.outcome, "accepted");
+    }
+    const waiting = await read(titleTask.id);
+    assert.equal(waiting.runs.length, 1);
+    assert.deepEqual(
+      waiting.inputSubmissions.map((record) => record.submission.operationId),
+      ["title-A", "title-B", "title-C"],
+    );
+    await invoke("metawork.tasks.stop", { taskId: titleTask.id });
+    assert.ok(
+      (await read(titleTask.id)).inputSubmissions.every(
+        (record) => record.state === "cancelled",
+      ),
+    );
+    assert.equal(
+      (
+        await submit(
+          titleTask,
+          titleRoot,
+          "after stop new intent",
+          "title-after-stop",
+        )
+      ).outcome,
+      "accepted",
+    );
+  } finally {
+    titleGate.release();
+  }
+  const titleDone = await settled(titleTask.id);
+  assert.equal(titleDone.runs.length, 2);
+  assert.equal(titleDone.runs[1].submission.operationId, "title-after-stop");
 
   const restart = await create("Input restart audit");
   const restartId = await start(restart, { kind: "text", text: "Review" }, [
@@ -489,11 +586,11 @@ export async function runActiveInputVertical({
         "restart-input",
       )
     ).outcome,
-    "submitted",
+    "accepted",
   );
   return async () => {
     const current = await read(restart.id);
-    assert.equal(current.sendInputResult, null);
+    assert.equal(current.sendInputResult, undefined);
     assert.equal(current.runs.length, 1);
     assert.ok(
       ["unadopted", "unknown"].includes(
@@ -507,7 +604,7 @@ export async function runActiveInputVertical({
     await assertNoSuccessor(current);
     for (const saved of transferredHistory) {
       const task = await read(saved.taskId);
-      assert.equal(task.runs.length, 2);
+      assert.equal(task.runs.length, 3);
       assert.equal(task.runs[1].id, saved.targetId);
       assert.equal(task.runs[1].input.text, saved.text);
       assert.deepEqual(
@@ -536,7 +633,7 @@ export async function runActiveInputVertical({
       ["adopted", "adopted"],
     );
     console.log(
-      "AgentCore active input: real receipt, boundary adoption, one merged continuation after streaming final output, old-source Stop isolation, stop/failure without continuation, Skill refusal and restart without replay passed.",
+      "AgentCore active input: real receipt, boundary adoption, one merged continuation after streaming final output, old-source Stop isolation, stop/failure without continuation, Skill waiting and restart without replay passed.",
     );
   };
 }

@@ -778,10 +778,23 @@ test "manual compact cancellation waits for the typed aborted result" {
         .session = session,
         .operation_id = operation_id,
     };
-    const thread = try std.Thread.spawn(.{}, compactOnThread, .{&context});
-    try session.waitForState(.compacting);
-    try session.requestCompactCancellation(operation_id, .user_cancel);
-    thread.join();
+    {
+        const thread = try std.Thread.spawn(.{}, compactOnThread, .{&context});
+        defer thread.join();
+        defer fake_core.releaseControlled();
+        // Host phase publication precedes the SDK call. This test exercises
+        // aborting an entered compact, so synchronize on the fake Core fact.
+        var entered = false;
+        for (0..5000) |_| {
+            fake_core.lock();
+            entered = fake_core.compact_calls == 1;
+            fake_core.unlock();
+            if (entered) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(entered);
+        try session.requestCompactCancellation(operation_id, .user_cancel);
+    }
     var terminal = context.result.?;
     defer terminal.deinit();
     try std.testing.expectEqual(@as(?lifecycle.CompactOutcome, .aborted), terminal.outcome);
