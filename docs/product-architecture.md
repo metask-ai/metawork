@@ -309,7 +309,7 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 
 自动评审的审批权与历史仍由 Task 拥有；独立 `permission/review` leaf 只构造有界输入、发送固定策略并严格解码一次无 Tool Completion 的建议。Product Control 拥有独立、有界的 job 执行与回收，不借用被同步 callback 占用的 Run executor。job 只持有深拷贝输入、冻结 execution binding、独立取消 token 与身份令牌，不持有 Task/Run 指针、Session access 或 Task worker lease。取消中和尚未回收的 job 仍占容量；shutdown 必须先取消并 join 全部审核 job，再释放 Completion、execution binding 及其依赖的 transport owner。删除 Task 不等待审核 job 的 Task lease，迟到结果由身份重新校验丢弃。
 
-Task 拥有捕获的自动评审模式、当前请求状态、结果接纳与审批历史。preparation 只转移有界 owned 输入和完整身份令牌，用户文本或明确选择的 Skill/附件 metadata 可解释意图；未提供的 Skill 指令、附件内容和脚本效果不得被猜测为授权。超限或准备失败保留原人工等待，同一请求不因轮询重试，只在新的请求重新准备。
+Task 拥有捕获的自动评审模式、当前请求状态、结果接纳与审批历史。preparation 只转移有界 owned 输入和完整身份令牌，用户文本或明确选择的 Skill/附件 metadata 可解释意图；未提供的 Skill 指令、附件内容和脚本效果不得被猜测为授权。超限或准备失败保留原人工等待，同一请求不因轮询重试，只在新的请求重新准备。 固定 Host 生图工具的评审输入还必须携带 Agent 拥有的实际效果说明，明确可能收费、失败或中断后可能已生成及不可自动重试；只按精确 Host namespace/name 取得该事实，同名 built-in/MCP 或模型参数不能提供或覆盖它。效果事实不授予权限，不携带 credential 或推测价格，也不改变[产品需求](requirements.md#55-审批与输入)定义的自动评审资格。
 
 审核上下文仅包含当次用户意图、最近一段 Agent 文字、工具名、参数和工作目录；超限拒绝而不截断。Product 在发送前脱敏已知 credential，并按 JSON 解码后的字符串处理转义值；敏感 key、无法可靠投影的 MCP/host 参数及其他缺失证据回到人工。上下文和原始参数仅存在于有界内存，用完清零，不进入日志或历史。策略引用、lifecycle 注释不进入模型请求。建议理由经过 projector 脱敏后才进入 `answered_by=user|reviewer` 和 nullable `review_reason` 审计，取消记录没有决定来源；旧合法历史未带来源时仍按原用户决定恢复。Completion 生命周期由[Completion 架构](completion-architecture.md#6-取消与生命周期)定义；模型判断不是安全边界。
 

@@ -433,11 +433,19 @@ test "Control permission reviewer commits once-only decisions and projects audit
     }
 }
 
-test "Control permission reviewer scrubs decoded arguments and leaves opaque MCP requests manual" {
-    for (0..2) |case| {
+test "Control permission reviewer scrubs decoded arguments and leaves MCP and Host requests manual" {
+    for (0..3) |case| {
         fake_core.reset();
         fake_core.permission_arguments_json = "{\"api_key\":\"fixture\\u002dsecret\",\"nested\":[\"fixture-secret\"]}";
-        fake_core.permission_tool_namespace = if (case == 0) "builtin" else "mcp";
+        fake_core.permission_tool_namespace = switch (case) {
+            0 => "builtin",
+            1 => "mcp",
+            else => "host",
+        };
+        if (case == 2) {
+            fake_core.permission_tool_name = "GenerateImage";
+            fake_core.permission_session_choices = false;
+        }
         fake_core.setNextPlan(.ui_wait);
         const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
         defer {
@@ -10229,6 +10237,49 @@ const ImageAdmissionProbe = struct {
         @panic("ordinary Product Runtime must still declare zero Host tools");
     }
 };
+
+test "image permission review carries Host cost facts without trusting a same-named tool" {
+    const cases = .{
+        .{ "host", "GenerateImage", true },
+        .{ "builtin", "GenerateImage", false },
+        .{ "mcp", "GenerateImage", false },
+        .{ "host", "OtherTool", false },
+    };
+    inline for (cases) |case| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        fake_core.permission_tool_namespace = case[0];
+        fake_core.permission_tool_name = case[1];
+        fake_core.permission_session_choices = false;
+        fake_core.permission_arguments_json = "{\"prompt\":\"draw run-image-secret-a\"}";
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, productControlConfiguration());
+        defer control.deinit();
+        try installControlExecution(&control);
+        var image: ImageAdmissionProbe = .{};
+        control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+        var input = productControlTaskInput();
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input);
+        _ = try control.runTask(task_id, .{ .text = "Draw without exposing run-image-secret-a or fixture-secret" });
+        try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
+        _ = try control.task_runtime.testSetPermissionReviewDelegation(task_id, true);
+        var prepared = (try control.task_runtime.preparePermissionReview(task_id, product_control.TestSupport.taskPermissionReviewText(&control))).?;
+        defer prepared.deinit();
+        try std.testing.expectEqualStrings(case[1], prepared.input.request.tool_name);
+        try std.testing.expectEqual(case[2], std.mem.indexOf(u8, prepared.input.host.constraints, "may be charged") != null);
+        try std.testing.expectEqual(case[2], std.mem.indexOf(u8, prepared.input.host.constraints, "do not automatically retry") != null);
+        try std.testing.expect(std.mem.indexOf(u8, prepared.input.host.constraints, "Never create Session grants") != null);
+        try std.testing.expect(std.mem.indexOf(u8, prepared.input.request.arguments_json, image.secret) == null);
+        try std.testing.expect(std.mem.indexOf(u8, prepared.input.user_intent, image.secret) == null);
+        try std.testing.expect(std.mem.indexOf(u8, prepared.input.user_intent, "fixture-secret") == null);
+        try std.testing.expectEqual(@as(usize, 1), image.calls);
+    }
+}
 
 test "image Run admission freezes per-Run input and retains scrub ownership through terminal event drain" {
     const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);

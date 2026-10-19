@@ -23,6 +23,7 @@ pub const PermissionDecisionSource = session_impl.PermissionDecisionSource;
 pub const PermissionCallbackOutcome = session_impl.PermissionCallbackOutcome;
 pub const PermissionProvenance = session_impl.PermissionProvenance;
 pub const PermissionToolNamespace = session_impl.PermissionToolNamespace;
+pub const imageGenerationPermissionContext = session_impl.imageGenerationPermissionContext;
 pub const RunState = session_impl.RunState;
 pub const RunStatePhase = session_impl.RunStatePhase;
 pub const ParsedPermissionRequest = session_impl.ParsedPermissionRequest;

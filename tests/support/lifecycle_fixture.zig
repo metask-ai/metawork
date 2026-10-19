@@ -383,6 +383,7 @@ pub const FakeCore = struct {
     permission_callback_count: usize = 0,
     permission_arguments_json: []const u8 = "{}",
     permission_tool_namespace: []const u8 = "builtin",
+    permission_tool_name: []const u8 = "Bash",
     permission_session_choices: bool = true,
     ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
@@ -2809,6 +2810,7 @@ fn permissionRequestJson(
     fake_core.lock();
     const arguments = fake_core.permission_arguments_json;
     const namespace = fake_core.permission_tool_namespace;
+    const name = fake_core.permission_tool_name;
     const session_choices = fake_core.permission_session_choices;
     fake_core.unlock();
     const binding = if (std.mem.eql(u8, namespace, "builtin"))
@@ -2820,8 +2822,8 @@ fn permissionRequestJson(
     std.json.Stringify.value(arguments, .{}, &writer) catch return error.NoSpaceLeft;
     return std.fmt.bufPrint(
         storage,
-        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":{d},\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
-        .{ session_id, run_id, namespace, binding, policy_generation, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"{s}\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":{d},\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
+        .{ session_id, run_id, namespace, name, binding, policy_generation, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
     );
 }
 

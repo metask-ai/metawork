@@ -2410,8 +2410,13 @@ pub const Runtime = struct {
         const intent = intent_writer.buffered();
         if (std.mem.trim(u8, intent, " \t\r\n").len == 0) return error.ReviewIntentUnavailable;
         const context = latestReviewContext(run);
+        const constraints = if (agent.imageGenerationPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
+            const start = writer.end;
+            try writer.print("{s}\n{s}", .{ review_constraints, effects });
+            break :blk writer.buffered()[start..];
+        } else review_constraints;
         const input: permission_review.Input = .{
-            .host = .{ .delegated = true, .constraints = review_constraints, .authorization = review_authorization },
+            .host = .{ .delegated = true, .constraints = constraints, .authorization = review_authorization },
             .user_intent = try copyReviewField(&writer, text, intent, 8 * 1024, &run.redactionSecrets()),
             .request = .{
                 .tool_name = try copyReviewField(&writer, text, request.tool.name, 128, &run.redactionSecrets()),

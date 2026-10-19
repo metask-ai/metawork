@@ -67,6 +67,12 @@ pub const PermissionDecisionSource = sdk.protocol.PermissionDecisionSource;
 pub const PermissionCallbackOutcome = sdk.protocol.PermissionCallbackOutcome;
 pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
+
+/// Trusted effects for the fixed Host tool, independent of model arguments.
+/// A same-named MCP or built-in tool does not inherit this description.
+pub fn imageGenerationPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
+    return if (namespace == .host and std.mem.eql(u8, name, generate_image.name)) generate_image.description else null;
+}
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const CatalogHealth = catalog.Health;
