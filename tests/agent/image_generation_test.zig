@@ -2,6 +2,61 @@ const std = @import("std");
 const agent = @import("metawork_agent");
 const backend = @import("image_http_backend");
 const options = @import("image_fixture_options");
+const sdk = @import("lifecycle_fixture").sdk;
+
+// Pass-through instrumentation over the exact staged binary. No result, issue,
+// checkpoint or status is fabricated; only the schema-change case changes the
+// one fixed GenerateImage descriptor while creating its isolated Runtime.
+const CoreProbe = struct {
+    var active: *CoreProbe = undefined;
+    api: sdk.types.ApiV1,
+    runtime_api: sdk.types.RuntimeApiV1,
+    control_api: sdk.types.SessionControlApiV1,
+    original: sdk.Api,
+    changed_schema: bool = false,
+    report: [8192]u8 = undefined,
+    report_len: usize = 0,
+    description: [8192]u8 = undefined,
+    description_len: usize = 0,
+
+    fn init(self: *CoreProbe, changed: bool) !void {
+        const original = try sdk.Api.discover();
+        self.* = .{ .api = original.raw.*, .runtime_api = original.raw.runtime.?.*, .control_api = original.raw.session_control.?.*, .original = original, .changed_schema = changed };
+        self.runtime_api.create = create;
+        self.control_api.restore = restore;
+        self.control_api.describe = describe;
+        self.api.runtime = &self.runtime_api;
+        self.api.session_control = &self.control_api;
+        active = self;
+    }
+    fn create(config: ?*const sdk.types.RuntimeConfigV1, plugins: ?*const sdk.types.RuntimePluginConfigV1, output: ?*?*sdk.types.RuntimeHandle, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
+        var copy = config.?.*;
+        if (active.changed_schema) {
+            std.debug.assert(copy.host_tool_count == 1);
+            var tool = copy.host_tools.?[0];
+            tool.input_schema_json = sdk.bytesView("{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"maxLength\":1000}},\"required\":[\"prompt\"],\"additionalProperties\":false}");
+            copy.host_tools = @ptrCast(&tool);
+            return active.original.runtime().create()(&copy, plugins, output, diagnostic);
+        }
+        return active.original.runtime().create()(config, plugins, output, diagnostic);
+    }
+    fn restore(runtime: ?*sdk.types.RuntimeHandle, config: ?*const sdk.types.SessionRestoreConfigV1, callbacks: ?*const sdk.types.SessionCallbacksV1, output: ?*?*sdk.types.SessionHandle, report: ?*sdk.types.OwnedBytesV1, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
+        const status = active.original.sessionControl().restore()(runtime, config, callbacks, output, report, diagnostic);
+        if (report) |value| if (value.ptr) |ptr| {
+            active.report_len = @min(value.len, active.report.len);
+            @memcpy(active.report[0..active.report_len], ptr[0..active.report_len]);
+        };
+        return status;
+    }
+    fn describe(session: ?*sdk.types.SessionHandle, output: ?*sdk.types.OwnedBytesV1, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
+        const status = active.original.sessionControl().describe()(session, output, diagnostic);
+        if (output) |value| if (value.ptr) |ptr| {
+            active.description_len = @min(value.len, active.description.len);
+            @memcpy(active.description[0..active.description_len], ptr[0..active.description_len]);
+        };
+        return status;
+    }
+};
 
 const Fixture = struct {
     child: std.process.Child,
@@ -83,13 +138,17 @@ const Sink = struct {
 };
 
 fn open(runtime: *agent.Runtime, root: []const u8, fixture: *Fixture, mode: agent.PermissionMode) !*agent.Session {
-    return runtime.createSession(.{
+    return runtime.createSession(openOptions(root, fixture, mode));
+}
+
+fn openOptions(root: []const u8, fixture: *Fixture, mode: agent.PermissionMode) agent.SessionOpenOptions {
+    return .{
         .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
         .permission_mode = mode,
         .shell_policy = .unrestricted,
         .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
         .canonical_user_home = root,
-    });
+    };
 }
 
 fn execute(session: *agent.Session) !void {
@@ -223,7 +282,11 @@ const Work = struct {
 };
 
 fn permissionRun(h: *Harness, session: *agent.Session, choice: agent.PermissionChoice) !usize {
-    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
+    return permissionRunText(h.runtime, session, "Generate the fixture image.", choice, true);
+}
+
+fn permissionRunText(runtime: *agent.Runtime, session: *agent.Session, text: []const u8, choice: agent.PermissionChoice, host: bool) !usize {
+    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = text }) };
     const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
     defer {
         if (!work.done.load(.acquire)) {
@@ -235,14 +298,14 @@ fn permissionRun(h: *Harness, session: *agent.Session, choice: agent.PermissionC
     var previous: ?u64 = null;
     var answers: usize = 0;
     for (0..20_000) |_| {
-        while (h.runtime.takeEvent()) |event_value| {
+        while (runtime.takeEvent()) |event_value| {
             var event = event_value;
             event.deinit();
         }
         if (work.done.load(.acquire)) break;
         if (session.pendingUiRequest()) |request| if (previous == null or previous.? != request) {
             // Host tools have no stable session grant candidate.
-            try std.testing.expectError(error.InvalidUiResponse, session.respondPermission(work.id, request, .allow_session));
+            if (host) try std.testing.expectError(error.InvalidUiResponse, session.respondPermission(work.id, request, .allow_session));
             try session.respondPermission(work.id, request, choice);
             previous = request;
             answers += 1;
@@ -252,6 +315,227 @@ fn permissionRun(h: *Harness, session: *agent.Session, choice: agent.PermissionC
     try std.testing.expect(work.done.load(.acquire));
     try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
     return answers;
+}
+
+const RestoreBytes = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    offset: usize = 0,
+
+    fn write(context: ?*anyopaque, value: []const u8) agent.CheckpointSinkWriteResult {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.bytes.appendSlice(std.testing.allocator, value) catch return .io_failed;
+        return .ok;
+    }
+    fn read(context: ?*anyopaque, output: []u8) agent.CheckpointSourceReadResult {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const n = @min(output.len, self.bytes.items.len - self.offset);
+        if (n == 0) return .eof;
+        @memcpy(output[0..n], self.bytes.items[self.offset..][0..n]);
+        self.offset += n;
+        return .{ .bytes = n };
+    }
+};
+
+fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
+    var h: Harness = undefined;
+    try h.init("restore", .{});
+    defer h.deinit();
+    if (!old_image) {
+        try h.runtime.shutdown();
+        h.runtime.deinit();
+        h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
+    }
+    const session = try h.session(.default, false);
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, session, "Write the checkpoint fixture.", if (grant) .allow_session else .allow_once, false));
+    const last_run_id = session.active_run_id;
+    while (h.runtime.takeEvent()) |value| {
+        var event = value;
+        event.deinit();
+    }
+    const limits: agent.CheckpointLimits = .{
+        .hard_bytes = 16 * 1024 * 1024,
+        .max_section_bytes = 16 * 1024 * 1024,
+        .max_string_bytes = 8 * 1024 * 1024,
+        .max_messages = 1024,
+        .max_blocks_per_message = 128,
+        .chunk_bytes = 64 * 1024,
+    };
+    var bytes: RestoreBytes = .{};
+    defer bytes.bytes.deinit(std.testing.allocator);
+    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, last_run_id, 0, "claude-sonnet-4-20250514");
+    defer exported.deinit();
+    const checkpoint = switch (exported) {
+        .success => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try h.runtime.shutdown();
+    h.runtime.deinit();
+    var probe: CoreProbe = undefined;
+    try probe.init(changed_schema);
+    h.runtime = try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
+    const restored = h.runtime.restoreSessionRoute(.{
+        .session = .{
+            .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = h.fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .workspace = .{ .canonical_root = h.root, .trust = .explicitly_trusted },
+            .canonical_user_home = h.root,
+            .operation_id_floor = .{ .last_run_id = last_run_id },
+        },
+        .checkpoint_limits = limits,
+        .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
+        .expectation = .{ .logical_session_id = checkpoint.description.session_id, .checkpoint_generation = checkpoint.checkpoint.generation, .last_run_id = last_run_id, .last_compact_id = 0, .model = "claude-sonnet-4-20250514" },
+    }) catch |err| {
+        if (old_image or grant or changed_schema) return err;
+        // ABI rev 24 emits degraded with no invalidations and no issue when
+        // the tool set changes but there are no persisted rules. Its own SDK
+        // rejects that contradiction. Preserve this fail-closed behavior;
+        // this regression is evidence of an OPEN B0 gate, not recovery support.
+        try std.testing.expectEqual(error.RestoreContractFailed, err);
+        try std.testing.expectError(error.InvalidPayload, sdk.decodeRestoreReport(std.testing.allocator, probe.report[0..probe.report_len]));
+        const raw = try std.json.parseFromSlice(sdk.protocol.RestoreReport, std.testing.allocator, probe.report[0..probe.report_len], .{});
+        defer raw.deinit();
+        try std.testing.expectEqual(sdk.protocol.RestoreHealth.degraded, raw.value.health);
+        try std.testing.expectEqual(@as(u32, 0), raw.value.permission.invalidated_rules);
+        try std.testing.expectEqual(@as(u32, 0), raw.value.skill.invalidated);
+        try std.testing.expectEqual(@as(u32, 0), raw.value.mcp.invalidated_bindings);
+        try std.testing.expectEqual(@as(usize, 0), raw.value.issues.len);
+        try std.testing.expectEqual(@as(usize, 0), probe.description_len);
+        for (h.runtime.sessions, h.runtime.session_reservations) |entry, reserved| {
+            try std.testing.expect(entry == null);
+            try std.testing.expect(!reserved);
+        }
+        try h.evidence(0, 0, "");
+        return;
+    };
+    var report = try sdk.decodeRestoreReport(std.testing.allocator, probe.report[0..probe.report_len]);
+    defer report.deinit();
+    var described = try sdk.decodeSessionDescription(std.testing.allocator, probe.description[0..probe.description_len]);
+    defer described.deinit();
+    // Changing only GenerateImage's schema does not invalidate an unrelated
+    // built-in Write grant. Host tools cannot have persisted Session grants.
+    const changed = !old_image;
+    try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
+    try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
+    try std.testing.expectEqual(@as(u32, if (changed) 0 else 1), restored.report.restored_permission_rules);
+    try std.testing.expectEqual(@as(usize, if (changed) 1 else 0), report.value.issues.len);
+    if (changed) {
+        try std.testing.expectEqual(sdk.protocol.AuthorityIssueReason.policy_changed, report.value.issues[0].reason);
+        try std.testing.expectEqualStrings("Write", report.value.issues[0].canonical_name.?);
+    }
+    try std.testing.expectEqual(report.value.health, described.value.restore.health);
+    try std.testing.expectEqual(report.value.permission.invalidated_rules, described.value.restore.invalidated_permission_rules);
+    const answers = try permissionRunText(h.runtime, restored.session, "Write the checkpoint fixture.", .allow_once, false);
+    try std.testing.expectEqual(@as(usize, if (changed) 1 else 0), answers);
+    // Host authorization must still be requested independently of any Write grant.
+    try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, "Generate the fixture image.", .allow_once, true));
+    try h.evidence(0, 0, "unavailable");
+    if (changed_schema) {
+        const trace = try h.trace();
+        defer std.testing.allocator.free(trace);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "\"maxLength\":1000") != null);
+    }
+}
+
+test "GenerateImage canonical checkpoint invalidates changed tool authority and preserves unchanged grants" {
+    try checkpointTools(false, true, false);
+    try checkpointTools(true, true, false);
+    try checkpointTools(true, true, true);
+}
+
+test "GenerateImage old checkpoint without grants exposes contradictory Core report and fails closed (B0 gate open)" {
+    try checkpointTools(false, false, false);
+}
+
+test "GenerateImage accept_edits still requires once-only Host approval" {
+    var h: Harness = undefined;
+    try h.init("repeat", .{});
+    defer h.deinit();
+    const session = try h.session(.accept_edits, true);
+    try std.testing.expectEqual(@as(usize, 2), try permissionRun(&h, session, .allow_once));
+    try h.evidence(2, 2, "saved");
+}
+
+test "GenerateImage accept_edits denial and noninteractive permission stop have zero effects" {
+    var denied: Harness = undefined;
+    try denied.init("success", .{});
+    defer denied.deinit();
+    const interactive = try denied.session(.accept_edits, true);
+    try std.testing.expectEqual(@as(usize, 1), try permissionRun(&denied, interactive, .deny_once));
+    try denied.evidence(0, 0, "");
+    try std.testing.expectEqual(@as(usize, 0), denied.sink.attempts);
+
+    var h: Harness = undefined;
+    try h.init("success", .{});
+    defer h.deinit();
+    var config = openOptions(h.root, &h.fixture, .accept_edits);
+    config.permission_interaction = .noninteractive;
+    const session = try h.runtime.createSession(config);
+    try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = h.sink.output() });
+    var run = try session.beginRun(try session.prepareRun(.{ .text = "Generate the fixture image." }));
+    defer run.deinit();
+    var terminal = run.execute();
+    defer terminal.deinit();
+    try std.testing.expectEqual(agent.TerminationSignal.permission_required, terminal.termination_signal.?);
+    try std.testing.expect(session.pendingUiRequest() == null);
+    try std.testing.expectEqual(@as(usize, 0), h.sink.attempts);
+    try h.evidence(0, 0, "");
+}
+
+// Platform prerequisites only. These probes do not certify the future product
+// sink: B2 must use and verify these checks on its actual output path.
+test "GenerateImage output prerequisites exclusive creation preserves existing bytes and exposes file identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir = try tmp.dir.createDirPathOpen(std.testing.io, "generated-images", .{ .open_options = .{ .follow_symlinks = false } });
+    defer dir.close(std.testing.io);
+    try std.testing.expectEqual(std.Io.File.Kind.directory, (try dir.stat(std.testing.io)).kind);
+    const file = try dir.createFile(std.testing.io, "image-probe.png", .{ .read = true, .exclusive = true, .resolve_beneath = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, "owned image bytes");
+    const owned = try file.stat(std.testing.io);
+    try std.testing.expectEqual(std.Io.File.Kind.file, owned.kind);
+    const named = try dir.statFile(std.testing.io, "image-probe.png", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(owned.inode, named.inode);
+    try std.testing.expectError(error.PathAlreadyExists, dir.createFile(std.testing.io, "image-probe.png", .{ .exclusive = true, .resolve_beneath = true }));
+    const bytes = try dir.readFileAlloc(std.testing.io, "image-probe.png", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("owned image bytes", bytes);
+    // A pathname may refer to a replacement while the original handle lives.
+    // Cleanup must compare current identity, and must not unlink the replacement.
+    try dir.rename("image-probe.png", dir, "moved.png", std.testing.io);
+    const replacement = try dir.createFile(std.testing.io, "image-probe.png", .{ .exclusive = true });
+    defer replacement.close(std.testing.io);
+    try replacement.writeStreamingAll(std.testing.io, "replacement");
+    const now = try dir.statFile(std.testing.io, "image-probe.png", .{ .follow_symlinks = false });
+    try std.testing.expect(owned.inode != now.inode);
+    try std.testing.expectEqual(owned.inode, (try file.stat(std.testing.io)).inode);
+}
+
+test "GenerateImage output prerequisites detect directory junction without traversing it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const trace = try std.fs.path.join(std.testing.allocator, &.{ root, "trace.jsonl" });
+    defer std.testing.allocator.free(trace);
+    var fixture = try Fixture.start(trace, "output-junction");
+    defer fixture.deinit();
+    // On Windows no-follow can OPEN the reparse object, rather than rejecting
+    // it. The handle's kind check is essential before any descendant effects.
+    const metadata = try tmp.dir.statFile(std.testing.io, "generated-images", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.sym_link, metadata.kind);
+    if (tmp.dir.openDir(std.testing.io, "generated-images", .{ .follow_symlinks = false })) |dir| {
+        defer dir.close(std.testing.io);
+        try std.testing.expectEqual(std.Io.File.Kind.sym_link, (try dir.stat(std.testing.io)).kind);
+    } else |err| switch (err) {
+        error.NotDir, error.SymLinkLoop => {},
+        else => return err,
+    }
+    var outside = try tmp.dir.openDir(std.testing.io, "outside", .{ .iterate = true });
+    defer outside.close(std.testing.io);
+    var entries = outside.iterate();
+    try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try entries.next(std.testing.io));
 }
 
 test "GenerateImage identical prompts are separate requests and concurrent calls overlap" {

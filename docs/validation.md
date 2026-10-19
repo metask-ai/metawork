@@ -152,6 +152,14 @@ Task completion receipt 的最小充分证据必须跨越实际 owner：Product 
 
 File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
+### GenerateImage 工具集合迁移的恢复缺口
+
+Windows x86_64 的 canonical AgentCore `0.11.0-dev+68ac95c2d42b`（ABI revision 24、对应 target lock）在旧集合无 Session grant 的 checkpoint 恢复到新增 `GenerateImage` 的集合时，返回 `health = degraded`、所有 invalidation 计数为 0、`issues = []`。同一 bundle 的官方 SDK 明确拒绝这个自相矛盾的 summary；MetaWork 因而返回 `RestoreContractFailed`，未安装 Session。此缺口阻塞正式 Host Tool 集合迁移，不能按合法 degraded 恢复处理，不能放宽 SDK/Host 校验或改写 checkpoint 绕过。
+
+`zig build test-generate-image` 的 canonical 回归使用真实旧 Runtime、一次 `Write` 的 `allow_once`、checkpoint export 与新集合 restore 复现，并断言原始 report 的矛盾、SDK 拒绝、Session slot 回收和零图片请求。该测试通过仅证明 fail-closed，**不证明迁移 Gate 通过**。有 Session grant 的旧集合恢复、相同新集合恢复及仅改变 GenerateImage schema 的恢复另行验证 typed report、issues、describe 与后续实际审批；schema 变化不预设无关的 Write grant 必须失效。
+
+关闭此缺口需要 AgentCore 发布方提供满足官方 report 合同的 canonical artifact，再验证无 grant 的历史也能恢复，以及既存 grant 失效、typed report/describe 一致、后续 Host 当次审批和清理。不通过本地 SDK patch、fallback 或伪造 report 消除阻塞。生产 Runtime 继续保持零 Host tools，发布条件仍由 [AgentCore 集成契约](agentcore-integration.md#host-tools) 定义。
+
 ## Storage 基础层验证
 
 [Storage 架构](storage-architecture.md)拥有 SQL、权限、migration、事务结果和 lifecycle 合同；本节统一拥有其验证责任、入口与平台证据边界，不复制实现清单或测试数量。

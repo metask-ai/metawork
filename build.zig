@@ -878,6 +878,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
+    cases.addImport("lifecycle_fixture", createLifecycleFixture(b, modules, link_libc));
     cases.addOptions("image_fixture_options", fixture_options);
     const tests = b.addTest(.{ .name = "metawork-generate-image", .root_module = cases });
     const run = b.addRunArtifact(tests);

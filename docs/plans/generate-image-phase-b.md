@@ -1,6 +1,6 @@
 # MetaWork 原生生图阶段 B 方案
 
-> 状态：待评审的实施方案。阶段 A 及评审修复已完成；本次只整理阶段 B，不开放正式 Host Tool、不调用收费服务，不修改规范、持久格式或现有 Gate。本文不是 decision record，也不替代领域真源。
+> 状态：已获实施授权，从 B0 开始；先完成不收费的验证。正式 Host Tool 与设置入口仍关闭，不调用收费服务。B0 已发现 canonical Core 的无 grant checkpoint 恢复阻塞，见[验证缺口](../validation.md#generateimage-工具集合迁移的恢复缺口)。本文不是 decision record，也不替代领域真源。
 
 阶段 B 交付一个最小正式链路：用户在 Models 设置中明确选择 Metask 生图模型，普通 Task 的模型通过 `GenerateImage` 发起一次图片生成，结果保存到 owning Workspace，工具返回真实文件引用。对话模型与生图模型独立；对话来源为 Custom Provider 的 Task 也可以消费已配置的 Metask 生图能力。
 
@@ -199,13 +199,13 @@ Agent 可验证 target 的 HTTPS、安全 URL 结构和输入边界，但不另�
 
 固定输出目录建议为 Workspace 下 `generated-images/`，文件名由 Host 产生，形如 `image-<随机唯一值>.png`；模型和服务响应均不参与选根或命名。receipt 返回真实的 Workspace-relative path、MIME 和字节数。
 
-沿用阶段 A 的单次 `commit(bytes, cancellation)` 输出能力：成功取得并校验图片后，在 callback worker 上按冻结的 Workspace authority 打开/验证根，打开/创建固定子目录、独占创建文件、完整写入并关闭，最后返回 committed receipt。已有目录 lease 可直接使用。文件名、receipt 和所有可能分配失败的本地 metadata 在写入前准备完成，关闭后不追加可失败的步骤。
+沿用阶段 A 的单次 `commit(bytes, cancellation)` 输出能力：成功取得并校验图片后，在 callback worker 上按冻结的 Workspace authority 打开/验证根，打开/创建固定子目录、独占创建文件、完整写入并关闭，最后返回 committed receipt。已有目录 lease 可直接使用。文件名、receipt 和所有可能分配失败的本地 metadata 在写入前准备完成，关闭后不追加可失败的步骤。当前 `std.Io.File.close` 不返回错误；写入、必要的同步与归属校验等可失败步骤须放在提交前，不能承诺观察到该 API 不提供的 close 错误。提交不承诺崩溃持久性，不为此引入新的持久化事务。
 
 不在 HTTP 前创建空图片，不引入对外 `prepare/commit/abort` 文件事务、试写协议、文件名预留表或长期 pending output。提前占位也不能保证数分钟后磁盘、配额和写入仍成功，却会增加空文件、取消和崩溃状态。Run preparation 能拒绝已知的 Workspace 资格不可用；它不是文件系统可写性或未来写入成功的承诺。实际目录打开及写入都在 worker，落盘失败可能发生在收费之后，必须准确报告并禁止自动重试。
 
 输出能力只含有界目录 authority 与 I/O 所需 owner，不含可变 Task/Run 指针；期限覆盖全部 callback、文件操作及清理。权限拒绝与 callback unavailable 不调用输出，因此不创建目录或文件。合法输出发生命名冲突时，只能在同一次落盘中有界换一个 Host 名称，不得重发生成请求。
 
-目录打开逐级拒绝 symlink/reparse 跳转，目标文件用独占创建，不能打开或截断已存在文件；不使用普通 rename 证明不覆盖，也不等待 Native loop 图片解码。复用现有受支持的文件 API，在 Windows 与 macOS 分别验证；缺少所需语义时明确 capability gap，不能以字符串前缀或先检查再创建替代。这里不扩展为对所有持有 Workspace 写权限的并发者提供完整 TOCTOU/原子隔离保证；receipt 表示提交时的文件事实，用户和其他工具之后仍可修改它。
+目录打开逐级拒绝 symlink/reparse 跳转，目标文件用独占创建，不能打开或截断已存在文件；不使用普通 rename 证明不覆盖，也不等待 Native loop 图片解码。Windows 的 no-follow 可以成功打开 reparse 对象自身，须检查打开句柄的类型，再执行子目录操作；`resolve_beneath` 在不支持的平台可能被忽略，不单独作为 confinement 证明。用于确认文件身份的创建句柄须具备平台查询 metadata 所需的访问权。复用现有受支持的文件 API，在 Windows 与 macOS 分别验证；缺少所需语义时明确 capability gap，不能以字符串前缀或先检查再创建替代。这里不扩展为对所有持有 Workspace 写权限的并发者提供完整 TOCTOU/原子隔离保证；receipt 表示提交时的文件事实，用户和其他工具之后仍可修改它。
 
 文件提交是单调事实。提交后取消、Core 中止、结果投递失败或历史保存失败都保留已生成文件，不自动再生成。未提交失败只清理本次确实创建且仍可确认归属的文件；发现名称/文件已被替换、移动或无法确认归属时保留现场，不按旧路径删除别人的文件。清理不完整是有界工具错误事实，不能报告已删除；本阶段不新建持久 cleanup debt 服务或后台扫描/自动删除循环。直接写入不承诺其他观察者看不到写入过程，也不承诺崩溃/掉电持久性；崩溃残留不在重启时按文件名前缀擅自删除。
 
@@ -251,7 +251,21 @@ UI 实施遵循现有设计系统、双语、键盘、深浅主题、窄屏与�
 
 每个子任务完成后检查其是否可独立验证并及时提交，记录实际 revision 与验证。不能用“最终启用时再补”留下跨 owner 半条 active 链路；保留隔离测试入口只为持续验证明确的 fixture target，不保留旧正式实现。
 
-B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用户明确提供可用测试身份、模型和有界生成次数后执行。此方案整理不授权使用本机已有凭据调用收费服务。
+B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用户明确提供可用测试身份、模型和有界生成次数后执行。当前实施授权不包含使用本机已有凭据调用收费服务。
+
+### B0 无收费核对结果
+
+本轮在 Windows x86_64 上使用当前 target lock 验证；生产注册、持久化和设置入口未改变。
+
+| 前提 | 结论 |
+| --- | --- |
+| Metask 接口归属 | 已复核本地服务源码 revision `f1dfbdab162defba25b5d8c57c2648728310a68c`：目录使用 `read`，图片使用 `model:invoke`，复用既有 scope；地址政策归 Models、请求 codec 归 Agent。源码不证明正式部署，也不保证目录内所有模型返回 PNG；实际模型验收仍属于 B5 |
+| Host 权限 | canonical Core 证明 `accept_edits` 下同 prompt 两次调用需要两次 `allow_once`，`allow_session` 非法；请求、PNG 文件与 receipt 同时核对 |
+| 工具集合与 schema 恢复 | 旧集合有 Write grant → 新集合：合法 degraded，旧 grant 失效，Write 和 Host 分别审批；新集合不变及只改变 GenerateImage schema：Write grant 保留，Host 仍审批。report/issue/describe 均由官方 SDK 校验；无 grant 的旧 checkpoint 存在[上游矛盾 report](../validation.md#generateimage-工具集合迁移的恢复缺口)，**B0 尚未完成** |
+| 即时 lease | Account 的现有能力在不变更 authenticated 状态或 generation、且没有通知的情况下，仍会拒绝 hard expiry 与时钟不可用的新 lease；已有 owned copy 保持独立寿命。App → Models 的一次 Run preparation handoff 按 §6 实施，不消费 catalog 缓存 token |
+| 文件 API | Windows 实测 exclusive 创建不覆盖，no-follow + 句柄类型可识别 junction，打开文件的 identity 可区分名称被替换。只是 B2 的 API 前提，不是生产 sink 验收；macOS 与真实文件取消/清理仍待后续验证 |
+
+B0 的离线探针可先独立提交；无 grant checkpoint 的合法恢复证据必须由 canonical 依赖修复后补齐。不得把“测试准确断言了拒绝”当成 B0 通过，也不得提前解除 B1/B2 的 DAG 依赖。
 
 ## 13 验收矩阵
 
@@ -266,7 +280,7 @@ B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用�
 | restore | 旧集合有/无 grants、新集合、schema 变化；核对 typed report/describe，合法 degraded 保留 Conversation、旧权限失效且后续重新审批 |
 | 正式请求 | fixture 记录 method/path/独立 model/prompt/n/b64 格式/header；正式 smoke 证明 OAuth scope、部署目标、真实结果和服务请求 reference |
 | 费用与失败 | 一次调用一次请求，同 prompt 两次两个文件；unknown/401/403/429/5xx/超限/不支持格式不自动重试、切模型或变更 Account |
-| 文件 authority | Manual/Automatic、不同 Task/Session、冲突、symlink/reparse、目录权限、write/close/cleanup 故障；HTTP 前无占位图片，替换文件不被误删；请求记录与文件字节/receipt 同时验证 |
+| 文件 authority | Manual/Automatic、不同 Task/Session、冲突、symlink/reparse、目录权限、write/同步/cleanup 故障及 close 前后的取消；HTTP 前无占位图片，替换文件不被误删；请求记录与文件字节/receipt 同时验证 |
 | 结果可靠性 | 最长合法路径/JSON 转义、最小内存预算并发、发送前 OOM、提交后禁用分配、Core release、提交与取消/投递失败；没有无 detail 的误导失败 |
 | 取消与预算 | 大于 A fixture 的量级、超时、同时在途、HTTP/文件写入/清理期间 stop/close/shutdown、登记竞态；I/O/watchdog 静止，下 Run 重置，不依赖 UI drain |
 | 产品呈现 | 设置选择、不可用提示、已有审批/工具详情、两种语言/主题/窄屏/键盘；不泄漏 credential/Base64，不伪造 File Changes 或看图事实 |

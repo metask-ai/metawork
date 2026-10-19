@@ -1,9 +1,19 @@
 import { createServer } from "node:http";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
 // One listener, two independent protocols. Only synthetic credentials are accepted.
 const [tracePath, mode = "success"] = process.argv.slice(2);
+if (mode === "output-junction") {
+  const outside = join(dirname(tracePath), "outside");
+  mkdirSync(outside);
+  symlinkSync(
+    outside,
+    join(dirname(tracePath), "generated-images"),
+    "junction",
+  );
+}
 const png = readFileSync(
   new URL("../../src/agent/testdata/generated.png", import.meta.url),
 );
@@ -100,12 +110,16 @@ const server = createServer(async (request, response) => {
     const declaration = payload.tools.find(
       (tool) => tool.name === "GenerateImage",
     );
+    // Checkpoint probes begin in the real, pre-image product tool set. Each
+    // fresh user turn requests Write so a restored grant is observable.
+    const restoreProbe = mode === "restore";
     if (
-      !declaration ||
-      JSON.stringify(Object.keys(declaration.input_schema.properties)) !==
-        '["prompt"]' ||
-      declaration.input_schema.additionalProperties !== false ||
-      JSON.stringify(declaration.input_schema.required) !== '["prompt"]'
+      (!declaration && !restoreProbe) ||
+      (declaration &&
+        (JSON.stringify(Object.keys(declaration.input_schema.properties)) !==
+          '["prompt"]' ||
+          declaration.input_schema.additionalProperties !== false ||
+          JSON.stringify(declaration.input_schema.required) !== '["prompt"]'))
     )
       throw Error("tool schema");
     const messages = payload.messages;
@@ -113,7 +127,24 @@ const server = createServer(async (request, response) => {
     const results = Array.isArray(last.content)
       ? last.content.filter((part) => part.type === "tool_result")
       : [];
-    trace({ kind: "provider", schema: declaration.input_schema, results });
+    trace({ kind: "provider", schema: declaration?.input_schema, results });
+    if (
+      restoreProbe &&
+      results.length === 0 &&
+      JSON.stringify(last).includes("Write the checkpoint fixture.")
+    ) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(
+        protocolToolSse("anthropic", payload.messages.length, "Write", {
+          file_path: join(dirname(tracePath), "checkpoint-grant.txt"),
+          content: "checkpoint authority",
+        }),
+      );
+    }
+    if (restoreProbe && results.length > 0) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(protocolTextSse("anthropic", "fixture completed"));
+    }
     const boundary = messages.findLastIndex(
       (m) =>
         m.role === "user" &&
