@@ -124,6 +124,10 @@ Models 每次 resolve 只产生一个调用方 owned candidate，绑定精确 `M
 
 生图 intent 在同一 store 的可选 `metask_image` 中保存单条 `principal_ref`、可空 `model_id` 与独立非零 `selection_revision`。缺字段表示从未配置，写回未配置记录时不增加该字段，不改变既有 schema identity。显式清除保存空模型和推进后的 revision，重启不得把 revision 重置为初始值；修改生图 intent 不改变对话 intent、global default 或其 revisions。选择只来自用户明确操作，不从目录首项初始化；logout 保留记录，只有归属当前 principal 的记录可被采用或清除，另一个账号显式选择时替换该单条记录，不建立多账号历史配置库。身份字段有界且为有效 UTF-8，无控制字符；该记录不携带执行授权或 credential。
 
+生图设置以独立 selection revision 与共享 catalog generation 作 CAS，并核对 Host 当前 principal 与目录归属；选中成员必须具备生图资格。生图投影按图片成员独立判断目录与选择的可用性，不能把对话 `no_models` 当成图片不可用；被目录移除的选择保留为不可用 intent，不隐式替换。设置与清除复用同一 canonical candidate commit，提交未确认时不发布新选择。
+
+图片执行 candidate 只在 Models 接收当次 Host authorization lease 的借用输入后构造：principal、authorization generation 必须与选择及已接纳目录匹配，selection/catalog revisions 必须仍有效；目录加载中或授权不可用均拒绝新解析。candidate 复制该次 lease 的有界 credential，不借用 catalog 缓存的执行 token；不获取、刷新或持久化授权。其 owned model、固定 Metask Images Generation target、catalog/selection revisions 与 credential 构成独立配置，不包含对话 protocol、Product execution generation、principal 或授权代次。正式地址政策由 Models 唯一定义，消费者不提交或覆盖 URL；已交付副本不随目录、选择或 logout 热替换，执行 owner 静止后清零释放 credential。
+
 首次 bootstrap 读取 schema 2，并仅为既有 schema 1 Metask intent 提供一次确定性迁移：丢弃旧 `api_key_id`，把旧 `metask:<api-key-id>` selection source 归一为固定 `metask`，保留 model、revision、generation 与 Custom Provider 事实，下一次提交写回 schema 2。canonical 文件不存在时，在一次 Models transaction 中初始化空的 schema 2；`preferences.json`、`custom-providers.json` 及其 decoder、归档和迁移 marker 不属于当前 authority，也不参与恢复或 fallback。除此之外的缺失字段、未知 shape 或损坏必须 fail closed，不能猜测 generation/revision、默认来源或静默清空已有事实。
 
 Models persistence health 精确区分：当前 canonical 可用为 `ready`；Models file capability 存在但 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 本身不存在为 `unavailable`。只有 `recovery_required` 允许用户确认显式恢复；Models owner 与 Product Control 必须在执行时重新校验该资格。恢复执行时先重新读取并严格解码 canonical：合法 schema 1/2 必须重装且不得清空，其中 schema 1 按上一段迁移，中断的 `testing` 状态确定性收敛为 `failed`，并在确认提交后恢复 `ready`；读取失败或资源耗尽拒绝恢复且不得写盘；只有文件缺失或严格解码确认损坏时，才允许用当前可信内存事实安装空的 schema 2 store。`ready` 与 `unavailable` 都拒绝该命令，Renderer 不能为其显示恢复动作。恢复不猜测解释或归档旧 bytes，不改写 Account、Workspace、Task、Run 或对话历史；既有 Task 已拥有的 ExecutionConfig 继续按原生命周期收口。
