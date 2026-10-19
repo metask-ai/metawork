@@ -305,7 +305,7 @@ B1–B4 按失败模式运行最小充分 owner/跨 owner 测试。新能力涉�
 - `docs/validation.md`：正式接线与平台/外部服务证据，替换“只覆盖测试 sink”的相应能力结论。
 - Completion、架构/目录或 ABI 文档仅在其合同实际改变时更新；复用原有 transport、同一 owner 内新文件不构成机械同步理由。
 
-进入 B1 前由 B0 收口：API 的 OAuth/b64/PNG 合同、Run 即时 lease handoff 的 owner 边界、canonical 工具集合变化的实际 report、平台文件 API 的可用语义。正式部署、具体模型的 PNG/大小/deadline 与最终产物行为留到 B5 的真实验收；不能用“一个模型曾成功”推导目录内所有模型的格式保证。
+B1/B2 的实施前提由 B0.1 收口：API 的 OAuth/b64/PNG 合同、Run 即时 lease handoff 的 owner 边界、canonical 工具行为的离线证据与平台文件 API 的可用语义。B0.2 的旧工具集合恢复缺口不阻塞隔离装配中的实现，但必须在正式启用工具前关闭。正式部署、具体模型的 PNG/大小/deadline 与最终产物行为留到 B5 的真实验收；不能用“一个模型曾成功”推导目录内所有模型的格式保证。
 
 如果这些前提不成立，应停在对应能力边界，提出必要的最小合同调整。不得改用网站接口、伪装模型、下载未知 URL、扩大 OAuth scope、取消安全文件校验或忽略 restore report 来交付表面成功。
 
