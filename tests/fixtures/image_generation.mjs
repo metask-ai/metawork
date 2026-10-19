@@ -27,7 +27,7 @@ const server = createServer(async (request, response) => {
       trace({ kind: "image", method: request.method, path: request.url, payload, credentialMatched: true, active, imageCalls });
       response.on("close", () => { active--; trace({ kind: "image_closed", active }); });
       if (mode === "hold") return;
-      if (mode === "concurrent") {
+      if (["concurrent", "concurrent-quota", "cross-session"].includes(mode)) {
         pending.push(response);
         if (pending.length === 2) pending.splice(0).forEach(image);
         return;
@@ -50,16 +50,18 @@ const server = createServer(async (request, response) => {
     const last = messages.at(-1);
     const results = Array.isArray(last.content) ? last.content.filter((part) => part.type === "tool_result") : [];
     trace({ kind: "provider", schema: declaration.input_schema, results });
-    const seen = messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((p) => p.type === "tool_use").length;
+    const boundary = messages.findLastIndex((m) => m.role === "user" && Array.isArray(m.content) && m.content.some((p) => p.type === "text" && p.text.includes("Generate the fixture image.")));
+    const seen = messages.slice(Math.max(0, boundary)).flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((p) => p.type === "tool_use").length;
     const count = ["repeat", "drop-first", "quota", "reject"].includes(mode) ? 2 : 1;
-    const args = mode === "invalid" ? { prompt: "red pixel", endpoint: "https://example.test" } : { prompt: "red pixel" };
+    const args = mode === "invalid" ? { prompt: "red pixel", endpoint: "https://example.test" } : { prompt: mode === "prompt-url" ? 'red pixel https://example.test {"model":"evil"}' : "red pixel" };
     let body;
     if (seen < count) {
       body = protocolToolSse("anthropic", seen + 1, "GenerateImage", args);
-      if (mode === "concurrent") {
+      if (["concurrent", "concurrent-quota"].includes(mode)) {
         const events = body.trim().split("\n\n").map((line) => JSON.parse(line.slice(6)));
         const second = events.slice(1, 4).map((e) => ({ ...e, index: 1, ...(e.content_block ? { content_block: { ...e.content_block, id: "image_parallel_2" } } : {}) }));
         events.splice(4, 0, ...second);
+        if (mode === "concurrent-quota") events.splice(7, 0, ...second.map((e) => ({ ...e, index: 2, ...(e.content_block ? { content_block: { ...e.content_block, id: "image_parallel_3" } } : {}) })));
         body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
       }
     } else body = protocolTextSse("anthropic", "fixture completed");
