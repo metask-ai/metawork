@@ -2843,6 +2843,15 @@ test("Application arbitrates single-instance ownership before business owners", 
     app.slice(arbitration, frontend),
     /if \(disposition == \.secondary\) return;/u,
   );
+  assert.doesNotMatch(app.slice(arbitration, frontend), /notify_fn/u);
+  const start = app.match(/fn start\([\s\S]*?fn stop\(/u)?.[0];
+  assert.ok(start, "Application startup must remain explicit");
+  assert.ok(start.indexOf("platform.start(native_runtime)") >= 0);
+  assert.ok(start.indexOf("coordinator.bindWakeAndDrain(") >= 0);
+  assert.ok(
+    start.indexOf("platform.start(native_runtime)") <
+      start.indexOf("coordinator.bindWakeAndDrain("),
+  );
 
   const stop = app.match(/fn stop\([\s\S]*?fn event\(/u)?.[0];
   assert.ok(stop, "Application stop lifecycle must remain explicit");
@@ -2850,6 +2859,11 @@ test("Application arbitrates single-instance ownership before business owners", 
   assert.ok(
     stop.indexOf("coordinator.stopIngress();") <
       stop.indexOf("dispatcher.stopIngress();"),
+  );
+  assert.ok(stop.indexOf("platform.stop(native_runtime);") >= 0);
+  assert.ok(
+    stop.indexOf("coordinator.stopIngress();") <
+      stop.indexOf("platform.stop(native_runtime);"),
   );
   assert.match(
     app,

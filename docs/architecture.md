@@ -108,19 +108,22 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统 eff
 | 标准 WebView Clipboard API | Renderer | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
 | 标准 WebView paste 事件 | Renderer | 只允许普通 Composer 的显式图片粘贴输入，按文件附件合同消费本次 File；不开放主动 clipboard read |
 | Bridge API / data-only DTO | Bridge、Application | transport、source/window authority 与无执行权数据 |
-| `PlatformServices` public primitive | Application 的附件图片解码、已登记一级 compatibility seam | 附件仅按下述图片处理边界消费；其他调用只补 Runtime API 的明确缺口 |
+| `PlatformServices` public primitive | Application 的主循环唤醒、附件图片解码、已登记一级 compatibility seam | 唤醒与附件仅按下述边界消费；其他调用只补 Runtime API 的明确缺口 |
 | 公开 PNG 编码 API | Application | 只用于下述附件内存图片转换 |
 | 公开 OS API / platform handle | 已登记二级 compatibility seam | 只补 SDK 也未提供原语的明确缺口 |
 | `PlatformServices.context` | 无 | SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转 |
 
-Application 的系统 effect 与附件图片处理只通过以下路径消费：
+Application 只通过以下受限路径消费系统 effect、主循环唤醒与附件图片处理：
 
 | 路径 | 调用链 | 适用条件 |
 | --- | --- | --- |
 | 正常路径 | Application → Native SDK Runtime API → SDK internals → OS | Runtime API 已提供完整能力 |
+| 主循环唤醒正常路径 | Application → 公开 `PlatformServices.wake` → SDK platform loop | 只提交有界、非阻塞的跨线程唤醒，不执行窗口或 Product effect |
 | 附件图片正常路径 | Application → SDK 公开图片解码与 PNG 编码 API | 只完成下述有界内存图片转换 |
 | 一级兼容 | Application narrow seam → public `PlatformServices` primitive → OS | Runtime API 缺失，但 SDK 公开低层原语足够 |
 | 二级兼容 | Application narrow platform seam → public OS API | SDK 没有可用原语，必须暂时补齐平台实现 |
+
+主循环唤醒是 Application 对 SDK 公开跨线程 enqueue 原语的正常消费，不属于 compatibility capability。Application 在 Native 服务就绪且 wake 可用后才发布回调，以生产者启动或 owner 内同步建立可见性；关闭时先停止入口并 join 在途生产者，再清理平台引用。Native 就绪前的单实例激活只保留有界合并需求，由主线程绑定回调时消费；就绪后的单实例通知显式失败时，不得为尚未消费的本次需求返回成功，也不得撤销较早已接受的需求或自动重放。SDK 调用成功只代表 enqueue 合同，不代表窗口已激活或 Product effect 已完成；最终 effect 仍由主线程处理。这项许可不开放其他低层系统 effect。
 
 附件图片预览是 Application 对公开 `PlatformServices.decodeImage` 与 `canvas.app_icon.encodePng` 的正常组合，不属于 compatibility capability，也不因缺少 Runtime 封装而成为 SDK 缺口。Application 在 Native loop thread 生成按像素和输出字节有界的 PNG，负责临时内存的 ownership 与释放，调用失败必须明确返回；这项许可不授予其他低层系统调用权。Product 独占原件、类型、配额和生命周期，精确合同见 [Product 架构](product-architecture.md#26-文件-attachment-staging)；Renderer 不参与图片转换，不注册额外 host tool。
 
