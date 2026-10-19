@@ -253,18 +253,7 @@ export type CatalogModelView = {
   metadataProvenance: ModelMetadataProvenance;
 };
 
-export type MetaskImageGenerationView = {
-  catalogState: ModelsCatalogState;
-  catalogGeneration: string;
-  models: CatalogModelView[];
-  selection: ModelRef | null;
-  selectionRevision: string;
-  selectionAvailable: boolean;
-  errorCode: ModelsErrorCode;
-};
-
 export type ModelsView = {
-  imageGeneration: MetaskImageGenerationView;
   availability: ModelsCatalogState;
   persistenceHealth: "ready" | "recovery_required" | "unavailable";
   providers: {

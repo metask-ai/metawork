@@ -361,16 +361,6 @@ const readySettingsAccount = {
 };
 
 const readySettingsModels = {
-  imageGeneration: {
-    catalogState: "unavailable",
-    catalogGeneration: "0",
-    models: [],
-    selection: null,
-    selectionRevision: "0",
-    selectionAvailable: false,
-    errorCode: "catalog_unavailable",
-  },
-
   availability: "ready",
   persistenceHealth: "ready",
   providers: [
@@ -1020,6 +1010,7 @@ test("Settings moves directly from Provider to model selection", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
+  assert.equal(screen.queryByRole("combobox", { name: "Image model" }), null);
   assert.equal(screen.queryByRole("combobox", { name: "API key" }), null);
   assert.match(screen.getByText("Models 2").textContent, /Models 2/);
   await user.click(screen.getByRole("combobox", { name: "Default model" }));

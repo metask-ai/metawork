@@ -59,7 +59,9 @@ const server = createServer(async (request, response) => {
       if (request.headers.authorization !== "Bearer synthetic-image-key")
         throw Error("image credential");
       if (
-        payload.model !== "fixture-image" ||
+        !["fixture-image", "gemini-3.1-flash-image-preview"].includes(
+          payload.model,
+        ) ||
         payload.n !== 1 ||
         payload.response_format !== "b64_json" ||
         typeof payload.prompt !== "string"

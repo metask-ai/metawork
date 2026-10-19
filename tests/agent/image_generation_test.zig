@@ -1120,6 +1120,7 @@ const image_product = struct {
         network: *backend.Backend,
         endpoint: []const u8,
         trace_dir: std.Io.Dir,
+        fallback: bool = false,
         image_calls: std.atomic.Value(usize) = .init(0),
         catalog_calls: std.atomic.Value(usize) = .init(0),
         key: [64]u8 = undefined,
@@ -1135,6 +1136,9 @@ const image_product = struct {
         fn image(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, output: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (!std.mem.eql(u8, request.url, models.metask_images_generations_url)) return error.InvalidHttp;
+            const body = std.json.parseFromSlice(struct { model: []const u8 }, std.testing.allocator, request.body, .{ .ignore_unknown_fields = true }) catch return error.InvalidHttp;
+            defer body.deinit();
+            if (!std.mem.eql(u8, body.value.model, if (self.fallback) "fixture-image" else models.metask_default_image_model)) return error.InvalidHttp;
             _ = self.image_calls.fetchAdd(1, .monotonic);
             // This test effect is the only target rewrite. No real credential
             // or formal service is used; production Models supplies the target.
@@ -1149,7 +1153,10 @@ const image_product = struct {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (request.kind != .models or !std.mem.eql(u8, request.bearer orelse "", "synthetic-image-key")) return error.ProtocolFailed;
             _ = self.catalog_calls.fetchAdd(1, .monotonic);
-            const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"fixture-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+            const body = if (self.fallback)
+                "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"fixture-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}"
+            else
+                "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ models.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
             @memcpy(output[0..body.len], body);
             return .{ .status = 200, .body = output[0..body.len] };
         }
@@ -1271,14 +1278,18 @@ const image_product = struct {
 };
 
 test "GenerateImage canonical Product Run freezes authorization and restores without image authority" {
-    try expectCanonicalImageProduct("success");
+    try expectCanonicalImageProduct("success", false);
 }
 
 test "GenerateImage canonical Product stop joins image HTTP and releases its owned preparation" {
-    try expectCanonicalImageProduct("hold");
+    try expectCanonicalImageProduct("hold", false);
 }
 
-fn expectCanonicalImageProduct(mode: []const u8) !void {
+test "GenerateImage canonical Product sends the eligible fallback model when the default is absent" {
+    try expectCanonicalImageProduct("success", true);
+}
+
+fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     var h: Harness = undefined;
     try h.init(mode, .{ .timeout_ms = 10000 });
     defer h.deinit();
@@ -1287,7 +1298,7 @@ fn expectCanonicalImageProduct(mode: []const u8) !void {
     try h.runtime.shutdown();
     h.runtime.deinit();
     h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
-    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir };
+    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir, .fallback = fallback };
     var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
     var platform: image_product.account_api.TestSupport.Platform = .{};
     image_product.account_api.TestSupport.attachPlatform(&account, &platform);
@@ -1323,7 +1334,7 @@ fn expectCanonicalImageProduct(mode: []const u8) !void {
     try std.testing.expect(coordinator.refreshCatalog().accepted);
     for (0..5000) |_| {
         coordinator.drain();
-        const current = control.modelsManagement().imageView();
+        const current = control.modelsView().providers[0];
         if (current.catalog_state == .ready) break;
         if (current.catalog_state != .loading) {
             std.debug.print("image catalog fixture rejected state={s} error={s}\n", .{ @tagName(current.catalog_state), @tagName(current.error_code) });
@@ -1331,12 +1342,6 @@ fn expectCanonicalImageProduct(mode: []const u8) !void {
         }
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
-    const view = control.modelsManagement().imageView();
-    try std.testing.expect(control.custom_providers.configureMetaskImageSelection("image-account", .{
-        .selection = .{ .source_id = image_product.models.metask_source_id, .model_id = "fixture-image" },
-        .expected_selection_revision = view.selection_revision,
-        .expected_catalog_generation = view.catalog_generation,
-    }).accepted);
     control.setImageRunPreparation(coordinator.imageRunPreparation());
     const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual });
     for (0..5000) |_| {
@@ -1349,12 +1354,7 @@ fn expectCanonicalImageProduct(mode: []const u8) !void {
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
     // The Core cannot send the image request before manual once approval.
     try std.testing.expectEqual(@as(usize, 0), effects.image_calls.load(.acquire));
-    const current_image = control.modelsManagement().imageView();
-    try std.testing.expect(control.custom_providers.configureMetaskImageSelection("image-account", .{
-        .selection = null,
-        .expected_selection_revision = current_image.selection_revision,
-        .expected_catalog_generation = current_image.catalog_generation,
-    }).accepted);
+    control.custom_providers.setMetaskAuthorizationUnavailable();
     var logout = image_product.account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
     defer logout.deinit();
     account.commit(&logout);

@@ -10321,8 +10321,8 @@ const ImageAdmissionProbe = struct {
     calls: usize = 0,
     released: usize = 0,
     available: bool = true,
-    secret: []const u8 = "run-image-secret-a",
     model: []const u8 = "image-a",
+    secret: []const u8 = "run-image-secret-a",
     workspace_id: u64 = 0,
     workspace_epoch: u64 = 0,
 
@@ -10333,7 +10333,7 @@ const ImageAdmissionProbe = struct {
         self.workspace_epoch = authority.epoch;
         if (!self.available) return null;
         return .{
-            .candidate = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, self.secret, 7, @intCast(self.calls)) catch unreachable,
+            .candidate = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, self.secret, 7) catch unreachable,
             .transport = .{ .perform_fn = imageHttp },
             .output = .{ .context = self, .commit_fn = output },
             .output_owner = self,

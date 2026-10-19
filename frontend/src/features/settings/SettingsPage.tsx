@@ -21,7 +21,6 @@ import {
   accountIdentityLabel,
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
-import { ImageGenerationSettings } from "./ImageGenerationSettings.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -191,7 +190,6 @@ export function SettingsPage({
   onRetryAutomaticWorkspaceRoot,
   onCancel,
   onSelectModel,
-  onSelectImageModel,
   onCreateCustomProvider,
   onCreateBuiltinProvider,
   onUpdateBuiltinProviderBaseUrl,
@@ -236,7 +234,6 @@ export function SettingsPage({
   ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
   onSelectModel: (id: string) => void;
-  onSelectImageModel: (id: string | null) => Promise<boolean>;
   onCreateCustomProvider: (input: CustomProviderSubmission) => Promise<boolean>;
   onCreateBuiltinProvider: (input: {
     providerId: BuiltinProviderId;
@@ -1754,17 +1751,6 @@ export function SettingsPage({
                   </div>
                 )}
               </div>
-              <ImageGenerationSettings
-                account={account}
-                image={models.imageGeneration}
-                disabled={
-                  disabled ||
-                  executionDisabled ||
-                  models.persistenceHealth === "recovery_required"
-                }
-                onRefresh={onRefresh}
-                onSelect={onSelectImageModel}
-              />
             </section>
           )}
 

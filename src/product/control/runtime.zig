@@ -2711,21 +2711,6 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn configureMetaskImageSelection(
-        self: *Runtime,
-        command: models_contract.ConfigureMetaskImageSelectionCommand,
-    ) models_contract.CommandResult {
-        if (self.shutting_down) return .rejected(.operation_in_progress);
-        // This is a metadata mutation. Account's committed identity supplies
-        // ownership; an execution authorization lease is acquired per Run.
-        const account = self.account_projection.view();
-        if (account.state != .authenticated or account.account_id.len == 0)
-            return .rejected(.authorization_unavailable);
-        const result = self.custom_providers.configureMetaskImageSelection(account.account_id, command);
-        if (result.accepted) self.bumpRevision();
-        return result;
-    }
-
     pub fn submitCustomProviderCommand(
         self: *Runtime,
         command: models_contract.CustomProviderCommand,
@@ -6685,9 +6670,7 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, preset.documentation_url);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"imageGeneration\":") catch return error.SnapshotTooLarge;
-        try self.writeImageGenerationModels(writer, view.image_generation);
-        writer.writeAll(",\"customProviders\":[") catch return error.SnapshotTooLarge;
+        writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
         try self.writeCustomProviders(writer, view.custom_providers);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -6719,16 +6702,6 @@ pub const Runtime = struct {
             writer.print(",\"metadataProvenance\":\"{s}\"}}", .{@tagName(model.metadata_provenance)}) catch return error.SnapshotTooLarge;
         }
         writer.writeByte(']') catch return error.SnapshotTooLarge;
-    }
-
-    fn writeImageGenerationModels(self: *Runtime, writer: *std.Io.Writer, view: models_contract.MetaskImageView) Error!void {
-        writer.print("{{\"catalogState\":\"{s}\",\"catalogGeneration\":\"{d}\",\"selectionRevision\":\"{d}\",\"selectionAvailable\":{},\"errorCode\":\"{s}\",\"selection\":", .{
-            @tagName(view.catalog_state), view.catalog_generation, view.selection_revision, view.selection_available, @tagName(view.error_code),
-        }) catch return error.SnapshotTooLarge;
-        try self.writeOptionalModelRef(writer, view.selection);
-        writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-        try self.writeCatalogModels(writer, view.models);
-        writer.writeAll("}") catch return error.SnapshotTooLarge;
     }
 
     fn writeCustomProviders(
@@ -9216,7 +9189,6 @@ pub const Runtime = struct {
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
-            .image_view_fn = controlImageView,
             .prepare_image_candidate_fn = controlPrepareImageCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
@@ -9485,9 +9457,6 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 }
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
-}
-fn controlImageView(context: *anyopaque) models_contract.MetaskImageView {
-    return controlOwner(context).custom_providers.imageView();
 }
 fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
     return controlOwner(context).custom_providers.prepareImageCandidate(input);
@@ -19786,65 +19755,4 @@ test "active input wire identity borrows stable Run memory until history encodin
     const projected = scratch.state.tasks[0].runs[0].additional_inputs[0];
     try std.testing.expectEqual(run.additional_inputs[0].?.operationId().ptr, projected.operation_id.ptr);
     try std.testing.expectEqualStrings(operation_id, projected.operation_id);
-}
-
-test "image settings bind Host identity without reading credentials or changing dialogue admission" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{});
-    defer control.deinit();
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(directory);
-    var vault: TestCustomProviderVault = .{};
-    try control.startCustomProviders(directory, vault.port());
-    defer control.stopCustomProviders();
-    _ = try createReadyTestCustomProvider(&control);
-    const provider = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = TestCustomProviderVault.slot, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }).accepted);
-    const dialogue_revision = control.modelsView().selection_revision;
-    const active_generation = control.newTaskAdmissionView().active_generation;
-    const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"image-only\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
-    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogResponse(&control.custom_providers, "account-1", body));
-    const initial = control.modelsView().image_generation;
-    try std.testing.expect(initial.selection == null);
-    try std.testing.expectEqual(@as(usize, 1), initial.models.len);
-    var command: models_contract.ConfigureMetaskImageSelectionCommand = .{
-        .selection = .{ .source_id = models_contract.metask_source_id, .model_id = "image-only" },
-        .expected_selection_revision = 0,
-        .expected_catalog_generation = initial.catalog_generation,
-    };
-    // Image settings require no access token or dialogue credential resolution.
-    vault.read_fails = true;
-    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
-    try std.testing.expect(control.modelsView().image_generation.selection_available);
-    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
-    try std.testing.expectEqual(active_generation, control.newTaskAdmissionView().active_generation);
-    try std.testing.expectEqual(models_contract.ManagementError.generation_mismatch, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-2", .display_name = "Other" } });
-    command.expected_selection_revision = 1;
-    command.selection = null;
-    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
-    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
-    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
-    const cleared = control.modelsView().image_generation;
-    try std.testing.expect(cleared.selection == null);
-    try std.testing.expectEqual(@as(u64, 2), cleared.selection_revision);
-    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
-    var snapshot: [256 * 1024]u8 = undefined;
-    const encoded = try control.writeSnapshot(&snapshot);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"imageGeneration\":{\"catalogState\":\"ready\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"selectionRevision\":\"2\",\"selectionAvailable\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "refreshed-secret") == null);
-    const persisted = try tmp.dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(1024 * 1024));
-    defer std.testing.allocator.free(persisted);
-    try std.testing.expect(std.mem.indexOf(u8, persisted, "refreshed-secret") == null);
 }

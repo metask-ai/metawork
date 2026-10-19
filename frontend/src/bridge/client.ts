@@ -650,16 +650,6 @@ export class BridgeClient {
     );
   }
 
-  async configureMetaskImageSelection(input: {
-    modelId: string | null;
-    expectedSelectionRevision: string;
-    expectedCatalogGeneration: string;
-  }) {
-    return decodeExecutionCommandResult(
-      await this.invoke(commands.configureMetaskImageSelection, input),
-    );
-  }
-
   async selectModelsDefault(input: {
     sourceId: string;
     modelId: string;

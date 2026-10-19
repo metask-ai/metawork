@@ -92,16 +92,6 @@ const signedOut = {
 };
 
 const unavailableModels = {
-  imageGeneration: {
-    catalogState: "unavailable",
-    catalogGeneration: "0",
-    models: [],
-    selection: null,
-    selectionRevision: "0",
-    selectionAvailable: false,
-    errorCode: "catalog_unavailable",
-  },
-
   availability: "needs_authentication",
   persistenceHealth: "ready",
   providers: [
@@ -139,16 +129,6 @@ const readyAccount = {
 };
 
 const readyModels = {
-  imageGeneration: {
-    catalogState: "unavailable",
-    catalogGeneration: "0",
-    models: [],
-    selection: null,
-    selectionRevision: "0",
-    selectionAvailable: false,
-    errorCode: "catalog_unavailable",
-  },
-
   ...unavailableModels,
   availability: "ready",
   providers: [

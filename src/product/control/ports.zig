@@ -44,7 +44,6 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
-    image_view_fn: *const fn (*anyopaque) models_contract.MetaskImageView,
     prepare_image_candidate_fn: *const fn (*anyopaque, models_contract.ImagePreparationInput) models_contract.ImagePreparation,
     start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
@@ -61,9 +60,6 @@ pub const ModelsManagement = struct {
     complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
-    pub fn imageView(self: ModelsManagement) models_contract.MetaskImageView {
-        return self.image_view_fn(self.context);
-    }
     pub fn prepareImageCandidate(self: ModelsManagement, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
         return self.prepare_image_candidate_fn(self.context, input);
     }

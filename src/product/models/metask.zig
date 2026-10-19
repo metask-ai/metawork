@@ -281,6 +281,11 @@ pub const CatalogSession = struct {
         return self.models.items[index].protocol != null;
     }
 
+    pub fn firstImageModelId(self: *const CatalogSession) ?[]const u8 {
+        for (self.models.items) |*entry| if (entry.image_generation) return entry.id.view();
+        return null;
+    }
+
     pub fn hasImageModel(self: *const CatalogSession, id: []const u8) bool {
         const index = self.findModel(id) orelse return false;
         return self.models.items[index].image_generation;

@@ -268,7 +268,6 @@ pub const Runtime = struct {
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
             .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
-            .image_generation = self.imageView(),
             .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };
@@ -286,99 +285,27 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn imageView(self: *Runtime) contract.MetaskImageView {
-        self.assertMainThread();
-        const intent = self.registry.metaskImageIntent();
-        const catalog_ready = self.store_healthy and self.metask_catalog_state == .ready;
-        const models = if (catalog_ready and self.metask_public_catalog != null)
-            self.metask_public_catalog.?.imageModelViews()
-        else
-            &.{};
-        var selection: ?contract.ModelRef = null;
-        if (catalog_ready) if (intent) |value| {
-            if (std.mem.eql(u8, value.principal_ref, self.metask_catalog.ownerAccountId()))
-                if (value.model_id) |model| {
-                    selection = .{ .source_id = contract.metask_source_id, .model_id = model };
-                };
-        };
-        return .{
-            .catalog_state = if (self.store_healthy) self.metask_catalog_state else .unavailable,
-            .catalog_generation = self.metask_catalog_generation,
-            .models = models,
-            .selection = selection,
-            .selection_revision = if (intent) |value| value.selection_revision else 0,
-            .selection_available = if (selection) |value| self.metask_catalog.hasImageModel(value.model_id) else false,
-            .error_code = if (!self.store_healthy) .persistence_unavailable else if (catalog_ready)
-                if (models.len == 0) .no_models else .none
-            else
-                self.metask_error,
-        };
-    }
-
-    /// `principal_ref` comes from the current Host identity, never Renderer.
-    pub fn configureMetaskImageSelection(
-        self: *Runtime,
-        principal_ref: []const u8,
-        command: contract.ConfigureMetaskImageSelectionCommand,
-    ) contract.CommandResult {
-        self.assertMainThread();
-        if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
-        if (self.metask_catalog_state != .ready or self.metask_catalog_generation == 0 or
-            command.expected_catalog_generation != self.metask_catalog_generation)
-            return .rejected(.generation_mismatch);
-        if (principal_ref.len == 0 or !std.mem.eql(u8, principal_ref, self.metask_catalog.ownerAccountId()))
-            return .rejected(.authorization_unavailable);
-        const current = self.registry.metaskImageIntent();
-        const revision = if (current) |value| value.selection_revision else 0;
-        if (command.expected_selection_revision != revision) return .rejected(.generation_mismatch);
-        if (command.selection) |selection| {
-            if (!std.mem.eql(u8, selection.source_id, contract.metask_source_id) or
-                !self.metask_catalog.hasImageModel(selection.model_id))
-                return .rejected(.model_not_found);
-            if (current) |value| if (std.mem.eql(u8, value.principal_ref, principal_ref)) {
-                if (value.model_id) |model|
-                    if (std.mem.eql(u8, model, selection.model_id)) return .acceptedResult();
-            };
-        } else {
-            const value = current orelse return .acceptedResult();
-            if (!std.mem.eql(u8, value.principal_ref, principal_ref)) return .rejected(.authorization_unavailable);
-            if (value.model_id == null) return .acceptedResult();
-        }
-        const next_revision = std.math.add(u64, revision, 1) catch return .rejected(.local_resource_exhausted);
-        var candidate = self.registry.clone() catch return .rejected(.local_resource_exhausted);
-        defer candidate.deinit();
-        candidate.configureMetaskImage(
-            principal_ref,
-            if (command.selection) |selection| selection.model_id else null,
-            next_revision,
-        ) catch |err| return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
-    }
-
+    /// Resolve the preferred model or the first eligible catalog entry using
+    /// the current authorization lease. No user selection is persisted.
     pub fn prepareImageCandidate(self: *Runtime, input: contract.ImagePreparationInput) contract.ImagePreparation {
         self.assertMainThread();
         if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
         if (self.catalog_attempt != null or self.metask_catalog_state != .ready or self.metask_catalog_generation == 0)
             return .{ .rejected = .catalog_unavailable };
-        const intent = self.registry.metaskImageIntent() orelse return .{ .rejected = .model_not_found };
-        if (input.expected_selection_revision != intent.selection_revision or
-            input.expected_catalog_generation != self.metask_catalog_generation)
-            return .{ .rejected = .generation_mismatch };
-        if (!std.mem.eql(u8, intent.principal_ref, input.principal_ref) or
-            !std.mem.eql(u8, self.metask_catalog.ownerAccountId(), input.principal_ref) or
+        if (!std.mem.eql(u8, self.metask_catalog.ownerAccountId(), input.principal_ref) or
             input.authorization_generation == 0 or
             input.authorization_generation != self.metask_catalog_authorization_generation or
             input.bearer.len == 0 or input.bearer.len > contract.Limits.credential_bytes)
             return .{ .rejected = .authorization_unavailable };
-        const model = intent.model_id orelse return .{ .rejected = .model_not_found };
-        if (!self.metask_catalog.hasImageModel(model)) return .{ .rejected = .model_not_found };
+        const model = if (self.metask_catalog.hasImageModel(contract.metask_default_image_model))
+            contract.metask_default_image_model
+        else
+            self.metask_catalog.firstImageModelId() orelse return .{ .rejected = .model_not_found };
         return .{ .ready = contract.OwnedImageCandidate.copy(
             self.allocator,
             model,
             input.bearer,
             self.metask_catalog_generation,
-            intent.selection_revision,
         ) catch |err| return .{ .rejected = if (err == error.OutOfMemory) .local_resource_exhausted else .invalid_provider } };
     }
 
@@ -2687,7 +2614,7 @@ test "successful empty Metask catalog preserves intent but removes all resolvabl
     }).accepted);
 }
 
-test "image-only Metask catalog resolves fresh image input alongside a Custom dialogue default" {
+test "fixed image model resolves without user configuration alongside a Custom dialogue default" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2721,69 +2648,25 @@ test "image-only Metask catalog resolves fresh image input alongside a Custom di
         .expected_catalog_generation = probe.expected_catalog_generation,
     }).accepted);
     const dialogue_revision = runtime.view().selection_revision;
-    const catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+    const catalog = test_image_catalog;
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-a", catalog));
     try std.testing.expectEqual(contract.ModelsError.no_models, runtime.view().providers[0].error_code);
-    var image = runtime.imageView();
-    try std.testing.expectEqual(contract.ModelsError.none, image.error_code);
-    try std.testing.expectEqual(@as(usize, 1), image.models.len);
-    try std.testing.expect(image.selection == null);
-    var command: contract.ConfigureMetaskImageSelectionCommand = .{
-        .selection = .{ .source_id = "metask", .model_id = "image" },
-        .expected_selection_revision = 0,
-        .expected_catalog_generation = image.catalog_generation,
-    };
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.configureMetaskImageSelection("wrong-principal", command).error_code.?);
-    var wrong_source = command;
-    wrong_source.selection.?.source_id = "custom";
-    try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.configureMetaskImageSelection("principal-a", wrong_source).error_code.?);
-    try std.testing.expect(runtime.configureMetaskImageSelection("principal-a", command).accepted);
-    image = runtime.imageView();
-    try std.testing.expect(image.selection_available);
-    try std.testing.expectEqual(@as(u64, 1), image.selection_revision);
-    try std.testing.expectEqual(contract.ManagementError.generation_mismatch, runtime.configureMetaskImageSelection("principal-a", command).error_code.?);
+    try std.testing.expectEqual(@as(usize, 0), runtime.view().providers[0].models.len);
     var lease = "fresh-lease".*;
-    const input: contract.ImagePreparationInput = .{
-        .principal_ref = "principal-a",
-        .authorization_generation = 17,
-        .bearer = &lease,
-        .expected_selection_revision = image.selection_revision,
-        .expected_catalog_generation = image.catalog_generation,
-    };
-    var candidate = switch (runtime.prepareImageCandidate(input)) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
+    const input: contract.ImagePreparationInput = .{ .principal_ref = "principal-a", .authorization_generation = 17, .bearer = &lease };
+    var candidate = runtime.prepareImageCandidate(input).ready;
     defer candidate.deinit();
     @memset(&lease, 0);
     try std.testing.expectEqualStrings("fresh-lease", candidate.input().bearer);
+    try std.testing.expectEqualStrings("gemini-3.1-flash-image-preview", candidate.input().selection.model_id);
     try std.testing.expectEqualStrings(contract.metask_images_generations_url, candidate.input().endpoint);
     const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(bytes);
-    for ([_][]const u8{ "fresh-lease", "refreshed-secret", "custom-secret" }) |secret|
+    for ([_][]const u8{ "fresh-lease", "refreshed-secret", "custom-secret", "metask_image" }) |secret|
         try std.testing.expect(std.mem.indexOf(u8, bytes, secret) == null);
-    command.expected_selection_revision = 1;
-    command.selection = null;
-    try std.testing.expect(runtime.configureMetaskImageSelection("principal-a", command).accepted);
-    try std.testing.expectEqual(@as(u64, 2), runtime.imageView().selection_revision);
-    try std.testing.expectEqual(contract.ManagementError.generation_mismatch, runtime.prepareImageCandidate(input).rejected);
-    command.expected_selection_revision = 2;
-    command.selection = .{ .source_id = "metask", .model_id = "image" };
-    try std.testing.expect(runtime.configureMetaskImageSelection("principal-a", command).accepted);
-    const saved_store = runtime.store;
-    runtime.store = null;
-    command.expected_selection_revision = 3;
-    command.selection = null;
-    const failed_commit = runtime.configureMetaskImageSelection("principal-a", command);
-    runtime.store = saved_store;
-    try std.testing.expectEqual(contract.ManagementError.persistence_unavailable, failed_commit.error_code.?);
-    try std.testing.expect(runtime.imageView().selection_available);
-    try std.testing.expectEqual(@as(u64, 3), runtime.imageView().selection_revision);
     runtime.setMetaskAuthorizationUnavailable();
-    try std.testing.expect(runtime.imageView().selection == null);
     try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareImageCandidate(input).rejected);
     try std.testing.expectEqualStrings("fresh-lease", candidate.input().bearer);
-    try std.testing.expectEqualStrings("image", candidate.input().selection.model_id);
     var dialogue = (try runtime.resolveDefault()).?;
     defer dialogue.deinit();
     try std.testing.expectEqualStrings("chat", dialogue.input().target.model);
@@ -2791,21 +2674,20 @@ test "image-only Metask catalog resolves fresh image input alongside a Custom di
     try std.testing.expectEqual(dialogue_revision, runtime.view().selection_revision);
     runtime.stop();
     try runtime.start(directory, vault.port());
-    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-a", catalog));
-    try std.testing.expect(runtime.imageView().selection_available);
-    try std.testing.expectEqual(@as(u64, 3), runtime.imageView().selection_revision);
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-b", catalog));
-    try std.testing.expect(runtime.imageView().selection == null);
-    command.expected_catalog_generation = runtime.imageView().catalog_generation;
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.configureMetaskImageSelection("principal-b", command).error_code.?);
-    command.selection = .{ .source_id = "metask", .model_id = "image" };
-    try std.testing.expect(runtime.configureMetaskImageSelection("principal-b", command).accepted);
-    try std.testing.expectEqualStrings("principal-b", runtime.registry.metaskImageIntent().?.principal_ref);
-    try std.testing.expectEqual(@as(u64, 4), runtime.imageView().selection_revision);
+    var current = input;
+    current.bearer = "new-account-lease";
+    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(current).rejected);
+    current.principal_ref = "principal-b";
+    var restarted = runtime.prepareImageCandidate(current).ready;
+    defer restarted.deinit();
+    try std.testing.expectEqualStrings(contract.metask_default_image_model, restarted.input().selection.model_id);
     try std.testing.expectEqual(dialogue_revision, runtime.view().selection_revision);
 }
 
-test "image preparation rejects stale catalog selection and lease authority without inferred replacement" {
+const test_image_catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ contract.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+
+test "image preparation requires current lease and falls back only before sending" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2817,61 +2699,46 @@ test "image preparation rejects stale catalog selection and lease authority with
         runtime.stop();
         runtime.deinit();
     }
-    const catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
-    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", catalog));
-    try std.testing.expect(runtime.configureMetaskImageSelection("principal", .{
-        .selection = .{ .source_id = "metask", .model_id = "image" },
-        .expected_selection_revision = 0,
-        .expected_catalog_generation = runtime.imageView().catalog_generation,
-    }).accepted);
-    const input: contract.ImagePreparationInput = .{
-        .principal_ref = "principal",
-        .authorization_generation = 17,
-        .bearer = "fresh-secret",
-        .expected_catalog_generation = runtime.imageView().catalog_generation,
-        .expected_selection_revision = 1,
-    };
-    var wrong = input;
-    wrong.authorization_generation = 18;
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(wrong).rejected);
-    wrong = input;
-    wrong.principal_ref = "other";
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(wrong).rejected);
-    wrong = input;
-    wrong.bearer = "";
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(wrong).rejected);
-    wrong = input;
-    wrong.expected_catalog_generation +%= 1;
-    try std.testing.expectEqual(contract.ManagementError.generation_mismatch, runtime.prepareImageCandidate(wrong).rejected);
+    const input: contract.ImagePreparationInput = .{ .principal_ref = "principal", .authorization_generation = 17, .bearer = "fresh-secret" };
+    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareImageCandidate(input).rejected);
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", test_image_catalog));
+    for (0..4) |case| {
+        var wrong = input;
+        switch (case) {
+            0 => wrong.principal_ref = "other",
+            1 => wrong.authorization_generation = 0,
+            2 => wrong.authorization_generation = 18,
+            3 => wrong.bearer = "",
+            else => unreachable,
+        }
+        try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(wrong).rejected);
+    }
     const preparation = runtime.prepareMetaskCatalogRefresh("principal", 18).ready;
     try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareImageCandidate(input).rejected);
     var session = metask_provider.CatalogSession.init(std.testing.allocator);
     defer session.deinit();
-    try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", "catalog-secret", catalog);
+    try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", "catalog-secret", test_image_catalog);
     var completion = metask_provider.OwnedCatalogCompletion.init(&session);
     var port = completion.ownedPort();
     try std.testing.expectEqual(contract.ModelsError.none, runtime.completeMetaskCatalogRefresh(preparation.attempt_id, 18, &port));
+    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(input).rejected);
     var refreshed = input;
-    refreshed.expected_catalog_generation = runtime.imageView().catalog_generation;
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareImageCandidate(refreshed).rejected);
     refreshed.authorization_generation = 18;
     var candidate = runtime.prepareImageCandidate(refreshed).ready;
     defer candidate.deinit();
     try std.testing.expectEqualStrings("fresh-secret", candidate.input().bearer);
-    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", "{\"object\":\"list\",\"has_more\":false,\"data\":[]}"));
-    try std.testing.expect(!runtime.imageView().selection_available);
-    try std.testing.expectEqualStrings("image", runtime.imageView().selection.?.model_id);
-    refreshed.expected_catalog_generation = runtime.imageView().catalog_generation;
-    refreshed.authorization_generation = 17;
-    try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareImageCandidate(refreshed).rejected);
+    const unsupported = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ contract.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":false}}}}]}";
+    const absent = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"other-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+    for ([_][]const u8{ unsupported, "{\"object\":\"list\",\"has_more\":false,\"data\":[]}" }) |body| {
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", body));
+        try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareImageCandidate(input).rejected);
+    }
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", absent));
+    var fallback = runtime.prepareImageCandidate(input).ready;
+    defer fallback.deinit();
+    try std.testing.expectEqualStrings("other-image", fallback.input().selection.model_id);
     try std.testing.expectEqualStrings("fresh-secret", candidate.input().bearer);
-    try std.testing.expectEqualStrings("image", candidate.input().selection.model_id);
-    try runtime.registry.configureMetaskImage("principal", "image", std.math.maxInt(u64));
-    try std.testing.expectEqual(contract.ManagementError.local_resource_exhausted, runtime.configureMetaskImageSelection("principal", .{
-        .selection = null,
-        .expected_selection_revision = std.math.maxInt(u64),
-        .expected_catalog_generation = runtime.imageView().catalog_generation,
-    }).error_code.?);
+    try std.testing.expectEqualStrings(contract.metask_default_image_model, candidate.input().selection.model_id);
 }
 
 test "first empty Metask catalog has no inferred selection" {
@@ -2985,4 +2852,38 @@ test "declared protocol refresh changes default authority and preserves old owne
     }).accepted);
     try std.testing.expectEqual(contract.Protocol.openai_responses, runtime.defaultAuthority().?.protocol);
     try std.testing.expectEqualStrings("model-2", runtime.view().default_selection.?.model_id);
+}
+
+test "image model policy prefers the default and then the first declared generation endpoint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    const entries = "{\"id\":\"text\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}," ++
+        "{\"id\":\"video\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":{\"supported\":true}}}}," ++
+        "{\"id\":\"guessed-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"output\":{\"image\":{\"supported\":true}}}}," ++
+        "{\"id\":\"first-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}," ++
+        "{\"id\":\"second-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}";
+    const fallback_catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[" ++ entries ++ "]}";
+    const preferred_catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[" ++ entries ++ "," ++
+        "{\"id\":\"" ++ contract.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+    const input: contract.ImagePreparationInput = .{ .principal_ref = "principal", .authorization_generation = 17, .bearer = "fresh-lease" };
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", preferred_catalog));
+    var preferred = runtime.prepareImageCandidate(input).ready;
+    defer preferred.deinit();
+    try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.view().providers[0].models.len);
+    try std.testing.expectEqualStrings("text", runtime.view().providers[0].models[0].id);
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", fallback_catalog));
+    var fallback = runtime.prepareImageCandidate(input).ready;
+    defer fallback.deinit();
+    try std.testing.expectEqualStrings("first-image", fallback.input().selection.model_id);
+    try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
 }

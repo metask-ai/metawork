@@ -24,6 +24,7 @@ pub const Limits = struct {
 pub const metask_source_id = "metask";
 pub const metask_anthropic_messages_url =
     "https://app.metask-ai.com/v1/messages";
+pub const metask_default_image_model = "gemini-3.1-flash-image-preview";
 pub const metask_images_generations_url =
     "https://app.metask-ai.com/v1/images/generations";
 
@@ -177,7 +178,6 @@ pub const ProviderView = struct {
 };
 
 pub const ModelsView = struct {
-    image_generation: MetaskImageView = .{ .catalog_state = .unavailable, .catalog_generation = 0 },
     availability: CatalogState,
     persistence_health: PersistenceHealth,
     providers: []const ProviderView = &.{},
@@ -338,30 +338,12 @@ pub const ConfigureMetaskSelectionCommand = struct {
     expected_catalog_generation: u64,
 };
 
-pub const ConfigureMetaskImageSelectionCommand = struct {
-    selection: ?ModelRef,
-    expected_selection_revision: u64,
-    expected_catalog_generation: u64,
-};
-
-pub const MetaskImageView = struct {
-    catalog_state: CatalogState,
-    catalog_generation: u64,
-    models: []const ModelView = &.{},
-    selection: ?ModelRef = null,
-    selection_revision: u64 = 0,
-    selection_available: bool = false,
-    error_code: ModelsError = .none,
-};
-
 /// Borrowed only during preparation, from the Host's current authorization
 /// lease. Models does not acquire, cache, refresh or persist this authorization.
 pub const ImagePreparationInput = struct {
     principal_ref: []const u8,
     authorization_generation: u64,
     bearer: []const u8,
-    expected_selection_revision: u64,
-    expected_catalog_generation: u64,
 };
 
 pub const ImageCandidateInput = struct {
@@ -369,7 +351,6 @@ pub const ImageCandidateInput = struct {
     endpoint: []const u8,
     bearer: []const u8,
     catalog_generation: u64,
-    selection_revision: u64,
 };
 
 pub const ImagePreparation = union(enum) {
@@ -528,19 +509,17 @@ pub const OwnedImageCandidate = struct {
     model: OwnedBuffer,
     secret: SecretBuffer,
     catalog_generation: u64,
-    selection_revision: u64,
 
     pub fn copy(
         allocator: std.mem.Allocator,
         model: []const u8,
         bearer: []const u8,
         catalog_generation: u64,
-        selection_revision: u64,
     ) (ValidationError || std.mem.Allocator.Error)!OwnedImageCandidate {
         try validateRequired(model, Limits.model_id_bytes);
         for (model) |byte| if (std.ascii.isControl(byte)) return error.InvalidEncoding;
         try validateOpaqueRequired(bearer, Limits.credential_bytes);
-        if (catalog_generation == 0 or selection_revision == 0) return error.InvalidGeneration;
+        if (catalog_generation == 0) return error.InvalidGeneration;
         const owned_model = try allocator.dupe(u8, model);
         errdefer allocator.free(owned_model);
         const owned_bearer = try allocator.dupe(u8, bearer);
@@ -548,7 +527,6 @@ pub const OwnedImageCandidate = struct {
             .model = .initOwned(allocator, owned_model),
             .secret = .initOwned(allocator, owned_bearer),
             .catalog_generation = catalog_generation,
-            .selection_revision = selection_revision,
         };
     }
 
@@ -558,7 +536,6 @@ pub const OwnedImageCandidate = struct {
             .endpoint = metask_images_generations_url,
             .bearer = self.secret.view(),
             .catalog_generation = self.catalog_generation,
-            .selection_revision = self.selection_revision,
         };
     }
 
@@ -567,7 +544,6 @@ pub const OwnedImageCandidate = struct {
             .model = self.model.take(),
             .secret = self.secret.take(),
             .catalog_generation = self.catalog_generation,
-            .selection_revision = self.selection_revision,
         };
     }
 
@@ -575,7 +551,6 @@ pub const OwnedImageCandidate = struct {
         self.secret.deinit();
         self.model.deinit();
         self.catalog_generation = 0;
-        self.selection_revision = 0;
     }
 };
 
@@ -1176,7 +1151,7 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
     var model = "image-model".*;
     var bearer = "lease-secret".*;
-    var candidate = try OwnedImageCandidate.copy(observing.allocator(), &model, &bearer, 7, 2);
+    var candidate = try OwnedImageCandidate.copy(observing.allocator(), &model, &bearer, 7);
     observing.observe(candidate.secret.bytes);
     @memset(&model, 'x');
     @memset(&bearer, 0);
@@ -1187,15 +1162,14 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     try std.testing.expectEqualStrings(metask_images_generations_url, moved.input().endpoint);
     try std.testing.expectEqualStrings("lease-secret", moved.input().bearer);
     try std.testing.expectEqual(@as(u64, 7), moved.input().catalog_generation);
-    try std.testing.expectEqual(@as(u64, 2), moved.input().selection_revision);
     moved.deinit();
     try std.testing.expect(observing.saw_secret_free);
     try std.testing.expect(observing.secret_was_zero);
-    try std.testing.expectError(error.FieldEmpty, OwnedImageCandidate.copy(std.testing.allocator, "image", "", 7, 2));
-    try std.testing.expectError(error.InvalidGeneration, OwnedImageCandidate.copy(std.testing.allocator, "image", "secret", 0, 2));
+    try std.testing.expectError(error.FieldEmpty, OwnedImageCandidate.copy(std.testing.allocator, "image", "", 7));
+    try std.testing.expectError(error.InvalidGeneration, OwnedImageCandidate.copy(std.testing.allocator, "image", "secret", 0));
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
-            var owned = try OwnedImageCandidate.copy(allocator, "image", "secret", 7, 2);
+            var owned = try OwnedImageCandidate.copy(allocator, "image", "secret", 7);
             defer owned.deinit();
         }
     }.run, .{});

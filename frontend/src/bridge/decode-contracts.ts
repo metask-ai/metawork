@@ -39,7 +39,6 @@ import {
   type AccountView,
   type ModelsView,
   type CatalogModelView,
-  type MetaskImageGenerationView,
   type NewTaskAdmissionView,
   type ModelMetadata,
   type ModelMetadataProvenance,
@@ -1770,78 +1769,8 @@ function decodeCatalogModels(value: unknown, path: string): CatalogModelView[] {
   return models;
 }
 
-function decodeImageGeneration(
-  value: unknown,
-  path: string,
-): MetaskImageGenerationView {
-  const item = object(value, path, [
-    "catalogState",
-    "catalogGeneration",
-    "models",
-    "selection",
-    "selectionRevision",
-    "selectionAvailable",
-    "errorCode",
-  ]);
-  const catalogState = enumValue(
-    item.catalogState,
-    `${path}.catalogState`,
-    modelsCatalogStates,
-  );
-  const catalogGeneration = wireId(
-    item.catalogGeneration,
-    `${path}.catalogGeneration`,
-  );
-  const models = decodeCatalogModels(item.models, `${path}.models`);
-  const selection = decodeModelRef(item.selection, `${path}.selection`);
-  const selectionRevision = wireId(
-    item.selectionRevision,
-    `${path}.selectionRevision`,
-  );
-  const selectionAvailable = booleanValue(
-    item.selectionAvailable,
-    `${path}.selectionAvailable`,
-  );
-  if (selection !== null && selection.sourceId !== "metask")
-    fail(`${path}.selection`, "image selection must belong to Metask");
-  if (selection !== null && selectionRevision === "0")
-    fail(
-      `${path}.selectionRevision`,
-      "selected image intent requires a revision",
-    );
-  if (catalogState === "ready" && catalogGeneration === "0")
-    fail(
-      `${path}.catalogGeneration`,
-      "a ready image catalog requires a generation",
-    );
-  if (catalogState !== "ready" && (models.length !== 0 || selection !== null))
-    fail(
-      path,
-      "an unavailable image catalog cannot publish candidates or a selection",
-    );
-  const available =
-    catalogState === "ready" &&
-    selection !== null &&
-    models.some((model) => model.id === selection.modelId);
-  if (selectionAvailable !== available)
-    fail(
-      `${path}.selectionAvailable`,
-      "image availability must match the qualified catalog",
-    );
-  return {
-    catalogState,
-    catalogGeneration,
-    models,
-    selection,
-    selectionRevision,
-    selectionAvailable,
-    errorCode: enumValue(item.errorCode, `${path}.errorCode`, modelsErrorCodes),
-  };
-}
-
 function decodeModels(value: unknown, path: string): ModelsView {
   const item = object(value, path, [
-    "imageGeneration",
     "availability",
     "persistenceHealth",
     "providers",
@@ -1976,10 +1905,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
       item.persistenceHealth,
       `${path}.persistenceHealth`,
       ["ready", "recovery_required", "unavailable"] as const,
-    ),
-    imageGeneration: decodeImageGeneration(
-      item.imageGeneration,
-      `${path}.imageGeneration`,
     ),
     providers,
     metaskSelection,

@@ -3523,17 +3523,6 @@ export default function App() {
             }
             onCancel={() => void cancelAccountOperation()}
             onSelectModel={(id) => void selectMetaskModel(id)}
-            onSelectImageModel={(modelId) =>
-              runExecutionCommand(() =>
-                client.configureMetaskImageSelection({
-                  modelId,
-                  expectedSelectionRevision:
-                    snapshot.models.imageGeneration.selectionRevision,
-                  expectedCatalogGeneration:
-                    snapshot.models.imageGeneration.catalogGeneration,
-                }),
-              )
-            }
             onCreateCustomProvider={(input) =>
               runExecutionCommand(() => client.createCustomProvider(input))
             }

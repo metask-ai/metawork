@@ -340,7 +340,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
-            .{ .name = commands.models_configure_metask_image_selection, .function = configureMetaskImageSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
             .{ .name = commands.custom_provider_create, .function = customProviderCreate },
             .{ .name = commands.builtin_provider_create, .function = builtinProviderCreate },
@@ -2231,30 +2230,6 @@ pub const Dispatcher = struct {
             .expected_catalog_generation = try handlers.parseWireId(
                 parsed.value.expectedCatalogGeneration,
             ),
-        }));
-    }
-
-    fn configureMetaskImageSelection(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ConfigureMetaskImageSelection, invocation.request.payload);
-        defer parsed.deinit();
-        if (parsed.value.modelId) |model| {
-            if (model.len == 0 or model.len > models_contract.Limits.model_id_bytes or !std.unicode.utf8ValidateSlice(model))
-                return error.InvalidBridgePayload;
-            for (model) |byte| if (std.ascii.isControl(byte)) return error.InvalidBridgePayload;
-        }
-        const control = self.control orelse return error.DispatcherUnavailable;
-        return encodeExecutionResult(output, control.configureMetaskImageSelection(.{
-            .selection = if (parsed.value.modelId) |model| .{ .source_id = models_contract.metask_source_id, .model_id = model } else null,
-            .expected_selection_revision = try handlers.parseWireId(parsed.value.expectedSelectionRevision),
-            .expected_catalog_generation = try handlers.parseWireId(parsed.value.expectedCatalogGeneration),
         }));
     }
 
@@ -6856,21 +6831,12 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     const image_revision = workbench.currentRevision();
-    for ([_][]const u8{
-        "{\"id\":\"image-missing\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
-        "{\"id\":\"image-endpoint\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"modelId\":null,\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\",\"endpoint\":\"https://example.test\"}}",
-        "{\"id\":\"image-principal\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"modelId\":null,\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\",\"principalRef\":\"injected\"}}",
-        "{\"id\":\"image-empty\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"modelId\":\"\",\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
-    }) |request| {
-        const rejected = native_dispatcher.dispatch(request, source, &response);
-        try std.testing.expect(std.mem.indexOf(u8, rejected, "\"handler_failed\"") != null);
-    }
-    const wrong_image_window = native_dispatcher.dispatch(
-        "{\"id\":\"image-window\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"modelId\":null,\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
-        wrong_window,
+    const retired_image_setting = native_dispatcher.dispatch(
+        "{\"id\":\"image-setting\",\"command\":\"metawork.models.configureMetaskImageSelection\",\"payload\":{\"modelId\":\"other-image\",\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
+        source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, wrong_image_window, "\"handler_failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retired_image_setting, "\"permission_denied\"") != null);
     try std.testing.expectEqual(image_revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     const forwarded_selection = native_dispatcher.dispatch(

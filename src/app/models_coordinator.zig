@@ -277,8 +277,6 @@ pub const Coordinator = struct {
     fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        const view = self.management.imageView();
-        if (!view.selection_available) return null;
         const transport = self.completion_transport orelse return null;
         var lease = (self.account.authorizationLease() catch return null) orelse return null;
         defer lease.deinit();
@@ -286,8 +284,6 @@ pub const Coordinator = struct {
             .principal_ref = lease.principal_ref,
             .authorization_generation = lease.authorization_generation,
             .bearer = lease.access_token,
-            .expected_selection_revision = view.selection_revision,
-            .expected_catalog_generation = view.catalog_generation,
         })) {
             .ready => |value| value,
             .rejected => return null,
@@ -583,20 +579,15 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
         expected_token: []const u8 = "image-access-a",
         model: []const u8 = "image-model-a",
 
-        fn imageView(context: *anyopaque) models_contract.MetaskImageView {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            return .{ .catalog_state = .ready, .catalog_generation = 7, .selection_revision = 3, .selection_available = self.available };
-        }
         fn prepare(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
             const self: *@This() = @ptrCast(@alignCast(context));
+            if (!self.available) return .{ .rejected = .model_not_found };
             self.calls += 1;
             std.testing.expectEqualStrings("account-image", input.principal_ref) catch unreachable;
             std.testing.expectEqual(self.expected_generation, input.authorization_generation) catch unreachable;
             std.testing.expectEqualStrings(self.expected_token, input.bearer) catch unreachable;
-            std.testing.expectEqual(@as(u64, 3), input.expected_selection_revision) catch unreachable;
-            std.testing.expectEqual(@as(u64, 7), input.expected_catalog_generation) catch unreachable;
             if (self.reject) return .{ .rejected = .generation_mismatch };
-            return .{ .ready = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, input.bearer, 7, 3) catch unreachable };
+            return .{ .ready = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, input.bearer, 7) catch unreachable };
         }
         fn accountHttp(_: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
             if (request.kind != .refresh_token) return error.ProtocolFailed;
@@ -630,7 +621,6 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     // selection behavior are independently tested against the real Models owner.
     var management: control_ports.ModelsManagement = undefined;
     management.context = &fixture;
-    management.image_view_fn = Fixture.imageView;
     management.prepare_image_candidate_fn = Fixture.prepare;
     var coordinator = Coordinator.init(&account, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(.{ .perform_fn = Fixture.imageHttp });
