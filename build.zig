@@ -176,6 +176,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-app-models-coordinator", .root_module = test_modules.models_coordinator },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-agent-mcp-connector", .root_module = test_modules.agent_mcp_connector },
@@ -255,7 +256,7 @@ pub fn build(b: *std.Build) void {
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
     const image_preparation_step = b.step("test-image-run-preparation", "Run image authorization, ownership and projection tests");
-    for ([_]*std.Build.Module{ test_modules.app, test_modules.product_task_runtime, test_modules.product_task_execution }) |module| {
+    for ([_]*std.Build.Module{ test_modules.models_coordinator, test_modules.product_task_runtime, test_modules.product_task_execution }) |module| {
         image_preparation_step.dependOn(&b.addRunArtifact(b.addTest(.{
             .root_module = module,
             .filters = &.{"image Run"},
@@ -560,6 +561,7 @@ const WiredModules = struct {
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
     image_output: *std.Build.Module,
+    models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
     product_schedule_state: *std.Build.Module,
@@ -891,11 +893,20 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
     cases.addImport("image_output", modules.image_output);
+    cases.addImport("models_coordinator", modules.models_coordinator);
+    cases.addImport("metawork_account", modules.account);
+    cases.addImport("product_models_metask", modules.models_metask);
+    cases.addImport("metask_transport", modules.metask_transport);
     cases.addImport("lifecycle_fixture", createLifecycleFixture(b, modules, link_libc));
     cases.addOptions("image_fixture_options", fixture_options);
     const tests = b.addTest(.{ .name = "metawork-generate-image", .root_module = cases });
     const run = b.addRunArtifact(tests);
     b.step("test-generate-image", "Run canonical Core image tool and real HTTP lifecycle tests").dependOn(&run.step);
+    b.step("test-generate-image-product", "Run canonical Product image lifecycle tests against local fixtures").dependOn(&b.addRunArtifact(b.addTest(.{
+        .name = "metawork-generate-image-product",
+        .root_module = cases,
+        .filters = &.{"canonical Product"},
+    })).step);
     return &run.step;
 }
 
@@ -1999,6 +2010,23 @@ fn wireAgentCore(
     mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
+    const models_coordinator = b.createModule(.{
+        .root_source_file = b.path("src/app/models_coordinator.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    models_coordinator.addImport("metawork_agent", agent);
+    models_coordinator.addImport("metawork_account", account);
+    models_coordinator.addImport("metawork_account_contract", account_contract);
+    models_coordinator.addImport("metawork_product_models_contract", models_contract);
+    models_coordinator.addImport("product_models_ports", models_ports);
+    models_coordinator.addImport("product_models_metask", models_metask);
+    models_coordinator.addImport("metask_transport", metask_transport);
+    models_coordinator.addImport("metawork_product_control_ports", product_control_ports);
+    models_coordinator.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
+    models_coordinator.addImport("metawork_product_task", product_task);
+    models_coordinator.addImport("metawork_product_workspace", product_workspace);
+    models_coordinator.addImport("image_output", image_output);
     const app = b.createModule(.{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
@@ -2015,8 +2043,7 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
-    app.addImport("image_output", image_output);
-    app.addImport("metawork_product_workspace", product_workspace);
+    app.addImport("models_coordinator", models_coordinator);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);
@@ -2112,6 +2139,7 @@ fn wireAgentCore(
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
         .image_output = image_output,
+        .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,
         .product_schedule_state = product_schedule_state,

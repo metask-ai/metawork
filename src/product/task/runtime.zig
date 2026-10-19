@@ -5276,7 +5276,6 @@ pub const Runtime = struct {
         effects: LifecycleEffects,
     ) RecoverySync {
         var result: RecoverySync = .{};
-        self.releaseQuiescentImages(effects.release);
         const titles = self.syncAutomaticTitles(
             effects.max_title_bytes,
             effects.text,
@@ -5299,6 +5298,9 @@ pub const Runtime = struct {
         const closes = self.syncCloseCompletions(effects.release);
         result.changed = closes.changed or result.changed;
         result.durable_changed = closes.durable_changed or result.durable_changed;
+        // Checkpoint/close reconciliation above can retire the final lease on
+        // this very pass. Do not retain the scrub credential until another wake.
+        self.releaseQuiescentImages(effects.release);
         return result;
     }
 };

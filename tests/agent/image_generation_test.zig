@@ -1043,3 +1043,328 @@ test "GenerateImage unavailable permission callback sends nothing and closes nor
     h.runtime.event_ready_notifier = null;
     try session.close(.session_close);
 }
+
+const image_product = struct {
+    const fixture_api = @import("lifecycle_fixture");
+    const control_api = fixture_api.product_control;
+    const task_api = fixture_api.product_task;
+    const models = fixture_api.models_contract;
+    const ports = fixture_api.models_ports;
+    const account_api = @import("metawork_account");
+    const coordinator_api = @import("models_coordinator");
+    const catalog_transport = @import("metask_transport");
+
+    const Effects = struct {
+        network: *backend.Backend,
+        endpoint: []const u8,
+        trace_dir: std.Io.Dir,
+        image_calls: std.atomic.Value(usize) = .init(0),
+        catalog_calls: std.atomic.Value(usize) = .init(0),
+        key: [64]u8 = undefined,
+        key_len: usize = 0,
+        fn imageTransport(self: *@This()) agent.CompletionTransport {
+            return .{ .context = self, .perform_fn = image, .signal_cancellation_fn = signal };
+        }
+        fn serverRecordedImage(self: *@This()) !bool {
+            const bytes = self.trace_dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(1024 * 1024)) catch |err| return if (err == error.FileNotFound) false else err;
+            defer std.testing.allocator.free(bytes);
+            return std.mem.indexOf(u8, bytes, "\"kind\":\"image\"") != null;
+        }
+        fn image(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, output: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!std.mem.eql(u8, request.url, models.metask_images_generations_url)) return error.InvalidHttp;
+            _ = self.image_calls.fetchAdd(1, .monotonic);
+            // This test effect is the only target rewrite. No real credential
+            // or formal service is used; production Models supplies the target.
+            return self.network.transport().perform(.{ .url = self.endpoint, .body = request.body, .headers = request.headers }, cancellation, output);
+        }
+        fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const transport = self.network.transport();
+            transport.signal_cancellation_fn.?(transport.context, cancellation);
+        }
+        fn catalog(context: *anyopaque, request: catalog_transport.Request, output: []u8) catalog_transport.TransportError!catalog_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .models or !std.mem.eql(u8, request.bearer orelse "", "synthetic-image-key")) return error.ProtocolFailed;
+            _ = self.catalog_calls.fetchAdd(1, .monotonic);
+            const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"fixture-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        fn account(_: *anyopaque, _: account_api.TransportRequest, _: []u8) account_api.TransportError!account_api.TransportResponse {
+            @panic("canonical image fixture must not dispatch Account HTTP");
+        }
+        fn notify(_: *anyopaque) void {}
+        fn generate(_: *anyopaque, slot: *[ports.credential_slot_bytes]u8) anyerror!void {
+            @memcpy(slot, ports.credential_slot_prefix ++ ("1" ** 32));
+        }
+        fn store(context: *anyopaque, _: []const u8, key: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (key.len > self.key.len) return error.CapacityReached;
+            @memcpy(self.key[0..key.len], key);
+            self.key_len = key.len;
+        }
+        fn get(context: *anyopaque, _: []const u8, output: []u8) anyerror!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.key_len == 0) return null;
+            @memcpy(output[0..self.key_len], self.key[0..self.key_len]);
+            return output[0..self.key_len];
+        }
+        fn delete(context: *anyopaque, _: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.crypto.secureZero(u8, &self.key);
+            self.key_len = 0;
+        }
+        fn vault(self: *@This()) ports.CredentialVault {
+            return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+        }
+    };
+
+    const History = struct {
+        fn commit(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
+            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
+            store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
+            return .committed;
+        }
+        fn confirmed(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
+            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
+            return store.commitConfirmed(std.testing.allocator, bytes);
+        }
+        fn resolve(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
+            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
+            return store.resolveCommit(std.testing.allocator, bytes);
+        }
+        fn port(store: *task_api.history.FileStore) task_api.history.Capability {
+            return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
+        }
+    };
+
+    fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8) !void {
+        try std.testing.expect(control.createCustomProviderWithCredential("synthetic-dialogue-key", .{
+            .display_name = "Local dialogue fixture",
+            .protocol = .anthropic_messages,
+            .normalized_base_url = endpoint,
+        }).accepted);
+        const created = control.modelsView().custom_providers[0];
+        const id = try std.testing.allocator.dupe(u8, created.id);
+        defer std.testing.allocator.free(id);
+        const model = "claude-sonnet-4-20250514";
+        try std.testing.expect(control.submitCustomProviderCommand(.{ .add_custom_model = .{
+            .source_id = id,
+            .expected_provider_revision = created.provider_revision,
+            .expected_catalog_generation = created.catalog_generation,
+            .model = .{ .id = model },
+        } }).accepted);
+        const configured = control.modelsView().custom_providers[0];
+        const command: models.CustomModelTestCommand = .{
+            .model = .{ .source_id = id, .model_id = model },
+            .expected_provider_revision = configured.provider_revision,
+            .expected_source_generation = configured.source_generation,
+            .expected_catalog_generation = configured.catalog_generation,
+        };
+        var candidate = switch (control.beginCustomProviderProbe(command)) {
+            .ready => |value| value,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        candidate.deinit();
+        try std.testing.expect(control.completeCustomModelTest(command, true).accepted);
+        const view = control.modelsView();
+        const ready = view.custom_providers[0];
+        try std.testing.expect(control.selectModelsDefault(.{
+            .selection = .{ .source_id = id, .model_id = model },
+            .expected_selection_revision = view.selection_revision,
+            .expected_source_generation = ready.source_generation,
+            .expected_catalog_generation = ready.catalog_generation,
+        }).accepted);
+    }
+
+    fn finish(control: *control_api.Runtime, task_id: u64, id: u64, stop_effects: ?*Effects) !void {
+        const task = control.task_runtime.find(task_id).?;
+        var answered: ?u64 = null;
+        var stopped = false;
+        for (0..10000) |_| {
+            try control.drainAgentEvents();
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            if (access.pendingUiObservation()) |request| if (answered != request.request_id) {
+                try control.respondUi(task_id, id, request.request_id, .{ .permission = .allow_once });
+                answered = request.request_id;
+            };
+            if (stop_effects) |effects| if (!stopped and effects.image_calls.load(.acquire) != 0 and try effects.serverRecordedImage()) {
+                try control.cancel(task_id, id);
+                stopped = true;
+            };
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
+                const run = task_api.testing.state_module.findRun(task.durable.runs, id).?;
+                const terminal = task_api.testing.state_module.productTerminalFacts(run) orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(if (stop_effects != null) task_api.RunOutcome.cancelled else .completed, terminal.outcome);
+                try std.testing.expect(run.image_execution == null);
+                try std.testing.expect(answered != null);
+                return;
+            }
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "GenerateImage canonical Product Run freezes authorization and restores without image authority" {
+    try expectCanonicalImageProduct("success");
+}
+
+test "GenerateImage canonical Product stop joins image HTTP and releases its owned preparation" {
+    try expectCanonicalImageProduct("hold");
+}
+
+fn expectCanonicalImageProduct(mode: []const u8) !void {
+    var h: Harness = undefined;
+    try h.init(mode, .{ .timeout_ms = 10000 });
+    defer h.deinit();
+    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir };
+    var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    var platform: image_product.account_api.TestSupport.Platform = .{};
+    image_product.account_api.TestSupport.attachPlatform(&account, &platform);
+    defer {
+        image_product.account_api.TestSupport.detachPlatform(&account);
+        account.deinit();
+    }
+    var authenticated = try image_product.account_api.TestSupport.prepareAuthenticated(&account, "image-account", "Image User", "synthetic-image-key", "synthetic-refresh-key", 1000);
+    defer authenticated.deinit();
+    account.commit(&authenticated);
+    var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
+    defer history.deinit();
+    var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
+    defer checkpoints.deinit();
+    var configuration = image_product.fixture_api.productControlConfiguration();
+    configuration.task_persistence = image_product.History.port(&history);
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    configuration.directories.canonical_user_home = h.root;
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    var control_live = true;
+    defer if (control_live) control.deinit();
+    try control.startCustomProviders(h.root, effects.vault());
+    try image_product.configureDialogue(&control, h.fixture.provider_endpoint);
+    var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
+    coordinator.setCompletionTransport(effects.imageTransport());
+    var coordinator_live = true;
+    defer if (coordinator_live) {
+        control.setImageRunPreparation(null);
+        coordinator.shutdown();
+        coordinator.drain();
+    };
+    try std.testing.expect(coordinator.refreshCatalog().accepted);
+    for (0..5000) |_| {
+        coordinator.drain();
+        const current = control.modelsManagement().imageView();
+        if (current.catalog_state == .ready) break;
+        if (current.catalog_state != .loading) {
+            std.debug.print("image catalog fixture rejected state={s} error={s}\n", .{ @tagName(current.catalog_state), @tagName(current.error_code) });
+            return error.TestUnexpectedResult;
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    const view = control.modelsManagement().imageView();
+    try std.testing.expect(control.custom_providers.configureMetaskImageSelection("image-account", .{
+        .selection = .{ .source_id = image_product.models.metask_source_id, .model_id = "fixture-image" },
+        .expected_selection_revision = view.selection_revision,
+        .expected_catalog_generation = view.catalog_generation,
+    }).accepted);
+    control.setImageRunPreparation(coordinator.imageRunPreparation());
+    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual });
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const first_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
+    const task = control.task_runtime.find(task_id).?;
+    try std.testing.expect(task.durable.runs[0].?.image_execution != null);
+    // The Core cannot send the image request before manual once approval.
+    try std.testing.expectEqual(@as(usize, 0), effects.image_calls.load(.acquire));
+    const current_image = control.modelsManagement().imageView();
+    try std.testing.expect(control.custom_providers.configureMetaskImageSelection("image-account", .{
+        .selection = null,
+        .expected_selection_revision = current_image.selection_revision,
+        .expected_catalog_generation = current_image.catalog_generation,
+    }).accepted);
+    var logout = image_product.account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
+    defer logout.deinit();
+    account.commit(&logout);
+    coordinator.authorizationChanged();
+    const cancelled = std.mem.eql(u8, mode, "hold");
+    try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
+    try std.testing.expect(task.durable.checkpoint != null);
+    try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
+    const trace = try h.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"image\""));
+    try std.testing.expectEqual(@as(usize, 0), count(trace, "fixture_error"));
+    try std.testing.expectEqual(!cancelled, std.mem.indexOf(u8, trace, "\\\"status\\\":\\\"saved\\\"") != null);
+    const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(png);
+    const directory: ?std.Io.Dir = h.tmp.dir.openDir(std.testing.io, "generated-images", .{ .iterate = true }) catch |err| if (cancelled and err == error.FileNotFound) null else return err;
+    var files: usize = 0;
+    if (directory) |dir| {
+        defer dir.close(std.testing.io);
+        var entries = dir.iterate();
+        while (try entries.next(std.testing.io)) |entry| {
+            const bytes = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(1024));
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqualSlices(u8, png, bytes);
+            files += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, if (cancelled) 0 else 1), files);
+    var snapshot: [256 * 1024]u8 = undefined;
+    const encoded = try control.writeSnapshot(&snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-image-key") == null);
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
+    try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
+    // Restart Product from its real history and opaque canonical checkpoint.
+    // The same fixed isolated tool set makes this a legal restore; B0.2's
+    // old-tool-set migration report is not altered or bypassed here.
+    control.setImageRunPreparation(null);
+    coordinator.shutdown();
+    coordinator.drain();
+    coordinator_live = false;
+    control.shutdownExecutor();
+    try control.drainAgentEvents();
+    control.deinit();
+    control_live = false;
+    const restored = (try history.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "synthetic-image-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "image_execution") == null);
+    configuration.task_persistence.restored_bytes = restored;
+    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    control_live = true;
+    try control.startCustomProviders(h.root, effects.vault());
+    coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setCompletionTransport(effects.imageTransport());
+    coordinator_live = true;
+    control.setImageRunPreparation(coordinator.imageRunPreparation());
+    const recovered = control.task_runtime.find(task_id).?;
+    try std.testing.expect(!recovered.runtime.hasAttachedSession());
+    try std.testing.expect(recovered.durable.runs[0].?.image_execution == null);
+    _ = try control.restoreTaskConversation(task_id, recovered.durable.binding_epoch);
+    for (0..10000) |_| {
+        try control.drainAgentEvents();
+        if (recovered.runtime.restore_job == null and !recovered.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    if (recovered.runtime.last_restore_failure) |failure| std.debug.print("image Product restore failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(recovered.runtime.last_restore_failure == null);
+    try std.testing.expect(recovered.runtime.hasAttachedSession());
+    const second_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
+    try std.testing.expect(recovered.durable.runs[1].?.image_execution == null);
+    try image_product.finish(&control, task_id, second_id, null);
+    try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));
+    const final_trace = try h.trace();
+    defer std.testing.allocator.free(final_trace);
+    try std.testing.expectEqual(@as(usize, 0), count(final_trace, "fixture_error"));
+    try std.testing.expect(std.mem.indexOf(u8, final_trace, "unavailable") != null);
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
+    try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
+}
