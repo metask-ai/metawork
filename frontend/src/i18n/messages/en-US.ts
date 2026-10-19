@@ -1184,6 +1184,25 @@ export const enUS = {
   "settings.default_model_for_new_tasks": "Default model for new tasks",
   "settings.current_default": "Current",
   "settings.provider": "Provider",
+  "settings.image_title": "Image model",
+  "settings.image_help":
+    "Choose a Metask model for image generation, separately from your chat model.",
+  "settings.image_billing":
+    "Generation may incur charges. Selecting a model does not generate an image. Changes apply to the next run; only PNG files are saved.",
+  "settings.image_choose": "Select an image model",
+  "settings.image_clear": "Clear selection",
+  "settings.image_selected": "Selected:",
+  "settings.image_unselected": "No image model selected.",
+  "settings.image_needs_auth":
+    "Sign in to Metask to sync and choose an image model.",
+  "settings.image_loading": "Syncing image models…",
+  "settings.image_catalog_failed":
+    "The image catalog is unavailable. Sync again to retry.",
+  "settings.image_no_models": "No image models are available in this catalog.",
+  "settings.image_unavailable": "The selected image model is unavailable:",
+  "settings.image_saving": "Saving image model settings…",
+  "settings.image_save_failed":
+    "The update could not be confirmed. Check the current settings before trying again.",
   "settings.provider_help":
     "Choose the service, then select one of its available models.",
   "settings.choose_provider": "Choose a provider",

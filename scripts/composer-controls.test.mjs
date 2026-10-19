@@ -361,6 +361,16 @@ const readySettingsAccount = {
 };
 
 const readySettingsModels = {
+  imageGeneration: {
+    catalogState: "unavailable",
+    catalogGeneration: "0",
+    models: [],
+    selection: null,
+    selectionRevision: "0",
+    selectionAvailable: false,
+    errorCode: "catalog_unavailable",
+  },
+
   availability: "ready",
   persistenceHealth: "ready",
   providers: [
