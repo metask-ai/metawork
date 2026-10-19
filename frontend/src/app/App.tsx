@@ -1,7 +1,5 @@
-import {
-  taskDraftVersion,
-  newComposerOperationId,
-} from "../features/composer/drafts.ts";
+import { Message } from "../components/ai/Message.tsx";
+import { newComposerOperationId } from "../features/composer/drafts.ts";
 import {
   useCallback,
   useEffect,
@@ -105,8 +103,8 @@ import {
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
 import {
-  submitTaskInstruction,
-  type EnsureTaskContinuationResult,
+  TaskSubmissionSession,
+  taskHasSubmission,
 } from "../features/composer/submitTaskInstruction.ts";
 import {
   modelDisplayLabel,
@@ -180,8 +178,6 @@ import {
   modelOptionId,
 } from "./new-task-model-selection.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
-import { SkillPreparationCoordinator } from "./skill-preparation.ts";
-import { ConversationRecoveryCoordinator } from "./conversation-recovery.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 
 function errorText(error: unknown) {
@@ -217,7 +213,6 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
 }
 
 const automaticWorkspaceOptionId = "automatic";
-const continuationWaitTimeoutMs = 10_000;
 
 type FileChangeDiffUiState =
   | { phase: "idle"; diff: null; requestGeneration?: undefined }
@@ -249,6 +244,16 @@ function orderedFileChanges(changes: FileChangeView[]): FileChangeView[] {
     return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
   });
 }
+
+type LocalTaskSubmission = {
+  operationId: string;
+  taskId: string | null;
+  scope: string;
+  generation: string;
+  draft: ComposerDraft;
+  state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
+  reason?: MutationReason;
+};
 
 export default function App() {
   const { t } = useI18n();
@@ -370,8 +375,10 @@ export default function App() {
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
-  const conversationRecovery = useRef(new ConversationRecoveryCoordinator());
-  const skillPreparation = useRef(new SkillPreparationCoordinator());
+  const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
+  const [localSubmissions, setLocalSubmissions] = useState<
+    LocalTaskSubmission[]
+  >([]);
 
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
@@ -869,21 +876,13 @@ export default function App() {
       : Promise.reject(new Error("Workbench connection is unavailable"));
   }, []);
 
-  // Correlation metadata only: no input payload, retry, or execution callback.
-  const inputReceipts = useRef(
-    new Map<string, { operationId: string; draftVersion: string | null }>(),
-  );
   const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
-    newTaskDraftActive ||
-    (activeTask?.lifecycle === "open" &&
-      (activeTask.activeOperation?.kind === "run" ||
-        inputContinuation !== null ||
-        activeTask.continuationAvailable ||
-        activeTask.continuationRecoveryAvailable) &&
-      !activeTask.archived);
+    newTaskDraftActive || Boolean(activeTask?.inputAcceptance.available);
   const taskOperationInFlight = Boolean(
-    activeTask?.activeOperation || inputContinuation,
+    activeTask?.activeOperation ||
+    inputContinuation ||
+    activeTask?.inputSubmissions.some((input) => input.state === "waiting"),
   );
   const composerWorkspaceId =
     activeTask?.workspaceId || workbench.draftWorkspaceId;
@@ -925,51 +924,30 @@ export default function App() {
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent &&
     (composerDraft.kind !== "skill" || !skillCatalogBusy);
-  const sendingToRun =
-    !newTaskDraftActive && activeTask?.activeOperation?.kind === "run";
-  const skillRunInFlight =
-    sendingToRun &&
-    activeTask?.runs.some(
-      (run) =>
-        run.id === activeTask.activeOperation?.id && run.input.kind === "skill",
+  const localSubmissionCount = localSubmissions.filter(
+    (entry) =>
+      entry.scope === composerDraftScope &&
+      (entry.state === "submitting" || entry.state === "accepted"),
+  ).length;
+  const taskIdentityPending =
+    newTaskDraftActive &&
+    submissionSessions.current.has(
+      `${bridgeGenerationRef.current}:${composerDraftScope}`,
     );
+  const canCreateTask =
+    (snapshot.newTaskAdmission.available ||
+      newTaskModelState.intent !== null) &&
+    newTaskWorkspaceReady &&
+    newTaskModelState.valid;
   const canSubmit =
-    !pendingTaskSelection.current &&
     taskCanCompose &&
     composerContentReady &&
     !attachmentBusy &&
-    !taskMutationDisabled &&
+    !bridgeUnavailable &&
     !workspaceBusy &&
-    (sendingToRun
-      ? Boolean(
-          activeTask?.inputReady &&
-          composerDraft.kind === "text" &&
-          !(activeTask.id in cancelPending) &&
-          composerWorkspace?.authorization === "available",
-        )
-      : activeTask?.modelIntent?.state !== "outcome_unknown" &&
-        (!newTaskDraftActive ||
-          snapshot.newTaskAdmission.available ||
-          newTaskModelState.intent !== null) &&
-        (!newTaskDraftActive ||
-          (newTaskWorkspaceReady && newTaskModelState.valid)) &&
-        !taskOperationInFlight &&
-        (newTaskDraftActive ||
-          activeTask?.skillCatalog.availability !== "loading"));
-  const inputDisabledReason: MessageId | undefined = inputContinuation
-    ? "input.continuation_wait"
-    : taskOperationInFlight
-      ? activeTask?.currentRunPhase === "stopping" ||
-        Boolean(activeTask && activeTask.id in cancelPending)
-        ? "input.stopping"
-        : skillRunInFlight
-          ? "input.skill_run"
-          : composerDraft.kind !== "text"
-            ? "input.text_only"
-            : !activeTask?.inputReady
-              ? "input.not_ready"
-              : undefined
-      : undefined;
+    localSubmissionCount < 64 &&
+    (!newTaskDraftActive || taskIdentityPending || canCreateTask);
+  const inputDisabledReason: MessageId | undefined = undefined;
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
@@ -1039,54 +1017,21 @@ export default function App() {
     const current = new WorkbenchConnection(client, {
       onSnapshot: (next, generation) => {
         if (!cancelled) {
-          conversationRecovery.current.observeSnapshot(next, generation);
-          skillPreparation.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
           latestSnapshotRef.current = next;
           publishApprovalObservations(
             approvalRequestsRef.current.observe(next, generation),
           );
           setApprovalRequests(approvalRequestsRef.current.view());
-          for (const [taskId, pending] of inputReceipts.current) {
-            const task = next.tasks.find((item) => item.id === taskId);
-            if (!task) {
-              if (!pendingTaskDraftRetention.current.has(taskId))
-                inputReceipts.current.delete(taskId);
-              continue;
-            }
-            const receipt = task.sendInputResult;
-            if (receipt?.operationId !== pending.operationId) continue;
-            const adopted =
-              receipt.outcome === "unknown" &&
-              task.runs.some((run) =>
-                run.additionalInputs.some(
-                  (message) =>
-                    message.operationId === pending.operationId &&
-                    message.state === "adopted",
+          setLocalSubmissions((entries) =>
+            entries.filter(
+              (entry) =>
+                !taskHasSubmission(
+                  next.tasks.find((task) => task.id === entry.taskId),
+                  entry.operationId,
                 ),
-              );
-            if (
-              receipt.outcome === "started" ||
-              receipt.outcome === "submitted" ||
-              adopted
-            ) {
-              inputReceipts.current.delete(taskId);
-              setStatuses((current) =>
-                current[`task:${taskId}`]?.id === "input.unknown"
-                  ? publishStatus(
-                      current,
-                      quietStatus("input.submitted", { scope: "task", taskId }),
-                    )
-                  : current,
-              );
-              if (
-                pending.draftVersion !== null &&
-                taskDraftVersion(taskId) === pending.draftVersion
-              )
-                taskDrafts.clearDraft(taskId);
-            } else if (receipt.outcome === "rejected")
-              inputReceipts.current.delete(taskId);
-          }
+            ),
+          );
           const projectedTaskIds = next.tasks.map((task) => task.id);
           const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
@@ -1143,8 +1088,14 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
-          conversationRecovery.current.resetGeneration(generation);
-          skillPreparation.current.resetGeneration(generation);
+          setLocalSubmissions((entries) =>
+            entries.map((entry) =>
+              entry.state === "submitting" || entry.state === "accepted"
+                ? { ...entry, state: "unknown" }
+                : entry,
+            ),
+          );
+          submissionSessions.current.clear();
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           latestSnapshotRef.current = null;
@@ -1172,8 +1123,6 @@ export default function App() {
     window.addEventListener("pagehide", onPageHide);
     return () => {
       cancelled = true;
-      conversationRecovery.current.dispose();
-      skillPreparation.current.dispose();
       if (connection.current === current) connection.current = null;
       setBridgeReady(false);
       setRootRenderBlockReason(null);
@@ -1213,8 +1162,6 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     taskPanelOpeners.current.clear();
-    conversationRecovery.current.cancelExceptTask(activeTask?.id ?? null);
-    skillPreparation.current.cancelExceptTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
 
   useEffect(() => {
@@ -1328,19 +1275,6 @@ export default function App() {
       delete next[scope];
       return next;
     });
-  }
-
-  function moveTaskPendingOperation(from: string, to: string) {
-    if (!taskPendingScopes.current.move(from, to)) return false;
-    setTaskPending((current) => {
-      const operation = current[from];
-      if (!operation) return current;
-      const next = { ...current };
-      delete next[from];
-      next[to] = operation;
-      return next;
-    });
-    return true;
   }
 
   function setCancelPendingForTask(taskId: string, pending: boolean) {
@@ -1807,6 +1741,9 @@ export default function App() {
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
+    submissionSessions.current.delete(
+      `${bridgeGenerationRef.current}:new-task:unscoped`,
+    );
     setNewTaskApprovalOverride(null);
     setNewTaskRequestedModel(null);
     setRoute("workbench");
@@ -1842,81 +1779,6 @@ export default function App() {
     });
   }
 
-  async function ensureTaskContinuation(
-    taskId: string,
-    bindingEpoch: string,
-  ): Promise<EnsureTaskContinuationResult> {
-    if (activeTaskIdRef.current !== taskId)
-      return {
-        kind: "failed",
-        error: new Error("The active Task changed before conversation restore"),
-      };
-    const task = workbench.snapshot.tasks.find(
-      (candidate) => candidate.id === taskId,
-    );
-    if (!task || task.binding.epoch !== bindingEpoch)
-      return {
-        kind: "failed",
-        error: new Error("The Task binding is no longer current"),
-      };
-    if (task.continuationAvailable)
-      return { kind: "ready", bindingEpoch: task.binding.epoch };
-    if (
-      task.continuationUnavailableReason !== "session_recovery_required" &&
-      task.continuationUnavailableReason !== "session_recovery_failed"
-    )
-      return {
-        kind: "failed",
-        error: new Error("Conversation continuation is unavailable"),
-      };
-    const generation = bridgeGenerationRef.current;
-    if (generation === "0")
-      return {
-        kind: "failed",
-        error: new Error("The Host connection is unavailable"),
-      };
-    let restored;
-    try {
-      restored = await client.restoreTask(taskId, bindingEpoch);
-    } catch (error) {
-      return { kind: "failed", error };
-    }
-    if (!restored.accepted)
-      return { kind: "rejected", reason: restored.reason };
-    const attempt = { taskId, attemptId: restored.attemptId, generation };
-    const completion = await conversationRecovery.current.waitForAttempt({
-      ...attempt,
-      timeoutMs: continuationWaitTimeoutMs,
-    });
-    if (completion.kind === "ready") {
-      if (activeTaskIdRef.current !== taskId)
-        return {
-          kind: "failed",
-          error: new Error(
-            "The active Task changed after conversation restore",
-          ),
-        };
-      return completion;
-    }
-    if (completion.kind === "timeout") {
-      await refreshSnapshot().catch(() => undefined);
-      const reconciled = conversationRecovery.current.inspectLatest(attempt);
-      if (reconciled.kind === "ready") {
-        if (activeTaskIdRef.current !== taskId)
-          return {
-            kind: "failed",
-            error: new Error(
-              "The active Task changed after conversation restore",
-            ),
-          };
-        return reconciled;
-      }
-      if (reconciled.kind === "failed" || reconciled.kind === "cancelled")
-        return { kind: "failed", error: reconciled.error };
-    }
-    return { kind: "failed", error: completion.error };
-  }
-
   async function submitRun() {
     if (
       !canSubmit ||
@@ -1924,276 +1786,126 @@ export default function App() {
       attachmentRemoval.current.busy
     )
       return;
-    const submitted = composerDraft;
+    const submitted = composerDraftRef.current;
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
+    const scope = composerDraftScope;
+    const generation = bridgeGenerationRef.current;
     const operationId = newComposerOperationId();
-    const rememberInput = (taskId: string, id: string) => {
-      inputReceipts.current.set(taskId, {
-        operationId: id,
-        draftVersion:
-          taskDrafts.getDraft(taskId) === submitted
-            ? taskDraftVersion(taskId)
-            : null,
-      });
-    };
-    if (!newTaskDraftActive && activeTask?.activeOperation?.kind === "run") {
-      const task = activeTask;
-      const runId = task.activeOperation!.id;
-      const generation = bridgeGenerationRef.current;
-      const scope = `task:${task.id}`;
-      if (!beginTaskPendingOperation(scope, "run")) return;
-      rememberInput(task.id, operationId);
-      try {
-        let receipt;
-        try {
-          receipt = await client.sendInput(
-            operationId,
-            task.id,
-            task.binding.epoch,
-            { kind: "run", runId },
-            input,
-          );
-        } catch {
-          await refreshSnapshot().catch(() => undefined);
-          const observed = latestSnapshotRef.current?.tasks.find(
-            (item) => item.id === task.id,
-          )?.sendInputResult;
-          if (observed?.operationId === operationId) receipt = observed;
-        }
-        if (bridgeGenerationRef.current !== generation) return;
-        if (receipt?.outcome === "submitted") {
-          if (inputReceipts.current.get(task.id)?.operationId === operationId)
-            inputReceipts.current.delete(task.id);
-          taskDrafts.acknowledgeDraft(task.id, submitted);
-          setStatus(
-            quietStatus("input.submitted", { scope: "task", taskId: task.id }),
-          );
-        } else if (receipt?.outcome === "rejected") {
-          if (inputReceipts.current.get(task.id)?.operationId === operationId)
-            inputReceipts.current.delete(task.id);
-          setStatus(
-            attentionStatus(mutationReasonMessageId(receipt.reason), {
-              scope: "task",
-              taskId: task.id,
-            }),
-          );
-        } else
-          setStatus(
-            attentionStatus("input.unknown", {
-              scope: "task",
-              taskId: task.id,
-            }),
-          );
-        await refreshSnapshot().catch(() => undefined);
-      } finally {
-        endTaskPendingOperation(scope);
-      }
-      return;
-    }
-    const expectedLastRunId =
-      !newTaskDraftActive && activeTask
-        ? activeTask.runs.reduce<string | null>(
-            (last, run) =>
-              last === null || BigInt(run.id) > BigInt(last) ? run.id : last,
-            null,
-          )
-        : null;
-    const existingTaskId = activeTask?.id ?? null;
-    const workspace =
-      newTaskDraftActive && composerWorkspace
-        ? {
-            kind: "manual" as const,
-            workspaceId: composerWorkspace.id,
-            expectedWorkspaceEpoch: composerWorkspace.epoch,
-          }
-        : { kind: "automatic" as const };
-    const submittedDraftId = newTaskDraftId;
-    const submittedScope = composerDraftScope;
-    const submittedGeneration = bridgeGenerationRef.current;
-    let pendingScope = currentTaskScope;
-    if (!beginTaskPendingOperation(pendingScope, "run")) return;
-    // Cache the exact submitted object. Only this version may be cleared by
-    // the acknowledgement; edits made while awaiting it belong to the user.
-    if (submittedDraftId) newTaskDrafts.setDraft(submittedDraftId, submitted);
-    else if (existingTaskId) taskDrafts.setDraft(existingTaskId, submitted);
-    try {
-      let result = await submitTaskInstruction({
-        client,
-        operationId,
-        expectedLastRunId,
-        onBeforeSend: rememberInput,
-        taskId: existingTaskId,
-        workspace,
-        expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
-        expectedSelectionRevision:
-          snapshot.newTaskAdmission.activeSelectionRevision,
-        modelSelection: newTaskDraftActive ? newTaskModelState.intent : null,
-        expectedBindingEpoch: activeTask?.binding.epoch ?? null,
-        approvalMode: newTaskApprovalMode,
-        input,
-        continuationRecoveryAvailable: Boolean(
-          activeTask?.continuationRecoveryAvailable,
-        ),
-        ensureContinuation: ensureTaskContinuation,
-        ensureSkills: (taskId, bindingEpoch) =>
-          skillPreparation.current.wait(
-            { taskId, bindingEpoch, generation: bridgeGenerationRef.current },
-            continuationWaitTimeoutMs,
+    const draftId = newTaskDraftId;
+    const taskId = !newTaskDraftActive ? (activeTask?.id ?? null) : null;
+    const key = `${generation}:${scope}`;
+    const audience = attachmentAudience.current;
+    let session = submissionSessions.current.get(key);
+    if (!session) {
+      session = new TaskSubmissionSession({
+        taskId,
+        current: () => bridgeGenerationRef.current === generation,
+        send: (id, target, value) => client.sendInput(id, target, value),
+        stop: (target) => client.stopTask(target),
+        create: () =>
+          client.createTask(
+            composerWorkspace
+              ? {
+                  kind: "manual",
+                  workspaceId: composerWorkspace.id,
+                  expectedWorkspaceEpoch: composerWorkspace.epoch,
+                }
+              : { kind: "automatic" },
+            snapshot.newTaskAdmission.activeGeneration,
+            snapshot.newTaskAdmission.activeSelectionRevision,
+            newTaskModelState.intent,
+            input.kind === "skill" ? input.catalogRevision : null,
+            input.kind === "skill" ? input.selectionRevision : null,
+            newTaskApprovalMode,
           ),
-        onTaskCreated: (taskId) => {
+        onCreated: (id) => {
+          pendingTaskDraftRetention.current.add(id);
+          if (
+            composerDraftScopeRef.current !== scope ||
+            attachmentAudience.current !== audience ||
+            submissionSessions.current.get(key) !== session
+          )
+            return;
           setNewTaskApprovalOverride(null);
           setNewTaskRequestedModel(null);
-          pendingTaskDraftRetention.current.add(taskId);
-          taskDrafts.setDraft(
-            taskId,
-            submittedDraftId
-              ? newTaskDrafts.getDraft(submittedDraftId)
-              : submitted,
-          );
-          if (
-            composerDraftScopeRef.current === submittedScope &&
-            bridgeGenerationRef.current === submittedGeneration
-          ) {
-            pendingTaskSelection.current = taskId;
-            if (submittedDraftId)
-              pendingTaskDraftSource.current = {
-                taskId,
-                draftId: submittedDraftId,
-                generation: submittedGeneration,
-              };
-          }
-          const taskScope = `task:${taskId}`;
-          if (moveTaskPendingOperation(pendingScope, taskScope))
-            pendingScope = taskScope;
+          pendingTaskSelection.current = id;
+          if (draftId)
+            pendingTaskDraftSource.current = {
+              taskId: id,
+              draftId,
+              generation,
+            };
         },
       });
-      // Creation can precede the first Snapshot containing the Task. Until
-      // selection, keep the visible New task draft as the editing authority.
-      const source = pendingTaskDraftSource.current;
-      if (
-        "taskId" in result &&
-        source?.taskId === result.taskId &&
-        source.generation === bridgeGenerationRef.current
-      ) {
-        const latest = newTaskDrafts.currentDraft(source.draftId);
-        if (latest) taskDrafts.setDraft(result.taskId, latest);
-      }
-      if (result.kind === "create_failed") {
-        if (
-          await reconcileCommandTimeout(result.error, "operation.task_create", {
-            scope: "workspace",
-            workspaceId: composerWorkspaceId ?? null,
-          })
-        )
-          return;
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
-            "task.create_failed",
-            { scope: "workspace", workspaceId: composerWorkspaceId ?? null },
-            {
-              diagnostic: errorText(result.error),
-            },
-          ),
-        );
-        return;
-      }
-      if (result.kind === "create_rejected") {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason), {
-            scope: "workspace",
-            workspaceId: composerWorkspaceId,
-          }),
-        );
-        return;
-      }
-      if (result.kind === "continuation_rejected") {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason), {
-            scope: "task",
-            taskId: result.taskId,
-          }),
-        );
-        return;
-      }
-      if (result.kind === "continuation_failed") {
-        if (
-          await reconcileCommandTimeout(result.error, "operation.restore", {
-            scope: "task",
-            taskId: result.taskId,
-          })
-        )
-          return;
-        setStatus(
-          attentionStatus(
-            "recovery.start_failed",
-            { scope: "task", taskId: result.taskId },
-            { diagnostic: errorText(result.error) },
-          ),
-        );
-        await refreshSnapshot().catch(() => undefined);
-        return;
-      }
-      if (result.kind === "input_unknown") {
-        setStatus(
-          attentionStatus("input.unknown", {
-            scope: "task",
-            taskId: result.taskId,
-          }),
-        );
-        await refreshSnapshot().catch(() => undefined);
-        return;
-      }
-      if (result.kind === "run_failed") {
-        await refreshSnapshot().catch(() => undefined);
-        const failedTaskId = result.taskId;
-        const receipt = latestSnapshotRef.current?.tasks.find(
-          (task) => task.id === failedTaskId,
-        )?.sendInputResult;
-        if (
-          receipt?.operationId === operationId &&
-          receipt.outcome === "started"
-        ) {
-          result = {
-            kind: "started",
-            taskId: result.taskId,
-            created: result.created,
-          };
-        } else {
-          setStatus(
-            attentionStatus("input.unknown", {
-              scope: "task",
-              taskId: result.taskId,
-            }),
-          );
-          return;
-        }
-      }
-      if (result.kind === "run_rejected") {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason), {
-            scope: "task",
-            taskId: result.taskId,
-          }),
-        );
-        return;
-      }
-      if (bridgeGenerationRef.current === submittedGeneration) {
-        taskDrafts.acknowledgeDraft(result.taskId, submitted);
-        if (submittedDraftId)
-          newTaskDrafts.acknowledgeDraft(submittedDraftId, submitted);
-      }
-      await refreshAfterCommit("run.started", "operation.run_submit", {
-        scope: "task",
-        taskId: result.taskId,
-      });
-    } finally {
-      endTaskPendingOperation(pendingScope);
+      submissionSessions.current.set(key, session);
     }
+    // The submission owns this draft now. Responses never clear a later draft.
+    if (draftId) newTaskDrafts.clearDraft(draftId);
+    else if (taskId) taskDrafts.clearDraft(taskId);
+    composerDraftRef.current = emptyComposerDraft();
+    setLocalSubmissions((entries) => [
+      ...entries
+        .filter(
+          (entry) =>
+            entry.scope !== scope ||
+            entry.state === "submitting" ||
+            entry.state === "accepted" ||
+            entry.state === "unknown",
+        )
+        .slice(-63),
+      {
+        operationId,
+        taskId,
+        scope,
+        generation,
+        draft: submitted,
+        state: "submitting",
+      },
+    ]);
+    const result = await session.submit(
+      operationId,
+      input,
+      (target) => {
+        setLocalSubmissions((entries) =>
+          entries.map((entry) =>
+            entry.operationId === operationId
+              ? { ...entry, taskId: target }
+              : entry,
+          ),
+        );
+      },
+      () => {
+        setLocalSubmissions((entries) =>
+          entries.map((entry) =>
+            entry.operationId === operationId
+              ? { ...entry, state: "cancelled" }
+              : entry,
+          ),
+        );
+      },
+    );
+    if (bridgeGenerationRef.current !== generation) return;
+    const state =
+      result.kind === "accepted"
+        ? "accepted"
+        : result.kind === "cancelled"
+          ? "cancelled"
+          : result.kind === "unknown"
+            ? "unknown"
+            : "failed";
+    setLocalSubmissions((entries) =>
+      entries.map((entry) =>
+        entry.operationId === operationId
+          ? {
+              ...entry,
+              state,
+              reason: "reason" in result ? result.reason : undefined,
+            }
+          : entry,
+      ),
+    );
+    await refreshSnapshot().catch(() => undefined);
   }
 
   async function addAttachments(
@@ -2207,8 +1919,6 @@ export default function App() {
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
       !taskCanCompose ||
-      taskMutationDisabled ||
-      pendingTaskSelection.current !== null ||
       composerDraftRef.current.kind === "skill"
     ) {
       setAttachmentError("input_unavailable");
@@ -2368,47 +2078,42 @@ export default function App() {
   }
 
   async function cancelRun() {
-    if (
-      viewSyncFailed ||
-      !bridgeReady ||
-      !activeTask ||
-      cancelPendingTasks.current.has(activeTask.id) ||
-      activeTask.currentRunId === "0" ||
-      (activeTask.currentRunPhase === null && !inputContinuation)
-    )
-      return;
-    const taskId = activeTask.id;
-    setCancelPendingForTask(taskId, true);
+    if (bridgeUnavailable) return;
+    const taskId = !newTaskDraftActive ? activeTask?.id : undefined;
+    const session = submissionSessions.current.get(
+      `${bridgeGenerationRef.current}:${composerDraftScope}`,
+    );
+    if (!taskId && !session) return;
+    if (taskId && cancelPendingTasks.current.has(taskId)) return;
+    if (taskId) setCancelPendingForTask(taskId, true);
     try {
       try {
-        await client.cancel(
-          activeTask.id,
-          inputContinuation?.id ?? activeTask.currentRunId,
-        );
+        if (session) await session.stop();
+        else if (taskId) await client.stopTask(taskId);
       } catch (error) {
+        const audience = taskId
+          ? { scope: "task" as const, taskId }
+          : { scope: "workspace" as const, workspaceId: composerWorkspaceId };
         if (
-          await reconcileCommandTimeout(error, "operation.run_stop", {
-            scope: "task",
-            taskId,
-          })
+          await reconcileCommandTimeout(error, "operation.run_stop", audience)
         )
           return;
         await refreshSnapshot().catch(() => undefined);
         setStatus(
-          attentionStatus(
-            "run.stop_failed",
-            { scope: "task", taskId },
-            { diagnostic: errorText(error) },
-          ),
+          attentionStatus("run.stop_failed", audience, {
+            diagnostic: errorText(error),
+          }),
         );
         return;
       }
-      await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
-        scope: "task",
-        taskId,
-      });
+      if (taskId)
+        await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
+          scope: "task",
+          taskId,
+        });
+      else await refreshSnapshot().catch(() => undefined);
     } finally {
-      setCancelPendingForTask(taskId, false);
+      if (taskId) setCancelPendingForTask(taskId, false);
     }
   }
 
@@ -2464,49 +2169,6 @@ export default function App() {
       });
     } finally {
       endTaskPendingOperation(scope);
-    }
-  }
-
-  async function cancelCompact() {
-    if (
-      viewSyncFailed ||
-      !bridgeReady ||
-      !activeTask ||
-      cancelPendingTasks.current.has(activeTask.id) ||
-      activeTask.activeOperation?.kind !== "compact"
-    )
-      return;
-    const taskId = activeTask.id;
-    const operationId = activeTask.activeOperation.id;
-    setCancelPendingForTask(taskId, true);
-    try {
-      try {
-        await client.cancelCompact(taskId, operationId);
-      } catch (error) {
-        if (
-          await reconcileCommandTimeout(error, "operation.compact_stop", {
-            scope: "task",
-            taskId,
-          })
-        )
-          return;
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
-            "compact.stop_failed",
-            { scope: "task", taskId },
-            { diagnostic: errorText(error) },
-          ),
-        );
-        return;
-      }
-      await refreshAfterCommit(
-        "compact.stop_requested",
-        "operation.compact_stop",
-        { scope: "task", taskId },
-      );
-    } finally {
-      setCancelPendingForTask(taskId, false);
     }
   }
 
@@ -3134,6 +2796,78 @@ export default function App() {
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
+  const visibleSubmissions = localSubmissions.filter(
+    (entry) =>
+      (newTaskDraftActive
+        ? entry.scope === composerDraftScope
+        : entry.taskId === activeTask?.id) &&
+      !taskHasSubmission(activeTask ?? undefined, entry.operationId),
+  );
+  const pendingMessages =
+    visibleSubmissions.length > 0 ? (
+      <div className="local-input-submissions" aria-live="polite">
+        {visibleSubmissions.map((entry) => (
+          <div
+            className="additional-input"
+            key={entry.operationId}
+            data-operation-id={entry.operationId}
+          >
+            <Message role="user">
+              <div className="task-input-copy">
+                {entry.draft.kind === "skill"
+                  ? `/${entry.draft.invocationName} ${entry.draft.argumentValues.join(" ")}`
+                  : entry.draft.text}
+              </div>
+              {entry.draft.kind === "multimodal" &&
+                entry.draft.attachments.map((attachment) => (
+                  <p key={attachment.token}>{attachment.displayName}</p>
+                ))}
+            </Message>
+            <p className="projection-note">
+              {t(
+                entry.state === "submitting"
+                  ? "input.submitting"
+                  : entry.state === "accepted"
+                    ? "input.waiting"
+                    : entry.state === "unknown"
+                      ? "input.unknown"
+                      : entry.state === "cancelled"
+                        ? "input.cancelled"
+                        : "input.unexecuted",
+              )}
+            </p>
+            {entry.reason && (
+              <p className="projection-note">
+                {t(mutationReasonMessageId(entry.reason))}
+              </p>
+            )}
+            {(entry.state === "failed" ||
+              entry.state === "unknown" ||
+              entry.state === "cancelled") && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (!composerDraftHasContent(composerDraftRef.current))
+                    updateComposerDraft(
+                      entry.draft.kind === "multimodal"
+                        ? {
+                            kind: "text",
+                            text: entry.draft.text,
+                            attachmentsReloadRequired: true,
+                          }
+                        : entry.draft,
+                    );
+                }}
+              >
+                {t("run.prepare_retry")}
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+    ) : null;
   const composerFooter = (
     <>
       {activeTask && (
@@ -3183,13 +2917,11 @@ export default function App() {
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}
         slashCommands={slashCommands}
-        composeDisabled={
-          !taskCanCompose ||
-          (taskMutationPending && taskPending[currentTaskScope] !== "run")
-        }
-        attachmentActionsDisabled={
-          taskMutationDisabled || pendingTaskSelection.current !== null
-        }
+        composeDisabled={Boolean(
+          !newTaskDraftActive &&
+          (activeTask?.archived || activeTask?.deletionStatus !== "idle"),
+        )}
+        attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
         runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
         accessRequired={Boolean(
@@ -3237,7 +2969,7 @@ export default function App() {
             ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
             : ""
         }
-        workspaceEditable={newTaskDraftActive}
+        workspaceEditable={newTaskDraftActive && !taskIdentityPending}
         modelLabel={
           newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
         }
@@ -3255,7 +2987,7 @@ export default function App() {
         }
         modelEditable={
           newTaskDraftActive
-            ? newTaskModelState.editable
+            ? newTaskModelState.editable && !taskIdentityPending
             : taskModelPolicy.showsSelector
         }
         modelSelectionDisabled={
@@ -3293,23 +3025,17 @@ export default function App() {
         defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={
-          inputContinuation
-            ? "run"
-            : activeTask?.activeOperation?.kind === "run" ||
-                activeTask?.activeOperation?.kind === "compact"
-              ? activeTask.activeOperation.kind
-              : null
+          taskOperationInFlight || localSubmissionCount > 0 ? "run" : null
         }
         stopDisabled={
           bridgeUnavailable ||
           Boolean(activeTask && activeTask.id in cancelPending) ||
-          activeTask?.currentRunPhase === "stopping" ||
           Boolean(
-            activeTask?.activeOperation?.kind === "compact" &&
-            activeTask.compacts.find(
-              (compact) =>
-                compact.operationId === activeTask.activeOperation?.id,
-            )?.phase === "stopping",
+            activeTask?.currentRunPhase === "stopping" &&
+            !activeTask.inputSubmissions.some(
+              (record) => record.state === "waiting",
+            ) &&
+            localSubmissionCount === 0,
           )
         }
         onDraftChange={updateComposerDraft}
@@ -3339,11 +3065,7 @@ export default function App() {
         }
         onRemoveAttachment={(token) => void removeAttachment(token)}
         onSubmit={() => void submitRun()}
-        onStop={() =>
-          void (activeTask?.activeOperation?.kind === "compact"
-            ? cancelCompact()
-            : cancelRun())
-        }
+        onStop={() => void cancelRun()}
         onSlashCommand={runSlashCommand}
         onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
         onConfirmAccess={() => void chooseWorkspaceForDraft()}
@@ -4091,9 +3813,11 @@ export default function App() {
             newTask={newTaskDraftActive}
             hasWorkspace={Boolean(composerWorkspace)}
             composer={composerFooter}
+            pendingContent={pendingMessages}
             taskContent={
               <TaskContent
                 task={activeTask}
+                localSubmissions={pendingMessages}
                 webLink={markdownWebLink}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
                 synchronized={!bridgeUnavailable}

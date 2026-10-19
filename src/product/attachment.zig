@@ -4,7 +4,7 @@ pub const store = @import("attachment_store.zig");
 pub const FileStore = store.FileStore;
 pub const Format = enum { png, jpeg, webp };
 pub const Kind = enum { file, image };
-pub const State = enum { input_reserved, ready, borrowed, cleanup_pending };
+pub const State = enum { input_reserved, ready, borrowed, cleanup_pending, task_owned, task_cleanup_pending };
 pub const Limits = struct {
     max_files: usize,
     max_display_name_bytes: usize,
@@ -91,7 +91,8 @@ pub const Runtime = struct {
         if (self.receiving) |receive| _ = self.cancelReceive(receive.id);
         var incomplete = false;
         for (self.slots) |*slot| if (slot.*) |*entry| {
-            if (!self.destroyEntry(entry, false)) {
+            const cleaned = if (entry.state == .task_owned or entry.state == .task_cleanup_pending) self.destroyTaskInput(entry) else self.destroyEntry(entry, false);
+            if (!cleaned) {
                 incomplete = true;
                 self.freeEntryMemory(entry);
             }
@@ -308,14 +309,14 @@ pub const Runtime = struct {
     }
     pub fn hasCleanupDebt(self: *const Runtime, batch_id: ?u64, attachment_id: ?u64) bool {
         for (self.slots) |slot| if (slot) |entry| {
-            if (entry.state == .cleanup_pending and (if (batch_id) |id| entry.batch_id == id else if (attachment_id) |id| entry.id == id else false)) return true;
+            if ((entry.state == .cleanup_pending or entry.state == .task_cleanup_pending) and (if (batch_id) |id| entry.batch_id == id else if (attachment_id) |id| entry.id == id else false)) return true;
         };
         return false;
     }
     pub fn cleanupDebt(self: *const Runtime) CleanupDebt {
         var debt: CleanupDebt = .{ .count = 0, .bytes = 0 };
         for (self.slots) |slot| if (slot) |entry| {
-            if (entry.state == .cleanup_pending) {
+            if (entry.state == .cleanup_pending or entry.state == .task_cleanup_pending) {
                 debt.count += 1;
                 debt.bytes += entry.file.size;
             }
@@ -326,6 +327,10 @@ pub const Runtime = struct {
     pub fn retryCleanup(self: *Runtime) bool {
         var cleaned = true;
         for (self.slots) |*slot| if (slot.*) |*entry| {
+            if (entry.state == .task_cleanup_pending) {
+                if (self.destroyTaskInput(entry)) slot.* = null else cleaned = false;
+                continue;
+            }
             if (entry.state == .cleanup_pending) {
                 if (self.destroyEntry(entry, false)) slot.* = null else cleaned = false;
             }
@@ -382,6 +387,28 @@ pub const Runtime = struct {
         const entry = self.slots[self.findIndex(id) orelse return null].?;
         if (entry.state != .ready and entry.state != .borrowed) return null;
         return self.descriptor(entry);
+    }
+
+    /// Only retained, never-delivered Task input originals can be removed here.
+    /// The ordinary staging cleanup guard remains unchanged.
+    pub fn settleTaskInput(self: *Runtime, id: u64, task_id: u64, keep_original: bool) Error!void {
+        const index = self.findIndex(id) orelse return error.UnknownAttachment;
+        const entry = &self.slots[index].?;
+        if (entry.state != .task_owned or task_id == 0 or entry.file.task_id != task_id) return error.AttachmentBusy;
+        const cleaned = if (keep_original) self.destroyEntry(entry, true) else self.destroyTaskInput(entry);
+        if (cleaned) self.slots[index] = null else return error.CleanupFailed;
+    }
+
+    fn destroyTaskInput(self: *Runtime, entry: *Entry) bool {
+        std.debug.assert(entry.state == .task_owned or entry.state == .task_cleanup_pending);
+        std.debug.assert(entry.file.task_id != 0);
+        self.file_store.?.deleteChecked(entry.file) catch {
+            entry.state = .task_cleanup_pending;
+            return false;
+        };
+        self.used_bytes -= entry.file.size;
+        self.freeEntryMemory(entry);
+        return true;
     }
     fn classify(self: *Runtime, entry: *Entry) Error!void {
         var prefix: [12]u8 = undefined;
@@ -479,6 +506,22 @@ pub const Borrow = struct {
         for (self.indices) |index| {
             _ = self.runtime.destroyEntry(&self.runtime.slots[index].?, true);
             self.runtime.slots[index] = null;
+        }
+        self.active = false;
+    }
+
+    pub fn retainForTask(self: *Borrow) void {
+        if (!self.active) return;
+        for (self.indices) |index| {
+            const entry = &self.runtime.slots[index].?;
+            std.debug.assert(entry.state == .borrowed and entry.file.task_id != 0);
+            entry.state = .task_owned;
+            for ([_][]u8{ entry.preview, entry.reference }) |bytes| {
+                std.crypto.secureZero(u8, bytes);
+                self.runtime.allocator.free(bytes);
+            }
+            entry.preview = &.{};
+            entry.reference = &.{};
         }
         self.active = false;
     }
@@ -893,4 +936,32 @@ test "input cleanup cannot delete a Task original after failed Run rollback" {
     var bytes: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 8), try fixture.store.read(original, 0, &bytes));
     try std.testing.expectEqualStrings("original", &bytes);
+}
+
+test "Task retained originals keep their quota and only undelivered ownership permits deletion" {
+    for ([_]bool{ false, true }) |delivered| {
+        var fixture = try TestStore.init();
+        defer fixture.deinit();
+        var runtime = try Runtime.init(std.testing.allocator, testLimits(), &fixture.store, .{}, null);
+        defer runtime.deinit();
+        var output: [1]Descriptor = undefined;
+        const ready = try runtime.stageBatch(&.{.{ .display_name = "a.txt", .bytes = "original" }}, &output);
+        const id = ready[0].id;
+        var parts: [1]BorrowedPart = undefined;
+        var indices: [1]usize = undefined;
+        var borrow = try runtime.borrow(&.{id}, &parts, &indices, 42);
+        const original = runtime.slots[indices[0]].?.file;
+        borrow.retainForTask();
+        try std.testing.expectEqual(@as(usize, 8), runtime.used_bytes);
+        try std.testing.expect(!try runtime.releaseChecked(id));
+        try std.testing.expectError(error.AttachmentBusy, runtime.settleTaskInput(id, 43, false));
+        try runtime.settleTaskInput(id, 42, delivered);
+        try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+        try std.testing.expectError(error.UnknownAttachment, runtime.settleTaskInput(id, 42, false));
+        var bytes: [8]u8 = undefined;
+        if (delivered) {
+            try std.testing.expectEqual(@as(usize, 8), try fixture.store.read(original, 0, &bytes));
+            try std.testing.expectEqualStrings("original", &bytes);
+        } else try std.testing.expectError(error.ReadFailed, fixture.store.read(original, 0, &bytes));
+    }
 }

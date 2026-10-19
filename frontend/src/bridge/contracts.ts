@@ -669,6 +669,7 @@ export type RunActivity =
 export type ConversationCoverage = "included" | "excluded";
 
 export type RunView = {
+  submission: InputSubmission | null;
   elapsedMs: string | null;
   submittedAtUnixMs: string | null;
   finishedAtUnixMs: string | null;
@@ -880,42 +881,29 @@ export const sendInputReasons = [
   "schedule_failed",
 ] as const;
 export type SendInputReason = (typeof sendInputReasons)[number];
-export type InputTarget =
-  { kind: "idle"; lastRunId: string | null } | { kind: "run"; runId: string };
 export type SendInputResult = {
   operationId: string;
   taskId: string;
 } & (
-  | {
-      outcome: "started";
-      runId: string;
-      inputId: null;
-      sequence: null;
-      reason: null;
-    }
-  | {
-      outcome: "submitted";
-      runId: string;
-      inputId: string;
-      sequence: number;
-      reason: null;
-    }
-  | {
-      outcome: "unknown";
-      runId: string;
-      inputId: string;
-      sequence: null;
-      reason: null;
-    }
-  | {
-      outcome: "rejected";
-      runId: null;
-      inputId: null;
-      sequence: null;
-      reason: SendInputReason;
-    }
+  | { outcome: "accepted"; reason: null }
+  | { outcome: "rejected"; reason: SendInputReason }
 );
+
+export type InputSubmission = {
+  operationId: string;
+  receivedAtUnixMs: string | null;
+  anchorRunId: string | null;
+  afterOutputCount: number;
+};
+export type WaitingInputView = {
+  submission: InputSubmission;
+  input: RunInputView;
+  state: "waiting" | "failed" | "cancelled" | "interrupted";
+  reason: SendInputReason | null;
+};
+
 export type AdditionalInputView = {
+  submission: InputSubmission | null;
   id: string;
   afterOutputCount: number;
   operationId: string;
@@ -937,7 +925,8 @@ export type AdditionalInputView = {
 
 export type TaskView = {
   inputReady: boolean;
-  sendInputResult: SendInputResult | null;
+  inputAcceptance: { available: boolean; reason: SendInputReason | null };
+  inputSubmissions: WaitingInputView[];
   approvalMode: ApprovalMode;
   approvalRevision: string;
   availableApprovalModes: ApprovalMode[];

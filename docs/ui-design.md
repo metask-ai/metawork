@@ -709,7 +709,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 - New task 默认显示当前 active 模型；Composer 模型按钮和菜单项只显示模型名称，内部仍以来源和模型共同区分候选。菜单仅列出当前已选 Provider 的 ready 模型；已有草稿保留其明确选择的来源，其余从 Host 当前默认配置确定，不能合并其他 Provider 的候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
 - 没有可用 global default 时，已有明确来源仍允许选择该来源当前可用的模型并发送；没有已选 Provider 或该 Provider 没有可用候选时提供进入 `Models` 设置的导航，不回退到其他 Provider。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
-- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。菜单仅列出 Task modelIntent 所属 Provider 的 ready 模型，不受 global default 的来源变化或忙碌状态约束；当前来源不可用或历史来源未知时保留模型事实，不借用其他 Provider 的目录。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
+- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。菜单仅列出 Task modelIntent 所属 Provider 的 ready 模型，不受 global default 的来源变化或忙碌状态约束；当前来源不可用或历史来源未知时保留模型事实，不借用其他 Provider 的目录。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 
@@ -721,17 +721,11 @@ Composer 布局与输入规则：
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
-Composer 是唯一 active operation 停止入口：
-
-- 活跃 Run 的空草稿只显示 `Stop task`；有文本、Skill 或附件内容时只显示发送，发送不可用或等待回执时仍保留同一禁用发送按钮，不并列停止。两种按钮使用相同 44px 尺寸。点击或 Enter 直接向绑定的当前 Run 发送文本，保留 IME 与 Shift+Enter 换行语义；
-- manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
-- `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
-- 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
-- Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
+Composer 是唯一 Task 停止入口。空草稿在当前 operation、准备或等待消息存在时显示 44px Stop；有内容时显示发送，并保留独立的同尺寸 Stop。文本、Skill、附件均经同一 Task 发送入口，不以 readiness、Skill Run、compact、restore、停止或收尾阶段禁用有效发送；发送只受内容、连接、真实接收资格与容量约束。顶部命令栏不重复放 Stop。Stop acknowledgement 只表示请求处理，真实 terminal 取 Snapshot；重复停止请求可暂时禁用 Stop，但不能因此阻止新消息。
 
 普通文本与带附件草稿遵守[产品输入限制](requirements.md#53-task)，按 UTF-8 字节预算判断发送能力。输入框不设置会截断粘贴的字符上限；超限时保留全文、禁用按钮与 Enter 发送，并在输入框附近提示如何缩短内容或改用文本文件。超限草稿仍可在本地有界保存预算内恢复。
 
-发送提交及等待回执期间，文字草稿保持可编辑；Enter 或点击发送后焦点留在当前输入区，New task 切换到真实 Task 时保留连续输入与输入法组合。成功回执只清除原提交版本，并从较新草稿中移除本次已消费的附件；较新的文字和未提交附件不得被清除或覆盖；失败、拒绝或超时保留当前草稿。用户已移到其他控件、Task 或 surface 时，迟到回执不得抢回焦点。
+每次点击或 Enter 将本次提交与当前草稿分离，立即清空本次编辑版本并允许编辑、发送下一条；IME 组合期间不触发发送，Shift+Enter 换行。逐条显示正在提交、等待或明确未执行；只有 Host 事实才能确认接收。未知回执不自动重发，用户可将失败/未确认内容放回编辑器检查后明确发送，不能覆盖已有草稿，失效附件需重新选择。旧响应不能修改较新草稿或抢走其他控件/Task 的焦点。
 
 ### 8.1 Slash、Command 与 Skill draft
 
@@ -746,30 +740,22 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
 
-Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。current Workspace 的 `loading / unavailable` 只影响 Skill 候选；Automatic Task 的初始准备 loading 另按 §8.3 阻止首个 Run，文字保持可编辑。
+Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。失败或未知的已分离提交保留完整内容供显式放回编辑器，不覆盖较新的 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。current Workspace 的 `loading / unavailable` 只影响 Skill 候选；Automatic Task 的初始准备 loading 另按 §8.3 阻止首个 Run，文字保持可编辑。
 
-| Task state             | Composer behavior |
+| Task state | Composer behavior |
 | --- | --- |
-| draft / idle | 文本、附件、普通发送，按既有新 Run 准入 |
-| queued / starting | 可编辑草稿，发送禁用并解释尚未就绪；空草稿显示 Stop |
-| running | 就绪时可直接发送文本插话；空草稿显示 Stop |
-| waiting_user | 时间线请求仍是首要处理面；可发送文本插话，不能替代请求回答；空草稿显示 Stop |
-| stopping | 草稿保留，有内容时发送禁用，空草稿时 Stop 禁用，等待真实结果 |
-| compact queued/running | 可编辑本地草稿，发送禁用；保留压缩停止入口 |
-| failed / interrupted | 消息保持普通气泡；不自动重发，沿用 Run 的失败或中断反馈 |
-
-
-表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
+| idle / queued / starting / running / waiting_user | 允许有效发送，Task 决定何时执行；请求回答独立于消息 |
+| stopping / compact / restore / 收尾 | 允许有效发送并显示等待；不以执行阶段冻结输入 |
+| failed / interrupted | 允许有资格的新意图，旧失败不自动重发 |
+| archived / 删除中 / 真实 authority 或容量失效 | 保留草稿，按 Host 接收资格说明不可发送原因 |
 
 输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 输入框左下角作为紧凑下拉菜单出现，紧邻模型选择，只显示当前模式名称；展开列出三种模式名称及各自一句简短说明，不在输入框上方保留独立设置区或铺开说明，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
-插话直接使用 Agent submitInput，不使用 `UiBackend.poll()`。运行中仍使用相同发送图标，发送反馈沿用普通消息，不提示内部采纳状态。未就绪、Skill Run、Skill/附件草稿、停止中或单次发送仍在调用期间禁用发送并说明原因；保留完整草稿。连接暂时不可用时，已有本地草稿保持可编辑且不因连接状态变化失焦；发送与其他 Host 操作仍禁用，恢复连接不自动发送。“排队中”仅表示已接纳 Run 等待 Executor。正常完成后确定未采纳输入的接续由 Host 按 [Product 架构](product-architecture.md) 收尾，不显示可编辑待发送条或撤回动作。
-
-Host 投影 `continuing` 时，来源 Run 保持真实完成状态；Composer 保持可编辑，有内容时只显示禁用的发送按钮并说明正在处理，空草稿时允许 Stop 精确取消来源预留。新草稿不混入已提交批次。采纳、接续、转入及其原因仅用于内部执行和对账，不在用户消息下方展示状态、恢复按钮或“查看下一轮”，技术过程也不重复追加采纳消息。状态变化保持提交锚点和原消息 DOM，每条实际发送的消息只展示一次。根据现有持久化转入关联省略目标 Run 的重复输入气泡及其提交时间、复制栏，多条合并和历史重新读取遵循同一规则；目标仍保留完整输入数据用于执行与重试，正常展示过程、回答及终态，不增加接续提示行。没有转入关联的普通输入照常展示，不按文本相同去重。完成通知与未读回执保持既有语义。
+Task 决定同步插话或等待下一轮，不使用 `UiBackend.poll()`。Renderer 统一提交消息，不在执行阶段选择路径。连接暂时不可用时草稿保持可编辑且不失焦，恢复连接不自动发送。Host 的 continuing 仅用于内部接续；来源保持真实完成状态，新草稿不混入已有批次，新发送由 Task 顺序处理。根据真实转入关联省略接续目标的重复根输入、时间与复制栏；不按文本相同去重，不显示采纳、接续或转入等技术状态。每条消息使用安全正文、原接收时间与锚点，等待消息转入执行后保持关联，只显示一次。
 
 追加消息与普通用户消息使用相同气泡和复制操作，安全正文靠右显示，不另做状态卡片，不隐藏在默认折叠的技术过程内。内部采纳状态不改变消息外观或位置。Renderer 按 Host 提供的 `afterOutputCount` 将插话放在前 N 个 canonical 输出槽位之后，空的已闭合槽位和脱敏尾部占位仍参与计数，不能先按正文非空过滤再定位。按消息提交顺序对锚点取前缀最大值，再与当前输出槽位数取较小值；同一位置按递增消息 identity 排列，锚点超过实际输出时放在末尾，撤回导致后续锚点下降也不得颠倒用户消息。两个插话边界之间排序后相邻的 Assistant part 连续呈现，不按序号是否连续判断，也不切割同一流式 Markdown。整份临时输出被丢弃并重试时，重试可复用原槽位而显示在插话上方，这是接受的显示差异，不承诺严格的首次出现时间线。采纳锚点保留为内部事实，不产生额外消息、状态说明或重复正文。
 
-命令超时后按 [Bridge 对账合同](renderer-bridge-contract.md)刷新并显示结果未知，不自动重发，不阻塞后续新意图；成功回执只清除同版本草稿，旧 connection 的迟到回执不能清除新草稿或抢回焦点。消息采纳不强制滚动或打开右栏；左侧不新增消息槽位图标，既有 completion receipt 与 Schedule 完成确认语义不改变。
+命令超时后按 [Bridge 对账合同](renderer-bridge-contract.md)刷新并显示结果未知，不自动重发，不阻塞后续新意图；提交已与草稿分离，旧 connection 的迟到回执不能清除新草稿或抢回焦点。消息采纳不强制滚动或打开右栏；左侧不新增消息槽位图标，既有 completion receipt 与 Schedule 完成确认语义不改变。
 
 
 ### 8.2 文件附件
@@ -792,37 +778,11 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 ### 8.3 New task 首次发送
 
-首次发送不是一个 UI 原子动作。Renderer 必须区分创建 Task 与启动第一个 Run：
+首次发送区分创建真实 Task、Task 接收消息和实际执行。Renderer 对同一 New task 只发起一次 create；创建期间继续编辑和发送，有界保留明确提交，取得 identity 后依点击顺序交付，不等待上条响应，也不等待 Skill/restore/readiness。准备和推进属于 Task，Renderer 不管理底层执行逻辑。
 
-```text
-校验草稿与上下文
-        │
-        ▼
-创建 Task
-        │
-        ▼
-等待 Automatic 交互 Task 的初始 Skill 准备
-        │
-        ▼
-启动第一个 Run
-        │
-        ▼
-以 canonical snapshot 呈现 queued / running / terminal
-```
+创建失败或未知逐条显示失败/未确认且不自动重建；切页不改变原提交目标。创建期间停止取消此前尚未交付的提交；创建结果迟到时保留真实 Task，不再交付被取消项。之后的新发送是新意图。连接 generation 失效不跨重连补发。
 
-| 结果                        | 页面            | 草稿                          | 反馈                                                                            |
-| --------------------------- | --------------- | ----------------------------- | ------------------------------------------------------------------------------- |
-| 本地 admission 条件不满足   | 保持 New task   | 保留                          | 在 Workspace、Model 或 Composer 就地说明                                        |
-| `create_rejected`           | 保持 New task   | 恢复 New task 草稿            | 显示 typed rejection 对应产品文案                                               |
-| `create_failed`             | 保持 New task   | 恢复 New task 草稿            | 显示创建失败和恢复动作                                                          |
-| Task 已创建，`run_rejected` | 切换到真实 Task | 恢复为该 Task 草稿            | 时间线不伪造已提交指令或 Running，显示启动被拒绝                                |
-| Task 已创建，`run_failed`   | 切换到真实 Task | 恢复为该 Task 草稿            | 显示启动失败，不伪造 Running                                                    |
-| Run accepted                | 切换到真实 Task | typed command accepted 后清除 | 等待 snapshot 发布 queued、running 或 terminal                                  |
-| command timeout             | 先刷新 snapshot | 对账完成前保留                | 由 snapshot 决定留在 New task、进入空 Task 或进入 active Task，禁止自动重复提交 |
-
-初始 Skill 准备属于当前发送的内部前置步骤，Task 已创建后按同一 canonical catalog 的 loading 状态等待，并禁用重复发送；不要求用户手工选择 Skill 或项目。准备 unavailable 只表示 Skill 能力缺席，普通文本与文件引用仍可发送；超时或 authority 变化恢复完整 Task 草稿，不自动重放。该等待不创建时间线指令、运行状态或第二套准备状态。已有 pinned catalog 的目录变化不自动重绑。
-
-只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 内容：行动标题淡出，Task Header 和已确认的用户输入出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在内容区。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
+Host 确认创建后，若用户仍在原 New task，则以 canonical Snapshot 切换真实 Task；保留同一个 Composer、输入、caret、IME 和焦点，约 220ms 动画在减少动效时直接切换。若用户已切页，迟到创建不能强制导航。消息转入执行后保留原接收时间、位置和 operation 关联，普通气泡及复制只出现一次；不显示采纳/转入等底层状态。等待、取消、中断和真实失败有简洁用户说明。内部等待不显示伪造 Running。
 
 ## 9. 审批与计划确认
 

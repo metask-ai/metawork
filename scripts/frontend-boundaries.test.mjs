@@ -195,14 +195,17 @@ test("Account states never replace or reinterpret the Workbench", async () => {
     /account\.state === "authorizing" && account\.canCancel[\s\S]*?onCancel/,
   );
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
+  // New object admission still uses its actual model/Workspace authority.
+  // Once identity acquisition began, continuous delivery uses that same Task.
   assert.match(
     app,
-    /\(!newTaskDraftActive\s*\|\|\s*snapshot\.newTaskAdmission\.available\s*\|\|\s*newTaskModelState\.intent !== null\)/,
+    /const canCreateTask =\s*\(snapshot\.newTaskAdmission\.available \|\|\s*newTaskModelState\.intent !== null\) &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid/,
   );
   assert.match(
     app,
-    /\(!newTaskDraftActive\s*\|\|\s*\(newTaskWorkspaceReady && newTaskModelState\.valid\)\)/,
+    /!newTaskDraftActive \|\| taskIdentityPending \|\| canCreateTask/,
   );
+  assert.match(app, /activeTask\?\.inputAcceptance\.available/);
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
   assert.doesNotMatch(

@@ -18,6 +18,7 @@ import type {
   RunOutcome,
   RunView,
   TaskView,
+  WaitingInputView,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
 import {
@@ -223,8 +224,10 @@ export function TaskContent({
   onReviewFileChanges,
   onRespond,
   renderPendingUi,
+  localSubmissions,
 }: {
   task: TaskView | null;
+  localSubmissions?: ReactNode;
   snapshotReceivedAt: number | null;
   synchronized: boolean;
   requestingStop: boolean;
@@ -274,6 +277,69 @@ export function TaskContent({
       task.runs.at(-1) ??
       null)
     : null;
+  const submissions: WaitingInputView[] = [
+    ...(task?.inputSubmissions ?? []),
+    ...(task?.runs.flatMap((run) =>
+      run.submission?.anchorRunId
+        ? [
+            {
+              submission: run.submission,
+              input: run.input,
+              state: "interrupted" as const,
+              reason: null,
+              executed: true,
+            },
+          ]
+        : [],
+    ) ?? []),
+  ];
+  function renderSubmission(record: WaitingInputView) {
+    const time = formatRunTimestamp(
+      locale,
+      record.submission.receivedAtUnixMs,
+      nowUnixMs,
+    );
+    const executed = task?.runs.some(
+      (run) => run.submission?.operationId === record.submission.operationId,
+    );
+    return (
+      <div
+        className="additional-input"
+        key={record.submission.operationId}
+        data-operation-id={record.submission.operationId}
+      >
+        <Message role="user" tabIndex={-1} className="focus-ring">
+          <TaskInput input={record.input} />
+        </Message>
+        <div className="input-copy-actions">
+          {time && <MessageTime className="input-submitted-time" time={time} />}
+          {!executed && (
+            <span className="projection-note">
+              {t(
+                record.state === "waiting"
+                  ? "input.waiting"
+                  : record.state === "cancelled"
+                    ? "input.cancelled"
+                    : "input.unexecuted",
+              )}
+            </span>
+          )}
+          <CopyButton
+            className="input-copy-action"
+            copyLabel={t("copy.input")}
+            copiedLabel={t("copy.copied")}
+            failedLabel={t("copy.failed")}
+            onCopy={() => copyRunInput(record.input)}
+          />
+        </div>
+        {record.reason && record.state === "failed" && (
+          <p className="projection-note">
+            {t(`mutation.reason.${record.reason}` as MessageId)}
+          </p>
+        )}
+      </div>
+    );
+  }
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
   const transferredRunIds = new Set(
     task?.runs.flatMap((run) =>
@@ -387,6 +453,9 @@ export function TaskContent({
           {t("task.conversation_history_excluded")}
         </p>
       )}
+      {submissions
+        .filter((record) => record.submission.anchorRunId === null)
+        .map(renderSubmission)}
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
@@ -395,11 +464,14 @@ export function TaskContent({
           run.id,
           run.output,
           run.additionalInputs,
+          submissions.filter(
+            (record) => record.submission.anchorRunId === run.id,
+          ),
         );
         const responseCopyable = responseCopyEligible(run);
         const submittedTime = formatRunTimestamp(
           locale,
-          run.submittedAtUnixMs,
+          run.submission?.receivedAtUnixMs ?? run.submittedAtUnixMs,
           nowUnixMs,
         );
         const finishedTime = formatRunTimestamp(
@@ -447,7 +519,7 @@ export function TaskContent({
             data-run-id={run.id}
             key={`${task.id}:${run.id}`}
           >
-            {!transferredRunIds.has(run.id) && (
+            {!transferredRunIds.has(run.id) && !run.submission?.anchorRunId && (
               <>
                 <Message role="user" tabIndex={-1} className="focus-ring">
                   <TaskInput input={run.input} />
@@ -475,10 +547,25 @@ export function TaskContent({
             )}
             <div className="run-reading-flow">
               {readingFlow.map((entry) =>
-                entry.kind === "input" ? (
+                entry.kind === "submission" ? (
+                  renderSubmission(entry.input)
+                ) : entry.kind === "input" ? (
                   <AdditionalInput
                     key={entry.identity}
                     input={entry.input}
+                    submittedTime={(() => {
+                      const time = formatRunTimestamp(
+                        locale,
+                        entry.input.submission?.receivedAtUnixMs ?? null,
+                        nowUnixMs,
+                      );
+                      return time ? (
+                        <MessageTime
+                          className="input-submitted-time"
+                          time={time}
+                        />
+                      ) : undefined;
+                    })()}
                     latest={
                       run.id === latestInputId &&
                       entry.input.id === run.additionalInputs.at(-1)?.id
@@ -716,6 +803,7 @@ export function TaskContent({
           <p>{t("task.created_empty_body")}</p>
         </div>
       )}
+      {localSubmissions}
     </Conversation>
   );
 }

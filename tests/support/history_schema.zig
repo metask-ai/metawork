@@ -439,6 +439,7 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .checkpoint_binding_epoch = try batch.ou(if (checkpoint) |cp| cp.anchor.binding_epoch else null),
         .ui_history_json = try batch.json(v.ui_history),
         .compacts_json = try batch.json(v.compacts),
+        .input_submissions_json = try batch.json(v.input_submissions),
     });
 }
 
@@ -469,6 +470,7 @@ fn readTask(row: Record) !wire.TaskWire {
     v.active_operation = if (try row.ot("active_operation_kind")) |kind| .{ .kind = kind, .id = try row.u("active_operation_id") } else null;
     v.runs = &.{};
     v.compacts = try row.json([]wire.CompactWire, "compacts_json");
+    v.input_submissions = try row.json([]wire.InputSubmissionWire, "input_submissions_json");
     v.ui_history = try row.json([]wire.UiRecordWire, "ui_history_json");
     v.checkpoint = try readCheckpoint(row);
     return v;
@@ -498,6 +500,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void 
         .cause = ot(v.cause),
         .input_json = try batch.json(v.input),
         .additional_inputs_json = try batch.json(v.additional_inputs),
+        .submission_json = try batch.ojson(v.submission),
         .commentary_ends_json = try batch.json(v.commentary_ends),
         .file_change_observation = ot(v.file_change_observation),
         .diagnostic = b(v.diagnostic),
@@ -534,6 +537,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.cause = try row.ot("cause");
     v.input = try row.json(wire.RunInputWire, "input_json");
     v.additional_inputs = try row.json([]wire.AdditionalInputWire, "additional_inputs_json");
+    v.submission = try row.ojson(wire.SubmissionWire, "submission_json");
     v.commentary_ends = try row.json([]const u64, "commentary_ends_json");
     v.file_change_observation = try row.ot("file_change_observation");
     v.diagnostic = try row.b("diagnostic");
@@ -672,11 +676,11 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 23) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 24) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
-    if (std.meta.fields(wire.RunWire).len != 30) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.RunWire).len != 31) @compileError("Review every history SQL field mapping after RunWire changes");
     // batch.json/row.json preserve the full typed input, including its reading anchor.
-    if (std.meta.fields(wire.AdditionalInputWire).len != 10) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
+    if (std.meta.fields(wire.AdditionalInputWire).len != 11) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");
     if (std.meta.fields(wire.CompactWire).len != 11) @compileError("Review every history SQL field mapping after CompactWire changes");

@@ -427,7 +427,7 @@ export function ComposerFooter({
   }
 
   function handleTextKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) return;
+    if (composing || event.nativeEvent.isComposing) return;
     if (menuOpen) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
@@ -872,7 +872,7 @@ export function ComposerFooter({
             </div>
             {stopAction ? (
               <div className="composer-run-actions">
-                {stopAction === "run" && composerDraftHasContent(draft) ? (
+                {composerDraftHasContent(draft) ? (
                   <Button
                     type="button"
                     variant="primary"
@@ -899,6 +899,20 @@ export function ComposerFooter({
                     title={t(
                       stopAction === "compact" ? "compact.stop" : "task.stop",
                     )}
+                    disabled={stopDisabled}
+                    onClick={onStop}
+                  >
+                    <Icon name="stop" />
+                  </Button>
+                )}
+                {composerDraftHasContent(draft) && (
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="icon"
+                    className="composer-stop"
+                    aria-label={t("task.stop")}
+                    title={t("task.stop")}
                     disabled={stopDisabled}
                     onClick={onStop}
                   >

@@ -483,6 +483,7 @@ fn privateFilePermissions() std.Io.File.Permissions {
 }
 
 pub const Limits = struct {
+    max_pending_inputs_per_task: usize = 64,
     max_workspaces: usize,
     max_tasks: usize,
     max_runs_per_task: usize,
@@ -599,6 +600,7 @@ pub const TaskWire = struct {
     next_run_generation: u64,
     active_operation: ?OperationWire,
     runs: []RunWire,
+    input_submissions: []InputSubmissionWire = &.{},
     compacts: []CompactWire,
     ui_history: []UiRecordWire,
     checkpoint: ?CheckpointWire = null,
@@ -675,6 +677,7 @@ pub const RunWire = struct {
     permission_profile: []const u8,
     permission_interaction: []const u8,
     input: RunInputWire,
+    submission: ?SubmissionWire = null,
     additional_inputs: []AdditionalInputWire = &.{},
     assistant: []const u8,
     assistant_redacted: bool,
@@ -698,6 +701,19 @@ pub const RunWire = struct {
     next_activity_order: u64,
 };
 
+pub const SubmissionWire = struct {
+    operation_id: []const u8,
+    received_at_unix_ms: ?u64 = null,
+    anchor_run_id: ?u64 = null,
+    after_output_count: u32 = 0,
+};
+
+pub const InputSubmissionWire = struct {
+    submission: SubmissionWire,
+    input: RunInputWire,
+    state: []const u8,
+};
+
 pub const AdditionalInputWire = struct {
     id: u64,
     after_output_count: u32,
@@ -709,6 +725,7 @@ pub const AdditionalInputWire = struct {
     order: ?u64,
     state: []const u8,
     transferred_to_run_id: ?u64 = null,
+    submission: ?SubmissionWire = null,
 };
 
 pub const RunInputWire = struct {
@@ -883,6 +900,8 @@ pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
                 allocator.free(changes);
             }
         }
+        for (task.input_submissions) |record| freeInputWire(allocator, record.input);
+        allocator.free(task.input_submissions);
         allocator.free(task.runs);
         allocator.free(task.compacts);
         allocator.free(task.ui_history);
@@ -1004,6 +1023,20 @@ pub fn projectTask(
         };
     }
 
+    var submission_count: usize = 0;
+    for (task.input_submissions.items) |record| {
+        if (!task_state.submissionHasExecution(task, record.submission.operationId())) submission_count += 1;
+    }
+    const submissions = try allocator.alloc(InputSubmissionWire, submission_count);
+    errdefer allocator.free(submissions);
+    var submission_index: usize = 0;
+    errdefer for (submissions[0..submission_index]) |record| freeInputWire(allocator, record.input);
+    for (task.input_submissions.items) |*record| {
+        if (task_state.submissionHasExecution(task, record.submission.operationId())) continue;
+        submissions[submission_index] = .{ .submission = submissionWire(&record.submission), .input = try projectInput(allocator, record.input), .state = @tagName(record.state) };
+        submission_index += 1;
+    }
+
     return .{
         .id = task.durable.id,
         .recent_order = task.durable.recent_order,
@@ -1037,6 +1070,7 @@ pub fn projectTask(
             .restore => null,
         },
         .runs = runs,
+        .input_submissions = submissions,
         .compacts = compacts,
         .ui_history = ui_history,
         .checkpoint = if (checkpoint) |value| .{
@@ -1064,6 +1098,83 @@ pub fn projectTask(
     };
 }
 
+fn projectInput(allocator: std.mem.Allocator, record: task_state.RunInputRecord) std.mem.Allocator.Error!RunInputWire {
+    var argument_values: ?[][]const u8 = null;
+    errdefer if (argument_values) |values| allocator.free(values);
+    var attachments: ?[]AttachmentWire = null;
+    errdefer if (attachments) |items| allocator.free(items);
+    return switch (record) {
+        .text => |text| .{
+            .kind = "text",
+            .text = text.value,
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .attachments = null,
+            .redacted = text.redacted,
+        },
+        .multimodal => |multimodal| input: {
+            const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
+            for (items, multimodal.attachments) |*target, item| target.* = .{
+                .kind = @tagName(item.kind),
+                .format = if (item.format) |format| @tagName(format) else null,
+                .display_name = item.display_name,
+                .size_bytes = item.size_bytes,
+                .redacted = item.redacted,
+            };
+            attachments = items;
+            break :input .{
+                .kind = "multimodal",
+                .text = multimodal.text,
+                .skill_id = null,
+                .catalog_revision = null,
+                .invocation_name = null,
+                .display_name = null,
+                .argument_values = null,
+                .attachments = items,
+                .redacted = multimodal.redacted,
+            };
+        },
+        .skill => |skill| input: {
+            const values = try allocator.alloc([]const u8, skill.argument_values.len);
+            for (values, skill.argument_values) |*target, value| target.* = value;
+            argument_values = values;
+            break :input .{
+                .kind = "skill",
+                .text = null,
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .invocation_name = skill.invocation_name,
+                .display_name = skill.display_name,
+                .argument_values = values,
+                .attachments = null,
+                .redacted = skill.redacted,
+            };
+        },
+    };
+}
+
+fn freeInputWire(allocator: std.mem.Allocator, input: RunInputWire) void {
+    if (input.argument_values) |values| allocator.free(values);
+    if (input.attachments) |items| allocator.free(items);
+}
+
+fn submissionWire(record: *const task_state.Submission) SubmissionWire {
+    return .{ .operation_id = record.operationId(), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
+}
+
+fn restoreSubmission(record: SubmissionWire) RestoreError!task_state.Submission {
+    if (record.operation_id.len == 0 or record.operation_id.len > 64) return error.TaskStoreCorrupt;
+    for (record.operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.TaskStoreCorrupt;
+    if (record.received_at_unix_ms) |time| if (time == 0 or time > task_state.max_displayable_unix_ms) return error.TaskStoreCorrupt;
+    if (record.anchor_run_id) |id| if (id == 0) return error.TaskStoreCorrupt;
+    var result: task_state.Submission = .{ .operation_id_len = @intCast(record.operation_id.len), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
+    @memcpy(result.operation_id[0..record.operation_id.len], record.operation_id);
+    return result;
+}
+
 fn projectRun(
     allocator: std.mem.Allocator,
     run: *task_state.RunRecord,
@@ -1087,6 +1198,7 @@ fn projectRun(
             .order = record.order,
             .state = @tagName(record.state),
             .transferred_to_run_id = record.transferred_to_run_id,
+            .submission = if (record.submission) |*value| submissionWire(value) else null,
         };
         additional_index += 1;
     };
@@ -1188,61 +1300,8 @@ fn projectRun(
         allocator.free(changes);
     };
 
-    var argument_values: ?[][]const u8 = null;
-    errdefer if (argument_values) |values| allocator.free(values);
-    var attachments: ?[]AttachmentWire = null;
-    errdefer if (attachments) |items| allocator.free(items);
-    const input: RunInputWire = switch (run.input) {
-        .text => |text| .{
-            .kind = "text",
-            .text = text.value,
-            .skill_id = null,
-            .catalog_revision = null,
-            .invocation_name = null,
-            .display_name = null,
-            .argument_values = null,
-            .attachments = null,
-            .redacted = text.redacted,
-        },
-        .multimodal => |multimodal| input: {
-            const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
-            for (items, multimodal.attachments) |*target, item| target.* = .{
-                .kind = @tagName(item.kind),
-                .format = if (item.format) |format| @tagName(format) else null,
-                .display_name = item.display_name,
-                .size_bytes = item.size_bytes,
-                .redacted = item.redacted,
-            };
-            attachments = items;
-            break :input .{
-                .kind = "multimodal",
-                .text = multimodal.text,
-                .skill_id = null,
-                .catalog_revision = null,
-                .invocation_name = null,
-                .display_name = null,
-                .argument_values = null,
-                .attachments = items,
-                .redacted = multimodal.redacted,
-            };
-        },
-        .skill => |skill| input: {
-            const values = try allocator.alloc([]const u8, skill.argument_values.len);
-            for (values, skill.argument_values) |*target, value| target.* = value;
-            argument_values = values;
-            break :input .{
-                .kind = "skill",
-                .text = null,
-                .skill_id = skill.skill_id,
-                .catalog_revision = skill.catalog_revision,
-                .invocation_name = skill.invocation_name,
-                .display_name = skill.display_name,
-                .argument_values = values,
-                .attachments = null,
-                .redacted = skill.redacted,
-            };
-        },
-    };
+    const input = try projectInput(allocator, run.input);
+    errdefer freeInputWire(allocator, input);
     const projection = task_state.runProjectionFacts(run);
     const terminal = projection.terminal;
     const terminal_payload = if (terminal != null) task_state.terminalPayload(run) else null;
@@ -1263,6 +1322,7 @@ fn projectRun(
         .permission_profile = @tagName(run.permission_profile),
         .permission_interaction = @tagName(run.permission_interaction),
         .input = input,
+        .submission = if (run.submission) |*value| submissionWire(value) else null,
         .additional_inputs = additional_inputs,
         .assistant = run.assistant.list.items[0..run.assistant.committed_len],
         .assistant_redacted = run.assistant_redacted,
@@ -1503,6 +1563,25 @@ pub fn restoreTask(
     @memset(ui_history, null);
     for (wire.ui_history, 0..) |record, index|
         ui_history[index] = restoreUiRecord(record);
+    var submissions: std.ArrayList(task_state.InputSubmission) = .empty;
+    errdefer {
+        for (submissions.items) |*record| {
+            deinitRestoredRunInput(projection, &record.input);
+            projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+        }
+        submissions.deinit(projection.allocator);
+    }
+    if (wire.input_submissions.len > projection.limits.max_pending_inputs_per_task) return error.TaskStoreCorrupt;
+    for (wire.input_submissions) |record| {
+        const metadata = try restoreSubmission(record.submission);
+        var input = try restoreRunInput(projection, record.input);
+        errdefer deinitRestoredRunInput(projection, &input);
+        try projection.reserve_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+        errdefer projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+        const State = @FieldType(task_state.InputSubmission, "state");
+        const state: State = if (std.mem.eql(u8, record.state, "waiting")) .interrupted else parseEnum(State, record.state) orelse return error.TaskStoreCorrupt;
+        try submissions.append(projection.allocator, .{ .submission = metadata, .input = input, .payload = null, .state = state });
+    }
     return .{
         .durable = .{
             .id = wire.id,
@@ -1534,6 +1613,7 @@ pub fn restoreTask(
             .checkpoint_attempt = checkpoint_attempt,
         },
         .runtime = .{},
+        .input_submissions = submissions,
     };
 }
 
@@ -1617,6 +1697,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             .order = record.order,
             .state = if (input_state == .pending) .unknown else input_state,
             .transferred_to_run_id = record.transferred_to_run_id,
+            .submission = if (record.submission) |metadata| try restoreSubmission(metadata) else null,
         };
         @memcpy(message.operation_id[0..message.operation_id_len], record.operation_id);
         additional[index] = message;
@@ -1747,6 +1828,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             wire.permission_interaction,
         ) orelse return error.TaskStoreCorrupt,
         .input = input,
+        .submission = if (wire.submission) |metadata| try restoreSubmission(metadata) else null,
         .additional_inputs = additional,
         .assistant = assistant,
         .assistant_redacted = wire.assistant_redacted,
@@ -2995,6 +3077,14 @@ fn validate(state: *const StateWire, limits: Limits) !void {
 }
 
 fn validateTask(task: TaskWire, limits: Limits) !void {
+    if (task.input_submissions.len > limits.max_pending_inputs_per_task) return error.Invalid;
+    for (task.input_submissions, 0..) |record, index| {
+        _ = restoreSubmission(record.submission) catch return error.Invalid;
+        if (record.submission.after_output_count > limits.max_commentary_segments_per_run + 1 or
+            !oneOf(record.state, &.{ "waiting", "failed", "cancelled", "interrupted" })) return error.Invalid;
+        try validateRunInput(record.input, limits);
+        for (task.input_submissions[0..index]) |previous| if (std.mem.eql(u8, previous.submission.operation_id, record.submission.operation_id)) return error.Invalid;
+    }
     if (task.approval_revision == 0) return error.Invalid;
     if (task.model_intent) |intent| {
         if (!task_state.ModelIntent.valid(.{ .source_id = intent.source_id, .model_id = intent.model_id }, intent.revision))
@@ -3009,6 +3099,12 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     var completion_seen_valid = task.completion_seen_run_id == null or
         task.completion_seen_run_id.? == 0;
     for (task.runs, 0..) |run, index| {
+        if (run.submission) |metadata| {
+            _ = restoreSubmission(metadata) catch return error.Invalid;
+        }
+        for (run.additional_inputs) |record| if (record.submission) |metadata| {
+            _ = restoreSubmission(metadata) catch return error.Invalid;
+        };
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
             !oneOf(run.coverage, &.{ "pending", "covered", "excluded" }) or
             !oneOf(run.execution_protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or

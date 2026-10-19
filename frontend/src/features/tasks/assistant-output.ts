@@ -1,4 +1,8 @@
-import type { AdditionalInputView, RunOutput } from "../../bridge/contracts.ts";
+import type {
+  AdditionalInputView,
+  RunOutput,
+  WaitingInputView,
+} from "../../bridge/contracts.ts";
 
 export type AssistantOutputDisposition =
   "commentary" | "provisional" | "final" | "partial";
@@ -17,13 +21,15 @@ export type RunReadingEntry =
       parts: AssistantOutputPart[];
       redacted: boolean;
     }
-  | { kind: "input"; identity: string; input: AdditionalInputView };
+  | { kind: "input"; identity: string; input: AdditionalInputView }
+  | { kind: "submission"; identity: string; input: WaitingInputView };
 
 /** Submission anchors are independent of adoption and may outlive a tail. */
 export function deriveRunReadingFlow(
   runId: string,
   output: RunOutput,
   inputs: readonly AdditionalInputView[],
+  submissions: readonly WaitingInputView[] = [],
 ): RunReadingEntry[] {
   const parts = deriveAssistantOutputParts(runId, output);
   const entries: RunReadingEntry[] = [];
@@ -44,15 +50,30 @@ export function deriveRunReadingFlow(
     start = end;
   }
 
-  // The canonical input array is strictly ordered by increasing input id.
-  for (const input of inputs) {
-    prefixMax = Math.max(prefixMax, input.afterOutputCount);
+  const messages = [
+    ...inputs.map((input, index) => ({
+      anchor: input.afterOutputCount,
+      index,
+      entry: {
+        kind: "input" as const,
+        identity: `${runId}:input:${input.id}`,
+        input,
+      },
+    })),
+    ...submissions.map((input, index) => ({
+      anchor: input.submission.afterOutputCount,
+      index: inputs.length + index,
+      entry: {
+        kind: "submission" as const,
+        identity: `submission:${input.submission.operationId}`,
+        input,
+      },
+    })),
+  ];
+  for (const message of messages) {
+    prefixMax = Math.max(prefixMax, message.anchor);
     appendOutput(Math.min(parts.length, prefixMax));
-    entries.push({
-      kind: "input",
-      identity: `${runId}:input:${input.id}`,
-      input,
-    });
+    entries.push(message.entry);
   }
   appendOutput(parts.length);
   if (output.redacted || output.provisionalRedacted) {

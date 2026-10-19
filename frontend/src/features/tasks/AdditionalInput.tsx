@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type {
   AdditionalInputView,
   RunInputView,
@@ -10,9 +11,11 @@ import { copyRunInput } from "./response-copy.ts";
 export function AdditionalInput({
   input,
   latest = false,
+  submittedTime,
 }: {
   input: AdditionalInputView;
   latest?: boolean;
+  submittedTime?: ReactNode;
 }) {
   const { t } = useI18n();
   const textInput: RunInputView = {
@@ -29,6 +32,7 @@ export function AdditionalInput({
         )}
       </Message>
       <div className="input-copy-actions">
+        {submittedTime}
         <CopyButton
           className="input-copy-action"
           data-latest={latest}

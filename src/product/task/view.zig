@@ -124,6 +124,7 @@ pub const Input = struct {
     model_selection_availability: ModelSelectionAvailability,
     available_approval_modes: []const task_state.ApprovalMode = &.{},
     shutting_down: bool,
+    input_acceptance_reason: ?task_state.SendInputReason = null,
     text: TextProjection,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
@@ -168,8 +169,25 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"inputReady\":") catch return error.SnapshotTooLarge;
     writer.writeAll(if (inputReady(task)) "true" else "false") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"sendInputResult\":") catch return error.SnapshotTooLarge;
-    if (task.send_input_result) |result| try writeSendInputResult(writer, input.text, result) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"inputAcceptance\":{\"available\":") catch return error.SnapshotTooLarge;
+    writer.writeAll(if (input.input_acceptance_reason == null) "true" else "false") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+    if (input.input_acceptance_reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll("},\"inputSubmissions\":[") catch return error.SnapshotTooLarge;
+    var first_submission = true;
+    for (task.input_submissions.items) |record| {
+        if (task_state.submissionHasExecution(task, record.submission.operationId())) continue;
+        if (!first_submission) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        first_submission = false;
+        writer.writeAll("{\"submission\":") catch return error.SnapshotTooLarge;
+        try writeSubmission(writer, input.text, record.submission);
+        writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
+        try writeInput(writer, input.text, record.input, null);
+        writer.print(",\"state\":\"{s}\",\"reason\":", .{@tagName(record.state)}) catch return error.SnapshotTooLarge;
+        if (record.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
@@ -469,6 +487,20 @@ fn writeInputId(writer: *std.Io.Writer, id: ?u64) Error!void {
     if (id) |value| writer.print("\"{d}\"", .{value}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
 }
 
+fn writeSubmission(writer: *std.Io.Writer, text: TextProjection, submission: ?task_state.Submission) Error!void {
+    const record = submission orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.writeAll("{\"operationId\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, record.operationId());
+    writer.writeAll(",\"receivedAtUnixMs\":") catch return error.SnapshotTooLarge;
+    try writeInputId(writer, record.received_at_unix_ms);
+    writer.writeAll(",\"anchorRunId\":") catch return error.SnapshotTooLarge;
+    try writeInputId(writer, record.anchor_run_id);
+    writer.print(",\"afterOutputCount\":{d}}}", .{record.after_output_count}) catch return error.SnapshotTooLarge;
+}
+
 pub fn writeSendInputResult(writer: *std.Io.Writer, text: TextProjection, result: task_state.SendInputResult) Error!void {
     writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{result.task_id}) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, result.operationId());
@@ -479,6 +511,14 @@ pub fn writeSendInputResult(writer: *std.Io.Writer, text: TextProjection, result
     writer.writeAll(",\"sequence\":") catch return error.SnapshotTooLarge;
     if (result.sequence) |sequence| writer.print("{d}", .{sequence}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+    if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+pub fn writeInputAcceptance(writer: *std.Io.Writer, text: TextProjection, result: task_state.InputAcceptance) Error!void {
+    writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{result.task_id}) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, result.operationId());
+    writer.print(",\"outcome\":\"{s}\",\"reason\":", .{@tagName(result.outcome)}) catch return error.SnapshotTooLarge;
     if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
@@ -518,6 +558,8 @@ fn writeRun(
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     try writeInput(writer, text_projection, run.input, null);
+    writer.writeAll(",\"submission\":") catch return error.SnapshotTooLarge;
+    try writeSubmission(writer, text_projection, run.submission);
     writer.writeAll(",\"additionalInputs\":[") catch return error.SnapshotTooLarge;
     var first_input = true;
     for (run.additional_inputs) |entry| if (entry) |record| {
@@ -542,6 +584,8 @@ fn writeRun(
             jsonValue(writer, @tagName(continuation_reason.?)) catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"submission\":") catch return error.SnapshotTooLarge;
+        try writeSubmission(writer, text_projection, record.submission);
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     };
     writer.writeByte(']') catch return error.SnapshotTooLarge;

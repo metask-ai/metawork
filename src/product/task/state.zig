@@ -413,6 +413,7 @@ pub const RunInputRecord = union(enum) {
 };
 
 pub const MultimodalAttachment = struct {
+    resource_id: u64 = 0,
     kind: AttachmentKind,
     format: ?AttachmentFormat,
     display_name: []const u8,
@@ -605,9 +606,23 @@ pub const SendInputResult = struct {
     }
 };
 
+pub const InputAcceptance = struct {
+    task_id: u64,
+    operation_id: [64]u8 = @splat(0),
+    operation_id_len: u8,
+    outcome: enum { accepted, rejected } = .rejected,
+    reason: ?SendInputReason = null,
+
+    pub fn operationId(self: *const InputAcceptance) []const u8 {
+        return self.operation_id[0..self.operation_id_len];
+    }
+};
+
 pub const AttachmentKind = enum { image, file };
 pub const AttachmentFormat = enum { png, jpeg, webp };
 pub const AttachmentRecord = struct {
+    /// Runtime-only ownership correlation with the attachment aggregate.
+    resource_id: u64 = 0,
     kind: AttachmentKind,
     format: ?AttachmentFormat,
     display_name: []u8,
@@ -1017,6 +1032,18 @@ pub const Task = struct {
         return self.runtime.permission_review.phaseForRequest(self.runtime.active_run_id, self.runtime.pending_ui_request_id);
     }
 };
+
+/// A prepared Run may already appear in a history candidate while acceptance
+/// still owns its input. Publish only the execution's copy of that message.
+pub fn submissionHasExecution(task: *const Task, operation_id: []const u8) bool {
+    for (task.durable.runs) |entry| if (entry) |run| {
+        if (run.submission) |submission| if (std.mem.eql(u8, operation_id, submission.operationId())) return true;
+        for (run.additional_inputs) |additional| if (additional) |record| {
+            if (std.mem.eql(u8, operation_id, record.operationId())) return true;
+        };
+    };
+    return false;
+}
 
 pub const ProductTerminalFacts = struct {
     phase: RunPhase,

@@ -47,7 +47,7 @@ const build_options = @import("build_options");
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
-pub const SendInputResult = task_runtime.SendInputResult;
+pub const SendInputResult = product_task.InputAcceptance;
 pub const SendInputReason = task_runtime.SendInputReason;
 pub const InputTarget = union(enum) { idle: ?u64, run: u64 };
 
@@ -157,6 +157,7 @@ pub const Limits = struct {
     max_scheduled_tasks: usize = 16,
     max_skill_assets: usize = 256,
     max_runs_per_task: usize = 16,
+    max_pending_inputs_per_task: usize = 64,
     max_compacts_per_task: usize = 16,
     max_tools_per_run: usize = 32,
     max_commentary_segments_per_run: usize = 256,
@@ -1155,7 +1156,7 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
-    advancing_input_continuations: bool = false,
+    advancing_task_inputs: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -1183,6 +1184,7 @@ pub const Runtime = struct {
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
             limits.max_skill_assets == 0 or
+            limits.max_pending_inputs_per_task == 0 or limits.max_pending_inputs_per_task > 64 or
             limits.max_runs_per_task == 0 or
             limits.max_compacts_per_task == 0 or
             limits.max_tools_per_run == 0 or
@@ -3579,6 +3581,7 @@ pub const Runtime = struct {
         }, self.skillProjectionBudget());
         skill_root_owned = false;
         self.bumpRevision();
+        defer self.reapTaskInputResources();
         if (!self.task_runtime.releaseWorkspaceSessions(workspace_id, .{
             .context = self,
             .release_fn = releaseTaskRuntimeSession,
@@ -4528,12 +4531,64 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        if (self.task_runtime.inputAction(task_id) != .none) return error.TaskBusy;
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         return self.admitTaskRun(task_id, binding_epoch, input);
     }
 
-    pub fn sendInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!SendInputResult {
+    pub fn sendInput(self: *Runtime, operation_id: []const u8, task_id: u64, input: TaskRunInput) Error!SendInputResult {
+        if (self.containsKnownCredential(operation_id) or operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        var result: SendInputResult = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len) };
+        self.reapTaskInputResources();
+        @memcpy(result.operation_id[0..operation_id.len], operation_id);
+        self.receiveTaskInput(task_id, operation_id, input) catch |err| {
+            result.reason = sendInputRejection(err);
+            return result;
+        };
+        result.outcome = .accepted;
+        self.advanceTaskInputs();
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+        return result;
+    }
+
+    fn receiveTaskInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: TaskRunInput) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        _ = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
+        var staged: StagedTaskInput = .{};
+        defer if (staged.borrow) |*borrow| borrow.rollback();
+        const task_input = try self.borrowTaskInput(task_id, input, &staged);
+        _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, self.taskRuntimeOperationEffects());
+        if (staged.borrow) |*borrow| {
+            borrow.retainForTask();
+            staged.external.accept();
+        }
+    }
+
+    pub fn stopTask(self: *Runtime, task_id: u64) Error!void {
+        _ = self.syncLifecycleFacts();
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
+        _ = self.task_runtime.stopInputs(task_id);
+        switch (task.runtime.active_operation) {
+            .run => |id| _ = try self.task_runtime.cancelRun(task_id, id, self.taskRuntimeOperationEffects()),
+            .compact => |id| _ = try self.task_runtime.cancelCompact(task_id, id, .user_cancel, self.taskRuntimeOperationEffects()),
+            .restore => self.task_runtime.cancelInputPreparation(task_id, self.taskRuntimeOperationEffects()),
+            .none => {},
+        }
+        self.reapTaskInputResources();
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    /// Test-only immediate Run targeting observes Core receipt semantics. The
+    /// product Composer always uses Task acceptance through sendInput.
+    pub fn testSendInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!task_runtime.SendInputResult {
+        if (!builtin.is_test) @compileError("immediate input targeting is a lifecycle test seam");
         if (self.containsKnownCredential(operation_id)) return error.InvalidInput;
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
@@ -4550,7 +4605,7 @@ pub const Runtime = struct {
     }
 
     pub fn writeSendInputResult(self: *const Runtime, writer: *std.Io.Writer, result: SendInputResult) Error!void {
-        try product_task.writeSendInputResult(writer, self.taskTextProjection(), result);
+        try product_task.writeInputAcceptance(writer, self.taskTextProjection(), result);
     }
 
     fn admitInput(self: *Runtime, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!void {
@@ -4676,6 +4731,10 @@ pub const Runtime = struct {
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
         self.shutting_down = true;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
+        };
+        self.reapTaskInputResources();
     }
 
     pub fn runTaskAtBinding(
@@ -4686,6 +4745,7 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        if (self.task_runtime.inputAction(task_id) != .none) return error.TaskBusy;
         return self.admitTaskRun(task_id, expected_binding_epoch, input);
     }
 
@@ -4693,7 +4753,80 @@ pub const Runtime = struct {
         return self.admitTaskRunWithSource(task_id, expected_binding_epoch, input, null);
     }
 
+    const StagedTaskInput = struct {
+        parts: [lifecycle.multimodal_input_limits.max_parts]product_attachment.BorrowedPart = undefined,
+        indices: [lifecycle.multimodal_input_limits.max_parts]usize = undefined,
+        items: [lifecycle.multimodal_input_limits.max_parts]task_runtime.MultimodalAttachment = undefined,
+        borrow: ?product_attachment.Borrow = null,
+        external: AttachmentAcceptance = .{},
+    };
+
+    fn borrowTaskInput(self: *Runtime, task_id: u64, input: TaskRunInput, staged: *StagedTaskInput) Error!task_runtime.RunInput {
+        return switch (input) {
+            .text => |text| .{ .text = text },
+            .skill => |skill| .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+                .argument_values = skill.argument_values,
+            } },
+            .multimodal => |multimodal| input: {
+                staged.external = multimodal.acceptance;
+                if (multimodal.attachment_ids.len == 0 or
+                    multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
+                    return error.TooManyFiles;
+                staged.borrow = try self.attachments.borrow(
+                    multimodal.attachment_ids,
+                    &staged.parts,
+                    &staged.indices,
+                    task_id,
+                );
+                for (staged.parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
+                    const descriptor = self.attachments.descriptorFor(part.attachmentId()) orelse unreachable;
+                    staged.items[index] = switch (part) {
+                        .image => |image| .{
+                            .resource_id = image.id,
+                            .kind = .image,
+                            .format = switch (image.format) {
+                                .png => .png,
+                                .jpeg => .jpeg,
+                                .webp => .webp,
+                            },
+                            .display_name = descriptor.display_name,
+                            .bytes = image.bytes,
+                            .reference = image.reference,
+                            .size_bytes = descriptor.size_bytes,
+                            .source_format = switch (descriptor.format.?) {
+                                .png => .png,
+                                .jpeg => .jpeg,
+                                .webp => .webp,
+                            },
+                        },
+                        .text => |text| .{
+                            .resource_id = text.id,
+                            .kind = .file,
+                            .format = null,
+                            .display_name = descriptor.display_name,
+                            .bytes = text.bytes,
+                            .size_bytes = descriptor.size_bytes,
+                        },
+                    };
+                }
+                break :input .{ .multimodal = .{
+                    .text = multimodal.text,
+                    .attachments = staged.items[0..multimodal.attachment_ids.len],
+                } };
+            },
+        };
+    }
+
     fn admitTaskRunWithSource(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput, source: ?u64) Error!u64 {
+        return self.admitTaskRunInternal(task_id, expected_binding_epoch, .{ .command = input }, source);
+    }
+
+    const AdmissionInput = union(enum) { command: TaskRunInput, queued: usize };
+
+    fn admitTaskRunInternal(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: AdmissionInput, source: ?u64) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.inputContinuation(task_id) != null) return error.TaskBusy;
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
@@ -4711,6 +4844,8 @@ pub const Runtime = struct {
         if (model_target) |*target| {
             const task = self.task_runtime.findConst(task_id).?;
             if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
+                if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
+                    return error.ExecutionUnavailable;
                 _ = try self.beginTaskModelRebind(task_id, binding_epoch, target);
                 return error.RestoreBusy;
             };
@@ -4729,66 +4864,18 @@ pub const Runtime = struct {
         );
         if ((self.task_runtime.catalogProjection(task_id) orelse return error.UnknownTask).availability == .loading)
             return error.CatalogLoading;
-        var borrowed_parts: [lifecycle.multimodal_input_limits.max_parts]product_attachment.BorrowedPart = undefined;
-        var borrowed_indices: [lifecycle.multimodal_input_limits.max_parts]usize = undefined;
-        var multimodal_items: [lifecycle.multimodal_input_limits.max_parts]task_runtime.MultimodalAttachment = undefined;
-        var attachment_borrow: ?product_attachment.Borrow = null;
+        var staged: StagedTaskInput = .{};
         var acceptance_context: AttachmentRunAcceptanceContext = undefined;
-        var external_acceptance: AttachmentAcceptance = .{};
-        defer if (attachment_borrow) |*borrow| borrow.rollback();
-        const task_input: task_runtime.RunInput = switch (input) {
-            .text => |text| .{ .text = text },
-            .skill => |skill| .{ .skill = .{
-                .skill_id = skill.skill_id,
-                .catalog_revision = skill.catalog_revision,
-                .selection_revision = skill.selection_revision,
-                .argument_values = skill.argument_values,
-            } },
-            .multimodal => |multimodal| input: {
-                external_acceptance = multimodal.acceptance;
-                if (multimodal.attachment_ids.len == 0 or
-                    multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
-                    return error.TooManyFiles;
-                attachment_borrow = try self.attachments.borrow(
-                    multimodal.attachment_ids,
-                    &borrowed_parts,
-                    &borrowed_indices,
-                    task_id,
-                );
-                for (borrowed_parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
-                    const descriptor = self.attachments.descriptorFor(part.attachmentId()) orelse unreachable;
-                    multimodal_items[index] = switch (part) {
-                        .image => |image| .{
-                            .kind = .image,
-                            .format = switch (image.format) {
-                                .png => .png,
-                                .jpeg => .jpeg,
-                                .webp => .webp,
-                            },
-                            .display_name = descriptor.display_name,
-                            .bytes = image.bytes,
-                            .reference = image.reference,
-                            .size_bytes = descriptor.size_bytes,
-                            .source_format = switch (descriptor.format.?) {
-                                .png => .png,
-                                .jpeg => .jpeg,
-                                .webp => .webp,
-                            },
-                        },
-                        .text => |text| .{
-                            .kind = .file,
-                            .format = null,
-                            .display_name = descriptor.display_name,
-                            .bytes = text.bytes,
-                            .size_bytes = descriptor.size_bytes,
-                        },
-                    };
-                }
-                break :input .{ .multimodal = .{
-                    .text = multimodal.text,
-                    .attachments = multimodal_items[0..multimodal.attachment_ids.len],
-                } };
+        defer if (staged.borrow) |*borrow| borrow.rollback();
+        const task_input = switch (input) {
+            .command => |command| blk: {
+                const value = try self.borrowTaskInput(task_id, command, &staged);
+                if (value == .multimodal) for (staged.items[0..value.multimodal.attachments.len]) |*item| {
+                    item.resource_id = 0;
+                };
+                break :blk value;
             },
+            .queued => |index| (self.task_runtime.pendingInput(task_id, index) orelse return error.InvalidInput).payload.?.input,
         };
         var order_preparation = if (workspace.kind == .manual)
             try self.workspace.prepareOrder(workspace.id)
@@ -4802,10 +4889,10 @@ pub const Runtime = struct {
         };
         var operation_effects = self.taskRuntimeOperationEffects();
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
-        if (attachment_borrow != null) {
+        if (staged.borrow != null) {
             acceptance_context = .{
-                .borrow = &attachment_borrow.?,
-                .external = external_acceptance,
+                .borrow = &staged.borrow.?,
+                .external = staged.external,
             };
             operation_effects.run_acceptance = .{
                 .context = &acceptance_context,
@@ -4820,7 +4907,12 @@ pub const Runtime = struct {
             .apply_fn = applyTaskWorkspaceOrder,
             .rollback_fn = rollbackTaskWorkspaceOrder,
         };
-        var prepared = try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
+        var prepared = if (input == .queued)
+            try self.task_runtime.startWaitingRun(task_id, input.queued, workspace_effect, operation_effects)
+        else if (source) |id|
+            try self.task_runtime.startInputContinuation(task_id, expected_binding_epoch, id, task_input, workspace_effect, operation_effects)
+        else
+            try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
         if (source) |id| self.task_runtime.markInputTransferred(task_id, id, prepared.id());
         self.commitTaskStateBestEffort() catch |err| {
             if (source) |id| self.task_runtime.markInputTransferred(task_id, id, null);
@@ -5102,6 +5194,7 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (try self.task_runtime.setArchived(task_id, archived)) {
+            self.reapTaskInputResources();
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
@@ -5123,6 +5216,7 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const requested = try self.task_runtime.requestDeletion(task_id);
+        self.reapTaskInputResources();
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
                 if (workspace.kind == .automatic)
@@ -5422,7 +5516,7 @@ pub const Runtime = struct {
     /// projection, then schedules/reaps independently owned permission reviews.
     pub fn syncLifecycle(self: *Runtime) void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
-        self.advanceInputContinuations();
+        self.advanceTaskInputs();
         self.syncPermissionReviews();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
     }
@@ -5484,56 +5578,124 @@ pub const Runtime = struct {
         return task_sync.mcp_refresh_needed;
     }
 
-    fn advanceInputContinuations(self: *Runtime) void {
-        if (self.advancing_input_continuations) return;
-        self.advancing_input_continuations = true;
-        defer self.advancing_input_continuations = false;
+    fn advanceTaskInputs(self: *Runtime) void {
+        if (self.advancing_task_inputs) return;
+        self.advancing_task_inputs = true;
+        defer self.advancing_task_inputs = false;
+        defer self.reapTaskInputResources();
         for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            const source = self.task_runtime.inputContinuation(task.durable.id) orelse continue;
             if (self.shutting_down) {
-                _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .shutting_down);
-                self.bumpRevision();
+                _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
+                _ = self.task_runtime.cancelInputContinuation(task.durable.id, null, .shutting_down);
                 continue;
             }
-            if (task.runtime.worker_leases.hasLive() or !source.event_stream_finalized or
-                source.input_continuation_schedule_gate) continue;
-            switch (source.checkpoint.state.load(.acquire)) {
-                .exporting, .candidate_ready, .failure_ready => continue,
-                .settled => if (source.coverage != .covered) {
-                    _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .checkpoint_failed);
+            for (0..self.limits.max_pending_inputs_per_task + 1) |_| {
+                switch (self.task_runtime.inputAction(task.durable.id)) {
+                    .none, .wait => break,
+                    .fail => |action| {
+                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason);
+                        self.bumpRevision();
+                    },
+                    .continuation => {
+                        if (!self.advanceInputContinuation(task.durable.id)) break;
+                    },
+                    .submit => |action| {
+                        _ = self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch) catch |err| {
+                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err));
+                            self.bumpRevision();
+                            continue;
+                        };
+                        const receipt = self.task_runtime.submitWaitingInput(task.durable.id, action.index, action.run_id, self.taskRuntimeOperationEffects()) catch |err| {
+                            switch (err) {
+                                error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
+                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err)),
+                            }
+                            self.bumpRevision();
+                            continue;
+                        };
+                        self.bumpRevision();
+                        if (receipt.outcome == .rejected) break;
+                    },
+                    .start => |index| {
+                        if (!self.startWaitingInput(task.durable.id, index)) break;
+                    },
+                }
+            }
+        }
+    }
+
+    fn reapTaskInputResources(self: *Runtime) void {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            while (self.task_runtime.takeInputResourceAction(task.durable.id)) |action| {
+                self.attachments.settleTaskInput(action.resource_id, task.durable.id, action.keep_original) catch |err| switch (err) {
+                    error.CleanupFailed => self.bumpRevision(),
+                    else => @panic("Task attachment ownership invariant violated"),
+                };
+            }
+        };
+    }
+
+    fn startWaitingInput(self: *Runtime, task_id: u64, index: usize) bool {
+        const task = self.task_runtime.find(task_id) orelse return false;
+        if (task.model_intent_prepared or task.approval_change != null or self.approvalHistoryBlocked()) return false;
+        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) {
+            const capability = self.task_runtime.continuationProjection(task_id, self.taskRuntimeProjectionEffects());
+            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed) and self.task_runtime.beginInputPreparation(task_id, index)) {
+                _ = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch |err| {
+                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err));
                     self.bumpRevision();
-                    continue;
-                },
-                .none => {},
+                    return true;
+                };
+                return false;
             }
-            if (source.input_continuation_binding_epoch != task.durable.binding_epoch) {
-                _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .binding_changed);
-                self.bumpRevision();
-                continue;
-            }
-            // Consuming the reservation and normal admission are synchronous.
-            // An attempted batch cannot be reactivated by lifecycle re-entry.
-            source.input_continuation_pending = false;
-            source.input_continuation_attempted = true;
-            const merged = self.task_runtime.mergeInputContinuation(source, self.limits.max_user_message_bytes) catch |err| {
-                source.input_continuation_failure = if (err == error.InputContinuationTooLarge) .combined_input_too_large else .resource_limit;
-                self.task_runtime.discardInputPayloads(source);
-                self.bumpRevision();
-                continue;
-            };
-            defer {
-                std.crypto.secureZero(u8, merged);
-                self.allocator.free(merged);
-            }
-            _ = self.admitTaskRunWithSource(task.durable.id, source.input_continuation_binding_epoch, .{ .text = merged }, source.id) catch |err| {
-                source.input_continuation_failure = sendInputRejection(err);
-                self.task_runtime.discardInputPayloads(source);
-                self.bumpRevision();
-                continue;
-            };
-            self.task_runtime.discardInputPayloads(source);
+            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable);
             self.bumpRevision();
+            return true;
+        }
+        var previous: u64 = 0;
+        for (task.durable.runs) |entry| if (entry) |run| {
+            previous = @max(previous, run.id);
+        };
+        const id = self.admitTaskRunInternal(task_id, task.durable.binding_epoch, .{ .queued = index }, null) catch |err| {
+            for (task.durable.runs) |entry| if (entry) |run| if (run.id > previous) {
+                self.task_runtime.finishWaitingInput(task_id, index, run.id, null, self.taskRuntimeReleaseEffects());
+                self.bumpRevision();
+                return true;
+            };
+            switch (err) {
+                error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => return false,
+                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err)),
+            }
+            self.bumpRevision();
+            return true;
+        };
+        self.task_runtime.finishWaitingInput(task_id, index, id, null, self.taskRuntimeReleaseEffects());
+        self.bumpRevision();
+        return true;
+    }
+
+    fn advanceInputContinuation(self: *Runtime, task_id: u64) bool {
+        switch (self.task_runtime.prepareInputContinuation(task_id, self.limits.max_user_message_bytes)) {
+            .wait => return false,
+            .ended => {
+                self.bumpRevision();
+                return true;
+            },
+            .ready => |batch| {
+                defer {
+                    std.crypto.secureZero(u8, batch.text);
+                    self.allocator.free(batch.text);
+                }
+                _ = self.admitTaskRunWithSource(task_id, batch.binding_epoch, .{ .text = batch.text }, batch.source_id) catch |err| {
+                    self.task_runtime.finishInputContinuation(task_id, batch.source_id, sendInputRejection(err));
+                    self.bumpRevision();
+                    return true;
+                };
+                self.task_runtime.finishInputContinuation(task_id, batch.source_id, null);
+                self.bumpRevision();
+                return true;
+            },
         }
     }
 
@@ -7066,6 +7228,7 @@ pub const Runtime = struct {
     fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
             .now_ms = self.run_clock.now(),
+            .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
             .context = self,
             .authority_fn = taskProjectionAuthority,
             .text = self.taskTextProjection(),
@@ -7460,6 +7623,7 @@ pub const Runtime = struct {
             .max_workspaces = self.workspace.slotCount(),
             .max_tasks = self.limits.max_tasks,
             .max_runs_per_task = self.limits.max_runs_per_task,
+            .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
             .max_compacts_per_task = self.limits.max_compacts_per_task,
             .max_tools_per_run = self.limits.max_tools_per_run,
             .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
@@ -8001,6 +8165,7 @@ pub const Runtime = struct {
             },
             .limits = .{
                 .max_user_message_bytes = self.limits.max_user_message_bytes,
+                .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
                 .max_catalog_projection_bytes = self.limits.max_catalog_projection_bytes,
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,

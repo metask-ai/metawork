@@ -73,6 +73,7 @@ pub const ProjectionError = view.Error;
 pub const ProjectionText = view.TextProjection;
 pub const writeInput = view.writeInput;
 pub const writeSendInputResult = view.writeSendInputResult;
+pub const writeInputAcceptance = view.writeInputAcceptance;
 pub const ModelSelectionAvailability = view.ModelSelectionAvailability;
 pub const history = @import("product_task_persistence");
 pub const checkpoint_store = @import("product_task_checkpoint_store");
@@ -94,4 +95,5 @@ pub const testing = if (builtin.is_test) struct {
 } else struct {};
 
 pub const SendInputResult = runtime.SendInputResult;
+pub const InputAcceptance = state.InputAcceptance;
 pub const SendInputReason = runtime.SendInputReason;
