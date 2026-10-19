@@ -128,7 +128,7 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 - 账号入口固定显示在左栏底部：已登录时按 `displayName → emailHint → phoneHint → 中性已登录文案` 的顺序显示身份；脱敏提示只用于呈现，不参与登录资格判断；未登录时显示登录动作。其轻量菜单同时提供产品级设置与“关于 MetaWork”入口；About 显示静态产品名、Metask 开发者归属和随应用构建注入的 canonical 产品版本，不属于 Account、Models 或 Bridge projection，在未登录与连接异常时仍可打开。接口不可用、Userinfo client 不匹配或响应不可信时不得从 token payload 推断 principal，也不得回退旧 identity；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
 - Account authenticated 后，Application 使用同一 generation-bound authorization lease 直接启动独立、单飞、有界的 history 同步；新的 OAuth gateway token 不得发送给旧 `/api/v1/auth/me` 或 `/api/v1/usage/dashboard/*`。history 从 `GET https://app.metask-ai.com/v1/usage/stats` 读取以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的稀疏日桶，并固定提交 `scope=user`、`granularity=day`、包含边界 `since` 与不包含边界 `before`；上海日历日边界由 Host 换算为 UTC。登录 identity 只以新 OAuth Userinfo 的非空 `sub`、精确 `client_id = metawork` 与非空 `authorization_id` 作为门槛，并把 `sub` 绑定到 token；`name/email/phone_number` 缺失或异常不得阻止登录。已经 authenticated 后，history 字段缺失、格式错误或请求失败不得回滚登录，已有值在失败时保留为 stale。history 严格校验响应声明的 `scope=user`、`granularity=day`、`timezone=Asia/Shanghai`、查询边界、日桶顺序、Token恒等式及桶合计；`cost_mu` 固定按毫 U 换算为 U。当前已发布响应不以 `unit` 或 `cost_complete` 为必需字段，因此每日金额只呈现为“已记录费用”，不得声称区间费用完整。只有整段响应成功且严格验证后，范围内缺失日期才解释为零使用；失败不得把缺失值补零。不得轮询或自动重试；
 - 唯一的 global default selection 属于 `Models` 设置；页面以 `Provider → 默认模型` 的依赖链选择一份完整、source-qualified 的默认配置。Metask credential authority 由已登录 OAuth 会话隐式提供，不投影或选择第二层凭据；用户管理来源的 credential 由 Host 安全持有，也不在 Models 中显示或修改。用户管理来源的创建、endpoint、credential 与生命周期属于平级、独立的 `Providers` 设置；Provider 页面不得读取或修改 global default。Host 只在 management、API Key 直接写入系统 credential storage 与真实模型测试同时可用时整体开放 `Providers`，任一能力缺失都隐藏整个入口。开放判断只依据当次运行时 capability，不按 Windows/macOS 平台名建立静态 allowlist，也不能以不可完成或局部可用的表单提前暴露；
-- `Models` 另有独立的 Metask 生图模型选择，可显式选择或清除，初始为空，不跟随对话默认值，也不自动选取首个模型。候选只来自同一 Metask 目录明确声明支持 `images_generations` 的模型，不包含 Custom Provider；已保存但失效的选择保持可见。设置操作只提交当前身份下的无 secret intent，不生成图片、不取得执行授权；图片执行仍须通过正式 Host Tool 验收 Gate，当前工具集合迁移缺口以[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)为准。界面应说明可能收费、下一次 Run 生效和仅保存 PNG；
+- `Models` 另有独立的 Metask 生图模型选择，可显式选择或清除，初始为空，不跟随对话默认值，也不自动选取首个模型。候选只来自同一 Metask 目录明确声明支持 `images_generations` 的模型，不包含 Custom Provider；已保存但失效的选择保持可见。设置操作只提交当前身份下的无 secret intent，不生成图片、不取得执行授权；普通 Task 通过固定 `GenerateImage` Host Tool 执行图片生成；当前内部测试已启用，发布前仍须完成真实服务验收和工具集合迁移验证，恢复缺口以[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)为准。界面应说明可能收费、下一次 Run 生效和仅保存 PNG；
 - 用户管理的 `CustomProvider` 是唯一 Provider 产品对象，不存在 `ModelConnection`、connection identity 或对应兼容层。其最小对象是稳定 `id + display_name + protocol + normalized_base_url + credential_status + provider_revision + source_generation + catalog_generation`，并拥有有界的 custom model definition 集合；刚保存且尚未在 Models 页添加模型的 Provider 可以以 `configuring + models=[]` 持久存在，不能解析、测试或成为默认来源。每个模型以 `source_id + model_id` 标识，携带 nullable capability/token metadata、明确 provenance、当前 source generation 的 readiness proof 和 `untested | testing | connected | failed` 最新测试状态。Provider 不拥有 default model 或 provider-local 默认选择；global default 只由 Models 页以完整 `ModelRef` 提交。unknown 不得伪装为 unsupported/verified，display name 永远不是 identity。`protocol` 精确取 `openai_responses | openai_chat_completions | anthropic_messages | gemini_native`，四者均可创建、恢复和选择。MetaWork 可以为 DeepSeek、Kimi、MiniMax 与智谱 GLM 发布只读官方配置模板；模板 identity 只记录该 Provider 来自哪份内置配置，固定显示名与 protocol，并提供官方默认 Base URL、API Key 获取地址和文档地址。用户可以显式用另一兼容 Base URL 覆盖官方默认值；Models 仍按模板 protocol 确定性生成 completion endpoint，不进入 Agent runtime 的 `ProviderKind`，也不允许根据模型名或 URL 反推厂商。当前不包含厂商图标。readiness 与 latest test status 必须分开；同一 source generation 已验证模型的失败重测不能撤销其 readiness 或正在使用的默认 execution。自定义 Provider 的 protocol 由用户创建时明确选择，不能根据模型名或 endpoint 猜测；
 - 用户管理 Provider 的 API credential 由用户在本地桌面 `Providers` 表单中直接填写；Renderer 只能在 create/replace 操作的临时 password state 中持有完整值，并通过专用 typed Bridge command 一次性提交。Bridge 严格校验后立即转交 Models，Models 写入系统安全存储；metadata 以独立、无 secret 的 registry 原子持久化。提交成功、取消、离页或 revision 变化后不得把秘密保留为可恢复 UI 状态；明确失败时可以留在当前表单供用户修正重试，但不得持久化或进入 snapshot。任何路径都不能提交 Authorization header 或把 arbitrary URL/credential 直接注入 Run；
 - 模型测试通过 Agent-owned Completion 发起一次有界的非流式请求，复用当前设置选择冻结的 ExecutionConfig，并由 MetaWork 的 Anthropic/OpenAI/Gemini 无 Tool codec 解析最终 JSON 响应；它不调用 AgentCore Completion，也不创建产品 Task、Run history 或持久 Conversation。第一版由用户明确提交 bounded model id，Host 保存其模型 metadata；自动模型发现不在当前范围；
@@ -368,11 +368,11 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 
 ```text
 Automatic Workspace 或经原生 picker 授权的 Manual Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
-→ 文本流 → Agent-owned 固定 built-in 集合 → 当前 `approval_required` compatibility permission
+→ 文本流 → Agent-owned 固定 built-in 集合与 GenerateImage → 当前 `approval_required` compatibility permission
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 
-它不包含独立 AgentCore Worker crash recovery、in-flight Run 恢复、async suspend/resume、strict Workspace security 或正式 Host tools。正常 Application 重启后的 finalized Conversation attachment 恢复按现有 checkpoint 合同独立提供，不扩大上述边界。
+它不包含独立 AgentCore Worker crash recovery、in-flight Run 恢复、async suspend/resume、strict Workspace security 或用户自定义 Host tools。正常 Application 重启后的 finalized Conversation attachment 恢复按现有 checkpoint 合同独立提供，不扩大上述边界。
 
 ### 7.2 Account 与 Custom Provider 集成 baseline
 
@@ -397,7 +397,7 @@ Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

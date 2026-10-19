@@ -6,15 +6,17 @@ const sdk = @import("lifecycle_fixture").sdk;
 const workspace_output = @import("image_output");
 
 // Pass-through instrumentation over the exact staged binary. No result, issue,
-// checkpoint or status is fabricated; only the schema-change case changes the
-// one fixed GenerateImage descriptor while creating its isolated Runtime.
+// checkpoint or status is fabricated. Test-only inputs reproduce the previous
+// zero-Host-tool release and a changed GenerateImage schema.
 const CoreProbe = struct {
     var active: *CoreProbe = undefined;
     api: sdk.types.ApiV1,
     runtime_api: sdk.types.RuntimeApiV1,
+    session_api: sdk.types.SessionApiV1,
     control_api: sdk.types.SessionControlApiV1,
     original: sdk.Api,
     changed_schema: bool = false,
+    legacy_tools: bool = false,
     report: [8192]u8 = undefined,
     report_len: usize = 0,
     description: [8192]u8 = undefined,
@@ -22,16 +24,23 @@ const CoreProbe = struct {
 
     fn init(self: *CoreProbe, changed: bool) !void {
         const original = try sdk.Api.discover();
-        self.* = .{ .api = original.raw.*, .runtime_api = original.raw.runtime.?.*, .control_api = original.raw.session_control.?.*, .original = original, .changed_schema = changed };
+        self.* = .{ .api = original.raw.*, .runtime_api = original.raw.runtime.?.*, .session_api = original.raw.session.?.*, .control_api = original.raw.session_control.?.*, .original = original, .changed_schema = changed };
         self.runtime_api.create = create;
+        self.session_api.create = createSession;
         self.control_api.restore = restore;
         self.control_api.describe = describe;
         self.api.runtime = &self.runtime_api;
+        self.api.session = &self.session_api;
         self.api.session_control = &self.control_api;
         active = self;
     }
     fn create(config: ?*const sdk.types.RuntimeConfigV1, plugins: ?*const sdk.types.RuntimePluginConfigV1, output: ?*?*sdk.types.RuntimeHandle, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
         var copy = config.?.*;
+        if (active.legacy_tools) {
+            copy.host_tools = null;
+            copy.host_tool_count = 0;
+            return active.original.runtime().create()(&copy, plugins, output, diagnostic);
+        }
         if (active.changed_schema) {
             std.debug.assert(copy.host_tool_count == 1);
             var tool = copy.host_tools.?[0];
@@ -40,6 +49,17 @@ const CoreProbe = struct {
             return active.original.runtime().create()(&copy, plugins, output, diagnostic);
         }
         return active.original.runtime().create()(config, plugins, output, diagnostic);
+    }
+    fn createSession(runtime: ?*sdk.types.RuntimeHandle, config: ?*const sdk.types.SessionCreateConfigV1, callbacks: ?*const sdk.types.SessionCallbacksV1, output: ?*?*sdk.types.SessionHandle, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
+        var copy = config.?.*;
+        var host = copy.host.?.*;
+        if (active.legacy_tools) {
+            std.debug.assert(host.allowed_tool_count == 11);
+            std.debug.assert(std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage"));
+            host.allowed_tool_count -= 1;
+            copy.host = &host;
+        }
+        return active.original.session().create()(runtime, &copy, callbacks, output, diagnostic);
     }
     fn restore(runtime: ?*sdk.types.RuntimeHandle, config: ?*const sdk.types.SessionRestoreConfigV1, callbacks: ?*const sdk.types.SessionCallbacksV1, output: ?*?*sdk.types.SessionHandle, report: ?*sdk.types.OwnedBytesV1, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
         const status = active.original.sessionControl().restore()(runtime, config, callbacks, output, report, diagnostic);
@@ -354,10 +374,13 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
     var h: Harness = undefined;
     try h.init("restore", .{});
     defer h.deinit();
+    var legacy_probe: CoreProbe = undefined;
     if (!old_image) {
         try h.runtime.shutdown();
         h.runtime.deinit();
-        h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
+        try legacy_probe.init(false);
+        legacy_probe.legacy_tools = true;
+        h.runtime = try agent.Runtime.initWithApi(std.testing.io, std.testing.allocator, &legacy_probe.api, .{ .max_sessions = 2 });
     }
     const session = try h.session(.default, false);
     try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, session, "Write the checkpoint fixture.", if (grant) .allow_session else .allow_once, false));
@@ -457,7 +480,7 @@ test "GenerateImage canonical checkpoint invalidates changed tool authority and 
     try checkpointTools(true, true, true);
 }
 
-test "GenerateImage old checkpoint without grants exposes contradictory Core report and fails closed (B0 gate open)" {
+test "GenerateImage legacy checkpoint without grants keeps the upstream restore release gap fail closed" {
     try checkpointTools(false, false, false);
 }
 
@@ -468,6 +491,19 @@ test "GenerateImage accept_edits still requires once-only Host approval" {
     const session = try h.session(.accept_edits, true);
     try std.testing.expectEqual(@as(usize, 2), try permissionRun(&h, session, .allow_once));
     try h.evidence(2, 2, "saved");
+}
+
+test "GenerateImage ordinary Runtime exposes the tool without requiring image configuration for text" {
+    var h: Harness = undefined;
+    try h.init("success", .{});
+    defer h.deinit();
+    try h.runtime.shutdown();
+    h.runtime.deinit();
+    h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
+    const session = try h.session(.accept_edits, false);
+    try std.testing.expectEqual(@as(usize, 1), try permissionRun(&h, session, .allow_once));
+    try h.evidence(0, 0, "unavailable");
+    try std.testing.expectEqual(@as(usize, 0), h.sink.attempts);
 }
 
 test "GenerateImage accept_edits denial and noninteractive permission stop have zero effects" {
@@ -1246,6 +1282,11 @@ fn expectCanonicalImageProduct(mode: []const u8) !void {
     var h: Harness = undefined;
     try h.init(mode, .{ .timeout_ms = 10000 });
     defer h.deinit();
+    // Exercise the ordinary product initializer and production limits. Only
+    // per-Run effects use local fixtures; registration has no test override.
+    try h.runtime.shutdown();
+    h.runtime.deinit();
+    h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
     var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir };
     var account = image_product.account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &effects, .perform_fn = image_product.Effects.account }, image_product.account_api.TestSupport.loopbackEndpoint(), .{ .context = &effects, .notify_fn = image_product.Effects.notify });
     var platform: image_product.account_api.TestSupport.Platform = .{};

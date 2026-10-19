@@ -1035,9 +1035,16 @@ test("Settings moves directly from Provider to model selection", async () => {
       { operation: "refreshing_catalog" },
     ),
   );
-  assert.match(screen.getByRole("status").textContent, /Preparing Model Two/);
   assert.match(
-    screen.getByRole("status").textContent,
+    within(
+      screen.getByRole("group", { name: "Default model for new tasks" }),
+    ).getByRole("status").textContent,
+    /Preparing Model Two/,
+  );
+  assert.match(
+    within(
+      screen.getByRole("group", { name: "Default model for new tasks" }),
+    ).getByRole("status").textContent,
     /current default model, model-1/i,
   );
   const model = screen.getByRole("combobox", { name: "Default model" });
@@ -1058,7 +1065,12 @@ test("Settings moves directly from Provider to model selection", async () => {
     /Model Two/,
   );
   assert.equal(screen.queryByText("Pending change"), null);
-  assert.equal(screen.queryByRole("status"), null);
+  assert.equal(
+    within(
+      screen.getByRole("group", { name: "Default model for new tasks" }),
+    ).queryByRole("status"),
+    null,
+  );
 });
 
 test("Settings keeps a model choice visibly pending without declaring it committed", async () => {
@@ -2310,7 +2322,11 @@ test("Models reports an authoritative empty conversation catalog without signing
     screen.getByRole("combobox", { name: "Default model" }).disabled,
     true,
   );
-  assert.ok(screen.getByRole("button", { name: "Sync again" }));
+  assert.ok(
+    within(
+      screen.getByRole("group", { name: "Default model for new tasks" }),
+    ).getByRole("button", { name: "Sync again" }),
+  );
   assert.deepEqual(view.selections.model, []);
 });
 

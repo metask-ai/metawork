@@ -2733,7 +2733,7 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
     try installControlExecution(&workbench);
     _ = try workbench.createTask(productControlTaskInput());
 
-    try std.testing.expect(fake_core.builtin_allowlist_seen);
+    try std.testing.expect(fake_core.product_allowlist_seen);
 }
 
 test "Task permission profile is immutable and successful interactive create remembers it" {
@@ -3351,7 +3351,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 10), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 11), fake_core.last_restored_allowed_tool_count);
 
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
@@ -10345,10 +10345,10 @@ const ImageAdmissionProbe = struct {
         self.released += 1;
     }
     fn imageHttp(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
-        @panic("ordinary Product Runtime must still declare zero Host tools");
+        @panic("this Product lifecycle scenario must not execute image effects");
     }
     fn output(_: *anyopaque, _: []const u8, _: *const lifecycle.ImageGenerationCancellation) lifecycle.ImageGenerationOutputResult {
-        @panic("ordinary Product Runtime must still declare zero Host tools");
+        @panic("this Product lifecycle scenario must not execute image effects");
     }
 };
 
@@ -10452,7 +10452,7 @@ test "image Run admission freezes per-Run input and retains scrub ownership thro
     fake_core.releaseControlled();
     try settleInputScenario(scenario);
     try std.testing.expectEqual(@as(usize, 1), image.released);
-    try std.testing.expect(fake_core.zero_host_tools_seen);
+    try std.testing.expect(fake_core.image_tool_seen);
 }
 
 test "image Run follow-up resolves the next configuration and admission rollback releases its owner" {
@@ -10482,5 +10482,5 @@ test "image Run follow-up resolves the next configuration and admission rollback
     try std.testing.expect(task.durable.runs[1].?.image_execution == null);
     try std.testing.expect(task.durable.runs[2].?.image_execution == null);
     try std.testing.expectEqual(@as(?u64, task.durable.runs[2].?.id), task.durable.runs[1].?.additional_inputs[0].?.transferred_to_run_id);
-    try std.testing.expect(fake_core.zero_host_tools_seen);
+    try std.testing.expect(fake_core.image_tool_seen);
 }

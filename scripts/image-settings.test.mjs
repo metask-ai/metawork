@@ -280,7 +280,7 @@ test("Image settings explain charges, next Run and PNG in both languages without
   }
 });
 
-test("Ordinary Models settings keep the image entry closed until the formal Host Tool Gate", () => {
+test("Ordinary Models settings expose image selection independently of the dialogue provider", () => {
   render(
     localized(
       createElement(SettingsPage, {
@@ -301,10 +301,102 @@ test("Ordinary Models settings keep the image entry closed until the formal Host
         onBack() {},
         onRefresh() {},
         onSelectModel() {},
+        onSelectImageModel: async () => true,
       }),
     ),
   );
   assert.ok(screen.getByRole("combobox", { name: "Default model" }));
-  assert.equal(screen.queryByRole("combobox", { name: "Image model" }), null);
-  assert.equal(screen.queryByRole("group", { name: "Image model" }), null);
+  assert.ok(screen.getByRole("combobox", { name: "Image model" }));
+  assert.ok(screen.getByRole("group", { name: "Image model" }));
+});
+
+test("App image selection and clear use current image revisions and never change the dialogue default", async (ctx) => {
+  window.sessionStorage.clear();
+  const { default: App } = await vite.ssrLoadModule("/src/app/App.tsx");
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const snapshot = structuredClone(snapshotFixture);
+  snapshot.models.imageGeneration = imageView();
+  const dialogue = structuredClone(snapshot.models.defaultSelection);
+  const writes = [];
+  let shortcut;
+  let rejected = false;
+  for (const [name, fn] of Object.entries({
+    available: () => true,
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    onShortcut: (callback) => {
+      shortcut = callback;
+      return () => {};
+    },
+    onHostSignal: () => () => {},
+    onWorkbenchRevision: () => () => {},
+    fetchSnapshot: async () => structuredClone(snapshot),
+    configureMetaskImageSelection: async (input) => {
+      writes.push(input);
+      if (rejected) return { accepted: false, errorCode: "stale_revision" };
+      const image = snapshot.models.imageGeneration;
+      image.selection =
+        input.modelId === null
+          ? null
+          : { sourceId: "metask", modelId: input.modelId };
+      image.selectionAvailable = input.modelId !== null;
+      image.selectionRevision = String(BigInt(image.selectionRevision) + 1n);
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return { accepted: true, errorCode: "none" };
+    },
+    configureMetaskSelection: async () =>
+      assert.fail("dialogue intent changed"),
+    selectModelsDefault: async () => assert.fail("dialogue default changed"),
+    refreshModelsCatalog: async () => assert.fail("hidden catalog refresh"),
+  }))
+    ctx.mock.method(BridgeClient.prototype, name, fn);
+  render(localized(createElement(App)));
+  await waitFor(() => assert.ok(shortcut));
+  await act(async () => shortcut({ id: "settings.open" }));
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("link", { name: "Models" }));
+  const trigger = screen.getByRole("combobox", { name: "Image model" });
+  await waitFor(() => assert.equal(trigger.disabled, false));
+  assert.equal(writes.length, 0);
+  trigger.focus();
+  await user.keyboard("{ArrowDown}");
+  await screen.findByRole("option", { name: /Image One/ });
+  await user.keyboard("{Enter}");
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("group", { name: "Image model" }).textContent,
+      /Selected: Image One/,
+    ),
+  );
+  assert.deepEqual(writes, [
+    {
+      modelId: "image-one",
+      expectedSelectionRevision: "17",
+      expectedCatalogGeneration: "71",
+    },
+  ]);
+  rejected = true;
+  await user.click(screen.getByRole("button", { name: "Clear selection" }));
+  await screen.findByText(/could not be confirmed/);
+  assert.equal(writes.length, 2);
+  assert.deepEqual(writes[1], {
+    modelId: null,
+    expectedSelectionRevision: "18",
+    expectedCatalogGeneration: "71",
+  });
+  assert.match(
+    screen.getByRole("group", { name: "Image model" }).textContent,
+    /Selected: Image One/,
+  );
+  rejected = false;
+  await user.click(screen.getByRole("button", { name: "Clear selection" }));
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("group", { name: "Image model" }).textContent,
+      /No image model selected/,
+    ),
+  );
+  assert.equal(writes.length, 3);
+  assert.deepEqual(snapshot.models.defaultSelection, dialogue);
 });

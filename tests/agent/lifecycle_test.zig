@@ -21,7 +21,7 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
-test "GenerateImage isolated initializer registers one fixed tool without changing product init" {
+test "GenerateImage fixture initializer uses the same fixed tool as product init" {
     const Http = struct {
         fn perform(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
             return error.Unexpected;
@@ -184,7 +184,7 @@ const ImageAllocationGate = struct {
     }
 };
 
-test "GenerateImage per-Run credentials are zeroed on every exit without opening the product Gate" {
+test "GenerateImage per-Run credentials are zeroed on every exit including product init" {
     for (0..5) |action| {
         fake_core.reset();
         var observing: ImageAllocationGate = .{};
@@ -227,8 +227,8 @@ test "GenerateImage per-Run credentials are zeroed on every exit without opening
         try std.testing.expectEqual(@as(usize, 0), network.calls);
         try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
         if (action == 4) {
-            try std.testing.expect(fake_core.zero_host_tools_seen);
-            try std.testing.expect(fake_core.image_tool == null);
+            try std.testing.expect(fake_core.image_tool_seen);
+            try std.testing.expect(fake_core.image_tool != null);
         }
     }
 }
@@ -2352,8 +2352,8 @@ test "Agent Runtime creates and destroys an idle Session" {
     defer deinitTestComposition(runtime);
     const session = try openSession(runtime);
     try std.testing.expect(fake_core.credential_seen);
-    try std.testing.expect(fake_core.zero_host_tools_seen);
-    try std.testing.expect(fake_core.builtin_allowlist_seen);
+    try std.testing.expect(fake_core.image_tool_seen);
+    try std.testing.expect(fake_core.product_allowlist_seen);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     try closeSession(session, .session_close);
     try closeSession(session, .session_close);
@@ -2464,7 +2464,7 @@ test "model binding limits reject before Session and checkpoint Core calls" {
     try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
 }
 
-test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
+test "Agent Runtime applies the fixed MetaWork built-in and Host tool surface to Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2494,7 +2494,7 @@ test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     defer closeSession(session, .session_close) catch {};
 
     const expected = [_][]const u8{
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch",
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch", "GenerateImage",
     };
     try std.testing.expectEqual(expected.len, fake_core.last_allowed_tool_count);
     for (expected, 0..) |name, index| {
