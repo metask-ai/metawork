@@ -243,7 +243,7 @@ test("Run disclosure remains collapsed unless the user explicitly opens it", () 
   assert.equal(observeRunProcessDisclosure(manual).expanded, true);
 });
 
-test("only adopted messages with real anchors enter technical process order", () => {
+test("adoption facts do not create user message entries in the technical process", () => {
   const message = {
     id: "1",
     operationId: "input-1",
@@ -280,7 +280,17 @@ test("only adopted messages with real anchors enter technical process order", ()
       tools: [tool("before", "1"), tool("after", "3")],
     }),
   );
-  assert.deepEqual(presentation.inputs, [message]);
+  assert.equal("inputs" in presentation, false);
+  const withoutTools = deriveRunPresentation(
+    run({
+      phase: "completed",
+      terminal: terminal("completed"),
+      additionalInputs: [message],
+      tools: [],
+    }),
+  );
+  assert.equal(withoutTools.processCanCollapse, false);
+  assert.equal(withoutTools.processVisible, false);
   assert.equal(presentation.processCanCollapse, true);
   assert.deepEqual(
     presentation.tools.map((tool) => tool.order),

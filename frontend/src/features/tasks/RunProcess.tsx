@@ -428,24 +428,6 @@ export function RunProcess({
         ? activityDetail(activity, locale, t)
         : null;
   const showBody = expanded && presentation.processCanCollapse;
-  const entries = [
-    ...presentation.tools.map((tool) => ({
-      kind: "tool" as const,
-      order: tool.order,
-      tool,
-    })),
-    ...presentation.inputs.map((input) => ({
-      kind: "input" as const,
-      order: input.order!,
-      input,
-    })),
-  ].sort((a, b) =>
-    BigInt(a.order) < BigInt(b.order)
-      ? -1
-      : BigInt(a.order) > BigInt(b.order)
-        ? 1
-        : 0,
-  );
 
   return (
     <section
@@ -484,31 +466,20 @@ export function RunProcess({
       />
       {showBody && (
         <div className="run-process-body" id={bodyId}>
-          {entries.length > 0 && (
+          {presentation.tools.length > 0 && (
             <ul className="run-process-tools">
-              {entries.map((entry) =>
-                entry.kind === "input" ? (
-                  <li
-                    key={`input-${entry.input.id}`}
-                    className="run-process-input"
-                  >
-                    {t("input.adopted_marker", {
-                      text: entry.input.text.slice(0, 160),
-                    })}
-                  </li>
-                ) : (
-                  <ProcessTool
-                    key={`tool-${entry.tool.id}`}
-                    tool={entry.tool}
-                    fileChanges={fileChanges}
-                    expanded={expandedToolIds.has(entry.tool.id)}
-                    onExpandedChange={(nextExpanded) =>
-                      onToolExpandedChange(entry.tool.id, nextExpanded)
-                    }
-                    onReviewFileChanges={onReviewFileChanges}
-                  />
-                ),
-              )}
+              {presentation.tools.map((tool) => (
+                <ProcessTool
+                  key={`tool-${tool.id}`}
+                  tool={tool}
+                  fileChanges={fileChanges}
+                  expanded={expandedToolIds.has(tool.id)}
+                  onExpandedChange={(nextExpanded) =>
+                    onToolExpandedChange(tool.id, nextExpanded)
+                  }
+                  onReviewFileChanges={onReviewFileChanges}
+                />
+              ))}
             </ul>
           )}
         </div>

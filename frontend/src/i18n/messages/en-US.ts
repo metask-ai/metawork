@@ -643,40 +643,11 @@ export const enUS = {
     "Only text can be added during a run. Your draft is preserved.",
   "input.not_ready":
     "This run is not accepting input. Your draft is preserved.",
-  "input.submitted":
-    "Message submitted to this run. Its adoption status appears in the run history.",
+  "input.submitted": "Message sent.",
   "input.unknown":
     "Submission is unconfirmed. Check the run history; the message will not be resent automatically.",
-  "input.position_unknown": "The exact adoption position is unconfirmed.",
-  "input.state.pending": "Submitted to this run, not yet adopted",
-  "input.state.adopted": "Added to this run’s context",
-  "input.state.unadopted":
-    "Not adopted in this Run; further processing was not started",
-  "input.state.continuing":
-    "Not included in this Run; continuing after cleanup",
-  "input.state.transferred":
-    "Not processed in this Run; transferred to the next Run",
-  "input.locate_target": "View next Run",
   "input.continuation_wait":
-    "Finishing cleanup before processing submitted messages; edit your draft or stop",
-  "input.continuation.failed":
-    "The next Run could not start. Put the messages back in the editor to send them again.",
-  "input.continuation.busy":
-    "Another operation blocked continuation; the next Run did not start.",
-  "input.continuation.execution":
-    "The execution setup is unavailable for continuation; the next Run did not start.",
-  "input.continuation.workspace":
-    "The working directory is unavailable for continuation; the next Run did not start.",
-  "input.continuation.capability":
-    "A required capability or catalog is unavailable; the next Run did not start.",
-  "input.continuation.input":
-    "The continuation input did not pass validation; the next Run did not start.",
-  "input.continuation.capacity":
-    "There is not enough capacity for continuation; the next Run did not start.",
-  "input.continuation.shutting_down":
-    "The app is shutting down; the next Run did not start.",
-  "input.continuation.unavailable":
-    "The task is not eligible for continuation; the next Run did not start.",
+    "Processing submitted messages; edit your draft or stop",
   "mutation.reason.continuation_cancelled": "Further processing was cancelled.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",
@@ -684,12 +655,6 @@ export const enUS = {
     "Run cleanup failed; messages were not continued.",
   "mutation.reason.schedule_failed":
     "The scheduled result could not be confirmed; messages were not continued.",
-  "input.state.unknown":
-    "Whether this was added to the run’s context is unconfirmed",
-  "input.restore": "Put back in the editor",
-  "input.restore_unknown":
-    "The original message may have been processed. Sending it again may repeat work.",
-  "input.adopted_marker": "Adopted user input: {text}",
   "mutation.reason.run_changed":
     "The target run has changed. Check it before sending again.",
   "mutation.reason.run_not_ready":

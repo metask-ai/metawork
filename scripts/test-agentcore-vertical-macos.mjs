@@ -657,7 +657,7 @@ desktopVertical: try {
     await verifyActiveRestart();
     await stopApplication("active input verification complete");
     process.stdout.write(
-      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, merged final-output continuation, stop/failure, target navigation, Skill refusal, timeout reconciliation, draft focus and restart.\n",
+      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, merged final-output continuation, stop/failure, ordinary user messages, Skill refusal, timeout reconciliation, draft focus and restart.\n",
     );
     break desktopVertical;
   }
@@ -3082,10 +3082,10 @@ async function verifyActiveRendererDraft(taskId, text) {
       const flow=document.querySelector('.run-reading-flow');
       const first=flow.querySelector('.additional-input .ai-message');
       const before=window.__activeReadingObservation;
-      return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,states:[...flow.querySelectorAll('.additional-input')].map(node=>node.dataset.state)};
+      return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,copies:flow.querySelectorAll('.additional-input .input-copy-actions').length};
     })()`);
     assert.deepEqual(reading.roles, ["user", "assistant", "user", "assistant"]);
-    assert.deepEqual(reading.states, ["adopted", "adopted"]);
+    assert.equal(reading.copies, 2);
     assert.equal(reading.same, true);
     assert.ok(reading.shift <= 1, JSON.stringify(reading));
     assert.equal(reading.following, 0);
@@ -3120,13 +3120,13 @@ async function observeTransferredInput(taskId, targetRunId) {
       const row=[...document.querySelectorAll('.task-list-item')].find(node=>node.dataset.taskId===${JSON.stringify(taskId)});
       if(!row) return false;
       if(row.getAttribute('aria-current')!=='page') {row.click();return false;}
-      return document.querySelectorAll('.additional-input[data-state="transferred"]').length===2;
+      return document.querySelectorAll('.additional-input').length===2;
     })()`),
       commandTimeoutMs,
       "transferred inputs in the real reading surface",
     );
     const inputCopies = await webview.evaluate(`(() => {
-      const source=[...document.querySelectorAll('.additional-input[data-state="transferred"] .task-input-copy')];
+      const source=[...document.querySelectorAll('.additional-input .task-input-copy')];
       const copies=[...document.querySelectorAll('.ai-message[data-role="user"] .task-input-copy')];
       const target=document.querySelector('[data-run-id="${targetRunId}"]');
       return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .input-copy-actions')};
@@ -3136,13 +3136,6 @@ async function observeTransferredInput(taskId, targetRunId) {
       targetInput: false,
       targetMetadata: false,
     });
-    const focus = await webview.evaluate(`(() => {
-      const button=document.querySelector('.additional-input-target');
-      if(!button) throw new Error('Missing transfer destination action');
-      button.click();
-      return document.activeElement?.closest('[data-run-id]')?.dataset.runId;
-    })()`);
-    assert.equal(focus, targetRunId);
     for (const [name, width, theme] of [
       ["continuation-desktop-light", 1320, "light"],
       ["continuation-desktop-dark", 1320, "dark"],
@@ -3161,18 +3154,15 @@ async function observeTransferredInput(taskId, targetRunId) {
           webview.evaluate(`(() => {
         if(innerWidth>${width} || innerWidth<${width}-32) return false;
         const messages=[...document.querySelectorAll('.additional-input')];
-        const buttons=[...document.querySelectorAll('.additional-input-target')];
-        if(messages.length!==2 || buttons.length!==2) return false;
-        if(document.querySelector('.additional-input-restore')) throw new Error('Transferred input still offers a replay action');
-        for(const button of buttons) {
-          const r=button.getBoundingClientRect();
-          if(r.height<43 || r.left<0 || r.right>innerWidth) throw new Error('Transfer action outside viewport or too small');
-          if(parseFloat(getComputedStyle(button).fontSize)>13 || getComputedStyle(button).borderTopWidth==='0px') throw new Error('Transfer action has lost its compact button appearance');
+        if(messages.length!==2) return false;
+        if(document.querySelector('.additional-input-target, .additional-input-state, .additional-input-restore, .run-process-input')) throw new Error('Interjection-specific status or action is visible');
+        for(const message of messages) {
+          if(message.querySelectorAll('button').length!==1 || !message.querySelector('.input-copy-actions .input-copy-action')) throw new Error('User message must only offer ordinary copy');
         }
         if(document.documentElement.scrollWidth>innerWidth) throw new Error('Continuation horizontal overflow');
         if(!document.querySelector('[data-run-id="${targetRunId}"]')) throw new Error('Transfer target is not a real exchange');
         messages[0].scrollIntoView({block:'start'});
-        return {width:innerWidth,theme:document.documentElement.dataset.theme,states:messages.map(node=>node.dataset.state),targets:buttons.length,errors:window.__activeInputUiErrors??0};
+        return {width:innerWidth,theme:document.documentElement.dataset.theme,messages:messages.length,copyActions:messages.filter(node=>node.querySelector('.input-copy-action')).length,errors:window.__activeInputUiErrors??0};
       })()`),
         commandTimeoutMs,
         `${name} transfer geometry`,
@@ -3194,7 +3184,7 @@ async function observeTransferredInput(taskId, targetRunId) {
     if (visualCaptureDir)
       await writeFile(
         path.join(visualCaptureDir, "continuation-dom.json"),
-        JSON.stringify({ taskId, targetRunId, focus, observations }, null, 2),
+        JSON.stringify({ taskId, targetRunId, observations }, null, 2),
       );
   } finally {
     await resizeActiveInputVisualWindow(1320, 812);

@@ -2348,56 +2348,20 @@ test("unavailable interjection preserves the draft and shows only disabled Send"
   assert.equal(stops, 0);
 });
 
-test("unadopted and uncertain history can only be put back in the editor", async () => {
-  const { AdditionalInput } = await vite.ssrLoadModule(
-    "/src/features/tasks/AdditionalInput.tsx",
-  );
-  const restored = [];
-  const inputs = [
-    {
-      id: "1",
-      operationId: "old",
-      text: "safe preview",
-      afterOutputCount: 0,
-      redacted: false,
-      sequence: null,
-      adoptedTurn: null,
-      order: null,
-      state: "unknown",
-    },
-  ];
-  const view = render(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
-      },
-      createElement(AdditionalInput, {
-        input: inputs[0],
-        onRestore: (input) => restored.push(input),
-      }),
-    ),
-  );
-  assert.match(view.container.textContent, /Sending it again may repeat work/);
-  assert.deepEqual(restored, []);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Put back in the editor" }),
-  );
-  assert.deepEqual(restored, [
-    { kind: "text", text: "safe preview", redacted: false },
-  ]);
-});
-
-test("continuation rejection explains the next Run without claiming a preserved draft or active task", async () => {
+test("all interjection states render the same ordinary message with copy only", async () => {
   const { AdditionalInput } = await vite.ssrLoadModule(
     "/src/features/tasks/AdditionalInput.tsx",
   );
   for (const locale of ["en-US", "zh-CN"]) {
-    for (const reason of ["admission_failed", "task_busy"]) {
+    let ordinaryMarkup;
+    for (const state of [
+      "pending",
+      "adopted",
+      "unadopted",
+      "unknown",
+      "continuing",
+      "transferred",
+    ]) {
       const view = render(
         createElement(
           I18nContext.Provider,
@@ -2411,35 +2375,39 @@ test("continuation rejection explains the next Run without claiming a preserved 
           createElement(AdditionalInput, {
             input: {
               id: "1",
-              operationId: "continuation-rejected",
+              operationId: "sent",
               text: "safe preview",
               afterOutputCount: 0,
               redacted: false,
               sequence: 1,
-              adoptedTurn: null,
-              order: null,
-              state: "unadopted",
-              transferredToRunId: null,
-              continuationReason: reason,
+              adoptedTurn: state === "adopted" ? 1 : null,
+              order: state === "adopted" ? "1" : null,
+              state,
+              transferredToRunId: state === "transferred" ? "2" : null,
+              continuationReason:
+                state === "unadopted" ? "admission_failed" : null,
             },
-            onRestore() {},
-            onLocate() {},
           }),
         ),
       );
-      const message = translate(
-        locale,
-        reason === "admission_failed"
-          ? "input.continuation.failed"
-          : "input.continuation.busy",
+      const message = view.container.querySelector(
+        '.ai-message[data-role="user"]',
       );
-      assert.ok(view.container.textContent.includes(message));
-      assert.doesNotMatch(
-        view.container.textContent,
-        /草稿已保留|该任务正在执行中|draft.*preserved|task is already running/i,
-      );
+      assert.equal(message.textContent, "safe preview");
+      assert.equal(message.getAttribute("aria-describedby"), null);
+      assert.equal(view.getAllByRole("button").length, 1);
       assert.ok(
-        view.getByRole("button", { name: translate(locale, "input.restore") }),
+        view.getByRole("button", { name: translate(locale, "copy.input") }),
+      );
+      assert.equal(
+        view.container.querySelectorAll(".input-copy-actions").length,
+        1,
+      );
+      ordinaryMarkup ??= message.outerHTML;
+      assert.equal(message.outerHTML, ordinaryMarkup);
+      assert.equal(
+        view.container.textContent,
+        `safe preview${translate(locale, "copy.input")}`,
       );
       view.unmount();
     }
@@ -3388,11 +3356,7 @@ test("App can Stop a completed source while its continuation is reserved", async
   const fixture = await renderSubmissionApp(ctx, { active: true });
   const source = finishWithPendingContinuation(fixture);
   await fixture.publish();
-  await waitFor(() =>
-    assert.ok(
-      screen.getByText("Not included in this Run; continuing after cleanup"),
-    ),
-  );
+  await waitFor(() => assert.ok(screen.getByText("submitted follow up")));
   assert.equal(fixture.textarea.disabled, false);
   assert.equal(
     screen.queryByRole("button", { name: "Put back in the editor" }),

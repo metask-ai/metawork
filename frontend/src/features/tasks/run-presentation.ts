@@ -3,7 +3,6 @@ import type {
   RunPhase,
   RunView,
   ToolView,
-  AdditionalInputView,
 } from "../../bridge/contracts.ts";
 import { translate, type Locale } from "../../i18n/runtime.ts";
 
@@ -22,7 +21,6 @@ export type RunPresentation = {
   processCanCollapse: boolean;
   showTerminalNotice: boolean;
   tools: ToolView[];
-  inputs: AdditionalInputView[];
   runningToolName: string | null;
 };
 
@@ -134,10 +132,7 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
   const tools = orderedTools(run.tools);
   const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
-  const inputs = run.additionalInputs.filter(
-    (input) => input.state === "adopted" && input.order !== null,
-  );
-  const processCanCollapse = tools.length > 0 || inputs.length > 0;
+  const processCanCollapse = tools.length > 0;
 
   return {
     active,
@@ -151,7 +146,6 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
         run.terminal.outcome !== "completed" ||
         !responseVisible),
     tools,
-    inputs,
     runningToolName:
       activity?.kind === "executing_tools" && runningTools.length === 1
         ? runningTools[0]!.name

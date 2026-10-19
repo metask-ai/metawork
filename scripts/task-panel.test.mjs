@@ -1338,21 +1338,15 @@ test("interjections use ordinary user bubbles between stable assistant reading b
   assert.equal(flow.querySelector('.ai-message[data-role="user"]'), bubble);
   assert.equal(flow.querySelector('[data-output-identity="9:output:1"]'), tail);
   assert.equal(tail.parentElement, tailParent);
-  assert.match(
-    document.getElementById(bubble.getAttribute("aria-describedby"))
-      .textContent,
-    /not adopted/i,
-  );
+  assert.equal(bubble.getAttribute("aria-describedby"), null);
   assert.deepEqual(restored, []);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Put back in the editor" }),
+  assert.equal(
+    screen.queryByRole("button", { name: "Put back in the editor" }),
+    null,
   );
-  assert.deepEqual(restored, [
-    { kind: "text", text: message.text, redacted: false },
-  ]);
 });
 
-test("continuation and transfer preserve the submitted bubble and locate the real target", () => {
+test("continuation and transfer preserve the ordinary submitted bubble without extra controls", () => {
   const message = {
     id: "1",
     afterOutputCount: 0,
@@ -1420,11 +1414,7 @@ test("continuation and transfer preserve the submitted bubble and locate the rea
     screen.queryByRole("button", { name: "Put back in the editor" }),
     null,
   );
-  fireEvent.click(screen.getByRole("button", { name: "View next Run" }));
-  assert.equal(
-    document.activeElement,
-    view.container.querySelector('[data-run-id="10"]'),
-  );
+  assert.equal(screen.queryByRole("button", { name: "View next Run" }), null);
   assert.equal(screen.getAllByText(message.text).length, 1);
   assert.equal(
     view.container.querySelector('[data-run-id="10"] .input-copy-actions'),
@@ -1555,11 +1545,7 @@ test("chained continuation keeps new interjections and independently sent identi
     ].map((node) => node.textContent),
     [runs[0].input.text, first.text, second.text, third.text, second.text],
   );
-  fireEvent.click(screen.getAllByRole("button", { name: "View next Run" })[0]);
-  assert.equal(
-    document.activeElement,
-    view.container.querySelector('[data-run-id="10"]'),
-  );
+  assert.equal(screen.queryByRole("button", { name: "View next Run" }), null);
   assert.equal(
     view.container.querySelectorAll(".run-assistant-output").length,
     4,
