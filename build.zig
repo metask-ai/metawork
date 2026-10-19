@@ -147,6 +147,7 @@ pub fn build(b: *std.Build) void {
         test_modules,
         bundle.link_libc,
     ));
+    artifacts.tests.step.dependOn(addImageGenerationTests(b, test_modules, bundle.link_libc));
     const module_tests = [_]struct {
         name: []const u8,
         root_module: *std.Build.Module,
@@ -865,6 +866,23 @@ fn addMcpAppTests(
         .filters = &.{"MCP"},
     });
     step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool) *std.Build.Step {
+    const fixture_options = b.addOptions();
+    fixture_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for image fixture"));
+    fixture_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/image_generation.mjs"));
+    fixture_options.addOption([]const u8, "png_path", b.pathFromRoot("src/agent/testdata/generated.png"));
+    const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
+    backend.addImport("metawork_agent", modules.agent);
+    const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
+    cases.addImport("metawork_agent", modules.agent);
+    cases.addImport("image_http_backend", backend);
+    cases.addOptions("image_fixture_options", fixture_options);
+    const tests = b.addTest(.{ .name = "metawork-generate-image", .root_module = cases });
+    const run = b.addRunArtifact(tests);
+    b.step("test-generate-image", "Run canonical Core image tool and real HTTP lifecycle tests").dependOn(&run.step);
+    return &run.step;
 }
 
 fn addMcpInteropTests(
