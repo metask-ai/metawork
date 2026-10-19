@@ -177,10 +177,8 @@ async function renderSubmissionApp(
   task.skillCatalog.availability = "unavailable";
   snapshot.tasks = newTask ? [] : [task];
   let revision;
-  let resolveCreate, resolveRun;
-  const creating = new Promise((resolve) => {
-    resolveCreate = resolve;
-  });
+  let resolveRun;
+  const createResolvers = [];
   const running = new Promise((resolve) => {
     resolveRun = resolve;
   });
@@ -203,7 +201,7 @@ async function renderSubmissionApp(
     fetchSnapshot: async () => structuredClone(snapshot),
     createTask: () => {
       creations += 1;
-      return creating;
+      return new Promise((resolve) => createResolvers.push(resolve));
     },
     cancel: async (taskId, runId) => {
       cancellations.push([taskId, runId]);
@@ -269,12 +267,12 @@ async function renderSubmissionApp(
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       await act(async () => revision(snapshot.revision));
     },
-    created: async () =>
+    created: async (createdTask = task, index = 0) =>
       act(async () =>
-        resolveCreate({
+        createResolvers[index]({
           accepted: true,
-          taskId: task.id,
-          bindingEpoch: task.binding.epoch,
+          taskId: createdTask.id,
+          bindingEpoch: createdTask.binding.epoch,
         }),
       ),
     settle: async (result = { accepted: true }) =>
@@ -1152,4 +1150,162 @@ test("pending Task identity keeps later input independent of a changed new-Task 
   await fixture.created();
   await waitFor(() => assert.equal(fixture.inputs.length, 2));
   await fixture.settle();
+});
+
+async function selectManualSubmissionWorkspace(user) {
+  fireEvent.keyDown(
+    screen.getByRole("combobox", { name: "Switch workspace" }),
+    { key: "ArrowDown" },
+  );
+  await user.click(
+    await screen.findByRole("option", { name: /\/tmp\/metawork-test/ }),
+  );
+}
+
+test("App creates a separate Task when the same Workspace is used for another new task", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await selectManualSubmissionWorkspace(user);
+  fireEvent.change(fixture.textarea, { target: { value: "first Task input" } });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await fixture.settle();
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await selectManualSubmissionWorkspace(user);
+  fireEvent.change(fixture.textarea, {
+    target: { value: "second Task input" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 2);
+  assert.equal(fixture.inputs.length, 1);
+
+  const secondTask = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    title: "Second task",
+  };
+  await fixture.created(secondTask, 1);
+  assert.deepEqual(fixture.targets, [
+    { taskId: fixture.task.id },
+    { taskId: secondTask.id },
+  ]);
+  assert.deepEqual(
+    fixture.inputs.map((entry) => entry[2].text),
+    ["first Task input", "second Task input"],
+  );
+});
+
+test("late Workspace creation cannot attach old messages or selection to a newly opened draft", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await selectManualSubmissionWorkspace(user);
+  fireEvent.change(fixture.textarea, {
+    target: { value: "old pending creation" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  fireEvent.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await selectManualSubmissionWorkspace(user);
+  fireEvent.change(fixture.textarea, { target: { value: "new unsent draft" } });
+
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  assert.equal(
+    document.querySelector(".workbench-view").dataset.view,
+    "new-task",
+  );
+  assert.equal(fixture.textarea.value, "new unsent draft");
+  assert.equal(Boolean(screen.queryByText("old pending creation")), false);
+  assert.equal(fixture.inputs.length, 1);
+
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.creations(), 2);
+  const secondTask = { ...structuredClone(fixture.task), id: "4" };
+  await fixture.created(secondTask, 1);
+  await fixture.settle();
+  assert.deepEqual(fixture.targets, [
+    { taskId: fixture.task.id },
+    { taskId: secondTask.id },
+  ]);
+});
+
+test("App retains unknown messages across Tasks at local capacity and preserves the next draft until reconciliation", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  await fixture.settle(new Error("response lost"));
+  async function sendUnknown(text) {
+    fireEvent.change(fixture.textarea, { target: { value: text } });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+    await act(async () => {});
+  }
+  for (let i = 0; i < 32; i++) await sendUnknown(`first-unknown-${i}`);
+  const secondTask = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    title: "Second task",
+  };
+  fixture.snapshot.tasks.push(secondTask);
+  await fixture.publish();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Second task/ }))[0],
+  );
+  for (let i = 0; i < 32; i++) await sendUnknown(`second-unknown-${i}`);
+
+  await sendUnknown("draft kept at capacity");
+  assert.equal(fixture.inputs.length, 64);
+  assert.equal(fixture.textarea.value, "draft kept at capacity");
+  assert.equal(fixture.textarea.disabled, false);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  assert.ok(screen.getByText(/Local submission storage is full/));
+  assert.equal(
+    document.querySelectorAll(".local-input-submissions .task-input-copy")
+      .length,
+    32,
+  );
+
+  fireEvent.click(
+    screen.getAllByRole("button", { name: /Submission task/ })[0],
+  );
+  assert.ok(screen.getByText("first-unknown-0"));
+  assert.equal(
+    document.querySelectorAll(".local-input-submissions .task-input-copy")
+      .length,
+    32,
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: /Second task/ })[0]);
+  assert.equal(fixture.textarea.value, "draft kept at capacity");
+
+  fixture.task.inputSubmissions = [
+    {
+      submission: {
+        operationId: fixture.operationIds[0],
+        receivedAtUnixMs: null,
+        anchorRunId: null,
+        afterOutputCount: 0,
+      },
+      input: { kind: "text", text: "first-unknown-0", redacted: false },
+      state: "waiting",
+      reason: null,
+    },
+  ];
+  await fixture.publish();
+  assert.equal(fixture.inputs.length, 64);
+  await waitFor(() =>
+    assert.equal(
+      Boolean(screen.queryByText(/Local submission storage is full/)),
+      false,
+    ),
+  );
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
+  assert.equal(fixture.textarea.value, "draft kept at capacity");
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await act(async () => {});
+  assert.equal(fixture.inputs.length, 65);
+  assert.equal(fixture.inputs.at(-1)[2].text, "draft kept at capacity");
 });

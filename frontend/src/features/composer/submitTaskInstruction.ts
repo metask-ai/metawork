@@ -7,6 +7,8 @@ import type {
   SendInputReason,
 } from "../../bridge/contracts.ts";
 
+export const maxLocalTaskSubmissions = 64;
+
 export type TaskSubmissionResult =
   | { kind: "accepted"; taskId: string }
   | { kind: "rejected"; taskId: string; reason: SendInputReason }
@@ -67,7 +69,7 @@ export class TaskSubmissionSession {
     onTarget: (taskId: string) => void,
     onCancelled: () => void = () => undefined,
   ): Promise<TaskSubmissionResult> {
-    if (this.pending.size >= 64)
+    if (this.pending.size >= maxLocalTaskSubmissions)
       return { kind: "create_rejected", reason: "capacity_reached" };
     const entry = { cancelled: false, delivered: false, onCancelled };
     this.pending.add(entry);

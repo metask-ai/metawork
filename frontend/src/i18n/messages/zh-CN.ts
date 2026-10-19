@@ -587,6 +587,8 @@ export const zhCN: Record<MessageId, string> = {
   "input.unexecuted": "未执行",
   "input.submitted": "消息已发送。",
   "input.unknown": "发送结果尚未确认，请核对本轮记录；系统不会自动重发。",
+  "input.local_capacity":
+    "本地提交记录容量已满，当前草稿已保留；请同步并核对之前的发送结果后再发送。",
   "input.continuation_wait": "正在处理已提交的消息；可编辑草稿或停止",
   "mutation.reason.continuation_cancelled": "已取消后续处理。",
   "mutation.reason.combined_input_too_large":

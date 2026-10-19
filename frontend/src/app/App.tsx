@@ -103,6 +103,7 @@ import {
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
 import {
+  maxLocalTaskSubmissions,
   TaskSubmissionSession,
   taskHasSubmission,
 } from "../features/composer/submitTaskInstruction.ts";
@@ -376,6 +377,7 @@ export default function App() {
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
   const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
+  const newTaskSubmissionInstance = useRef(0);
   const [localSubmissions, setLocalSubmissions] = useState<
     LocalTaskSubmission[]
   >([]);
@@ -744,7 +746,7 @@ export default function App() {
   const composerDraftRef = useRef(composerDraft);
   composerDraftRef.current = composerDraft;
   const composerDraftScope = newTaskDraftActive
-    ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}`
+    ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstance.current}`
     : `task:${activeTask?.id ?? "missing"}`;
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
@@ -924,10 +926,13 @@ export default function App() {
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent &&
     (composerDraft.kind !== "skill" || !skillCatalogBusy);
+  // Unknown results still own their local record, including in other Tasks.
   const localSubmissionCount = localSubmissions.filter(
     (entry) =>
-      entry.scope === composerDraftScope &&
-      (entry.state === "submitting" || entry.state === "accepted"),
+      entry.scope !== composerDraftScope ||
+      entry.state === "submitting" ||
+      entry.state === "accepted" ||
+      entry.state === "unknown",
   ).length;
   const taskIdentityPending =
     newTaskDraftActive &&
@@ -945,9 +950,12 @@ export default function App() {
     !attachmentBusy &&
     !bridgeUnavailable &&
     !workspaceBusy &&
-    localSubmissionCount < 64 &&
+    localSubmissionCount < maxLocalTaskSubmissions &&
     (!newTaskDraftActive || taskIdentityPending || canCreateTask);
-  const inputDisabledReason: MessageId | undefined = undefined;
+  const inputDisabledReason: MessageId | undefined =
+    localSubmissionCount >= maxLocalTaskSubmissions
+      ? "input.local_capacity"
+      : undefined;
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
@@ -1741,9 +1749,11 @@ export default function App() {
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
-    submissionSessions.current.delete(
-      `${bridgeGenerationRef.current}:new-task:unscoped`,
-    );
+    newTaskSubmissionInstance.current += 1;
+    // Retire lookup ownership; in-flight sessions still finish their own sends.
+    const prefix = `${bridgeGenerationRef.current}:new-task:`;
+    for (const key of submissionSessions.current.keys())
+      if (key.startsWith(prefix)) submissionSessions.current.delete(key);
     setNewTaskApprovalOverride(null);
     setNewTaskRequestedModel(null);
     setRoute("workbench");
@@ -1845,15 +1855,13 @@ export default function App() {
     else if (taskId) taskDrafts.clearDraft(taskId);
     composerDraftRef.current = emptyComposerDraft();
     setLocalSubmissions((entries) => [
-      ...entries
-        .filter(
-          (entry) =>
-            entry.scope !== scope ||
-            entry.state === "submitting" ||
-            entry.state === "accepted" ||
-            entry.state === "unknown",
-        )
-        .slice(-63),
+      ...entries.filter(
+        (entry) =>
+          entry.scope !== scope ||
+          entry.state === "submitting" ||
+          entry.state === "accepted" ||
+          entry.state === "unknown",
+      ),
       {
         operationId,
         taskId,
