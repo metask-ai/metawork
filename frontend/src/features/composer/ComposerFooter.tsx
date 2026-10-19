@@ -966,9 +966,6 @@ export function ComposerFooter({
           {t(sendDisabledReason)}
         </p>
       )}
-      {runInFlight && !sendDisabledReason && (
-        <p className="composer-draft-note">{t("input.hint")}</p>
-      )}
     </footer>
   );
 }

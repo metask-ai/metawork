@@ -1221,6 +1221,7 @@ test("an active Run switches one same-sized action between Send and Stop", () =>
   });
   assert.doesNotMatch(markup, /aria-label="Stop task"/);
   assert.match(markup, /aria-label="Send"/);
+  assert.doesNotMatch(markup, /composer-draft-note|await adoption/);
   const stopping = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
@@ -1241,4 +1242,5 @@ test("an active Run switches one same-sized action between Send and Stop", () =>
   });
   assert.match(empty, /aria-label="Stop task"/);
   assert.doesNotMatch(empty, /aria-label="Send"/);
+  assert.doesNotMatch(empty, /composer-draft-note|await adoption/);
 });
