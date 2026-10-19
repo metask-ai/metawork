@@ -39,12 +39,12 @@ pub const Adapter = struct {
     }
 
     pub fn start(self: *Adapter, runtime: *native_sdk.Runtime) !void {
+        const services_value = runtime.options.platform.services;
+        if (services_value.wake_fn == null) return error.MainLoopWakeUnavailable;
         try self.window.captureStartupWindow();
-        self.native_runtime = runtime;
-        self.platform_services = runtime.options.platform.services;
-        const services_value = self.platform_services orelse
-            return error.SystemWebViewChromeUnavailable;
         try self.window.bind(services_value);
+        self.native_runtime = runtime;
+        self.platform_services = services_value;
     }
 
     pub fn stop(self: *Adapter, runtime: *native_sdk.Runtime) void {
@@ -454,3 +454,72 @@ pub const Adapter = struct {
         return std.Thread.getCurrentId() == self.main_thread_id;
     }
 };
+
+test "main-loop wake startup rejects a missing service before publication" {
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = null;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    try std.testing.expectError(error.MainLoopWakeUnavailable, adapter.start(&harness.runtime));
+    try std.testing.expect(adapter.services() == null);
+    try std.testing.expect(adapter.native_runtime == null);
+    try std.testing.expect(!Adapter.notifyMainLoop(&adapter));
+}
+
+const WakePublicationTest = struct {
+    const activation = @import("single_instance.zig");
+    var calls: std.atomic.Value(usize) = .init(0);
+
+    fn wake(_: ?*anyopaque) anyerror!void {
+        _ = calls.fetchAdd(1, .monotonic);
+    }
+
+    const Worker = struct {
+        queue: *activation.ActivationQueue,
+        frame: []const u8,
+        entered: std.atomic.Value(bool) = .init(false),
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            if (self.queue.accept(self.frame) != .accepted) self.failed = true;
+            self.entered.store(true, .release);
+            for (0..100_000) |_| {
+                if (self.queue.accept(self.frame) != .accepted) self.failed = true;
+            }
+        }
+    };
+};
+
+test "main-loop wake publishes Native startup to the live activation listener" {
+    const T = WakePublicationTest;
+    T.calls.store(0, .monotonic);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = T.wake;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    const identity = T.activation.Identity.init("wake-test", "/isolated");
+    var queue = T.activation.ActivationQueue.init(std.testing.io, identity);
+    var storage: [T.activation.max_frame_bytes]u8 = undefined;
+    const frame = try T.activation.encodeRequest(&storage, identity, "/", &.{"metawork"});
+    var worker: T.Worker = .{ .queue = &queue, .frame = frame };
+    var started = false;
+    defer {
+        queue.stop();
+        if (started) adapter.stop(&harness.runtime);
+    }
+    {
+        const thread = try std.Thread.spawn(.{}, T.Worker.run, .{&worker});
+        defer thread.join();
+        while (!worker.entered.load(.acquire)) std.Thread.yield() catch {};
+        try std.testing.expectEqual(@as(usize, 0), T.calls.load(.monotonic));
+        try adapter.start(&harness.runtime);
+        started = true;
+        try std.testing.expect(queue.bindWakeAndDrain(.{ .context = &adapter, .notify_fn = Adapter.notifyMainLoop }));
+    }
+    try std.testing.expect(!worker.failed);
+    // Guaranteed post-bind request in addition to the concurrent stress.
+    try std.testing.expectEqual(T.activation.Status.accepted, queue.accept(frame));
+    try std.testing.expect(T.calls.load(.monotonic) > 0);
+}

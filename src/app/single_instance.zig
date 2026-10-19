@@ -229,13 +229,26 @@ pub const Notifier = struct {
 pub const ActivationQueue = struct {
     io: std.Io,
     identity: Identity,
-    notifier: Notifier,
+    notifier: ?Notifier = null,
     mutex: std.Io.Mutex = .init,
     pending: bool = false,
     stopping: bool = false,
 
-    pub fn init(io: std.Io, identity: Identity, notifier: Notifier) ActivationQueue {
-        return .{ .io = io, .identity = identity, .notifier = notifier };
+    pub fn init(io: std.Io, identity: Identity) ActivationQueue {
+        return .{ .io = io, .identity = identity };
+    }
+
+    /// Publish only after Native startup. The listener copies the callback
+    /// under this same lock, ordering its platform reads after startup writes.
+    pub fn bindWakeAndDrain(self: *ActivationQueue, notifier: Notifier) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping) return false;
+        std.debug.assert(self.notifier == null);
+        self.notifier = notifier;
+        const result = self.pending;
+        self.pending = false;
+        return result;
     }
 
     pub fn accept(self: *ActivationQueue, frame: []const u8) Status {
@@ -249,8 +262,9 @@ pub const ActivationQueue = struct {
             return .stopping;
         }
         self.pending = true;
+        const notifier = self.notifier;
         self.mutex.unlock(self.io);
-        self.notifier.notify();
+        if (notifier) |value| value.notify();
         return .accepted;
     }
 
@@ -267,6 +281,7 @@ pub const ActivationQueue = struct {
         defer self.mutex.unlock(self.io);
         self.stopping = true;
         self.pending = false;
+        self.notifier = null;
     }
 };
 
@@ -346,10 +361,11 @@ test "activation request rejects revision identity and malformed payload" {
 
 test "activation queue acknowledges only compatible requests and coalesces" {
     const identity = Identity.init("development", "C:/Data/MetaWork");
-    var queue = ActivationQueue.init(std.testing.io, identity, .{
+    var queue = ActivationQueue.init(std.testing.io, identity);
+    try std.testing.expect(!queue.bindWakeAndDrain(.{
         .context = null,
         .notify_fn = ignoreNotify,
-    });
+    }));
     var storage: [max_frame_bytes]u8 = undefined;
     const frame = try encodeRequest(&storage, identity, "C:/", &.{"metawork"});
     try std.testing.expectEqual(Status.accepted, queue.accept(frame));
@@ -368,6 +384,42 @@ test "activation queue acknowledges only compatible requests and coalesces" {
             &.{"metawork"},
         )),
     );
+}
+
+test "activation queue defers startup requests until binding and never rebinds after stop" {
+    const Spy = struct {
+        calls: usize = 0,
+        fn notify(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return true;
+        }
+    };
+    var spy: Spy = .{};
+    const notifier: Notifier = .{ .context = &spy, .notify_fn = Spy.notify };
+    const identity = Identity.init("development", "/isolated");
+    var queue = ActivationQueue.init(std.testing.io, identity);
+    var storage: [max_frame_bytes]u8 = undefined;
+    const frame = try encodeRequest(&storage, identity, "/", &.{"metawork"});
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
+    try std.testing.expect(queue.bindWakeAndDrain(notifier));
+    try std.testing.expect(!queue.drain());
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+    try std.testing.expect(queue.drain());
+    queue.stop();
+    try std.testing.expect(!queue.bindWakeAndDrain(notifier));
+    try std.testing.expectEqual(Status.stopping, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+    try std.testing.expect(!queue.drain());
+
+    var failed_start = ActivationQueue.init(std.testing.io, identity);
+    try std.testing.expectEqual(Status.accepted, failed_start.accept(frame));
+    failed_start.stop();
+    try std.testing.expect(!failed_start.bindWakeAndDrain(notifier));
+    try std.testing.expect(!failed_start.drain());
 }
 
 test "activation response round trips exact status" {

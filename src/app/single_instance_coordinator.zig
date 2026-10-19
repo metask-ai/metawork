@@ -31,7 +31,6 @@ pub const Coordinator = struct {
         args: std.process.Args,
         canonical_data_root: []const u8,
         artifact_identity: []const u8,
-        notifier: protocol.Notifier,
         interactive: bool,
         require_primary: bool,
     ) CoordinateError!Disposition {
@@ -55,7 +54,7 @@ pub const Coordinator = struct {
         errdefer lease.deinit();
 
         self.* = .{
-            .queue = protocol.ActivationQueue.init(io, identity, notifier),
+            .queue = protocol.ActivationQueue.init(io, identity),
             .lease = lease,
             .server = undefined,
         };
@@ -65,6 +64,11 @@ pub const Coordinator = struct {
         }) catch return activationFailure(interactive, .startup_failed);
         self.started = true;
         return .primary;
+    }
+
+    pub fn bindWakeAndDrain(self: *Coordinator, notifier: protocol.Notifier) bool {
+        if (!self.started) return false;
+        return self.queue.bindWakeAndDrain(notifier);
     }
 
     pub fn drain(self: *Coordinator) bool {
@@ -267,11 +271,6 @@ test "single-instance coordinator development startup rejects an existing owner 
         .{ .vector = &.{} },
         root,
         "development",
-        .{ .context = null, .notify_fn = struct {
-            fn notify(_: ?*anyopaque) bool {
-                @panic("rejected development startup must not activate existing owner");
-            }
-        }.notify },
         false,
         true,
     ));
@@ -292,10 +291,11 @@ test "single-instance coordinator forwards after a cold-start endpoint appears" 
     };
     defer held.deinit();
     const identity = protocol.Identity.init("development", root);
-    var queue = protocol.ActivationQueue.init(std.testing.io, identity, .{
+    var queue = protocol.ActivationQueue.init(std.testing.io, identity);
+    try std.testing.expect(!queue.bindWakeAndDrain(.{
         .context = null,
         .notify_fn = ignoreNotify,
-    });
+    }));
     var delayed = DelayedEndpoint{
         .io = std.testing.io,
         .allocator = std.testing.allocator,

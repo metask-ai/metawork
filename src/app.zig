@@ -112,7 +112,10 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         try self.platform.start(native_runtime);
         if (self.single_instance) |coordinator|
-            if (coordinator.drain()) self.platform.activateMainWindow();
+            if (coordinator.bindWakeAndDrain(.{
+                .context = &self.platform,
+                .notify_fn = app_platform.Adapter.notifyMainLoop,
+            })) self.platform.activateMainWindow();
         self.mcp_credential_store = .{
             .io = self.io,
             .services = self.platform.services().?,
@@ -500,10 +503,6 @@ pub fn run(init: std.process.Init) !void {
         init.minimal.args,
         paths_state.dataDir(),
         product_identity.runnerBundleId(),
-        .{
-            .context = &app.platform,
-            .notify_fn = app_platform.Adapter.notifyMainLoop,
-        },
         product_identity.artifact_kind != .automation,
         product_identity.artifact_kind == .development and
             std.mem.eql(u8, init.environ_map.get("METAWORK_DEV_REQUIRE_PRIMARY") orelse "", "1"),
@@ -765,6 +764,10 @@ test "Application remains a composition root with explicit platform limits" {
 test "Windows window chrome Application test roots" {
     _ = app_window;
     _ = app_platform;
+}
+
+test "main-loop wake Application test roots" {
+    std.testing.refAllDecls(app_platform);
 }
 
 test "MCP Application composition imports the startup owner" {
