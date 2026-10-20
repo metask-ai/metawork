@@ -5595,8 +5595,12 @@ export function decodeRendererBridgeConnect(value: unknown) {
 }
 
 export function decodeRevisionNotification(value: unknown) {
-  const item = object(value, "$", ["revision"]);
-  return wireId(item.revision, "$.revision");
+  const item = object(value, "$", ["generation", "revision", "securityEpoch"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    revision: wireId(item.revision, "$.revision"),
+    securityEpoch: positiveU64WireId(item.securityEpoch, "$.securityEpoch"),
+  };
 }
 
 function decodeSignal(value: unknown, keys: readonly string[]): HostSignal {

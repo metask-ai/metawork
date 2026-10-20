@@ -499,6 +499,7 @@ pub const Dispatcher = struct {
         const revision = workbench.currentRevision();
         _ = self.delivery.deliverRevision(
             revision,
+            workbench.projectionSecurityEpoch(),
             self.now(),
             self.transport(),
         ) catch |err| switch (err) {

@@ -167,12 +167,16 @@ export class BridgeClient {
   }
 
   onWorkbenchRevision(
-    consume: (revision: string) => void,
+    consume: (revision: string, securityEpoch: string) => void,
     reject: (error: unknown) => void,
   ) {
     return this.bridge().on<unknown>(events.workbench, (value) => {
       try {
-        consume(decodeRevisionNotification(value));
+        const notification = decodeRevisionNotification(value);
+        if (notification.generation !== this.attachmentConnection?.generation)
+          return;
+        this.viewCache.observeSecurityEpoch(notification.securityEpoch);
+        consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
       }

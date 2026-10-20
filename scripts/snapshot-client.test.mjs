@@ -155,3 +155,45 @@ test("snapshot descriptor accepts the Host limit and rejects larger budgets befo
     );
   }
 });
+
+test("scoped snapshot transport assembles split UTF-8 and rejects malformed UTF-8", async () => {
+  const wire = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/product-view.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  wire.taskPage.task.title = wire.taskIndex[0].title = "跨块内容 café 🏔";
+  const source = Buffer.from(JSON.stringify(wire));
+  const invoke = async (command, payload) => {
+    if (command === snapshotCommand)
+      return { snapshotId: "91", bytes: source.length, chunkBytes: 5 };
+    const offset = Number(payload.offset),
+      part = source.subarray(offset, offset + 5);
+    return {
+      snapshotId: "91",
+      offset,
+      bytes: part.length,
+      data: part.toString("base64"),
+    };
+  };
+  const actual = await fetchWorkbenchSnapshot(invoke, wire.scope);
+  assert.equal(actual.tasks[0].title, wire.taskPage.task.title);
+  const invalid = Buffer.from([0xc3, 0x28]);
+  await assert.rejects(
+    fetchWorkbenchSnapshot(async (command) =>
+      command === snapshotCommand
+        ? { snapshotId: "92", bytes: 2, chunkBytes: 2 }
+        : {
+            snapshotId: "92",
+            offset: 0,
+            bytes: 2,
+            data: invalid.toString("base64"),
+          },
+    ),
+    /not valid UTF-8/,
+  );
+});

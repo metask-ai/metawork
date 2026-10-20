@@ -23,6 +23,7 @@ export type WorkbenchAction =
       receivedAt: number;
       generation?: string;
     }
+  | { type: "security.invalidated"; securityEpoch: string; generation: string }
   | { type: "task.selected"; taskId: string }
   | { type: "task.draft.opened"; workspaceId: string | null }
   | { type: "task.draft.closed" };
@@ -203,6 +204,18 @@ export function workbenchReducer(
       draftOpen: false,
       draftWorkspaceId: null,
     };
+
+  if (action.type === "security.invalidated") {
+    if (action.generation !== state.connectionGeneration) return state;
+    return {
+      ...state,
+      snapshot: {
+        ...initialWorkbenchState.snapshot,
+        securityEpoch: action.securityEpoch,
+      },
+      snapshotReceivedAt: null,
+    };
+  }
 
   if (action.type === "generation.started") {
     if (action.generation === state.connectionGeneration) return state;

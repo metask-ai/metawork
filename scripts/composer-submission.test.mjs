@@ -270,7 +270,9 @@ async function renderSubmissionApp(
     creations: () => creations,
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      await act(async () => revision(snapshot.revision));
+      await act(async () =>
+        revision(snapshot.revision, snapshot.securityEpoch ?? "1"),
+      );
     },
     created: async (createdTask = task, index = 0) =>
       act(async () =>

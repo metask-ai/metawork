@@ -12150,7 +12150,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var terminal_restore = try Runtime.init(
+        const terminal_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(terminal_restore);
+        terminal_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12204,7 +12206,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var failed_restore = try Runtime.init(
+        const failed_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(failed_restore);
+        failed_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12233,7 +12237,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var interrupted_compact_restore = try Runtime.init(
+        const interrupted_compact_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(interrupted_compact_restore);
+        interrupted_compact_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12284,7 +12290,9 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
         legacy_state.value.tasks[0].runs[0].file_change_observation = previous_observation;
         legacy_state.value.tasks[0].runs[0].file_changes = previous_changes;
-        var legacy_restore = try Runtime.init(
+        const legacy_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(legacy_restore);
+        legacy_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12300,7 +12308,9 @@ test "Task state round trip restores product history without fabricating a Sessi
         for (legacy_run.file_changes) |change| try std.testing.expect(change == null);
     }
 
-    var restored = try Runtime.init(
+    const restored = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(restored);
+    restored.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -20075,4 +20085,20 @@ test "Product view cached delivery confirms versions without rebuilding stable b
     defer secured_view.deinit();
     try std.testing.expectEqual(@as(usize, 0), secured_view.value.object.get("reusedBlocks").?.array.items.len);
     try std.testing.expect(secured_view.value.object.get("context").? == .object);
+}
+
+test "Product view credential matcher preserves UTF-8 and clears its owned scan set after reads" {
+    var control = try testRuntime();
+    defer control.deinit();
+    execution_state.testing.setCredentialBytes(&control.execution_state, &.{0xa9});
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
+    var storage: [96 * 1024]u8 = undefined;
+    const bytes = try control.writeSnapshot(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.unicode.utf8ValidateSlice(bytes));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "caf** ***") != null);
+    try std.testing.expect(control.view_credentials == null);
+    var short: [1]u8 = undefined;
+    try std.testing.expectError(error.SnapshotTooLarge, control.writeSnapshot(&short, .{}));
+    try std.testing.expect(control.view_credentials == null);
 }

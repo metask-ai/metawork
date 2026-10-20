@@ -435,3 +435,32 @@ test("loaded history survives streaming only while Host confirms its exact Run c
   snapshot.historyPage.runs = [updated];
   assert.equal(accept(loaded, snapshot).snapshot.tasks[0].runs[0], updated);
 });
+
+test("security invalidation clears Host content while preserving the selected route", () => {
+  const state = {
+    ...initialWorkbenchState,
+    activeTaskId: "17",
+    snapshot: {
+      ...initialWorkbenchState.snapshot,
+      tasks: [task("17", "1")],
+      taskIndex: [task("17", "1")],
+    },
+  };
+  const next = workbenchReducer(state, {
+    type: "security.invalidated",
+    securityEpoch: "2",
+    generation: "0",
+  });
+  assert.deepEqual(next.snapshot.tasks, []);
+  assert.deepEqual(next.snapshot.taskIndex, []);
+  assert.equal(next.activeTaskId, "17");
+  assert.equal(next.snapshot.securityEpoch, "2");
+  assert.equal(
+    workbenchReducer(state, {
+      type: "security.invalidated",
+      securityEpoch: "2",
+      generation: "old",
+    }),
+    state,
+  );
+});

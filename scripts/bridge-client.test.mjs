@@ -1042,3 +1042,41 @@ test("input timeout and late response never resend or retarget", async () => {
   await new Promise((done) => setTimeout(done, 2));
   assert.equal(calls, 1);
 });
+
+test("Workbench security notifications are strict and bound to the connected document", async () => {
+  let listener;
+  const client = new BridgeClient({
+    bridge: {
+      invoke: async () => ({
+        accepted: true,
+        contractId: "metawork.renderer-bridge",
+        contractRevision: 1,
+        generation: "2",
+        error: null,
+        attachmentInput: { mode: "file_bytes", maxChunkBytes: "131072" },
+      }),
+      on: (_, consume) => {
+        listener = consume;
+        return () => {};
+      },
+    },
+  });
+  await client.connect();
+  const observed = [],
+    rejected = [];
+  client.onWorkbenchRevision(
+    (revision, epoch) => observed.push([revision, epoch]),
+    (error) => rejected.push(error),
+  );
+  listener({ generation: "1", revision: "99", securityEpoch: "99" });
+  assert.deepEqual(observed, []);
+  listener({ generation: "2", revision: "3", securityEpoch: "4" });
+  assert.deepEqual(observed, [["3", "4"]]);
+  for (const malformed of [
+    { revision: "3" },
+    { generation: "2", revision: "3", securityEpoch: "0" },
+    { generation: "2", revision: "3", securityEpoch: "4", extra: true },
+  ])
+    listener(malformed);
+  assert.equal(rejected.length, 3);
+});

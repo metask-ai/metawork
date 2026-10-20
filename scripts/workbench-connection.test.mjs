@@ -17,6 +17,7 @@ globalThis.window ??= {
 function snapshot(revision, tasks = []) {
   return {
     revision,
+    securityEpoch: "1",
     account: {
       state: "signed_out",
       catalogState: "unavailable",
@@ -518,7 +519,11 @@ function fixture(fetchSnapshot = async () => snapshot("1")) {
     },
     fetchSnapshot: () => {
       reads++;
-      return fetchSnapshot({ reads, generation, notify });
+      return fetchSnapshot({
+        reads,
+        generation,
+        notify: (value, epoch = "1") => notify(value, epoch),
+      });
     },
     ping: async () => {
       pings++;
@@ -543,7 +548,7 @@ function fixture(fetchSnapshot = async () => snapshot("1")) {
     failures,
     generations,
     disconnected,
-    notify: (value) => notify(value),
+    notify: (value, epoch = "1") => notify(value, epoch),
     rejectNotification: (value) => rejectNotification(value),
     signal: (value) => signal(value),
     reads: () => reads,
@@ -571,7 +576,7 @@ test("moving notification targets do not fail successful reads or delay first co
   let remaining = 12;
   const gates = [];
   const f = fixture(({ reads, notify }) => {
-    if (remaining-- > 0) notify(String(reads + 1));
+    if (remaining-- > 0) notify(String(reads + 1), "1");
     const gate = deferred();
     gates.push(gate);
     return gate.promise.then(() => snapshot(String(reads)));
@@ -1002,5 +1007,54 @@ test("scope changes discard old reads and serialize a single merged follow-up", 
     [null, "4"],
   );
   assert.equal(maximum, 1);
+  await connection.stop();
+});
+
+test("security notifications clear published state immediately and discard an old in-flight candidate", async () => {
+  const old = deferred();
+  let notify;
+  let reads = 0;
+  const observed = [],
+    invalidated = [],
+    ready = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: (consume) => {
+      notify = consume;
+      return () => {};
+    },
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: () =>
+      ++reads === 1
+        ? Promise.resolve(snapshot("1"))
+        : reads === 2
+          ? old.promise
+          : Promise.resolve({ ...snapshot("2"), securityEpoch: "2" }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => observed.push([view.revision, view.securityEpoch]),
+    onSecurityInvalidated: (epoch) => invalidated.push(epoch),
+    onReady: (value) => ready.push(value),
+    onStatus: () => {},
+    onViewSyncFailed: () => {},
+  });
+  await connection.start();
+  const refreshing = connection.refresh();
+  await flush();
+  assert.equal(reads, 2);
+  notify("2", "2");
+  assert.equal(invalidated.at(-1), "2");
+  assert.equal(ready.at(-1), false);
+  old.resolve(snapshot("2"));
+  await refreshing;
+  assert.deepEqual(observed, [
+    ["1", "1"],
+    ["2", "2"],
+  ]);
+  assert.equal(reads, 3);
+  assert.equal(ready.at(-1), true);
   await connection.stop();
 });

@@ -1135,6 +1135,20 @@ export default function App() {
       onReady: (ready) => {
         if (!cancelled) setBridgeReady(ready);
       },
+      onSecurityInvalidated: (securityEpoch, generation) => {
+        if (cancelled) return;
+        latestSnapshotRef.current = null;
+        setHistoryRequest(null);
+        filePreviewTabs.clear();
+        clearFileChanges();
+        approvalRequestsRef.current.reset(generation);
+        setApprovalRequests({});
+        dispatchWorkbench({
+          type: "security.invalidated",
+          securityEpoch,
+          generation,
+        });
+      },
       onGeneration: (generation) => {
         if (!cancelled) {
           setHistoryRequest(null);

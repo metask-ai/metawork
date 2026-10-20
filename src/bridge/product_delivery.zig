@@ -71,6 +71,7 @@ pub const Delivery = struct {
     revision: revision_impl.State = .{},
     snapshot: snapshot_impl.State = .{},
     snapshot_security_epoch: u64 = 0,
+    emitted_security_epoch: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Delivery {
         return .{ .snapshot = try snapshot_impl.State.initOwned(allocator) };
@@ -93,6 +94,7 @@ pub const Delivery = struct {
         self.generation += 1;
         self.window_id = window_id;
         self.revision.resetConnection();
+        self.emitted_security_epoch = 0;
         self.snapshot.invalidate();
         return self.generation;
     }
@@ -111,6 +113,7 @@ pub const Delivery = struct {
         if (self.revision.timer_armed) transport.cancelRetryTimer();
         self.window_id = null;
         self.revision.resetConnection();
+        self.emitted_security_epoch = 0;
         self.snapshot.invalidate();
     }
 
@@ -143,16 +146,23 @@ pub const Delivery = struct {
     pub fn deliverRevision(
         self: *Delivery,
         revision: u64,
+        security_epoch: u64,
         now_ns: u64,
         transport: Transport,
     ) (Error || std.fmt.BufPrintError)!RevisionResult {
         const window_id = self.window_id orelse return error.NoConnection;
-        if (!self.revision.needsDelivery(revision)) return .unchanged;
-        var detail_storage: [96]u8 = undefined;
+        if (security_epoch == 0) return error.StaleSnapshot;
+        if (security_epoch != self.snapshot_security_epoch) {
+            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
+            self.snapshot.invalidate();
+            self.snapshot_security_epoch = 0;
+        }
+        if (!self.revision.needsDelivery(revision) and self.emitted_security_epoch == security_epoch) return .unchanged;
+        var detail_storage: [160]u8 = undefined;
         const detail = try std.fmt.bufPrint(
             &detail_storage,
-            "{{\"revision\":\"{d}\"}}",
-            .{revision},
+            "{{\"generation\":\"{d}\",\"revision\":\"{d}\",\"securityEpoch\":\"{d}\"}}",
+            .{ self.generation, revision, security_epoch },
         );
         transport.emit(window_id, detail) catch {
             const timer_was_armed = self.revision.timer_armed;
@@ -166,6 +176,7 @@ pub const Delivery = struct {
         };
         if (self.revision.timer_armed) transport.cancelRetryTimer();
         self.revision.commit(revision);
+        self.emitted_security_epoch = security_epoch;
         return .delivered;
     }
 
@@ -259,9 +270,9 @@ test "product delivery owns connection retry and snapshot identity" {
     defer delivery.deinitOwnedBuffers();
     const generation = try delivery.connect(7, transport);
     try std.testing.expectEqual(@as(u64, 1), generation);
-    try std.testing.expectEqual(RevisionResult.retry_scheduled, try delivery.deliverRevision(4, 1, transport));
+    try std.testing.expectEqual(RevisionResult.retry_scheduled, try delivery.deliverRevision(4, 1, 1, transport));
     try std.testing.expect(delivery.onTimer(retry_timer_id));
-    try std.testing.expectEqual(RevisionResult.delivered, try delivery.deliverRevision(5, 2, transport));
+    try std.testing.expectEqual(RevisionResult.delivered, try delivery.deliverRevision(5, 1, 2, transport));
     const snapshot = try delivery.publishSnapshot(7, 1, .{ .write_fn = Harness.write });
     try std.testing.expectEqualStrings("{}", try delivery.snapshotChunk(7, 1, snapshot.id, 0));
     try delivery.disconnect(generation, 7, transport);
@@ -296,15 +307,15 @@ test "product revision retry exhausts a bounded transport budget" {
 
     try std.testing.expectEqual(
         RevisionResult.retry_scheduled,
-        try delivery.deliverRevision(1, 1, transport),
+        try delivery.deliverRevision(1, 1, 1, transport),
     );
     try std.testing.expectEqual(
         RevisionResult.retry_scheduled,
-        try delivery.deliverRevision(1, 2, transport),
+        try delivery.deliverRevision(1, 1, 2, transport),
     );
     try std.testing.expectError(
         error.RevisionRetryExhausted,
-        delivery.deliverRevision(1, 3, transport),
+        delivery.deliverRevision(1, 1, 3, transport),
     );
     try std.testing.expectEqual(@as(usize, 1), harness.timer_starts);
     try std.testing.expect(delivery.revision.timer_armed);
@@ -359,4 +370,37 @@ test "Product view security change revokes and clears an in-flight snapshot" {
     try std.testing.expect(after.id != before.id);
     try std.testing.expectEqualStrings("data", try delivery.snapshotChunk(9, 8, after.id, 0));
     try std.testing.expectError(error.StaleSnapshot, delivery.publishSnapshot(9, 0, .{ .write_fn = Writer.write }));
+}
+
+test "Product view security notification revokes a descriptor before Renderer requests another snapshot" {
+    const Harness = struct {
+        detail: [160]u8 = undefined,
+        len: usize = 0,
+        fn emit(context: ?*anyopaque, _: WindowId, _: []const u8, detail: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memcpy(self.detail[0..detail.len], detail);
+            self.len = detail.len;
+        }
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn write(_: ?*anyopaque, output: []u8) ![]const u8 {
+            @memcpy(output[0..6], "old-ui");
+            return output[0..6];
+        }
+    };
+    var harness: Harness = .{};
+    const transport: Transport = .{ .context = &harness, .emit_fn = Harness.emit, .start_timer_fn = Harness.timer, .cancel_timer_fn = Harness.cancel };
+    var delivery = try Delivery.init(std.testing.allocator);
+    defer delivery.deinitOwnedBuffers();
+    _ = try delivery.connect(7, transport);
+    defer delivery.breakConnection(transport);
+    _ = try delivery.deliverRevision(1, 1, 0, transport);
+    const descriptor = try delivery.publishSnapshot(7, 1, .{ .write_fn = Harness.write });
+    try std.testing.expectEqual(RevisionResult.delivered, try delivery.deliverRevision(1, 2, 1, transport));
+    try std.testing.expectEqualStrings("{\"generation\":\"1\",\"revision\":\"1\",\"securityEpoch\":\"2\"}", harness.detail[0..harness.len]);
+    try std.testing.expectEqual(@as(usize, 0), delivery.snapshot.len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), delivery.snapshot.storage[0..6]);
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(7, 1, descriptor.id, 0));
+    try std.testing.expectEqual(RevisionResult.unchanged, try delivery.deliverRevision(1, 2, 2, transport));
+    try std.testing.expectError(error.StaleSnapshot, delivery.deliverRevision(1, 0, 3, transport));
 }

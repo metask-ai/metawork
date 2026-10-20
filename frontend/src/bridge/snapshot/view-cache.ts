@@ -75,11 +75,18 @@ function retainedBytes(value: unknown): number {
 export class ViewCache {
   private epoch = "0";
   private generation = 0;
+  private securityFloor = "0";
   private entries = new Map<ViewBlockName, Entry>();
   clear() {
     this.epoch = "0";
+    this.securityFloor = "0";
     this.entries.clear();
     this.generation += 1;
+  }
+  observeSecurityEpoch(epoch: string) {
+    if (BigInt(epoch) <= BigInt(this.securityFloor)) return;
+    if (this.securityFloor !== "0") this.clear();
+    this.securityFloor = epoch;
   }
   capture(scope: ViewScope) {
     const entries = new Map(
@@ -114,6 +121,8 @@ export class ViewCache {
       "receipts",
     ]);
     const epoch = positiveU64WireId(root.securityEpoch, "$.securityEpoch");
+    if (BigInt(epoch) < BigInt(this.securityFloor))
+      throw new Error("Product view security epoch was revoked");
     const versions = decodeViewVersions(root.blockVersions);
     const reused = arrayValue(
       root.reusedBlocks,
@@ -146,6 +155,7 @@ export class ViewCache {
           throw new Error("Product view connection changed during read");
         if (this.epoch !== epoch) this.entries.clear();
         this.epoch = epoch;
+        this.securityFloor = epoch;
         for (const name of viewBlockNames) {
           const existing = this.entries.get(name);
           if (

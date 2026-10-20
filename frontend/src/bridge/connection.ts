@@ -18,6 +18,7 @@ export type WorkbenchConnectionCallbacks = {
   onReady: (ready: boolean) => void;
   onViewSyncFailed: (failed: boolean) => void;
   onGeneration?: (generation: string) => void;
+  onSecurityInvalidated?: (securityEpoch: string, generation: string) => void;
 };
 
 export type WorkbenchConnectionFailure =
@@ -91,6 +92,7 @@ export class WorkbenchConnection {
   private trusted = false;
   private contractFault: RendererBridgeContractError | null = null;
   private pendingRevision = 0n;
+  private securityEpoch = 0n;
   private removeWorkbench: (() => void) | null = null;
   private removeHostSignal: (() => void) | null = null;
 
@@ -124,7 +126,7 @@ export class WorkbenchConnection {
       throw error;
     }
     this.removeWorkbench ??= this.client.onWorkbenchRevision(
-      (revision) => this.notify(revision),
+      (revision, securityEpoch) => this.notify(revision, securityEpoch),
       (error) => this.failContract("revision", error),
     );
     this.removeHostSignal ??= this.client.onHostSignal(
@@ -187,8 +189,21 @@ export class WorkbenchConnection {
     );
   }
 
-  private notify(revision: string) {
+  private notify(revision: string, securityEpoch: string) {
     if (this.stopped || this.contractFault) return;
+    const epoch = BigInt(securityEpoch);
+    if (epoch < this.securityEpoch) return;
+    if (epoch > this.securityEpoch) {
+      this.securityEpoch = epoch;
+      if (this.state) {
+        this.state.latest = -1n;
+        this.callbacks.onReady(false);
+        this.callbacks.onSecurityInvalidated?.(
+          String(epoch),
+          this.state.generation,
+        );
+      }
+    }
     const value = BigInt(revision);
     if (value > this.pendingRevision) this.pendingRevision = value;
     const state = this.state;
@@ -234,12 +249,25 @@ export class WorkbenchConnection {
     if (!this.active(state)) return;
     const target = state.requested;
     const scopeGeneration = this.scopeGeneration;
+    const securityAtStart = this.securityEpoch;
     const scope = cloneViewScope(this.scope);
     const attempt = ++state.attempt;
     try {
       const next = await this.client.fetchSnapshot(scope);
       if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
         return;
+      {
+        const epoch = BigInt(next.securityEpoch);
+        if (epoch < this.securityEpoch)
+          throw new Error("Host returned a revoked Product security epoch");
+        if (epoch > this.securityEpoch) {
+          this.securityEpoch = epoch;
+          this.callbacks.onSecurityInvalidated?.(
+            next.securityEpoch,
+            state.generation,
+          );
+        }
+      }
       const revision = BigInt(next.revision);
       if (revision < state.latest || revision < target)
         throw new Error("Host returned a stale Workbench revision");
@@ -258,7 +286,11 @@ export class WorkbenchConnection {
         this.callbacks.onReady(true);
       }
     } catch (error) {
-      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+      if (
+        !this.active(state) ||
+        scopeGeneration !== this.scopeGeneration ||
+        securityAtStart !== this.securityEpoch
+      )
         return;
       this.callbacks.onReady(false);
       if (error instanceof RendererBridgeContractError) {
@@ -320,6 +352,7 @@ export class WorkbenchConnection {
       this.checkOperation(operation);
       this.contractFault = null;
       let generation: string;
+      this.securityEpoch = 0n;
       try {
         generation = await this.client.connect();
       } catch (error) {

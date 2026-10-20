@@ -5206,7 +5206,7 @@ async function renderAppFixture(
     snapshot,
     previews,
     diffs,
-    publish: () => onRevision(snapshot.revision),
+    publish: () => onRevision(snapshot.revision, snapshot.securityEpoch ?? "1"),
     setSnapshotFailure: (value) => {
       snapshotFailure = value;
     },
@@ -6747,4 +6747,25 @@ test("right file panel renders a PNG preview instead of source code", () => {
     view.container.querySelector(".task-panel-preview-source"),
     null,
   );
+});
+
+test("App removes revoked Host conversation before replacement snapshot can succeed", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+  );
+  await selectRecentTask(/First task/);
+  assert.ok(document.querySelector("[data-run-id]"));
+  setSnapshotFailure(true);
+  snapshot.securityEpoch = "2";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.equal(document.querySelector("[data-run-id]") === null, true);
+  assert.equal(
+    document.querySelector(".task-panel-preview-source") === null,
+    true,
+  );
+  setSnapshotFailure(false);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector("[data-run-id]")));
 });

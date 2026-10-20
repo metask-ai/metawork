@@ -135,7 +135,7 @@ test("Product cache clears across security epochs, reconnect and a clear during 
   assert.throws(
     () =>
       cache.materialize(reused(), fixture.scope, cache.capture(fixture.scope)),
-    /Unconfirmed/,
+    /security epoch was revoked/,
   );
 });
 test("Product cache never installs a malformed decoded candidate", async () => {
@@ -167,5 +167,22 @@ test("Product cache never installs a malformed decoded candidate", async () => {
   assert.equal(
     cache.capture(fixture.scope).known.versions.context,
     fixture.blockVersions.context,
+  );
+});
+
+test("security notification invalidates captured delivery before any new snapshot arrives", () => {
+  const cache = new ViewCache();
+  seed(cache);
+  const captured = cache.capture(fixture.scope);
+  cache.observeSecurityEpoch("3");
+  assert.throws(
+    () => cache.materialize(reused(), fixture.scope, captured),
+    /connection changed/,
+  );
+  assert.equal(cache.capture(fixture.scope).known.versions.context, "0");
+  assert.throws(
+    () =>
+      cache.materialize(fixture, fixture.scope, cache.capture(fixture.scope)),
+    /security epoch was revoked/,
   );
 });
