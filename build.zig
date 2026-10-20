@@ -93,6 +93,13 @@ pub fn build(b: *std.Build) void {
     artifacts.tests.step.dependOn(&image_codec_run.step);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
+    const sdk_consumption_tests = b.addTest(.{
+        .name = "metawork-sdk-consumption",
+        .root_module = test_modules.app,
+        .filters = &.{"SDK consumption"},
+    });
+    b.step("test-sdk-consumption", "Run Application Native SDK effect bindings")
+        .dependOn(&b.addRunArtifact(sdk_consumption_tests).step);
     const window_chrome_tests = b.addTest(.{
         .name = "metawork-window-chrome",
         .root_module = test_modules.app,

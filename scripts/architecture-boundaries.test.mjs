@@ -2242,7 +2242,7 @@ test("Account owns platform ports while Application binds Native SDK effects", (
     runtime,
     /account_path|account_dir|AccountDirectoryUnavailable/,
   );
-  assert.match(binding, /native_sdk\.platform\.PlatformServices/);
+  assert.match(binding, /runtime: \*native_sdk\.Runtime/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
   assert.doesNotMatch(
     binding,
@@ -2920,5 +2920,62 @@ test("development and macOS distribution signing owners stay isolated", () => {
   assert.doesNotMatch(
     distribution,
     /from "\.\/dev\.mjs"|setup-macos-local-signing|Apple Development|\.metawork-local-signing|runDevelopment|signWithStableRequirement/u,
+  );
+});
+
+test("Application SDK bindings retain Runtime dependencies for migrated effects", () => {
+  // Wiring checks for these bindings only. Runtime behavior is verified by
+  // test-sdk-consumption; these patterns do not resolve arbitrary Zig aliases.
+  for (const path of [
+    "src/app/account_platform_binding.zig",
+    "src/app/models_platform_binding.zig",
+    "src/app/mcp_platform.zig",
+  ]) {
+    const source = read(path);
+    assert.match(source, /runtime: \*native_sdk\.Runtime/u, path);
+    assert.doesNotMatch(
+      source,
+      /^\s*(?:platform_)?services:\s*\??native_sdk\.platform\.PlatformServices/mu,
+      path,
+    );
+    for (const method of ["setCredential", "getCredential", "deleteCredential"])
+      assert.match(
+        source,
+        new RegExp(`self\\.runtime\\.${method}\\(`, "u"),
+        path,
+      );
+  }
+  const account = read("src/app/account_platform_binding.zig");
+  assert.match(account, /self\.runtime\.startTimer\(/u);
+  assert.match(account, /self\.runtime\.cancelTimer\(/u);
+  const platform = read("src/app/platform.zig");
+  for (const method of ["startTimer", "cancelTimer", "showOpenDialog"])
+    assert.match(
+      platform,
+      new RegExp(
+        `self\\.native_runtime orelse return error\\.RuntimeUnavailable\\)\\.${method}\\(`,
+        "u",
+      ),
+    );
+  const window = read("src/app/window.zig");
+  assert.match(window, /runtime\.showNotification\(/u);
+  assert.match(window, /runtime\.windowChrome\(/u);
+});
+
+test("Host URL handoff preserves denied WebView navigation", () => {
+  assert.match(
+    read("app.zon"),
+    /external_links\s*=\s*\.\{\s*\.action\s*=\s*"deny"/u,
+  );
+  const handoff = read("src/app/platform.zig").match(
+    /pub fn openMcpAuthorizationUrl\([\s\S]*?\n    \}/u,
+  )?.[0];
+  assert.ok(handoff);
+  assert.match(handoff, /main_thread_id/u);
+  assert.match(handoff, /services_value\.openExternalUrl\(url\)/u);
+  assert.doesNotMatch(handoff, /runtime\.openExternalUrl|external_links\s*=/u);
+  assert.doesNotMatch(
+    read("src/app.zig"),
+    /external_links\s*=|allowed_urls\s*=/u,
   );
 });
