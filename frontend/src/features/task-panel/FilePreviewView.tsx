@@ -62,7 +62,7 @@ export function FilePreviewView({
       aria-live="polite"
       aria-busy={state.phase === "loading"}
     >
-      {markdown && ready && (
+      {markdown && ready && !state.preview?.image && (
         <Tabs.List
           className="task-panel-preview-modes"
           aria-label={t("file_preview.mode")}
@@ -92,7 +92,14 @@ export function FilePreviewView({
                 )}
               </div>
             )}
-            {markdown ? (
+            {state.preview.image ? (
+              <div className="task-panel-preview-image">
+                <img
+                  src={`data:image/png;base64,${state.preview.image.dataBase64}`}
+                  alt={state.selected.displayPath}
+                />
+              </div>
+            ) : markdown ? (
               <>
                 <Tabs.Panel
                   value="preview"

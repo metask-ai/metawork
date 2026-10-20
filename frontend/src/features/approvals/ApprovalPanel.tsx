@@ -120,7 +120,9 @@ export function ApprovalPanel({
         {choices.has("deny_once") ? (
           <div className="approval-action-cluster" data-variant="secondary">
             <Button
-              className="approval-split-main"
+              className={
+                choices.has("deny_session") ? "approval-split-main" : undefined
+              }
               variant="secondary"
               size="lg"
               disabled={actionDisabled}
@@ -170,7 +172,9 @@ export function ApprovalPanel({
         {choices.has("allow_once") ? (
           <div className="approval-action-cluster" data-variant="primary">
             <Button
-              className="approval-split-main"
+              className={
+                choices.has("allow_session") ? "approval-split-main" : undefined
+              }
               variant="primary"
               size="lg"
               disabled={actionDisabled}

@@ -124,7 +124,7 @@ pub const Runtime = struct {
         return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, null);
     }
 
-    /// Isolated acceptance only. No product initializer accepts this option.
+    /// Isolated transport and budget injection; the tool set matches product init.
     pub fn initImageGenerationForTesting(io: std.Io, allocator: std.mem.Allocator, limits: Limits, options: root.ImageGenerationTestOptions) !*Runtime {
         return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, options);
     }
@@ -186,20 +186,16 @@ pub const Runtime = struct {
             builtin_views[index] = sdk.bytesView(capabilities.wireName(builtin));
         runtime_config.builtin_tools = &builtin_views;
         runtime_config.builtin_tool_count = builtin_views.len;
-        runtime_config.host_tools = null;
-        runtime_config.host_tool_count = 0;
         var image_descriptor = std.mem.zeroes(wire.HostToolV1);
-        if (image_test != null) {
-            image_descriptor.struct_size = @sizeOf(wire.HostToolV1);
-            image_descriptor.ctx = self;
-            image_descriptor.name = sdk.bytesView(image_tool.name);
-            image_descriptor.description = sdk.bytesView(image_tool.description);
-            image_descriptor.input_schema_json = sdk.bytesView(image_tool.schema);
-            image_descriptor.execute = Session.executeImage;
-            image_descriptor.release_result = Session.releaseImageResult;
-            runtime_config.host_tools = @ptrCast(&image_descriptor);
-            runtime_config.host_tool_count = 1;
-        }
+        image_descriptor.struct_size = @sizeOf(wire.HostToolV1);
+        image_descriptor.ctx = self;
+        image_descriptor.name = sdk.bytesView(image_tool.name);
+        image_descriptor.description = sdk.bytesView(image_tool.description);
+        image_descriptor.input_schema_json = sdk.bytesView(image_tool.schema);
+        image_descriptor.execute = Session.executeImage;
+        image_descriptor.release_result = Session.releaseImageResult;
+        runtime_config.host_tools = @ptrCast(&image_descriptor);
+        runtime_config.host_tool_count = 1;
         const mcp_registry_generation = if (limits.mcp_input) |input|
             input.generation
         else
@@ -914,6 +910,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        var model_capabilities: [wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1 = undefined;
+        configureImageCapabilities(&host_config, binding.image_capabilities, &model_capabilities);
         host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
         host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
@@ -944,11 +942,11 @@ pub const Runtime = struct {
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
-        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + @intFromBool(self.image_test != null));
+        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + 1);
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
-        if (self.image_test != null) allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
+        allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -1077,12 +1075,12 @@ pub const Runtime = struct {
         }
         const allowed_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            capabilities.builtins.len + @intFromBool(self.image_test != null),
+            capabilities.builtins.len + 1,
         );
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
-        if (self.image_test != null) allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
+        allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
@@ -1171,6 +1169,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        var model_capabilities: [wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1 = undefined;
+        configureImageCapabilities(&host_config, binding.image_capabilities, &model_capabilities);
         host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
         host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
@@ -1606,8 +1606,25 @@ fn emptyOwnedBytes() wire.OwnedBytesV1 {
     return .{ .ptr = null, .len = 0 };
 }
 
+/// Both ABI entry points borrow this table only until their synchronous return.
+fn configureImageCapabilities(host: *wire.SessionHostConfigV1, entries: []const model_binding.ModelImageCapability, storage: *[wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1) void {
+    for (entries, 0..) |entry, index| {
+        storage[index] = std.mem.zeroes(wire.ModelCapabilityV1);
+        storage[index].struct_size = @sizeOf(wire.ModelCapabilityV1);
+        storage[index].model = sdk.bytesView(entry.model);
+        storage[index].image_input_code = if (entry.supported) wire.CAPABILITY_SUPPORTED else wire.CAPABILITY_UNSUPPORTED;
+    }
+    host.model_capabilities = if (entries.len == 0) null else storage;
+    host.model_capability_count = entries.len;
+}
+
 fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
     if (buffer.ptr != null or buffer.len != 0) api.bufferRelease()(buffer);
 }
 
 const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
+
+test "image capability consumer limit matches the canonical ABI" {
+    try std.testing.expectEqual(@as(u64, 256), wire.MAX_MODEL_CAPABILITIES_V1);
+    try std.testing.expectEqual(@as(u64, model_binding.max_model_bytes), wire.MAX_MODEL_CAPABILITY_MODEL_BYTES_V1);
+}

@@ -83,6 +83,9 @@ const { useFilePreviewTabs } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
+const { GeneratedImagePreview } = await vite.ssrLoadModule(
+  "/src/features/tasks/GeneratedImagePreview.tsx",
+);
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
@@ -2186,8 +2189,8 @@ test("successful terminal keeps commentary and collapsed technical process visib
   assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
   assert.equal(
-    document.querySelector(".ai-exchange").lastElementChild.className,
-    "response-copy-actions",
+    document.querySelector(".response-copy-actions").parentElement,
+    screen.getByText("Final response").closest(".run-assistant-output"),
   );
 });
 
@@ -2247,6 +2250,59 @@ test("terminal transition preserves an explicitly expanded Tool detail", async (
   );
   assert.ok(screen.getByRole("region", { name: "Details for Read" }));
   assert.ok(screen.getByText("recorded evidence"));
+});
+
+test("reply metadata stays with its response before a later user interjection", () => {
+  for (const responseKind of ["final", "partial"]) {
+    const value = task({
+      runs: [
+        run({
+          finishedAtUnixMs: String(Date.now() - 120_000),
+          output: {
+            ...run().output,
+            commentary: ["Earlier explanation"],
+            response: "Here is the answer",
+            responseKind,
+          },
+          additionalInputs: [
+            {
+              id: "later-input",
+              afterOutputCount: 2,
+              operationId: "follow-up",
+              text: "Generate a starry sky",
+              redacted: false,
+              sequence: 1,
+              adoptedTurn: null,
+              order: null,
+              state: "unadopted",
+            },
+          ],
+          tools: [technicalTool()],
+        }),
+      ],
+    });
+    const view = render(taskContentElement(value));
+    const response = screen.getByText("Here is the answer");
+    const message = response.closest(".run-assistant-output");
+    const footer = view.container.querySelector(".response-copy-actions");
+    const laterInput = screen.getByText("Generate a starry sky");
+    assert.equal(footer.parentElement, message);
+    assert.equal(message.lastElementChild, footer);
+    assert.ok(footer.querySelector("time"));
+    assert.equal(
+      within(message).getAllByRole("button", { name: "Copy response" }).length,
+      1,
+    );
+    assert.ok(
+      footer.compareDocumentPosition(laterInput) &
+        dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    assert.equal(
+      view.container.querySelectorAll(".response-copy-actions").length,
+      1,
+    );
+    cleanup();
+  }
 });
 
 test("reply footer uses the product tooltip for the finished time", async (context) => {
@@ -2445,8 +2501,8 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
   assert.ok(
-    markup.indexOf('class="ai-activity"') <
-      markup.indexOf('class="response-copy-actions"'),
+    markup.indexOf('class="response-copy-actions"') <
+      markup.indexOf('class="ai-activity"'),
   );
 });
 
@@ -2885,16 +2941,16 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
   );
   assert.ok(
-    visible.indexOf(">File changes<") <
-      visible.indexOf('class="response-copy-actions"'),
+    visible.indexOf('class="response-copy-actions"') <
+      visible.indexOf(">File changes<"),
   );
   assert.match(visible, />Execution details</);
   assert.match(visible, />Turn time 0:12</);
   assert.ok(
     visible.indexOf(">File changes<") <
       visible.indexOf(">Execution details<") &&
-      visible.indexOf(">Execution details<") <
-        visible.indexOf('class="response-copy-actions"'),
+      visible.indexOf('class="response-copy-actions"') <
+        visible.indexOf(">Execution details<"),
   );
 
   const incomplete = task({
@@ -2907,7 +2963,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const incompleteMarkup = renderToStaticMarkup(
     taskContentElement(incomplete, "1", { fileChangesEnabled: true }),
   );
-  assert.match(incompleteMarkup, /The file change record may be incomplete/);
+  assert.match(incompleteMarkup, /File changes for this run could not be fully verified/);
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
@@ -3929,6 +3985,62 @@ test("manual and fallback permission cards keep keyboard-driven decisions usable
     await user.keyboard("{Enter}");
     assert.deepEqual(responses, [
       { kind: "permission", permission: "deny_once" },
+    ]);
+    cleanup();
+  }
+});
+
+test("permission actions use split styling only when their own menu exists", async () => {
+  for (const sessionChoices of [
+    [],
+    ["allow_session"],
+    ["deny_session"],
+    ["allow_session", "deny_session"],
+  ]) {
+    const responses = [];
+    const view = render(
+      localizedView(
+        createElement(ApprovalPanel, {
+          pending: {
+            requestId: "image-permission",
+            tool: "GenerateImage",
+            args: '{"prompt":"Starry sky"}',
+            availableChoices: ["deny_once", "allow_once", ...sessionChoices],
+          },
+          task: {
+            uiHistory: [],
+            restorePermission: null,
+            permissionReviewState: "idle",
+          },
+          busy: false,
+          responsePhase: "idle",
+          respond: (payload) => responses.push(payload),
+        }),
+      ),
+    );
+    for (const [label, choice] of [
+      ["Deny", "deny_session"],
+      ["Allow once", "allow_session"],
+    ]) {
+      const button = screen.getByRole("button", { name: label });
+      assert.equal(
+        button.classList.contains("approval-split-main"),
+        sessionChoices.includes(choice),
+      );
+      assert.equal(
+        button.parentElement.querySelector(".approval-split-trigger") !== null,
+        sessionChoices.includes(choice),
+      );
+    }
+    assert.equal(
+      view.container.querySelectorAll(".approval-split-trigger").length,
+      sessionChoices.length,
+    );
+    const user = userEvent.setup({ document: dom.window.document });
+    screen.getByRole("button", { name: "Allow once" }).focus();
+    await user.keyboard("{Enter}");
+    assert.deepEqual(responses, [
+      { kind: "permission", permission: "allow_once" },
     ]);
     cleanup();
   }
@@ -6415,3 +6527,131 @@ for (const outcome of ["committed", "timeout"]) {
     assert.equal(calls, 1);
   });
 }
+
+const generatedPng =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8k8AAAAASUVORK5CYII=";
+
+test("generated image loads only its reference and opens the existing preview", async () => {
+  const calls = [];
+  const opened = [];
+  const reference = {
+    id: "host-image-1",
+    title: "",
+    displayPath: "generated-images/ocean.jpg",
+    generatedImage: true,
+  };
+  const view = render(
+    localizedView(
+      createElement(GeneratedImagePreview, {
+        taskId: "17",
+        runId: "23",
+        reference,
+        enabled: true,
+        load: async (...identity) => {
+          calls.push(identity);
+          return {
+            state: "ready",
+            content: "",
+            truncated: false,
+            redacted: false,
+            image: { mediaType: "image/png", dataBase64: generatedPng },
+          };
+        },
+        onOpen: (opener) => opened.push(opener),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.equal(view.container.querySelectorAll("img").length, 1),
+  );
+  assert.deepEqual(calls, [["17", "23", "host-image-1"]]);
+  assert.equal(view.container.textContent, "");
+  assert.match(view.container.querySelector("button").getAttribute("aria-label"), /generated-images\/ocean\.jpg/);
+  assert.equal(
+    view.container.querySelector("img").getAttribute("src"),
+    `data:image/png;base64,${generatedPng}`,
+  );
+  view.container.querySelector("button").click();
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0], view.container.querySelector("button"));
+});
+
+test("generated image ignores late completion after reference replacement and unmount", async () => {
+  const pending = [];
+  const props = {
+    taskId: "17",
+    runId: "23",
+    enabled: true,
+    load: () => new Promise((resolve) => pending.push(resolve)),
+    onOpen() {},
+  };
+  const reference = {
+    id: "old",
+    title: "",
+    displayPath: "old.jpg",
+    generatedImage: true,
+  };
+  const view = render(
+    localizedView(
+      createElement(GeneratedImagePreview, { ...props, reference }),
+    ),
+  );
+  view.rerender(
+    localizedView(
+      createElement(GeneratedImagePreview, {
+        ...props,
+        reference: { ...reference, id: "new", displayPath: "new.jpg" },
+      }),
+    ),
+  );
+  await act(async () =>
+    pending[0]({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image: { mediaType: "image/png", dataBase64: generatedPng },
+    }),
+  );
+  assert.equal(view.container.querySelector("img"), null);
+  view.unmount();
+  await act(async () =>
+    pending[1]({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image: { mediaType: "image/png", dataBase64: generatedPng },
+    }),
+  );
+});
+
+test("right file panel renders a PNG preview instead of source code", () => {
+  const view = render(
+    localizedView(
+      createElement(FilePreviewView, {
+        state: {
+          selected: { id: "image", title: "", displayPath: "ocean.jpg" },
+          phase: "settled",
+          preview: {
+            state: "ready",
+            content: "",
+            truncated: false,
+            redacted: false,
+            image: { mediaType: "image/png", dataBase64: generatedPng },
+          },
+        },
+        mode: "preview",
+        scrollTop: 0,
+        onModeChange() {},
+        onScrollTopChange() {},
+        onRetry() {},
+      }),
+    ),
+  );
+  assert.equal(view.container.querySelectorAll("img").length, 1);
+  assert.equal(
+    view.container.querySelector(".task-panel-preview-source"),
+    null,
+  );
+});

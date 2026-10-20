@@ -199,8 +199,8 @@ pub const Limits = struct {
 const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 64 * 1024 * 1024,
     .max_section_bytes = 16 * 1024 * 1024,
-    // Each encoded image preview fits with its checkpoint framing.
-    .max_string_bytes = 2 * 1024 * 1024,
+    // Core Read stores the complete image JSON as one checkpoint string.
+    .max_string_bytes = std.base64.standard.Encoder.calcSize(lifecycle.multimodal_input_limits.max_image_raw_bytes) + 64 * 1024,
     .max_messages = 4096,
     .max_blocks_per_message = 256,
     .chunk_bytes = 256 * 1024,
@@ -971,6 +971,7 @@ pub const FilePreviewState = file_preview.State;
 /// authority and known-credential redaction and must not be retained by the
 /// sink after `complete_fn` returns.
 pub const FilePreviewResult = struct {
+    image_png: []const u8 = &.{},
     completion_id: u64,
     state: FilePreviewState,
     content: []const u8,
@@ -1774,6 +1775,7 @@ pub const Runtime = struct {
             var truncated = false;
             var redacted = false;
             var safe_buffer: []u8 = &.{};
+            var image_png: []const u8 = &.{};
             var safe_content: []const u8 = &.{};
             defer if (safe_buffer.len != 0) {
                 std.crypto.secureZero(u8, safe_buffer);
@@ -1793,6 +1795,21 @@ pub const Runtime = struct {
                 !self.filePreviewWorkspaceAuthorized(reference.?))
             {
                 state = .restricted;
+            } else if (state == .ready and raw.image) {
+                if (self.containsKnownCredential(raw.content)) {
+                    state = .restricted;
+                } else if (self.attachments.images.prepare_fn) |prepare| {
+                    if (prepare(self.attachments.images.context, self.allocator, raw.content, file_preview.max_image_preview_bytes)) |prepared| {
+                        safe_buffer = prepared;
+                        if (safe_buffer.len == 0 or safe_buffer.len > file_preview.max_image_preview_bytes) {
+                            state = .unsupported;
+                        } else if (self.containsKnownCredential(safe_buffer)) {
+                            state = .restricted;
+                        } else {
+                            image_png = safe_buffer;
+                        }
+                    } else |_| state = .failed;
+                } else state = .unsupported;
             } else if (state == .ready) {
                 const cutoff = self.filePreviewCredentialSafeCutoff(
                     raw.content,
@@ -1830,6 +1847,7 @@ pub const Runtime = struct {
                 .completion_id = raw.completion_id,
                 .state = state,
                 .content = safe_content,
+                .image_png = image_png,
                 .truncated = truncated,
                 .redacted = redacted,
             });
@@ -2711,21 +2729,6 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn configureMetaskImageSelection(
-        self: *Runtime,
-        command: models_contract.ConfigureMetaskImageSelectionCommand,
-    ) models_contract.CommandResult {
-        if (self.shutting_down) return .rejected(.operation_in_progress);
-        // This is a metadata mutation. Account's committed identity supplies
-        // ownership; an execution authorization lease is acquired per Run.
-        const account = self.account_projection.view();
-        if (account.state != .authenticated or account.account_id.len == 0)
-            return .rejected(.authorization_unavailable);
-        const result = self.custom_providers.configureMetaskImageSelection(account.account_id, command);
-        if (result.accepted) self.bumpRevision();
-        return result;
-    }
-
     pub fn submitCustomProviderCommand(
         self: *Runtime,
         command: models_contract.CustomProviderCommand,
@@ -2734,7 +2737,7 @@ pub const Runtime = struct {
             return .rejected(.test_unavailable);
         const result = self.custom_providers.submitCommand(command);
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
+            self.reconcileModelsDefaultNoFail(true, false);
             self.finishExecutionCommitNoFail();
         }
         return result;
@@ -2769,7 +2772,10 @@ pub const Runtime = struct {
         succeeded: bool,
     ) models_contract.CommandResult {
         const result = self.custom_providers.completeTest(command, succeeded);
-        if (result.accepted) self.finishExecutionCommitNoFail();
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(true, false);
+            self.finishExecutionCommitNoFail();
+        }
         return result;
     }
 
@@ -2936,7 +2942,9 @@ pub const Runtime = struct {
             return;
         }
 
-        const execution_generation = if (execution_authority_aligned)
+        const installed = self.execution_state.executionInput();
+        const image_declarations_aligned = installed != null and models_contract.sameImageCapabilities(installed.?.target.image_capabilities, candidate_input.target.image_capabilities);
+        const execution_generation = if (execution_authority_aligned and image_declarations_aligned)
             self.executionGeneration()
         else
             self.nextExecutionGeneration(self.executionGeneration()) catch {
@@ -4108,6 +4116,7 @@ pub const Runtime = struct {
         // global default still resolves independently and gets a new identity.
         const active = self.execution_state.executionInput();
         const same_connection = !attached and active != null and self.execution_state.activeSourceGeneration() == execution.source_generation and
+            models_contract.sameImageCapabilities(active.?.target.image_capabilities, execution.target.image_capabilities) and
             active.?.target.protocol == execution.target.protocol and std.mem.eql(u8, active.?.target.provider_id, execution.target.provider_id) and
             std.mem.eql(u8, active.?.target.base_url, execution.target.base_url) and std.mem.eql(u8, active.?.api_key, execution.api_key);
         const generation = if (same_connection) active.?.execution_generation else self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
@@ -6685,9 +6694,7 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, preset.documentation_url);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"imageGeneration\":") catch return error.SnapshotTooLarge;
-        try self.writeImageGenerationModels(writer, view.image_generation);
-        writer.writeAll(",\"customProviders\":[") catch return error.SnapshotTooLarge;
+        writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
         try self.writeCustomProviders(writer, view.custom_providers);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -6719,16 +6726,6 @@ pub const Runtime = struct {
             writer.print(",\"metadataProvenance\":\"{s}\"}}", .{@tagName(model.metadata_provenance)}) catch return error.SnapshotTooLarge;
         }
         writer.writeByte(']') catch return error.SnapshotTooLarge;
-    }
-
-    fn writeImageGenerationModels(self: *Runtime, writer: *std.Io.Writer, view: models_contract.MetaskImageView) Error!void {
-        writer.print("{{\"catalogState\":\"{s}\",\"catalogGeneration\":\"{d}\",\"selectionRevision\":\"{d}\",\"selectionAvailable\":{},\"errorCode\":\"{s}\",\"selection\":", .{
-            @tagName(view.catalog_state), view.catalog_generation, view.selection_revision, view.selection_available, @tagName(view.error_code),
-        }) catch return error.SnapshotTooLarge;
-        try self.writeOptionalModelRef(writer, view.selection);
-        writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-        try self.writeCatalogModels(writer, view.models);
-        writer.writeAll("}") catch return error.SnapshotTooLarge;
     }
 
     fn writeCustomProviders(
@@ -9216,7 +9213,6 @@ pub const Runtime = struct {
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
-            .image_view_fn = controlImageView,
             .prepare_image_candidate_fn = controlPrepareImageCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
@@ -9391,6 +9387,9 @@ pub const TestSupport = if (builtin.is_test) struct {
             "",
         );
         errdefer execution.deinit();
+        var source = (try control.custom_providers.resolveDefault()).?;
+        defer source.deinit();
+        execution.image_capabilities = source.image_capabilities.take();
         try control.beginExecutionReplacement();
         errdefer control.endExecutionReplacementNoFail();
         try control.prepareExecutionInstall(execution.input());
@@ -9485,9 +9484,6 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 }
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
-}
-fn controlImageView(context: *anyopaque) models_contract.MetaskImageView {
-    return controlOwner(context).custom_providers.imageView();
 }
 fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
     return controlOwner(context).custom_providers.prepareImageCandidate(input);
@@ -11593,7 +11589,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
-fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
     return allocator.dupe(u8, bytes);
 }
 
@@ -14733,7 +14729,7 @@ test "same-source default model change preserves execution generation and advanc
     defer control.deinit();
 
     const models = [_]models_contract.ModelView{
-        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = false } } },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
     try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
@@ -18256,6 +18252,28 @@ test "projection failure after Agent terminal becomes a product failure" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
 }
 
+test "event capacity causes serialize to the shared Renderer fixture" {
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8 }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    defer cases.deinit();
+    for (cases.value) |expected| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        control.finalizeMarkedTerminalRunsAfterEventDrain();
+        detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
+        var storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeSnapshot(&storage);
+        const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer decoded.deinit();
+        const terminal = decoded.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object;
+        try std.testing.expectEqualStrings(expected.outcome, terminal.get("outcome").?.string);
+        try std.testing.expectEqualStrings(expected.cause, terminal.get("cause").?.string);
+        try std.testing.expectEqualStrings(expected.diagnosticDisposition, terminal.get("diagnosticDisposition").?.string);
+    }
+}
+
 test "event drain barrier atomically publishes terminal product state" {
     var control = try testRuntime();
     defer control.deinit();
@@ -19788,63 +19806,33 @@ test "active input wire identity borrows stable Run memory until history encodin
     try std.testing.expectEqualStrings(operation_id, projected.operation_id);
 }
 
-test "image settings bind Host identity without reading credentials or changing dialogue admission" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{});
+test "complete model metadata image refresh changes default generation while existing Task stays frozen" {
+    var control = try testRuntime();
     defer control.deinit();
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(directory);
-    var vault: TestCustomProviderVault = .{};
-    try control.startCustomProviders(directory, vault.port());
-    defer control.stopCustomProviders();
-    _ = try createReadyTestCustomProvider(&control);
-    const provider = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = TestCustomProviderVault.slot, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }).accepted);
-    const dialogue_revision = control.modelsView().selection_revision;
-    const active_generation = control.newTaskAdmissionView().active_generation;
-    const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"image-only\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
-    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogResponse(&control.custom_providers, "account-1", body));
-    const initial = control.modelsView().image_generation;
-    try std.testing.expect(initial.selection == null);
-    try std.testing.expectEqual(@as(usize, 1), initial.models.len);
-    var command: models_contract.ConfigureMetaskImageSelectionCommand = .{
-        .selection = .{ .source_id = models_contract.metask_source_id, .model_id = "image-only" },
-        .expected_selection_revision = 0,
-        .expected_catalog_generation = initial.catalog_generation,
-    };
-    // Image settings require no access token or dialogue credential resolution.
-    vault.read_fails = true;
-    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
-    try std.testing.expect(control.modelsView().image_generation.selection_available);
-    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
-    try std.testing.expectEqual(active_generation, control.newTaskAdmissionView().active_generation);
-    try std.testing.expectEqual(models_contract.ManagementError.generation_mismatch, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-2", .display_name = "Other" } });
-    command.expected_selection_revision = 1;
-    command.selection = null;
-    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
-    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
-    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
-    const cleared = control.modelsView().image_generation;
-    try std.testing.expect(cleared.selection == null);
-    try std.testing.expectEqual(@as(u64, 2), cleared.selection_revision);
-    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
-    var snapshot: [256 * 1024]u8 = undefined;
-    const encoded = try control.writeSnapshot(&snapshot);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"imageGeneration\":{\"catalogState\":\"ready\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"selectionRevision\":\"2\",\"selectionAvailable\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, encoded, "refreshed-secret") == null);
-    const persisted = try tmp.dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(1024 * 1024));
-    defer std.testing.allocator.free(persisted);
-    try std.testing.expect(std.mem.indexOf(u8, persisted, "refreshed-secret") == null);
+    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const old_execution = control.execution_state.executionInput().?;
+    const generation = old_execution.execution_generation;
+    const old_capabilities = (try control.task_runtime.testExecutionInput(task_id)).target.image_capabilities;
+    try std.testing.expectEqual(@as(usize, 1), old_capabilities.len);
+    try std.testing.expect(!old_capabilities[0].supported);
+    const current = control.modelsView();
+    const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = true } } }};
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        "SECRET-KEY",
+        &models,
+        "fixture-model",
+        control.execution_state.activeSourceGeneration(),
+        current.metask_selection_revision + 1,
+        current.selection_revision + 1,
+        current.providers[0].catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(true, false);
+    const refreshed = control.execution_state.executionInput().?;
+    try std.testing.expect(refreshed.execution_generation > generation);
+    try std.testing.expect(refreshed.target.image_capabilities[0].supported);
+    const pinned = try control.task_runtime.testExecutionInput(task_id);
+    try std.testing.expectEqual(generation, pinned.execution_generation);
+    try std.testing.expect(!pinned.target.image_capabilities[0].supported);
 }

@@ -65,8 +65,6 @@ export const commands = {
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
   modelsResetStore: "metawork.models.resetStore",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
-  configureMetaskImageSelection:
-    "metawork.models.configureMetaskImageSelection",
   selectModelsDefault: "metawork.models.selectDefault",
   customProviderCreate: "metawork.models.customProviders.create",
   builtinProviderCreate: "metawork.models.builtinProviders.create",

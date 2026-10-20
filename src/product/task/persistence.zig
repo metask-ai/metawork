@@ -776,6 +776,7 @@ pub const FileReferenceRangeWire = struct {
 };
 
 pub const FileReferenceWire = struct {
+    generated_image: bool = false,
     id: []const u8,
     title: []const u8,
     display_path: []const u8,
@@ -1224,6 +1225,7 @@ fn projectRun(
             for (tool.file_refs.?) |reference_entry| {
                 const reference = reference_entry orelse continue;
                 references[file_ref_index] = .{
+                    .generated_image = reference.generated_image,
                     .id = reference.id,
                     .title = reference.title,
                     .display_path = reference.display_path,
@@ -2037,6 +2039,7 @@ fn restoreFileReference(
     const locator_kind = parseEnum(task_state.FileReferenceLocatorKind, wire.locator_kind) orelse
         return error.TaskStoreCorrupt;
     var reference = task_state.FileReferenceView{
+        .generated_image = wire.generated_image,
         .id = undefined,
         .title = undefined,
         .display_path = undefined,
@@ -3286,6 +3289,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             "session_close",
             "app_shutdown",
             "event_pipeline_failure",
+            "event_payload_too_large",
             "queue_capacity_failure",
             "ui_pipeline_failure",
             "permission_required",

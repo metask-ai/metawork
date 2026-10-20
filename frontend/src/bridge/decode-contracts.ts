@@ -39,7 +39,6 @@ import {
   type AccountView,
   type ModelsView,
   type CatalogModelView,
-  type MetaskImageGenerationView,
   type NewTaskAdmissionView,
   type ModelMetadata,
   type ModelMetadataProvenance,
@@ -1770,78 +1769,8 @@ function decodeCatalogModels(value: unknown, path: string): CatalogModelView[] {
   return models;
 }
 
-function decodeImageGeneration(
-  value: unknown,
-  path: string,
-): MetaskImageGenerationView {
-  const item = object(value, path, [
-    "catalogState",
-    "catalogGeneration",
-    "models",
-    "selection",
-    "selectionRevision",
-    "selectionAvailable",
-    "errorCode",
-  ]);
-  const catalogState = enumValue(
-    item.catalogState,
-    `${path}.catalogState`,
-    modelsCatalogStates,
-  );
-  const catalogGeneration = wireId(
-    item.catalogGeneration,
-    `${path}.catalogGeneration`,
-  );
-  const models = decodeCatalogModels(item.models, `${path}.models`);
-  const selection = decodeModelRef(item.selection, `${path}.selection`);
-  const selectionRevision = wireId(
-    item.selectionRevision,
-    `${path}.selectionRevision`,
-  );
-  const selectionAvailable = booleanValue(
-    item.selectionAvailable,
-    `${path}.selectionAvailable`,
-  );
-  if (selection !== null && selection.sourceId !== "metask")
-    fail(`${path}.selection`, "image selection must belong to Metask");
-  if (selection !== null && selectionRevision === "0")
-    fail(
-      `${path}.selectionRevision`,
-      "selected image intent requires a revision",
-    );
-  if (catalogState === "ready" && catalogGeneration === "0")
-    fail(
-      `${path}.catalogGeneration`,
-      "a ready image catalog requires a generation",
-    );
-  if (catalogState !== "ready" && (models.length !== 0 || selection !== null))
-    fail(
-      path,
-      "an unavailable image catalog cannot publish candidates or a selection",
-    );
-  const available =
-    catalogState === "ready" &&
-    selection !== null &&
-    models.some((model) => model.id === selection.modelId);
-  if (selectionAvailable !== available)
-    fail(
-      `${path}.selectionAvailable`,
-      "image availability must match the qualified catalog",
-    );
-  return {
-    catalogState,
-    catalogGeneration,
-    models,
-    selection,
-    selectionRevision,
-    selectionAvailable,
-    errorCode: enumValue(item.errorCode, `${path}.errorCode`, modelsErrorCodes),
-  };
-}
-
 function decodeModels(value: unknown, path: string): ModelsView {
   const item = object(value, path, [
-    "imageGeneration",
     "availability",
     "persistenceHealth",
     "providers",
@@ -1977,10 +1906,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
       `${path}.persistenceHealth`,
       ["ready", "recovery_required", "unavailable"] as const,
     ),
-    imageGeneration: decodeImageGeneration(
-      item.imageGeneration,
-      `${path}.imageGeneration`,
-    ),
     providers,
     metaskSelection,
     metaskSelectionRevision: wireId(
@@ -2055,8 +1980,18 @@ function decodeNewTaskAdmission(
 }
 
 function decodeFileReference(value: unknown, path: string): FileReferenceView {
-  const item = object(value, path, ["id", "title", "displayPath"]);
+  const raw = record(value, path);
+  const generated = Object.hasOwn(raw, "generatedImage");
+  const item = object(value, path, [
+    "id",
+    "title",
+    "displayPath",
+    ...(generated ? ["generatedImage"] : []),
+  ]);
+  if (generated && item.generatedImage !== true)
+    fail(path, "invalid generated image attestation");
   return {
+    ...(generated ? { generatedImage: true as const } : {}),
     id: stringValue(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
     displayPath: stringValue(item.displayPath, `${path}.displayPath`),
@@ -2064,7 +1999,10 @@ function decodeFileReference(value: unknown, path: string): FileReferenceView {
 }
 
 export function decodeFilePreview(value: unknown): FilePreview {
+  const raw = record(value, "$");
+  const hasImage = Object.hasOwn(raw, "image");
   const item = object(value, "$", [
+    ...(hasImage ? ["image"] : []),
     "state",
     "content",
     "truncated",
@@ -2081,6 +2019,24 @@ export function decodeFilePreview(value: unknown): FilePreview {
   const content = stringValue(item.content, "$.content");
   const truncated = booleanValue(item.truncated, "$.truncated");
   const redacted = booleanValue(item.redacted, "$.redacted");
+  let image: FilePreview["image"];
+  if (hasImage) {
+    const entry = object(item.image, "$.image", ["mediaType", "dataBase64"]);
+    const data = stringValue(entry.dataBase64, "$.image.dataBase64");
+    if (
+      state !== "ready" ||
+      content !== "" ||
+      truncated ||
+      redacted ||
+      entry.mediaType !== "image/png" ||
+      data.length > 524288 ||
+      data.length % 4 !== 0 ||
+      !data.startsWith("iVBORw0KGgo") ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(data)
+    )
+      fail("$.image", "invalid bounded PNG preview");
+    image = { mediaType: "image/png", dataBase64: data };
+  }
   if (state !== "ready" && (content !== "" || truncated || redacted))
     fail("$", "non-ready preview must not publish content or success facts");
   return {
@@ -2088,6 +2044,7 @@ export function decodeFilePreview(value: unknown): FilePreview {
     content,
     truncated,
     redacted,
+    ...(image ? { image } : {}),
   };
 }
 

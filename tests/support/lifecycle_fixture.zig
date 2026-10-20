@@ -301,10 +301,9 @@ pub const FakeCore = struct {
     last_abort_reason: ?u32 = null,
     buffer_releases: usize = 0,
     credential_seen: bool = false,
-    zero_host_tools_seen: bool = false,
     image_tool_seen: bool = false,
     image_tool: ?wire.HostToolV1 = null,
-    builtin_allowlist_seen: bool = false,
+    product_allowlist_seen: bool = false,
     last_allowed_tool_count: usize = 0,
     last_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
     last_restored_allowed_tool_count: usize = 0,
@@ -886,14 +885,11 @@ pub fn runtimeCreate(
     fake_core.image_tool = if (config.?.host_tool_count == 1) config.?.host_tools.?[0] else null;
     fake_core.image_tool_seen = if (config.?.host_tools) |tools|
         config.?.host_tool_count == 1 and
+            config.?.builtin_tools != null and config.?.builtin_tool_count == 10 and
             std.mem.eql(u8, sdk.borrowedBytes(tools[0].name) catch "", "GenerateImage") and
             tools[0].execute != null and tools[0].release_result != null
     else
         false;
-    fake_core.zero_host_tools_seen = config.?.host_tools == null and
-        config.?.host_tool_count == 0 and
-        config.?.builtin_tools != null and
-        config.?.builtin_tool_count == 10;
     fake_core.mcp_server_count = @intCast(config.?.mcp_server_count);
     fake_core.mcp_descriptor_valid = if (config.?.mcp_server_count == 0)
         config.?.mcp_servers == null
@@ -1038,8 +1034,9 @@ pub fn sessionCreate(
             fake_core.next_plan = .immediate;
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
-            fake_core.builtin_allowlist_seen = host.allowed_tools != null and
-                host.allowed_tool_count == 10;
+            fake_core.product_allowlist_seen = host.allowed_tools != null and
+                host.allowed_tool_count == 11 and
+                std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage");
             recordAllowedTools(
                 host,
                 &fake_core.last_allowed_tool_count,
@@ -3189,6 +3186,6 @@ pub fn shutdownOnThread(runtime: *lifecycle.Runtime) void {
     shutdownTestComposition(runtime) catch unreachable;
 }
 
-pub fn prepareTestAttachmentImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+pub fn prepareTestAttachmentImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
     return allocator.dupe(u8, bytes);
 }

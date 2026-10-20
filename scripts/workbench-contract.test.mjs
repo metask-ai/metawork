@@ -1115,6 +1115,8 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
     "provider_failure",
     "tool_failure",
     "image_input_unsupported",
+    "event_payload_too_large",
+    "queue_capacity_failure",
   ]) {
     const agentFailure = clone(fixture);
     const task = agentFailure.tasks[0];
@@ -1126,6 +1128,21 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
     task.runs[0].terminal = terminal("failed", cause);
 
     assert.deepEqual(decodeWorkbenchSnapshot(agentFailure), agentFailure);
+  }
+});
+
+test("event size and queue capacity retain distinct Host fixture causes", () => {
+  const cases = JSON.parse(readFileSync(new URL("../src/product/control/event_failure.fixture", import.meta.url), "utf8"));
+  for (const expected of cases) {
+    const value = clone(fixture);
+    const task = value.tasks[0];
+    task.activeOperation = null;
+    task.currentRunId = "0";
+    task.currentRunPhase = null;
+    task.runs[0].phase = "failed";
+    task.runs[0].activity = null;
+    task.runs[0].terminal = expected;
+    assert.deepEqual(decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal, expected);
   }
 });
 
@@ -3419,82 +3436,49 @@ test("Task waiting input and reception metadata are strict safe projections", ()
   assert.deepEqual(decodeWorkbenchSnapshot(value), value);
 });
 
-test("image catalog projection remains independent and rejects execution authority", () => {
-  const value = clone(fixture);
-  const imageModel = {
-    ...clone(value.models.providers[0].models[0]),
-    id: "image-model",
-    displayName: "Image model",
-  };
-  const dialogue = clone(value.models.defaultSelection);
-  value.models.imageGeneration = {
-    catalogState: "ready",
-    catalogGeneration: "7",
-    models: [imageModel],
-    selection: null,
-    selectionRevision: "0",
-    selectionAvailable: false,
-    errorCode: "none",
-  };
-  assert.deepEqual(
-    decodeWorkbenchSnapshot(value).models.defaultSelection,
-    dialogue,
-  );
-  value.models.imageGeneration.selection = {
-    sourceId: "metask",
-    modelId: "image-model",
-  };
-  value.models.imageGeneration.selectionRevision = "1";
-  value.models.imageGeneration.selectionAvailable = true;
-  assert.equal(
-    decodeWorkbenchSnapshot(value).models.imageGeneration.selectionAvailable,
-    true,
-  );
-  const ready = clone(value);
-  value.models.imageGeneration.selection = {
-    sourceId: "metask",
-    modelId: "removed-model",
-  };
-  value.models.imageGeneration.selectionAvailable = false;
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+test("Models rejects retired image selection projection and execution authority", () => {
   for (const key of [
-    "credential",
-    "bearer",
-    "endpoint",
-    "principalRef",
-    "authorizationGeneration",
-    "protocol",
-    "sourceGeneration",
+    "imageGeneration",
+    "imageModel",
+    "imageCredential",
+    "imageEndpoint",
   ]) {
-    const bad = clone(ready);
-    bad.models.imageGeneration[key] = "forbidden";
-    assert.throws(() => decodeWorkbenchSnapshot(bad));
+    const value = clone(fixture);
+    value.models[key] = {};
+    assert.throws(() => decodeWorkbenchSnapshot(value));
   }
-  for (const mutate of [
-    (v) => {
-      delete v.models.imageGeneration;
+});
+
+test("file preview admits only bounded ready PNG image variants", () => {
+  const value = {
+    state: "ready",
+    content: "",
+    truncated: false,
+    redacted: false,
+    image: { mediaType: "image/png", dataBase64: "iVBORw0KGgo=" },
+  };
+  assert.deepEqual(decodeFilePreview(value), value);
+  for (const invalid of [
+    { ...value, state: "missing" },
+    { ...value, content: "binary must not become text" },
+    { ...value, truncated: true },
+    { ...value, image: { ...value.image, mediaType: "image/svg+xml" } },
+    {
+      ...value,
+      image: { ...value.image, dataBase64: "https://example.test/a.png" },
     },
-    (v) => {
-      v.models.imageGeneration.selection.sourceId = "custom";
+    {
+      ...value,
+      image: {
+        ...value.image,
+        dataBase64: "iVBORw0KGgo=" + "A".repeat(524288),
+      },
     },
-    (v) => {
-      v.models.imageGeneration.selection = null;
-    },
-    (v) => {
-      v.models.imageGeneration.catalogGeneration = "0";
-    },
-    (v) => {
-      v.models.imageGeneration.selectionRevision = "0";
-    },
-    (v) => {
-      v.models.imageGeneration.catalogState = "needs_authentication";
-    },
-    (v) => {
-      v.models.imageGeneration.models.push(clone(imageModel));
-    },
-  ]) {
-    const bad = clone(ready);
-    mutate(bad);
-    assert.throws(() => decodeWorkbenchSnapshot(bad));
-  }
+  ])
+    assert.throws(() => decodeFilePreview(invalid), /Invalid Host contract/);
+});
+
+test("file image preview matches the Host shared fixture", () => {
+  const value = JSON.parse(readFileSync(new URL("../src/bridge/file_preview_image.fixture", import.meta.url), "utf8"));
+  assert.deepEqual(decodeFilePreview(value), value);
 });

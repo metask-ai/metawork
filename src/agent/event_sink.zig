@@ -7,6 +7,7 @@ pub const Error = error{
 };
 
 pub const OwnedCoreEvent = struct {
+    generated_image_path: ?[]u8 = null,
     session_id: u64,
     run_id: u64,
     encoded_bytes: usize,
@@ -14,9 +15,14 @@ pub const OwnedCoreEvent = struct {
     event: sdk.ParsedCoreEvent,
     allocator: std.mem.Allocator,
 
+    pub fn ownedBytes(self: *const OwnedCoreEvent) usize {
+        return self.encoded_bytes +| if (self.generated_image_path) |path| path.len else @as(usize, 0);
+    }
+
     /// Ownership transfers from the sink to the caller. Do not copy this
     /// value; call `deinit` exactly once after consuming the SDK parse owner.
     pub fn deinit(self: *OwnedCoreEvent) void {
+        if (self.generated_image_path) |path| self.allocator.free(path);
         self.allocator.free(self.json);
         self.event.deinit();
         self.* = undefined;
@@ -25,6 +31,7 @@ pub const OwnedCoreEvent = struct {
     /// Drops the SDK parse owner and transfers the raw, already-validated
     /// event bytes to the transport layer without copying them again.
     pub fn takeJson(self: *OwnedCoreEvent) OwnedEventJson {
+        if (self.generated_image_path) |path| self.allocator.free(path);
         self.event.deinit();
         const result = OwnedEventJson{
             .session_id = self.session_id,
@@ -77,7 +84,7 @@ pub const BoundedEventSink = struct {
     }
 
     pub fn push(self: *BoundedEventSink, envelope: OwnedCoreEvent) Error!void {
-        if (envelope.encoded_bytes > self.max_event_bytes) return error.EventTooLarge;
+        if (envelope.ownedBytes() > self.max_event_bytes) return error.EventTooLarge;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.count == self.entries.len) return error.SinkFull;
@@ -85,7 +92,7 @@ pub const BoundedEventSink = struct {
         self.entries[self.tail] = envelope;
         self.tail = (self.tail + 1) % self.entries.len;
         self.count += 1;
-        self.bytes += envelope.encoded_bytes;
+        self.bytes += envelope.ownedBytes();
     }
 
     pub fn take(self: *BoundedEventSink) ?OwnedCoreEvent {
@@ -96,7 +103,7 @@ pub const BoundedEventSink = struct {
         self.entries[self.head] = null;
         self.head = (self.head + 1) % self.entries.len;
         self.count -= 1;
-        self.bytes -= envelope.encoded_bytes;
+        self.bytes -= envelope.ownedBytes();
         return envelope;
     }
 

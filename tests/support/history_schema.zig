@@ -696,7 +696,8 @@ comptime {
     if (std.meta.fields(wire.AttachmentWire).len != 5) @compileError("Review history fixture coverage after AttachmentWire changes");
     if (std.meta.fields(wire.FileReferencePositionWire).len != 2) @compileError("Review history fixture coverage after FileReferencePositionWire changes");
     if (std.meta.fields(wire.FileReferenceRangeWire).len != 2) @compileError("Review history fixture coverage after FileReferenceRangeWire changes");
-    if (std.meta.fields(wire.FileReferenceWire).len != 7) @compileError("Review history fixture coverage after FileReferenceWire changes");
+    // generated_image is preserved inside file_refs_json; history_schema_test covers absent/false/true.
+    if (std.meta.fields(wire.FileReferenceWire).len != 8) @compileError("Review history fixture coverage after FileReferenceWire changes");
     if (std.meta.fields(wire.FileChangeArtifactWire).len != 4) @compileError("Review history fixture coverage after FileChangeArtifactWire changes");
     if (std.meta.fields(wire.UsageWire).len != 4) @compileError("Review history fixture coverage after UsageWire changes");
     if (std.meta.fields(wire.PermissionSummaryWire).len != 11) @compileError("Review history fixture coverage after PermissionSummaryWire changes");

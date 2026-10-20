@@ -49,13 +49,34 @@ pub const Failure = enum {
     unsupported_output,
 };
 
+pub const Format = enum {
+    png,
+    jpeg,
+    webp,
+    pub fn mediaType(self: Format) []const u8 {
+        return switch (self) {
+            .png => "image/png",
+            .jpeg => "image/jpeg",
+            .webp => "image/webp",
+        };
+    }
+    pub fn extension(self: Format) []const u8 {
+        return switch (self) {
+            .png => "png",
+            .jpeg => "jpg",
+            .webp => "webp",
+        };
+    }
+};
+
 pub const Receipt = struct {
     pub const max_path_bytes = 512;
     path: [max_path_bytes]u8 = undefined,
     path_len: usize = 0,
     size_bytes: usize,
+    format: Format,
 
-    pub fn init(path: []const u8, size: usize) error{InvalidPath}!Receipt {
+    pub fn init(path: []const u8, size: usize, format: Format) error{InvalidPath}!Receipt {
         if (path.len == 0 or path.len > max_path_bytes or path[0] == '/' or
             std.mem.indexOfAny(u8, path, "\\:\x00\r\n") != null or !std.unicode.utf8ValidateSlice(path))
             return error.InvalidPath;
@@ -64,7 +85,7 @@ pub const Receipt = struct {
             if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
                 return error.InvalidPath;
         }
-        var result: Receipt = .{ .size_bytes = size };
+        var result: Receipt = .{ .size_bytes = size, .format = format };
         @memcpy(result.path[0..path.len], path);
         result.path_len = path.len;
         return result;
@@ -78,7 +99,7 @@ pub const Receipt = struct {
 pub const Output = struct {
     context: *anyopaque,
     /// A receipt is a committed fact, even if cancellation raced with commit.
-    commit_fn: *const fn (*anyopaque, []const u8, *const http.Cancellation) OutputResult,
+    commit_fn: *const fn (*anyopaque, []const u8, Format, *const http.Cancellation) OutputResult,
 };
 
 pub const OutputFailure = struct {
@@ -88,7 +109,7 @@ pub const OutputFailure = struct {
     path_len: usize = 0,
 
     pub fn init(code: Code, path: []const u8) error{InvalidPath}!OutputFailure {
-        const validated = try Receipt.init(path, 0);
+        const validated = try Receipt.init(path, 0, .png);
         return .{ .code = code, .attempted_path = validated.path, .path_len = validated.path_len };
     }
 
@@ -252,9 +273,9 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         error.UnsupportedOutput => .unsupported_output,
         else => .invalid_response,
     } };
-    defer allocator.free(decoded);
+    defer allocator.free(decoded.bytes);
     if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
-    return switch (binding.output.commit_fn(binding.output.context, decoded, &call.cancellation)) {
+    return switch (binding.output.commit_fn(binding.output.context, decoded.bytes, decoded.format, &call.cancellation)) {
         .saved => |receipt| .{ .saved = receipt },
         .failed => |failure| if (failure.code != .cleanup_incomplete and
             (failure.code == .cancelled or call.cancellation.isRequested()))
@@ -264,7 +285,9 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
     };
 }
 
-pub fn decode(allocator: std.mem.Allocator, body: []const u8, limits: Limits) ![]u8 {
+pub const Decoded = struct { bytes: []const u8, format: Format };
+
+pub fn decode(allocator: std.mem.Allocator, body: []const u8, limits: Limits) !Decoded {
     if (body.len > limits.response_bytes) return error.InvalidResponse;
     const scratch = try allocator.alloc(u8, limits.response_bytes * 4);
     defer allocator.free(scratch);
@@ -284,8 +307,118 @@ pub fn decode(allocator: std.mem.Allocator, body: []const u8, limits: Limits) ![
     const image = try allocator.alloc(u8, size);
     errdefer allocator.free(image);
     try std.base64.standard.Decoder.decode(image, encoded);
-    try validatePng(image);
-    return image;
+    return .{ .bytes = image, .format = try validateImage(image) };
+}
+
+pub fn validateImage(bytes: []const u8) !Format {
+    if (std.mem.startsWith(u8, bytes, "\x89PNG\r\n\x1a\n")) {
+        try validatePng(bytes);
+        return .png;
+    }
+    if (std.mem.startsWith(u8, bytes, "\xff\xd8")) {
+        try validateJpeg(bytes);
+        return .jpeg;
+    }
+    if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP")) {
+        try validateWebp(bytes);
+        return .webp;
+    }
+    return error.UnsupportedOutput;
+}
+
+fn validateDimensions(width: u32, height: u32) !void {
+    if (width == 0 or height == 0 or @as(u64, width) * height > 16_000_000) return error.InvalidResponse;
+}
+
+// Inspect bounded container structure and dimensions, without pixel decoding or
+// Native-loop work. Compressed image bytes remain unchanged through output.
+fn validateJpeg(bytes: []const u8) !void {
+    var offset: usize = 2;
+    var frame = false;
+    var scan = false;
+    var entropy = false;
+    while (offset < bytes.len) {
+        if (entropy) {
+            while (offset < bytes.len and bytes[offset] != 0xff) : (offset += 1) {}
+        }
+        if (offset >= bytes.len or bytes[offset] != 0xff) return error.InvalidResponse;
+        while (offset < bytes.len and bytes[offset] == 0xff) : (offset += 1) {}
+        if (offset >= bytes.len) return error.InvalidResponse;
+        const marker = bytes[offset];
+        offset += 1;
+        if (entropy and (marker == 0 or (marker >= 0xd0 and marker <= 0xd7))) continue;
+        entropy = false;
+        if (marker == 0xd9) {
+            if (!frame or !scan or offset != bytes.len) return error.InvalidResponse;
+            return;
+        }
+        if (marker == 0 or marker == 0xd8 or (marker >= 0xd0 and marker <= 0xd7)) return error.InvalidResponse;
+        if (marker == 0x01) continue;
+        if (bytes.len - offset < 2) return error.InvalidResponse;
+        const length: usize = std.mem.readInt(u16, bytes[offset..][0..2], .big);
+        if (length < 2 or length > bytes.len - offset) return error.InvalidResponse;
+        const segment = bytes[offset..][0..length];
+        const is_frame = marker >= 0xc0 and marker <= 0xcf and marker != 0xc4 and marker != 0xc8 and marker != 0xcc;
+        if (is_frame) {
+            if (frame or length < 8) return error.InvalidResponse;
+            const components: usize = segment[7];
+            if (components == 0 or components > 4 or length != 8 + 3 * components) return error.InvalidResponse;
+            try validateDimensions(std.mem.readInt(u16, segment[5..7], .big), std.mem.readInt(u16, segment[3..5], .big));
+            frame = true;
+        }
+        if (marker == 0xda) {
+            if (!frame or length < 6) return error.InvalidResponse;
+            const components: usize = segment[2];
+            if (components == 0 or components > 4 or length != 6 + 2 * components) return error.InvalidResponse;
+            scan = true;
+            entropy = true;
+        }
+        offset += length;
+    }
+    return error.InvalidResponse;
+}
+
+fn validateWebp(bytes: []const u8) !void {
+    if (std.mem.readInt(u32, bytes[4..8], .little) != bytes.len - 8) return error.InvalidResponse;
+    var offset: usize = 12;
+    var image = false;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    var canvas_width: u32 = 0;
+    var canvas_height: u32 = 0;
+    while (bytes.len - offset >= 8) {
+        const kind = bytes[offset..][0..4];
+        const length: usize = std.mem.readInt(u32, bytes[offset + 4 ..][0..4], .little);
+        if (length > bytes.len - offset - 8) return error.InvalidResponse;
+        const data = bytes[offset + 8 ..][0..length];
+        if (std.mem.eql(u8, kind, "ANIM") or std.mem.eql(u8, kind, "ANMF")) return error.UnsupportedOutput;
+        if (std.mem.eql(u8, kind, "VP8X")) {
+            if (offset != 12 or length != 10) return error.InvalidResponse;
+            if (data[0] & 2 != 0) return error.UnsupportedOutput;
+            canvas_width = 1 + @as(u32, std.mem.readInt(u24, data[4..7], .little));
+            canvas_height = 1 + @as(u32, std.mem.readInt(u24, data[7..10], .little));
+            try validateDimensions(canvas_width, canvas_height);
+        } else if (std.mem.eql(u8, kind, "VP8 ")) {
+            if (image or length < 10 or data[0] & 1 != 0 or !std.mem.eql(u8, data[3..6], "\x9d\x01\x2a")) return error.InvalidResponse;
+            width = std.mem.readInt(u16, data[6..8], .little) & 0x3fff;
+            height = std.mem.readInt(u16, data[8..10], .little) & 0x3fff;
+            image = true;
+        } else if (std.mem.eql(u8, kind, "VP8L")) {
+            if (image or length < 5 or data[0] != 0x2f) return error.InvalidResponse;
+            const packed_size = std.mem.readInt(u32, data[1..5], .little);
+            if (packed_size >> 29 != 0) return error.InvalidResponse;
+            width = (packed_size & 0x3fff) + 1;
+            height = ((packed_size >> 14) & 0x3fff) + 1;
+            image = true;
+        }
+        offset += 8 + length;
+        if (length & 1 != 0) {
+            if (offset >= bytes.len) return error.InvalidResponse;
+            offset += 1;
+        }
+    }
+    if (!image or offset != bytes.len or (canvas_width != 0 and (canvas_width != width or canvas_height != height))) return error.InvalidResponse;
+    try validateDimensions(width, height);
 }
 
 fn validatePng(bytes: []const u8) !void {
@@ -303,7 +436,7 @@ fn validatePng(bytes: []const u8) !void {
             if (!std.mem.eql(u8, kind, "IHDR") or len != 13) return error.InvalidResponse;
             const w = std.mem.readInt(u32, payload[0..4], .big);
             const h = std.mem.readInt(u32, payload[4..8], .big);
-            if (w == 0 or h == 0 or @as(u64, w) * h > 16_000_000) return error.InvalidResponse;
+            try validateDimensions(w, h);
         } else if (std.mem.eql(u8, kind, "IHDR")) return error.InvalidResponse;
         if (std.mem.eql(u8, kind, "IDAT")) saw_data = true;
         offset += len + 12;
@@ -343,7 +476,7 @@ test "production image limits bound every input and allow two maximum working re
 
 test "production target structure and isolated fixture admission remain separate" {
     const Fixture = struct {
-        fn output(_: *anyopaque, _: []const u8, _: *const http.Cancellation) OutputResult {
+        fn output(_: *anyopaque, _: []const u8, _: Format, _: *const http.Cancellation) OutputResult {
             return .{ .failed = .{ .code = .write_failed } };
         }
     };
@@ -423,11 +556,11 @@ test "production image codec delivers a PNG beyond fixture byte limits through a
             @memcpy(buffer[0..self.body.len], self.body);
             return .{ .status = 200, .body = buffer[0..self.body.len] };
         }
-        fn output(context: *anyopaque, bytes: []const u8, _: *const http.Cancellation) OutputResult {
+        fn output(context: *anyopaque, bytes: []const u8, format: Format, _: *const http.Cancellation) OutputResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.writes += 1;
             std.testing.expectEqualSlices(u8, self.png, bytes) catch return .{ .failed = .{ .code = .write_failed } };
-            return .{ .saved = Receipt.init("generated-images/fixture.png", bytes.len) catch unreachable };
+            return .{ .saved = Receipt.init("generated-images/fixture.png", bytes.len, format) catch unreachable };
         }
     };
     var fixture: Fixture = .{ .png = png, .body = body };
@@ -450,8 +583,8 @@ test "production image codec delivers a PNG beyond fixture byte limits through a
 
 test "image receipts cannot choose a different workspace" {
     for ([_][]const u8{ "../other.png", "/absolute.png", "C:\\image.png", "a//image.png", "./image.png" }) |path|
-        try std.testing.expectError(error.InvalidPath, Receipt.init(path, 1));
-    _ = try Receipt.init("generated/images/a.png", 12);
+        try std.testing.expectError(error.InvalidPath, Receipt.init(path, 1, .png));
+    _ = try Receipt.init("generated/images/a.png", 12, .png);
 }
 
 test "image response decoding preserves PNG bytes and rejects malformed or redirected output" {
@@ -463,8 +596,8 @@ test "image response decoding preserves PNG bytes and rejects malformed or redir
     const body = try std.json.Stringify.valueAlloc(allocator, .{ .data = .{.{ .b64_json = encoded }} }, .{});
     defer allocator.free(body);
     const decoded = try decode(allocator, body, .{});
-    defer allocator.free(decoded);
-    try std.testing.expectEqualSlices(u8, png, decoded);
+    defer allocator.free(decoded.bytes);
+    try std.testing.expectEqualSlices(u8, png, decoded.bytes);
     try std.testing.expectError(error.UnsupportedOutput, decode(allocator, "{\"data\":[{\"url\":\"https://other.test/image.png\"}]}", .{}));
     try std.testing.expectError(error.InvalidResponse, decode(allocator, "{\"data\":[]}", .{}));
     var broken = try allocator.dupe(u8, png);
@@ -511,7 +644,7 @@ test "post-send cancellation reports unknown and preserves incomplete cleanup fa
             @memcpy(buffer[0..self.body.len], self.body);
             return .{ .status = 200, .body = buffer[0..self.body.len] };
         }
-        fn output(context: *anyopaque, _: []const u8, token: *const http.Cancellation) OutputResult {
+        fn output(context: *anyopaque, _: []const u8, _: Format, token: *const http.Cancellation) OutputResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.writes += 1;
             @constCast(token).request();
@@ -539,4 +672,43 @@ test "post-send cancellation reports unknown and preserves incomplete cleanup fa
         try std.testing.expectEqual(@as(usize, if (phase == .before_send) 0 else 1), fixture.requests);
         try std.testing.expectEqual(@as(usize, if (phase == .output or phase == .cleanup) 1 else 0), fixture.writes);
     }
+}
+
+// These encoded 3x2 fixtures cover baseline/progressive JPEG and lossy,
+// lossless, and extended-alpha WebP; no runtime codec dependency is required.
+test "image formats preserve encoded bytes without trusting provider MIME" {
+    const allocator = std.testing.allocator;
+    inline for (.{
+        .{ Format.png, @embedFile("testdata/generated.png") },
+        .{ Format.jpeg, @embedFile("testdata/generated.jpg") },
+        .{ Format.jpeg, @embedFile("testdata/generated-progressive.jpg") },
+        .{ Format.webp, @embedFile("testdata/generated.webp") },
+        .{ Format.webp, @embedFile("testdata/generated-lossless.webp") },
+        .{ Format.webp, @embedFile("testdata/generated-alpha.webp") },
+    }) |entry| {
+        try std.testing.expectEqual(entry[0], try validateImage(entry[1]));
+        const encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(entry[1].len));
+        defer allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, entry[1]);
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .data = .{.{ .b64_json = encoded, .mime_type = "image/gif" }} }, .{});
+        defer allocator.free(body);
+        const result = try decode(allocator, body, .{});
+        defer allocator.free(result.bytes);
+        try std.testing.expectEqual(entry[0], result.format);
+        try std.testing.expectEqualSlices(u8, entry[1], result.bytes);
+        for (0..entry[1].len) |length| {
+            if (validateImage(entry[1][0..length])) |_| return error.TruncatedImageAccepted else |_| {}
+        }
+    }
+    try std.testing.expectError(error.UnsupportedOutput, validateImage("GIF89a"));
+    var jpeg = @embedFile("testdata/generated.jpg").*;
+    const sof = std.mem.indexOf(u8, &jpeg, "\xff\xc0").?;
+    @memset(jpeg[sof + 5 .. sof + 9], 0xff);
+    try std.testing.expectError(error.InvalidResponse, validateImage(&jpeg));
+    var webp = @embedFile("testdata/generated.webp").*;
+    std.mem.writeInt(u32, webp[4..8], 0, .little);
+    try std.testing.expectError(error.InvalidResponse, validateImage(&webp));
+    var animated = @embedFile("testdata/generated-alpha.webp").*;
+    animated[20] |= 2;
+    try std.testing.expectError(error.UnsupportedOutput, validateImage(&animated));
 }

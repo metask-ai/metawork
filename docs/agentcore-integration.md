@@ -13,7 +13,7 @@
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. 当前产品路径只使用 AgentCore built-in tools，不注册 v1 Host tools；
+7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
@@ -194,11 +194,18 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 ### Host tools
 
-当前锁定合同的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`；MetaWork Agent 在 Agent 模块中统一注册并允许固定 built-in 集合，Product Control 和 Application 不持有 profile 或 wire name。启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
+普通 Runtime 固定注册 `GenerateImage`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account 或 Models 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`；只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
-图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。这些输入与 client 能力不改变正式 Host Tool Gate。
+当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
-图片 output port 每次返回独立的 committed receipt 或有界分类失败，不通过任意 error 文本、共享错误槽或借用调用栈字符串传递文件事实。清理不完整的 attempted path 必须以 owned value 交付；即使取消同时发生，也不能丢弃该事实或把它当作 saved。输出取消只依赖共享取消 token，不要求 HTTP transport 提供文件 I/O 的唤醒。成功及失败 metadata 都必须装入发送前预留的结果容量，release 仍遵循原有 owned result 合同。
+
+Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
+
+当前启用用于内部测试，不代表正式服务和新包发布验收完成。旧工具集合 checkpoint 的已知恢复缺口必须保持 fail-closed；修复版 canonical bundle 的迁移验收、真实服务与目标平台证据属于发布前条件，见[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)。不以 SDK patch、checkpoint 改写或另一套旧工具 Runtime 绕过缺口。
+
+图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。
+
+图片 output port 借用已识别格式及原始编码字节，Application 按实际格式生成扩展名；committed receipt 的 MIME 必须与该格式一致，不要求服务端统一返回 PNG，也不转码或在 callback 中等待 Native 主线程解码。此校验约束编码容器结构和像素尺寸，不替代后续查看图片时的完整像素解码。图片 output port 每次返回独立的 committed receipt 或有界分类失败，不通过任意 error 文本、共享错误槽或借用调用栈字符串传递文件事实。清理不完整的 attempted path 必须以 owned value 交付；即使取消同时发生，也不能丢弃该事实或把它当作 saved。输出取消只依赖共享取消 token，不要求 HTTP transport 提供文件 I/O 的唤醒。成功及失败 metadata 都必须装入发送前预留的结果容量，release 仍遵循原有 owned result 合同。
 
 图片配置以 Run preparation 为冻结点：`prepareRunWithImage` 在排队前复制 target、model、credential，并捕获本 Run 的 HTTP/output capability；显式空配置冻结 unavailable，不继承上一 Run、Session fixture 或历史工具结果。调用方只需保持配置字节到 preparation 返回，但必须持有 effect context 到 Run callback 与 I/O 静止。queued cancel、Core 调用前中止及正常/失败 terminal 都在静止后释放执行副本并清零 credential；这不代替 Product 对尚未 drain 的事件保留独立脱敏副本。既有 fixture 配置只作为隔离测试的输入来源，callback 同样只消费冻结后的 Run 数据；配置有无不改变正式工具声明或 Session grants。
 
@@ -274,7 +281,9 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
-`image_input_unsupported` 与 `image_input_capability_unknown` 只在本次 Run 含图片时作为 typed admission 拒绝，均映射为既有 Product cause `image_input_unsupported`；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前 [ABI 消费合同](agentcore-abi-v1.md)不定义 document part 或文档能力拒绝 status；具体接受的修订由 canonical bundle identity 验证。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。Product 必须显式配置能够容纳满额模型图片预览及附件引用的 checkpoint 单字符串限额；其余 checkpoint 总量、section 和数量预算继续有界，不能在运行时自动扩容。其他超限仍沿既有 typed failure 返回。
+Models 声明的图片输入能力必须随执行配置冻结，并在 Session create 与 restore 时由 Host 填入 canonical `SessionHostConfigV1.model_capabilities`；不得仅保留在模型目录或 Renderer metadata。声明只覆盖同一 source、protocol 和 endpoint 路由中已经可执行的模型，包含明确支持与不支持的模型；未知声明不伪造为支持。能力表按 canonical ABI 的数量、模型名与唯一性限制验证，不能静默截断。每个默认 execution 与 Task attachment 持有独立副本；默认能力表变化分配新的 execution generation，既有 Task 保持原副本；同一路由的 `set_model` 使用已安装的表，能力表变化通过既有 Session rebind/restore 安装，不热改在飞 Run。恢复使用当次已解析的路由声明，不根据历史 checkpoint 或模型名重建能力。此表是执行期事实，不新增持久化格式，也不授予工具权限。
+
+`image_input_unsupported` 与 `image_input_capability_unknown` 只在本次 Run 含图片时作为 typed admission 拒绝，均映射为既有 Product cause `image_input_unsupported`；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前 [ABI 消费合同](agentcore-abi-v1.md)不定义 document part 或文档能力拒绝 status；具体接受的修订由 canonical bundle identity 验证。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。Product 必须显式配置能够容纳满额模型图片预览、附件引用以及 Core Read 完整图片 JSON 的 checkpoint 单字符串限额；其余 checkpoint 总量、section 和数量预算继续有界，不能在运行时自动扩容。其他超限仍沿既有 typed failure 返回。
 
 ### 每 Run 时间上下文
 
@@ -455,6 +464,10 @@ flowchart LR
 - per-pump Session/event budget；
 - Product Control snapshot capacity/chunk bytes 与 revision retry budget。
 
+默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界、公平调度和 deadline。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
+
+单事件尺寸超限映射为独立的 Product `event_payload_too_large`，队列准入容量不足继续映射为 `queue_capacity_failure`；Renderer 必须区分这两种原因，不将其描述为磁盘或工作台存储已满。
+
 ### 过载语义
 
 | 数据                            | 允许策略                                                                                  |
@@ -470,7 +483,7 @@ flowchart LR
 
 当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
 
-`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 512 KiB 单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在 512 KiB 总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
+`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 有界单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在与 Host 相同的总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
 
 按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 

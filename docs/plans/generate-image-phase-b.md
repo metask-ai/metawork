@@ -1,10 +1,10 @@
 # MetaWork 原生生图阶段 B 方案
 
-> 状态：已获实施授权；B0.1 离线前置核对已完成，继续不收费的实施与验证。正式 Host Tool 与设置入口仍关闭，不调用收费服务。B0.2 的 canonical Core 无 grant checkpoint 恢复缺口阻塞正式集合迁移，不阻塞隔离装配中的 B1/B2 实施，见[验证缺口](../validation.md#generateimage-工具集合迁移的恢复缺口)。本文不是 decision record，也不替代领域真源。
+> 状态：用户已明确授权在无真实用户的内部测试阶段启用普通 Runtime 的固定 `GenerateImage` ；生图模型已改由 Host 默认解析，先完成不收费验证。B0.2 的 canonical Core 无 grant checkpoint 恢复缺口与真实服务、平台验收只约束新包发布，不阻塞内部启用；旧任务恢复继续 fail-closed。此授权调整此前“全部发布证据齐备后才接通入口”的实施顺序，不放宽 SDK、Host 或文件安全校验。本文不是 decision record，也不替代领域真源。
 
-阶段 B 交付一个最小正式链路：用户在 Models 设置中明确选择 Metask 生图模型，普通 Task 的模型通过 `GenerateImage` 发起一次图片生成，结果保存到 owning Workspace，工具返回真实文件引用。对话模型与生图模型独立；对话来源为 Custom Provider 的 Task 也可以消费已配置的 Metask 生图能力。
+阶段 B 交付一个最小正式链路：Host 按默认优先、目录首个合格模型回退规则解析 Metask 生图模型，普通 Task 的模型通过 `GenerateImage` 发起一次图片生成，结果保存到 owning Workspace，工具返回真实文件引用。对话模型与生图模型独立；对话来源为 Custom Provider 的 Task 也可以消费已配置的 Metask 生图能力。
 
-正式开放必须同时满足三件事：固定工具的权限与恢复合同成立，Models 能解析独立且有效的图片执行配置，生产输出与真实 Metask 链路完成验收。仅把生产 `host_tool_count` 改为 1 不构成交付。
+新包对外发布必须同时满足三件事：固定工具的权限与恢复合同成立，Models 能解析独立且有效的图片执行配置，生产输出与真实 Metask 链路完成验收。仅把生产 `host_tool_count` 改为 1 不构成交付。
 
 ## 1 前提与范围
 
@@ -15,7 +15,7 @@
 | 本阶段交付 | 后续阶段处理 |
 | --- | --- |
 | 固定 `GenerateImage` Host Tool 的正式注册、fresh/restore allowlist、权限和恢复验证 | 任意 Host Tool registry、用户自定义工具和插件发现 |
-| Metask 生图目录、独立的可空模型选择、最小设置界面 | Custom Provider 生图、多生图 Provider、Task 专属生图模型选择 |
+| Metask 生图目录、Host 默认与目录回退模型策略 | Custom Provider 生图、多生图 Provider、Task 专属生图模型选择 |
 | 每次调用只接收 `prompt`，生成一张 PNG 到 Workspace | 参考图、编辑、mask、多图、尺寸与质量参数、视频 |
 | 复用既有 OAuth 授权与 HTTP backend，直连 Images Generation | 网站会话包装、独立 API Key、专门 OAuth scope 或账号体系 |
 | 正式的 Workspace 输出能力、真实结果与安全错误 | Outputs/图片图库、缩略图、自动展示、生成质量评审 |
@@ -33,7 +33,7 @@
 - `services/sglang-proxy/images.go` 消费 Images Generation 请求，在允许的 passthrough 路由执行或交给网关内部 Gemini 转换；桌面端不消费上游协议或路由 identity。
 - `apps/web/src/app/api/studio/images/route.ts` 是网站登录会话包装，另有字段限制，并请求 URL 结果；它不是桌面 API。
 
-这些是源码事实，不证明该 revision 已部署到正式站点，也不保证某个模型接受 `b64_json`、返回 PNG 或在本阶段预算内完成。B0 固定接口合同与待验证假设，B5 对正式部署和明确选择的模型取得实际证据；未满足时不打开正式能力，不要求先付费生成才能开始本地实现。
+这些是源码事实，不证明该 revision 已部署到正式站点，也不保证某个模型接受 `b64_json`、返回 PNG 或在本阶段预算内完成。B0 固定接口合同与待验证假设，B5 对正式部署和明确选择的模型取得实际证据；未满足时不完成发布验收，不要求先付费生成才能开始本地实现。
 
 ## 3 Owner 与依赖边界
 
@@ -41,7 +41,7 @@
 | --- | --- | --- |
 | Metask 服务 | OAuth scope 执法、目录声明、模型路由、生成与实际计量 | MetaWork 的工具权限、Workspace 文件归属和重试决定 |
 | Account | 身份、token refresh、authorization generation、有效 lease 及清零 | 生图模型目录、选项、图片请求或消费者状态 |
-| Models | 单一 Metask 服务地址政策、目录用途分类、生图选择、配置持久化、owned candidate | 查询 Task、调用 AgentCore、生成图片、写 Workspace |
+| Models | 单一 Metask 服务地址与默认模型政策、目录用途分类、owned candidate | 查询 Task、调用 AgentCore、生成图片、写 Workspace |
 | Product Control | Run admission、冻结 candidate、Workspace 输出 authority、可见历史和 provenance | 猜测模型、服务地址、credential 或 tool wire name |
 | Agent | 固定工具/schema、Core callback、图片请求与响应语义、预算、取消和结果所有权 | 导入 Models/Account/Product、决定用户默认模型或持久化选择 |
 | Application | catalog 及 Run preparation 的 lease handoff、已有 transport 与文件 effect 装配、worker/资源退出顺序 | 在 worker 选择模型、覆盖 endpoint、形成第二套领域政策 |
@@ -53,26 +53,26 @@
 
 ### 4.1 两种资格必须分开
 
-**产品能力 Gate** 决定本版本是否正式提供固定 Host Tool。Gate 关闭时，普通 Runtime 继续保持零 Host tools；隔离测试入口不能授予产品能力。
+**发布验收 Gate** 决定本版本是否可作为正式生图交付发布。内部测试已获单独启用授权，普通 Runtime 固定注册 `GenerateImage`，Host 默认图片配置同步接通；未完成的发布证据保持可见，不伪装为通过。
 
-这里的 Gate 是合同变更与合并/发布的验收条件，不新增一个产品运行时开关、持久 Gate 状态、通用 feature registry 或另一套策略控制系统。
+这里的 Gate 是发布的验收条件，不新增一个产品运行时开关、持久 Gate 状态、通用 feature registry 或另一套策略控制系统。
 
-**本次 Run readiness** 决定已开放工具是否具有可用执行输入。正式开放后，Runtime 固定注册一个 `GenerateImage`，fresh 与 restore Session 使用同一固定 allowlist。登录、目录、选择或图片配置变化只改变执行输入，不按这些状态增删工具声明，也不隐式修改 Session grants。
+**本次 Run readiness** 决定已开放工具是否具有可用执行输入。内部测试与后续发布使用同一正式注册路径，Runtime 固定注册一个 `GenerateImage`，fresh 与 restore Session 使用同一固定 allowlist。登录、目录或图片配置变化只改变执行输入，不按这些状态增删工具声明，也不隐式修改 Session grants。
 
 没有图片配置的 Run 仍可完成普通对话。Core 的工具权限判断可能先于 Host execute callback，因此缺配置时也可能先出现当次审批：拒绝按既有拒绝路径收口，允许后执行返回有界 `unavailable`，两者都不发送图片请求。不能承诺缺配置一定没有审批，也不为隐藏这次审批动态改变工具集合。不把生图 readiness 加到 New Task、文本 Run、Conversation recovery 或 Custom Provider 的全局 admission 上。
 
-### 4.2 Gate 通过条件
+### 4.2 发布 Gate 通过条件
 
 1. 产品范围、owner、安全、权限及恢复合同已获阶段 B 实施授权并更新对应真源。
 2. canonical Core 对固定 Host Tool 的注册、并发、permission namespace、once-only response、释放与生命周期证据齐全。
 3. Models、Account handoff、Run 冻结与正式输出能力形成真实闭环；测试 sink 不再承担生产输出。
 4. 旧工具集合的 checkpoint 在新集合恢复时，权限失效和 typed degraded report 得到验证；没有静默沿用旧 grant。
 5. B0 定义的实际服务合同与 B5 的目标平台验收完成，失败语义和收费风险可观察。
-6. 发布注册与界面入口同步接通；尚未完成的 UI 不得先显示可用生图能力。
+6. 普通 Runtime 的唯一注册、Host 默认策略、既有工具及审批呈现接线通过验收；不提供生图模型设置入口。
 
-能力注册的精确数据继续归 Agent；不建立环境变量、Renderer boolean、每 Session 任意工具列表或通用 Host Tool 注入接口。实施分支在最终 Gate 提交前，用固定隔离装配验证同一执行代码；该装配不进入 release。最终注册提交同时收口零 Host tools 的旧断言与正式合同，不保留两套 active 产品路径。
+能力注册的精确数据继续归 Agent；不建立环境变量、Renderer boolean、每 Session 任意工具列表或通用 Host Tool 注入接口。内部测试启用提交同时收口零 Host tools 的旧断言与正式合同，不保留两套 active 产品路径；持续 fixture 装配只注入 transport、预算和明确的测试输入，工具集合与普通 Runtime 一致。
 
-B2/B5 的固定候选注册数据仅由测试装配调用同一私有注册函数；真实 App 验证使用既有隔离 automation identity 和正式 backend。无需为此新增生产 candidate mode、另一层 Runtime factory 或可变注册表。B5 在切换普通 Runtime 为唯一正式集合后，必须重跑最终构建产物的相关验收，候选装配证据不能自动覆盖最后的接线差异。长期保留的本地 fixture 入口仍只接收显式 loopback target，不把阶段 A 的地址验证器放宽成通用生产 override。
+B2/B5 的注册数据与普通 Runtime 使用同一私有注册函数；真实 App 验证使用既有隔离 automation identity 和正式 backend。无需为此新增生产 candidate mode、另一层 Runtime factory 或可变注册表。B5 在切换普通 Runtime 为唯一正式集合后，必须重跑最终构建产物的相关验收，候选装配证据不能自动覆盖最后的接线差异。长期保留的本地 fixture 入口仍只接收显式 loopback target，不把阶段 A 的地址验证器放宽成通用生产 override。
 
 ### 4.3 权限与成本
 
@@ -80,7 +80,7 @@ B2/B5 的固定候选注册数据仅由测试装配调用同一私有注册函�
 
 Host tool 不提供 Session-scoped grant candidate。界面、自动评审和恢复都不得伪造 `allow_session`；只回答当次合法选择。拒绝、callback unavailable、noninteractive occurrence 的既有 `permission_required/needs_attention` 路径都必须在图片请求与输出文件创建前收口。自动评审输入需要保留本次调用可能收费的事实，但不能声称已知价格或审核器建议是安全证明。
 
-选择生图模型不是一次生成授权。设置操作不发收费 probe；实际请求的计量与余额由 Metask 执法。工具说明明确每次调用都是新的、可能收费的生成意图，同 prompt 两次仍是两次生成。
+Host 选定默认或目录回退模型不是一次生成授权，不发收费 probe；实际请求的计量与余额由 Metask 执法。工具说明明确每次调用都是新的、可能收费的生成意图，同 prompt 两次仍是两次生成。
 
 ### 4.4 checkpoint 与旧权限
 
@@ -105,50 +105,42 @@ Host tool 不提供 Session-scoped grant candidate。界面、自动评审和恢
 
 现有 `ModelEntry.protocol` 与只保存对话成员的结构必须改为可表达独立用途的内部表示；不复制一份宽松 parser，不为图片新增对话 `Protocol` 值。
 
-catalog 加载状态继续共用，候选数量与可解析性按用途分别判断。尤其要验证“Metask 只有生图模型、对话走 Custom Provider”：对话目录的 `no_models` 不能清掉有效图片目录、阻止图片选择或解析。为此只扩展现有 Models aggregate 的字段和投影，不新建生图 Provider Runtime、独立刷新 worker 或第二套 catalog generation。
+catalog 加载状态继续共用，候选数量与可解析性按用途分别判断。尤其要验证“Metask 只有生图模型、对话走 Custom Provider”：对话目录的 `no_models` 不能清掉有效图片目录、阻止图片解析。为此只扩展现有 Models aggregate 的字段和投影，不新建生图 Provider Runtime、独立刷新 worker 或第二套 catalog generation。
 
-### 5.2 选择与持久化
+### 5.2 Host 默认策略与持久化收口
 
-新增独立、可空的 Metask 生图选择；不复用全局对话 default、Provider-local 对话 intent 或 Composer 当前模型。
+用户已明确改为不提供生图模型选择。默认模型的唯一机器定义在 Models 值合同；优先采用目录中合格的默认模型，否则按目录返回顺序取第一个明确支持 `images_generations` 的成员。目录首项本身不授予能力，仍先过滤资格；没有候选则 unavailable。选择不跟随对话 default，不由 Agent 参数或 Renderer 提供，也不增加用户配置、图片 selection revision 或第二目录 worker。
 
-- 初始为未选择，必须用户明确选择；没有隐式首项、硬编码正式模型或“默认图像模型” fallback。
-- 只保存一条带 principal 归属的最近显式生图选择，沿用现有单条 Metask intent 的规模。logout 不清空该记录；当前账号与记录不匹配时显示未配置，不采用其模型。新账号显式选择后替换该条记录；返回旧账号只在记录仍属于自己时恢复。阶段 B 不建立多账号历史配置库。清除操作只清当前账号拥有的选择。
-- 选中模型被移除或不再合格：保留不可用 intent，发布原因和当前可选列表，等待用户重选；目录合法为空时不复用旧目录给新 resolve 放行。
-- 更改生图选择只推进自己的 selection revision，不改变对话选择、Task 对话 execution generation 或正在运行的图片调用。
-- Models 用同一个受控持久化事务保存新增可选字段；读取既有 `models.json` 时缺字段表示未配置，其他字段原样保持。不得借本阶段删除既有数据、重置偏好或更改稳定格式/version identity。若需要迁移或双向降级支持，单独说明并取得相应授权。
-
-typed 选择/清除命令只接受 source-qualified `ModelRef` 和所需 expected selection/catalog revision；Host 核对当前 principal 与目录。Renderer 不提交 endpoint、credential、返回格式、文件路径、请求预算或价格。
+旧 `models.json` 中的 `metask_image` 只在读取时丢弃，正常写回不再输出；保留其余对话、Provider、revision 与 credential tombstone，不为清理退休字段新增启动写入。删除专用选择/清除 Bridge command、allowlist、snapshot 字段、UI、样式及无职责测试；不保留隐藏的 active 设置路径。
 
 ### 5.3 图片执行 candidate
 
-Models 发布窄的图片配置值，包括 `ModelRef`、Models-owned 明确 target、catalog generation、图片 selection revision 和线性 owned credential。preparation 内另校验 principal 与 authorization generation；这些授权校验字段不进入 Agent、Renderer 或 durable Run history。图片配置不携带对话 protocol，也不伪装为现有文本 `ExecutionConfig`。
+Models 在一次主线程 preparation 内，以当前 lease 的 principal 与 authorization generation 核对目录归属，选定实际模型并复制 credential。candidate 只携带 owned `ModelRef`、固定 target、catalog generation 和线性 owned credential；不携带对话 protocol、图片 selection revision、Product generation、principal 或授权代次。目录变化只影响下一 Run，不改写已交付配置。
 
-图片选择 revision、catalog generation 与 Account authorization generation 分别表示用户意图、目录快照与授权，不互相替代。不借用会随对话 protocol/default 变化的 source generation 作为图片授权证明，也不额外建立一套图片 execution generation、installation registry 或默认 binding reconcile 状态机。
-
-正式 target 只从 Models 的唯一机器定义构造。Agent 自己的输入只有执行所需字段及 output capability；Product adapter 负责跨 owner 转换和 owned copy，不转发 Account Runtime 或 catalog 指针。
+回退只用于发送前选模型，不重发失败或取消的请求，不在收到 401、429、5xx、无效响应或落盘失败时改用其他模型。
 
 ## 6 Account 授权与 Run 冻结
 
 现有 Account → Application → Models catalog handoff 保持。仅靠已缓存目录或 Account 状态通知，不能证明 Run 接纳那一刻 token 尚未到 hard expiry；过期本身也不一定改变已缓存的 generation。阶段 B 显式增加一次 **Run preparation 的即时 lease handoff**，这是需要更新 Account 消费合同的地方。
 
-复用现有 Application Models coordinator 提供一个窄的图片 preparation capability：仅当存在已选且目录合格的图片模型时，在主线程调用 Account 的现有 `authorizationLease()`，把 lease 字段借给 Models 的纯输入方法，配合明确的图片选择/目录 revisions 构造 owned candidate，然后清零临时 lease。没有图片配置的文本 Run 不额外获取 token。Models 不 import Account 类型；coordinator 不选择模型、不触发 refresh，也不新建授权 Runtime、缓存的“已登录”布尔值或授权事件总线。图片 credential 直接来自本次 lease，不从旧 catalog token、对话 API Key、环境或网站 cookie 补齐。
+复用现有 Application Models coordinator 的窄图片 preparation capability：主线程调用 Account 的现有 `authorizationLease()`，将本次 lease 借给 Models 解析默认或目录回退模型，再清零临时 lease。Models 不 import Account；coordinator 不选模型、不触发 refresh，也不建立授权缓存。图片 credential 不从 catalog token、对话 API Key、环境或网站 cookie 补齐。
 
 Models 必须核对 lease principal、authorization generation 与已接纳 catalog 的授权归属。刷新换代后旧目录仍在或新目录尚未完成时，本次图片能力 unavailable；不每个 Run 重抓目录，也不以 token 内容相同推断授权等价。Account 的当前 lease 获取失败、过期、clock 失败或主体不匹配都形成图片不可用，不能借旧缓存继续发送。
 
 以 **Run admission** 为图片配置冻结点：
 
-1. Product Control 在主线程取得图片选择快照，通过同一 preparation capability 让 Models 结合当前 lease 解析 candidate。Manual、Scheduled occurrence 和内部 follow-up 都走此入口；没有图片配置则冻结本 Run 的图片不可用事实，不能只有 Bridge 发起的 Run 做授权检查。
+1. Product Control 在主线程通过同一 preparation capability 让 Models 结合当前 lease 解析 candidate。Manual、Scheduled occurrence 和内部 follow-up 都走此入口；没有图片配置则冻结本 Run 的图片不可用事实，不能只有 Bridge 发起的 Run 做授权检查。
 2. 捕获 owning Workspace 的既有 authority：owner/binding、epoch、已规范化根的有界副本，或已有的目录 lease。此处只冻结授权输入，不新开目录句柄、不创建目录/文件、不增加持久 file identity。图片配置和输出能力随同 Run 输入在同一 preparation 中冻结，不经过可与 prepare 竞态的可变 Session setter。图片配置/Workspace 资格不可用时冻结 unavailable，文本仍可接纳；Run 本身的接纳失败、排队取消或 stale 时释放全部候选。
-3. 同一 Run 的多次调用使用该冻结配置；目录更新、设置切换、refresh 和 logout 不修改其 model/credential/output，也不改写发送额度。
-4. Core callback、HTTP、watchdog 和文件操作全部静止后释放 Agent 执行副本；Product 为 canonical 脱敏保留的有界副本要等现有 terminal event drain/清理 barrier 完成后再清零。剩余 Host result 独立拥有已编码字节直到 release，不借用这些副本。下一 Run 重新解析；用户在设置中明确变更的选择届时生效。
+3. 同一 Run 的多次调用使用该冻结配置；目录更新、refresh 和 logout 不修改其 model/credential/output，也不改写发送额度。
+4. Core callback、HTTP、watchdog 和文件操作全部静止后释放 Agent 执行副本；Product 为 canonical 脱敏保留的有界副本要等现有 terminal event drain/清理 barrier 完成后再清零。剩余 Host result 独立拥有已编码字节直到 release，不借用这些副本。下一 Run 重新解析当前目录与默认策略。
 
 图片配置不必与整个对话 Session 同寿命，避免既有 Task 永久持有已退出账号的图片 credential。即便沿用 Session 内存放置，也必须是 per-Run 的冻结 owner，不能保留阶段 A 的长寿命测试 binding 作为正式语义。
 
-保留 Account 现有规则：logout 不等待或取消已交付的消费者 binding；已接纳 Run 可以按原配置收口。logout、换账号或授权失效后，后续 Run 无法取得新的 Metask 图片配置，文本任务与 Custom Provider 不受此额外 gate 影响。恢复后下一 Run 也重新解析当前选择，不从历史 source/model 反查旧 credential。
+保留 Account 现有规则：logout 不等待或取消已交付的消费者 binding；已接纳 Run 可以按原配置收口。logout、换账号或授权失效后，后续 Run 无法取得新的 Metask 图片配置，文本任务与 Custom Provider 不受此额外 gate 影响。恢复后下一 Run 也重新解析当前模型策略，不从历史 source/model 反查旧 credential。
 
 接纳时 lease 有效不保证排队、长 Run 或人工审批等待结束后 token 仍有效。既有 Run 不为图片调用等待 Account、换 token 或重发；服务端的 401/403 正常形成本次工具失败。配置在 preparation 后才恢复可用时，同一 Run 也不临时升级，留到下一 Run。这里保护的是接纳时授权有效与已交付配置不被热改写，不承诺远程凭据在整个 Run 内持续有效。
 
-非 secret 的本次图片模型和配置 revision 可作为 Run/工具 execution provenance 保存；不写 principal credential、token、Authorization header 或凭据 locator。历史 provenance 不是重新执行 authority。
+非 secret 的本次图片模型和 catalog generation 可作为 Run/工具 execution provenance 保存；不写 principal credential、token、Authorization header 或凭据 locator。历史 provenance 不是重新执行 authority。
 
 图片 credential 只交图片 client 与执行所需 HTTP effect，不交对话 Provider 或 Core model binding。已有 Product 的 canonical 投影清理必须覆盖本 Run 持有的对话和图片 credential；工具输入/结果、服务错误与清理诊断都不能成为第二条 secret 通道。
 
@@ -230,7 +222,7 @@ stop、close、shutdown 继续经过同一终止 latch 取消已登记调用。�
 
 ## 11 最小设置与产品呈现
 
-Models 设置新增独立“生图模型”区域，只列当前 Metask 图片候选，支持明确选择和清除。展示未登录、目录加载/失败、未选择、可用和已选模型不可用；设置页解释生成可能收费、配置对下一 Run 生效、首版输出 PNG。它不展示推测价格、未取得的余额或内部 generation。
+Models 设置和对话 Composer 只保留对话模型选择；图片模型由 Host 自动解析。沿用既有审批和工具详情说明可能收费、失败后不自动重试及真实文件结果，不增加图片专属设置、模式按钮、价格估算或能力投影。
 
 不在对话 Composer 的模型列表混入生图模型，不增加生图模式按钮、Skill 入口或 prompt 参数编辑器。没有图片配置时文本输入、发送与历史浏览仍正常。
 
@@ -245,21 +237,21 @@ UI 实施遵循现有设计系统、双语、键盘、深浅主题、窄屏与�
 | B0 合同与 canonical 行为核对 | 阶段 A 评审修复 | 固定 API/授权/目录/返回格式合同及正式部署待验证项；取得工具集合变化/Host permission 的真实 Core 证据，核对文件 API 与 Run 即时 lease handoff 合同；不要求收费请求。先提交必要 probe/fixture 与合同收敛，不开放产品 |
 | B0.1 合同与离线前置核对 | 阶段 A 评审修复 | 已取得固定工具、权限、文件 API 与 lease 的离线证据；未知正式部署事实保留给 B5；不把已复现的上游恢复缺口当成通过 |
 | B0.2 旧工具集合恢复缺口关闭 | B0.1 | 等待上游交付符合官方恢复合同的 canonical artifact，再验证旧无 grant checkpoint；当前不修改 AgentCore 生产者，不放宽消费者校验 |
-| B1 Models 生图能力 | B0.1 | 一次 catalog 分出用途、独立可空选择、持久化兼容、精确解析 owned 图片 candidate；对话选择与账号隔离回归通过后提交 |
+| B1 Models 生图能力 | B0.1 | 一次 catalog 分出用途、默认优先和目录回退、退休选择字段迁移、精确解析 owned 图片 candidate；对话选择与账号隔离回归通过后提交 |
 | B2 Agent 与正式输出 | B0.1 | 独立正式 target 输入、生产预算、owned 目录与单次 commit、无主线程等待、结果单调性；测试替身替换为真实产品输出适配的证据通过后提交 |
 | B3 Run 接线与恢复 | B1、B2 | 所有 Run 的即时 lease handoff、冻结/清零/失效、logout/refresh/过期、权限/noninteractive、checkpoint degraded 和并发闭合后提交 |
-| B4 Models 设置与 Bridge | B1 | 最小选择区域、typed command/view、allowlist；可独立验证设置组件，发布呈现仍等 B5。受影响 Renderer/Bridge 验证通过后提交，无须等待 B3 才开始实现 |
+| B4 Renderer 与 Bridge 收口 | B1 | 移除已取消的生图选择命令、projection 和 UI；对话目录只显示对话模型，沿用工具与审批呈现。受影响 Renderer/Bridge 验证通过后提交 |
 | B5 正式能力验收与启用 | B0–B4 | 核对正式部署，以明确付费额度验证真实服务/模型；正式集合切换后重新验收最终 App 构建产物、Core、UI 与平台，全部通过才完成发布 Gate |
 
 每个子任务完成后检查其是否可独立验证并及时提交，记录实际 revision 与验证。不能用“最终启用时再补”留下跨 owner 半条 active 链路；保留隔离测试入口只为持续验证明确的 fixture target，不保留旧正式实现。
 
-B0 是 B0.1/B0.2 的父任务。Models、图片 client、生产输出和 Run 接线可在固定隔离装配中继续实施；旧工具集合迁移的证据仍由 B0.2 提供，B0 未完成时 B5 不得通过。这里修正的是实现任务的依赖，不改变正式 Host Tool Gate、SDK 校验、恢复政策或任何 machine guard。
+B0 是 B0.1/B0.2 的父任务。Models、图片 client、生产输出和 Run 接线可在固定隔离装配中继续实施；旧工具集合迁移的证据仍由 B0.2 提供，B0 未完成时 B5 发布验收不得通过；用户已另行授权内部测试的普通注册与设置接线。SDK 校验、恢复政策和 machine guard 保持不变。
 
 B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用户明确提供可用测试身份、模型和有界生成次数后执行。当前实施授权不包含使用本机已有凭据调用收费服务。
 
 ### B0 无收费核对结果
 
-本轮在 Windows x86_64 上使用当前 target lock 验证；生产注册、持久化和设置入口未改变。
+以下是 B0 时的历史前置核对，不能替代本次默认模型策略与普通 Runtime 的最终验证。
 
 | 前提 | 结论 |
 | --- | --- |
@@ -269,7 +261,7 @@ B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用�
 | 即时 lease | Account 的现有能力在不变更 authenticated 状态或 generation、且没有通知的情况下，仍会拒绝 hard expiry 与时钟不可用的新 lease；已有 owned copy 保持独立寿命。App → Models 的一次 Run preparation handoff 按 §6 实施，不消费 catalog 缓存 token |
 | 文件 API | Windows 实测 exclusive 创建不覆盖，no-follow + 句柄类型可识别 junction，打开文件的 identity 可区分名称被替换。只是 B2 的 API 前提，不是生产 sink 验收；macOS 与真实文件取消/清理仍待后续验证 |
 
-B0 的离线探针已独立提交；无 grant checkpoint 的合法恢复证据必须由 canonical 依赖修复后补齐。不得把“测试准确断言了拒绝”当成 B0 通过。B1/B2 的实施只依赖已完成的 B0.1，正式集合切换及发布继续受 B0.2 和 B5 约束。
+B0 的离线探针已独立提交；无 grant checkpoint 的合法恢复证据必须由 canonical 依赖修复后补齐。不得把“测试准确断言了拒绝”当成 B0 通过。B1/B2 的实施只依赖已完成的 B0.1，内部测试可切换正式集合，新包发布继续受 B0.2 和 B5 约束。
 
 ## 13 验收矩阵
 
@@ -287,7 +279,7 @@ B0 的离线探针已独立提交；无 grant checkpoint 的合法恢复证据�
 | 文件 authority | Manual/Automatic、不同 Task/Session、冲突、symlink/reparse、目录权限、write/同步/cleanup 故障及 close 前后的取消；HTTP 前无占位图片，替换文件不被误删；请求记录与文件字节/receipt 同时验证 |
 | 结果可靠性 | 最长合法路径/JSON 转义、最小内存预算并发、发送前 OOM、提交后禁用分配、Core release、提交与取消/投递失败；没有无 detail 的误导失败 |
 | 取消与预算 | 大于 A fixture 的量级、超时、同时在途、HTTP/文件写入/清理期间 stop/close/shutdown、登记竞态；I/O/watchdog 静止，下 Run 重置，不依赖 UI drain |
-| 产品呈现 | 设置选择、不可用提示、已有审批/工具详情、两种语言/主题/窄屏/键盘；不泄漏 credential/Base64，不伪造 File Changes 或看图事实 |
+| 产品呈现 | 无生图设置入口、对话选择、已有审批/工具详情、两种语言/主题/窄屏/键盘；不泄漏 credential/Base64，不伪造 File Changes 或看图事实 |
 
 B1–B4 按失败模式运行最小充分 owner/跨 owner 测试。新能力涉及共享装配、工具集合和持久化时运行 architecture guard、正式 Native graph、受影响 Renderer/Bridge suite、当前平台 build 与 packaged vertical。Windows/macOS 的路径与 lifecycle 具有独立失败模式，分别验收；一个平台通过不升级另一个平台的能力状态。
 
@@ -305,7 +297,7 @@ B1–B4 按失败模式运行最小充分 owner/跨 owner 测试。新能力涉�
 - `docs/validation.md`：正式接线与平台/外部服务证据，替换“只覆盖测试 sink”的相应能力结论。
 - Completion、架构/目录或 ABI 文档仅在其合同实际改变时更新；复用原有 transport、同一 owner 内新文件不构成机械同步理由。
 
-B1/B2 的实施前提由 B0.1 收口：API 的 OAuth/b64/PNG 合同、Run 即时 lease handoff 的 owner 边界、canonical 工具行为的离线证据与平台文件 API 的可用语义。B0.2 的旧工具集合恢复缺口不阻塞隔离装配中的实现，但必须在正式启用工具前关闭。正式部署、具体模型的 PNG/大小/deadline 与最终产物行为留到 B5 的真实验收；不能用“一个模型曾成功”推导目录内所有模型的格式保证。
+B1/B2 的实施前提由 B0.1 收口：API 的 OAuth/b64/PNG 合同、Run 即时 lease handoff 的 owner 边界、canonical 工具行为的离线证据与平台文件 API 的可用语义。B0.2 的旧工具集合恢复缺口不阻塞隔离装配中的实现，但必须在新包发布前关闭。正式部署、具体模型的 PNG/大小/deadline 与最终产物行为留到 B5 的真实验收；不能用“一个模型曾成功”推导目录内所有模型的格式保证。
 
 如果这些前提不成立，应停在对应能力边界，提出必要的最小合同调整。不得改用网站接口、伪装模型、下载未知 URL、扩大 OAuth scope、取消安全文件校验或忽略 restore report 来交付表面成功。
 
@@ -315,11 +307,9 @@ B1/B2 的实施前提由 B0.1 收口：API 的 OAuth/b64/PNG 合同、Run 即时
 | --- | --- |
 | 为什么 Gate 不做成运行时开关 | 本阶段只批准一个固定工具。增加持久开关和候选产品模式，会引入额外工具集合、恢复组合与验证职责；合并/发布验收和固定测试装配已足够 |
 | 为什么有 catalog lease 还要在 Run preparation 检查 | Account 的 `authorizationLease()` 会即时检查 hard expiry 和 principal，而缓存目录或通知不是该时刻的证明；一次窄 handoff 补齐缺口，不需要新的授权服务 |
-| 为什么生图选择独立，却不建另一套 execution registry | 用户意图确实与对话不同，但 per-Run owned candidate 已覆盖执行与清理；新增 registry/generation/reconcile 没有独立职责 |
-| 为什么不为每个账号维护图片配置历史 | 当前 Metask intent 是单条 principal 绑定记录；单条生图记录已满足不串账号，跨账号历史 profile 不属于阶段 B |
 | 为什么不在收费前创建占位文件 | 占位只能验证当时的一次创建，不能保证未来写入；它制造额外空文件与回收状态，仍无法消除生成后落盘失败。单次 commit 和准确错误语义更直接 |
 | 为什么 logout 不取消已接纳 Run | 这是现有 owned binding 的合同；新 lease 接纳检查与已交付执行收口是两条边界，不能用新增工具偷偷实现热撤权 |
 | 为什么不能只在 worker 结束时清空全部图片 secret | 尚未 drain 的 canonical 事件仍需脱敏；执行副本与投影清理副本各自按真实静止点释放，不能提前清空也不能让 Session 永久持有 |
 | 为什么 B0 不要求付费，B4 不依赖 B3 | 本地合同实现不依赖一次真实生成，设置域也不依赖 Run 接线完成；实际部署/模型和最终产物留在 B5 验收，消除不必要的实施串行 |
 
-保留的复杂度只对应可观察失败：独立选择避免串模型，即时 lease 防止新 Run 使用失效授权，固定工具集合稳定恢复，owned 输出与结果预留保护文件事实。其余通用注册、缓存、事务和回收系统均不在本阶段引入。
+保留的复杂度只对应可观察失败：Models 独立模型策略避免串用对话模型，即时 lease 防止新 Run 使用失效授权，固定工具集合稳定恢复，owned 输出与结果预留保护文件事实。其余通用注册、缓存、事务和回收系统均不在本阶段引入。

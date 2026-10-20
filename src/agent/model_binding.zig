@@ -1,6 +1,6 @@
 //! Borrowed model execution input shared by Agent entry points.
 //!
-//! Product authority, generations, catalog metadata, and ownership do not
+//! Product authority, generations, and catalog ownership do not
 //! cross this boundary. Each consumer applies its own lifetime policy.
 
 const std = @import("std");
@@ -26,7 +26,13 @@ pub const ModelTarget = struct {
     model: []const u8,
 };
 
+pub const ModelImageCapability = struct {
+    model: []const u8,
+    supported: bool,
+};
+
 pub const ModelBinding = struct {
+    image_capabilities: []const ModelImageCapability = &.{},
     target: ModelTarget,
     credential: []const u8,
 };
@@ -35,6 +41,13 @@ pub fn validate(
     binding: ModelBinding,
     endpoint_policy: EndpointPolicy,
 ) ValidationError!void {
+    if (binding.image_capabilities.len > 256) return error.InvalidModelBinding;
+    for (binding.image_capabilities, 0..) |entry, index| {
+        try validateModel(entry.model);
+        for (binding.image_capabilities[0..index]) |prior| {
+            if (std.ascii.eqlIgnoreCase(prior.model, entry.model)) return error.InvalidModelBinding;
+        }
+    }
     try validateProviderId(binding.target.provider_id);
     try validateModel(binding.target.model);
     if (binding.credential.len == 0 or
@@ -175,4 +188,14 @@ test "endpoint policy distinguishes explicit endpoints from SDK defaults" {
         error.InvalidModelBinding,
         validate(binding, .required_explicit),
     );
+}
+
+test "model image declarations reject ambiguous names and excessive ABI input" {
+    var binding: ModelBinding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = "", .model = "glm" }, .credential = "synthetic" };
+    const duplicate = [_]ModelImageCapability{ .{ .model = "GLM", .supported = true }, .{ .model = "glm", .supported = false } };
+    binding.image_capabilities = &duplicate;
+    try std.testing.expectError(error.InvalidModelBinding, validate(binding, .optional_sdk_default));
+    const excessive = [_]ModelImageCapability{.{ .model = "m", .supported = true }} ** 257;
+    binding.image_capabilities = &excessive;
+    try std.testing.expectError(error.InvalidModelBinding, validate(binding, .optional_sdk_default));
 }

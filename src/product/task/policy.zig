@@ -333,7 +333,8 @@ pub fn causeForSignal(signal: agent.TerminationSignal) task_state.RunCause {
             .ui => .ui_pipeline_failure,
         },
         .event_pump_failure => |failure| switch (failure) {
-            .event_too_large, .capacity => .queue_capacity_failure,
+            .event_too_large => .event_payload_too_large,
+            .capacity => .queue_capacity_failure,
             .invalid_event, .allocation, .consumer_rejected => .event_pipeline_failure,
         },
         .event_consumer_notification_failure => .event_pipeline_failure,
@@ -636,6 +637,16 @@ test "Agent terminal facts map into Product Task outcomes" {
     terminal.stop_reason = null;
     terminal.raw_stop_reason_code = null;
     terminal.failure = .abi_status;
+    terminal.termination_signal = .{ .event_pump_failure = .event_too_large };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .event_payload_too_large },
+        classifyAgentTerminal(&terminal),
+    );
+    terminal.termination_signal = .{ .event_pump_failure = .capacity };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .queue_capacity_failure },
+        classifyAgentTerminal(&terminal),
+    );
     terminal.termination_signal = .permission_required;
     try std.testing.expectEqual(
         TerminalDecision{

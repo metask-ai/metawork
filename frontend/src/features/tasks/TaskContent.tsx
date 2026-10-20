@@ -1,3 +1,7 @@
+import {
+  GeneratedImagePreview,
+  type FilePreviewLoader,
+} from "./GeneratedImagePreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
@@ -221,6 +225,7 @@ export function TaskContent({
   webLink,
   onPrepareRetry,
   onPreviewFile,
+  loadFilePreview,
   onReviewFileChanges,
   onRespond,
   renderPendingUi,
@@ -238,6 +243,7 @@ export function TaskContent({
   fileChangesEnabled: boolean;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
+  loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
     taskId: string,
     runId: string,
@@ -617,11 +623,52 @@ export function TaskContent({
                           {t("privacy.sensitive_hidden")}
                         </p>
                       )}
+                      {responseCopyable &&
+                        entry.parts.some(
+                          (part) =>
+                            part.disposition === "final" ||
+                            part.disposition === "partial",
+                        ) && (
+                          <div className="response-copy-actions">
+                            <CopyButton
+                              className="response-copy-action"
+                              data-latest={run.id === latestCopyableId}
+                              copyLabel={t("copy.response")}
+                              copiedLabel={t("copy.copied")}
+                              failedLabel={t("copy.failed")}
+                              onCopy={() =>
+                                copyResponseMarkdown(run.output.response)
+                              }
+                            />
+                            {finishedTime && (
+                              <MessageTime
+                                className="response-finished-time"
+                                time={finishedTime}
+                              />
+                            )}
+                          </div>
+                        )}
                     </Message>
                   </Fragment>
                 ) : null,
               )}
             </div>
+            {run.tools
+              .flatMap((tool) => tool.fileRefs)
+              .filter((reference) => reference.generatedImage)
+              .map((reference) => (
+                <GeneratedImagePreview
+                  key={`${task.id}:${run.id}:${reference.id}`}
+                  taskId={task.id}
+                  runId={run.id}
+                  reference={reference}
+                  enabled={Boolean(synchronized && !responseDisabled)}
+                  load={loadFilePreview}
+                  onOpen={(opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
+                  }
+                />
+              ))}
             {presentation.active && (
               <RunProcess
                 presentation={presentation}
@@ -775,24 +822,6 @@ export function TaskContent({
               >
                 {t("run.conversation_history_excluded")}
               </p>
-            )}
-            {responseCopyable && (
-              <div className="response-copy-actions">
-                <CopyButton
-                  className="response-copy-action"
-                  data-latest={run.id === latestCopyableId}
-                  copyLabel={t("copy.response")}
-                  copiedLabel={t("copy.copied")}
-                  failedLabel={t("copy.failed")}
-                  onCopy={() => copyResponseMarkdown(run.output.response)}
-                />
-                {finishedTime && (
-                  <MessageTime
-                    className="response-finished-time"
-                    time={finishedTime}
-                  />
-                )}
-              </div>
             )}
           </section>
         );

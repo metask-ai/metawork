@@ -652,6 +652,7 @@ fn writeRun(
             try text_projection.writeJson(writer, reference.title);
             writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
             try text_projection.writeJson(writer, reference.display_path);
+            if (reference.generated_image) writer.writeAll(",\"generatedImage\":true") catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         };
         writer.writeAll("]}") catch return error.SnapshotTooLarge;

@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const max_in_flight: usize = 8;
 pub const worker_count: usize = 2;
+pub const max_image_source_bytes = 10 * 1024 * 1024;
+pub const max_image_preview_bytes = 384 * 1024;
 
 pub const State = enum {
     ready,
@@ -36,6 +38,7 @@ pub const Completion = struct {
     workspace_root: []const u8,
     state: State,
     content: []const u8,
+    image: bool = false,
     truncated: bool,
 };
 
@@ -72,6 +75,11 @@ pub const Executor = struct {
     }
 };
 
+fn isImage(bytes: []const u8) bool {
+    return std.mem.startsWith(u8, bytes, "\x89PNG\r\n\x1a\n") or std.mem.startsWith(u8, bytes, "\xff\xd8\xff") or
+        (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP"));
+}
+
 const Job = struct {
     lane: *Lane,
     completion_id: u64,
@@ -85,6 +93,7 @@ const Job = struct {
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
+    image: bool = false,
     state: State = .failed,
     buffer: []u8 = &.{},
     content: []const u8 = &.{},
@@ -153,7 +162,22 @@ const Job = struct {
             self.state = .unsupported;
             return .completed;
         }
-        const wanted: usize = @intCast(@min(before.size, self.max_bytes));
+        var header: [30]u8 = undefined;
+        const header_len: usize = @intCast(@min(before.size, header.len));
+        const header_read = file.readPositionalAll(self.lane.io, header[0..header_len], 0) catch {
+            self.state = .failed;
+            return .completed;
+        };
+        if (header_read >= 21 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..16], "WEBPVP8X") and header[20] & 2 != 0) {
+            self.state = .unsupported;
+            return .completed;
+        }
+        const image = isImage(header[0..header_read]);
+        if (image and before.size > max_image_source_bytes) {
+            self.state = .unsupported;
+            return .completed;
+        }
+        const wanted: usize = @intCast(if (image) before.size else @min(before.size, self.max_bytes));
         if (wanted == 0) {
             const after = file.stat(self.lane.io) catch {
                 self.state = .failed;
@@ -183,6 +207,11 @@ const Job = struct {
         };
         if (read != wanted or metadataChanged(before, after)) return .changed;
 
+        if (image) {
+            self.image = true;
+            self.state = .ready;
+            return .completed;
+        }
         var visible = trimIncompleteUtf8Tail(bytes);
         if (!std.unicode.utf8ValidateSlice(visible) or containsUnsafeControl(visible)) {
             self.clearContent();
@@ -205,6 +234,7 @@ const Job = struct {
         self.buffer = &.{};
         self.content = &.{};
         self.truncated = false;
+        self.image = false;
     }
 
     fn deinit(self: *Job) void {
@@ -337,6 +367,7 @@ pub const Lane = struct {
                 .workspace_root = job.workspace_root,
                 .state = job.state,
                 .content = job.content,
+                .image = job.image,
                 .truncated = job.truncated,
             },
         };
@@ -521,4 +552,45 @@ test "file preview text bounds stop before an over-limit line or codepoint" {
     try std.testing.expectEqualStrings("a", trimIncompleteUtf8Tail(&incomplete));
     try std.testing.expect(!containsUnsafeControl("a\tb\nc\r"));
     try std.testing.expect(containsUnsafeControl("a\x00b"));
+}
+
+test "file preview image source is bounded before decode and retains binary only inside Host" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "small.jpg", .data = "\xff\xd8\xffbinary-image" });
+    const large = try tmp.dir.createFile(std.testing.io, "large.png", .{});
+    try large.writeStreamingAll(std.testing.io, "\x89PNG\r\n\x1a\n");
+    try large.setLength(std.testing.io, max_image_source_bytes + 1);
+    large.close(std.testing.io);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "animated.webp", .data = "RIFF0000WEBPVP8X0000\x02rest" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const TestExecutor = struct {
+        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            job.execute_fn(job.context);
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = TestExecutor.wake }, .{ .context = &context, .enqueue_fn = TestExecutor.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    for ([_][]const u8{ "small.jpg", "large.png", "animated.webp" }, 0..) |path, index| {
+        try lane.begin(.{ .completion_id = index + 1, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = root, .relative_path = path, .max_bytes = 2, .max_lines = 10, .max_line_bytes = 10 });
+        const taken = lane.take().?;
+        defer lane.release(taken);
+        if (index == 0) {
+            try std.testing.expectEqual(State.ready, taken.completion.state);
+            try std.testing.expect(taken.completion.image);
+            try std.testing.expectEqualStrings("\xff\xd8\xffbinary-image", taken.completion.content);
+            try std.testing.expect(!taken.completion.truncated);
+        } else {
+            try std.testing.expectEqual(State.unsupported, taken.completion.state);
+            try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
+        }
+    }
 }

@@ -9715,60 +9715,64 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
 }
 
-.settings-image-content {
-  padding: 18px;
+.generated-image-preview {
+  margin: 16px 0;
+  width: fit-content;
+  max-width: min(100%, 576px);
 }
-.settings-image-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+.generated-image-open {
+  display: block;
+  padding: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-align: left;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface-panel);
+  color: inherit;
+  cursor: pointer;
 }
-.settings-image-heading p {
-  margin: 0;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.6;
+.generated-image-open:disabled {
+  cursor: default;
 }
-.settings-image-controls {
+.generated-image-open img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  background: var(--ui-surface-panel-2);
+}
+.generated-image-placeholder {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  margin-top: 16px;
+  place-items: center;
+  min-height: 160px;
+  padding: 16px;
+  color: var(--ui-content-muted);
 }
-.settings-image-trigger {
-  width: 100%;
-  min-width: 0;
+.generated-image-retry {
+  color: var(--ui-action-primary);
+}
+.generated-image-retry {
   min-height: 44px;
+  padding: 8px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
-.settings-image-status,
-.settings-image-note,
-.settings-image-error {
-  margin: 12px 0 0;
-  font-size: var(--text-control);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
+.task-panel-preview-image {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
 }
-.settings-image-status {
-  color: var(--settings-ink);
-}
-.settings-image-note {
-  color: var(--settings-muted);
-}
-.settings-image-error,
-.settings-image-status[data-unavailable] {
-  color: var(--ui-content-error);
-}
-@media (max-width: 640px) {
-  .settings-image-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .settings-image-controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .settings-image-controls > button {
-    justify-self: start;
-  }
+.task-panel-preview-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
 }
