@@ -889,7 +889,7 @@ fn writeToolPresentation(
     tool: *const task_state.ToolView,
 ) Error!bool {
     writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
-    if (tool.input_truncated or tool.input.len > 128 * 1024) {
+    if (tool.input_truncated or tool.input.len == 0 or tool.input.len > 128 * 1024) {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
         return false;
     }

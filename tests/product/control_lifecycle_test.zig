@@ -10219,7 +10219,7 @@ test "Product view scopes exclude history from navigation and bound selected Run
     _ = try scenario.control.runTask(scenario.task_id, .{ .text = "second-page-only-input" });
     try waitTaskSnapshot(&scenario.control, "\"id\":\"2\",\"conversationCoverage\"", "\"phase\":\"completed\"");
     var storage: [512 * 1024]u8 = undefined;
-    const index_bytes = try scenario.control.writeSnapshot(&storage, .{});
+    const index_bytes = try scenario.control.writeViewFixture(&storage, .{});
     var index = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index_bytes, .{});
     defer index.deinit();
     try std.testing.expect(index.value.object.get("taskPage").? == .null);
@@ -10227,7 +10227,7 @@ test "Product view scopes exclude history from navigation and bound selected Run
     try std.testing.expect(!summary.contains("runs"));
     try std.testing.expect(!summary.contains("skillCatalog"));
     try std.testing.expect(std.mem.indexOf(u8, index_bytes, "second-page-only-input") == null);
-    const page_bytes = try scenario.control.writeSnapshot(&storage, .{ .task_id = scenario.task_id, .run_limit = 1 });
+    const page_bytes = try scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .run_limit = 1 });
     var page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page_bytes, .{});
     defer page.deinit();
     const task_page = page.value.object.get("taskPage").?.object;
@@ -10235,14 +10235,14 @@ test "Product view scopes exclude history from navigation and bound selected Run
     const runs = task_page.get("task").?.object.get("runs").?.array.items;
     try std.testing.expectEqual(@as(usize, 1), runs.len);
     try std.testing.expectEqualStrings("2", runs[0].object.get("id").?.string);
-    const older_bytes = try scenario.control.writeSnapshot(&storage, .{ .task_id = scenario.task_id, .before_run_id = 2, .run_limit = 1 });
+    const older_bytes = try scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .before_run_id = 2, .run_limit = 1 });
     var older = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, older_bytes, .{});
     defer older.deinit();
     const older_page = older.value.object.get("historyPage").?.object;
     try std.testing.expectEqualStrings("2", older.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("id").?.string);
     try std.testing.expect(older_page.get("nextBeforeRunId").? == .null);
     try std.testing.expectEqualStrings("1", older_page.get("runs").?.array.items[0].object.get("id").?.string);
-    try std.testing.expectError(error.InvalidViewRequest, scenario.control.writeSnapshot(&storage, .{ .task_id = scenario.task_id, .before_run_id = 999 }));
+    try std.testing.expectError(error.InvalidViewRequest, scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .before_run_id = 999 }));
 }
 
 test "ProductDelivery reads do not advance worker lifecycle" {
@@ -10270,7 +10270,7 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         switch (read) {
             .revision => _ = control.currentRevision(),
             .snapshot => _ = try control.writeAggregateFixture(&snapshot),
-            .view => _ = try control.writeSnapshot(&snapshot, .{ .task_id = task.durable.id }),
+            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id }),
             .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
             .personal_catalog => _ = control.skillCatalog(),
             .task_catalog => _ = try control.taskCatalog(task.durable.id),

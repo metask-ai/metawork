@@ -17,6 +17,7 @@ pub const State = struct {
     id: u64 = 0,
     generation: u64 = 0,
     window_id: WindowId = 0,
+    step_bytes: usize = chunk_bytes,
 
     pub fn init(storage: []u8) Error!State {
         if (storage.len != max_bytes) return error.InvalidStorage;
@@ -46,13 +47,15 @@ pub const State = struct {
         len: usize,
         generation: u64,
         window_id: WindowId,
+        step_bytes: usize,
     ) Error!void {
-        if (len == 0 or len > self.storage.len) return error.InvalidStorage;
+        if (len == 0 or len > self.storage.len or step_bytes == 0 or step_bytes > chunk_bytes) return error.InvalidStorage;
         self.id +%= 1;
         if (self.id == 0) self.id = 1;
         self.len = len;
         self.generation = generation;
         self.window_id = window_id;
+        self.step_bytes = step_bytes;
     }
 
     pub fn chunk(
@@ -65,14 +68,14 @@ pub const State = struct {
         if (snapshot_id != self.id or generation != self.generation or window_id != self.window_id)
             return error.StaleSnapshot;
         if (offset >= self.len) return error.InvalidOffset;
-        return self.storage[offset..@min(self.len, offset + chunk_bytes)];
+        return self.storage[offset..@min(self.len, offset + self.step_bytes)];
     }
 };
 
 test "snapshot transport binds chunks to identity generation and window" {
     var bytes = [_]u8{ 1, 2, 3 };
     var state = State{ .storage = &bytes };
-    try state.publish(bytes.len, 4, 7);
+    try state.publish(bytes.len, 4, 7, chunk_bytes);
     try @import("std").testing.expectEqualSlices(u8, &bytes, try state.chunk(1, 4, 7, 0));
     try @import("std").testing.expectError(error.StaleSnapshot, state.chunk(1, 5, 7, 0));
     state.invalidate();

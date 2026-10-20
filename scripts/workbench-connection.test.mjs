@@ -1058,3 +1058,63 @@ test("security notifications clear published state immediately and discard an ol
   assert.equal(ready.at(-1), true);
   await connection.stop();
 });
+
+test("navigation during bootstrap follows the current scope without converting cancellation into connection failure", async () => {
+  const reads = [],
+    published = [],
+    statuses = [],
+    ready = [];
+  let active = 0,
+    maximum = 0,
+    pings = 0;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {
+      pings++;
+    },
+    fetchSnapshot: (scope) =>
+      new Promise((resolve) => {
+        maximum = Math.max(maximum, ++active);
+        reads.push({
+          scope,
+          release: () => {
+            active--;
+            resolve({ ...snapshot("1"), scope });
+          },
+        });
+      }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => published.push(view.scope.management),
+    onStatus: (status) => statuses.push(status),
+    onReady: (value) => ready.push(value),
+    onViewSyncFailed: () => {},
+  });
+  const startup = connection.start();
+  await flush();
+  assert.equal(reads.length, 1);
+  const oldRefresh = connection.refresh();
+  const rejected = assert.rejects(oldRefresh, /scope changed/);
+  const navigation = connection.setScope({
+    ...initialViewScope,
+    management: "skills",
+  });
+  await rejected;
+  reads[0].release();
+  await flush();
+  assert.equal(reads.length, 2);
+  assert.equal(pings, 0);
+  assert.equal(reads[1].scope.management, "skills");
+  reads[1].release();
+  await Promise.all([startup, navigation]);
+  assert.deepEqual(published, ["skills"]);
+  assert.equal(statuses.at(-1).kind, "connected");
+  assert.equal(ready.at(-1), true);
+  assert.equal(pings, 1);
+  assert.equal(maximum, 1);
+  await connection.stop();
+});

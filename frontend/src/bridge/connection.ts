@@ -61,6 +61,7 @@ function errorText(error: unknown) {
 }
 
 type RefreshWaiter = {
+  scopeBound: boolean;
   afterAttempt: number;
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -111,9 +112,11 @@ export class WorkbenchConnection {
     this.scopeGeneration++;
     if (!this.state) return Promise.resolve();
     if (pageChanged) {
-      for (const waiter of this.state.waiters)
+      for (const waiter of this.state.waiters) {
+        if (!waiter.scopeBound) continue;
         waiter.reject(new Error("Product consumer scope changed"));
-      this.state.waiters.clear();
+        this.state.waiters.delete(waiter);
+      }
     }
     return this.refresh();
   }
@@ -161,8 +164,20 @@ export class WorkbenchConnection {
     if (!state)
       return Promise.reject(new Error("Workbench connection is disconnected"));
     if (state.fault) return Promise.reject(state.fault);
+    return this.requestView(state, true);
+  }
+
+  private requestView(
+    state: ConnectionReadState,
+    scopeBound: boolean,
+  ): Promise<void> {
     const pending = new Promise<void>((resolve, reject) => {
-      state.waiters.add({ afterAttempt: state.attempt, resolve, reject });
+      state.waiters.add({
+        scopeBound,
+        afterAttempt: state.attempt,
+        resolve,
+        reject,
+      });
     });
     // An explicit refresh can skip notification coalescing, but shares backoff.
     if (state.timer && !state.timer.retry) this.clearTimer(state);
@@ -274,7 +289,8 @@ export class WorkbenchConnection {
       state.latest = revision;
       state.failures = 0;
       this.callbacks.onSnapshot(next, state.generation);
-      if (!this.active(state)) return;
+      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+        return;
       for (const waiter of state.waiters) {
         if (waiter.afterAttempt < attempt) {
           state.waiters.delete(waiter);
@@ -331,7 +347,7 @@ export class WorkbenchConnection {
         state.fault = null;
         state.failures = 0;
         try {
-          await this.refresh();
+          await this.requestView(state, false);
           this.checkOperation(operation);
           // A retained generation is already confirmed; an unconfirmed one needs ping.
           if (!state.confirmed) await this.confirm(state, operation, recovered);
@@ -385,7 +401,7 @@ export class WorkbenchConnection {
       this.state = state;
       this.callbacks.onGeneration?.(generation);
       try {
-        await this.refresh();
+        await this.requestView(state, false);
         await this.confirm(state, operation, recovered);
       } catch (error) {
         if (operation !== this.operation || this.stopped) throw error;

@@ -255,6 +255,18 @@ pub fn build(b: *std.Build) void {
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
+    const projection_performance_module = b.createModule(.{
+        .root_source_file = b.path("tests/product/projection_performance_test.zig"),
+        .target = modules.product_control.resolved_target.?,
+        .optimize = modules.product_control.optimize.?,
+    });
+    projection_performance_module.addImport("metawork_product_control", modules.product_control);
+    projection_performance_module.addImport("metawork_bridge", modules.bridge);
+    projection_performance_module.link_libc = bundle.link_libc;
+    b.step("test-projection-performance", "Measure legal maximum scoped Product presentation budgets").dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = projection_performance_module,
+        .filters = &.{"Product projection legal maximum performance"},
+    })).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_task_runtime, test_modules.product_control_runtime }) |module| {
         product_views_step.dependOn(&b.addRunArtifact(b.addTest(.{

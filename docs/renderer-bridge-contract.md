@@ -39,11 +39,15 @@ ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、�
 
 已加载历史的复用另受根 `historyEpoch` 与 Run manifest 的 `contentVersion` 确认。非 CoreEvent 的产品变更推进 historyEpoch；CoreEvent 只推进所修改 Run 的运行期内容版本。Renderer 只保留同一 Task、安全代次、historyEpoch 且 manifest 仍确认相同内容版本的已加载 Run；新返回的当前页和历史页覆盖同 identity 的旧内容。这些失效标识不进入历史持久化格式。Product 编码缓存和 Renderer 交付缓存均按总字节预算有界，淘汰只造成后续重建，不改变可访问数据容量；安全失效清空缓存，旧版本不得重新分配给不同内容。
 
+Product 在 begin 时冻结脱敏后的 owned 读取计划、精确编码长度、块版本与安全代次；读取计划不保留 Product 对象借用、执行句柄或 credential。大字符串的 JSON 转义随 chunk 请求有界推进，每次最多一个 Product 编码步，后续步骤只消费冻结内容，不重新查询实时业务状态。Bridge 保存读取 identity 和运输 bytes，不解释计划或执行 JSON 投影。Renderer 按 descriptor 的 chunk 大小递增读取；允许重读已生成前缀，拒绝越过前缀跳读。旧读取被替换、断开、安全失效或关闭时撤销其计划。编码结果只有在源内容仍有效时才能回填当前块缓存；同一次冻结读取不因普通后续业务更新而混入新内容。
+
 Bridge transport storage 是有界 encoded bytes，不持有 Product 内部状态或 credential。Product writer 只在同步调用期间借用 output buffer；运输使用绑定读取 identity、generation、window、范围和安全代次的分块，base64 后仍须满足 Native SDK 单次 result 上限。新的 begin 或安全失效必须先撤销旧 descriptor；失败不得继续读取被部分覆盖或安全代次过期的 buffer。缓存和运输容量必须覆盖合法产品范围，不能通过永久 SnapshotTooLarge、缩小产品状态或回退旧全量路径处理合格数据。
 
 Product Control 改变安全代次后，旧代次缓存和在途读取立即失效；版本通知精确携带 `{ generation, revision, securityEpoch }`，绑定当前已连接文档，响应也明确交付新安全代次。安全代次改变本身需要通知，即使提交 revision 不变；通知前先撤销并清除旧运输存储。Renderer 收到当前 generation 的新安全代次即清除旧 Host 正文、历史、预览和读取候选，不等待下一次快照成功；旧 generation 的迟到通知不能撤销新连接内容。Renderer 清除旧代次正文、块版本和读取候选，按当前范围重新获取；迟到分块不得拼接或重新安装。Host 与 Renderer 都不得把旧安全代次命中当作缓存成功。
 
 Renderer 在读取开始时冻结本次 revision、消费者范围和目标 identity，读取期间的新通知只产生后续需求；合格读取无需追上未来通知，也不因正常滞后消耗失败预算。每个连接最多一个在途读取，后续需求有界合并；空闲后的通知按固定窗口合并，持续通知不能推迟首次读取。显式刷新只有在调用之后开始的合格读取被当前连接消费后才能完成，不等待整条追赶链；在途失败与退避期间到达的等待者共享同一份有限重试预算。预算耗尽、合同故障、停止、断开及等待期间 generation 被替换均须明确拒绝，不得零读取返回成功或把旧等待者转移到新连接。Task、页面或范围切换后，旧请求不得覆盖当前范围；恢复只重新取得当前所需数据，不先物化全部历史。
+
+连接就绪的内部等待追随当前消费者范围，不因启动或恢复期间的正常切页而断开连接；显式页面刷新等待仍在范围被替换时拒绝。两者都必须由所属 generation 的真实合格读取完成，不能由旧范围完成或仅等待旧 Promise 冒充成功。
 
 连接层独占 readiness：新 generation 必须完成有效握手、真实首读与 ping，不能把等待旧 Promise 误判为同步成功；后续正常 pending 不撤销已确认的 readiness，最终命令 admission 仍属于 Host。新 event generation 建立时使旧 snapshot descriptor 失效；读取与 ACK、ping、定时及清理回调均须校验所属连接，旧异步结果不能影响新连接、复活 stopped 连接或清除合同故障。
 

@@ -47,6 +47,7 @@ pub const UiResponse = runtime_impl.UiResponse;
 pub const Configuration = runtime_impl.Configuration;
 pub const Runtime = runtime_impl.Runtime;
 pub const ViewRequest = runtime_impl.ViewRequest;
+pub const projection_step_bytes = runtime_impl.projection_step_bytes;
 pub const ViewReceiptQuery = runtime_impl.ViewReceiptQuery;
 pub const TestSupport = runtime_impl.TestSupport;
 pub const ChangeNotifier = runtime_impl.ChangeNotifier;

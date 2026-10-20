@@ -45,6 +45,9 @@ const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 const view_cache = @import("view_cache.zig");
+const view_plan = @import("view_plan.zig");
+pub const projection_step_bytes = view_plan.max_step_bytes;
+pub const SnapshotRead = struct { id: u64, bytes: usize };
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
@@ -54,7 +57,7 @@ pub const InputTarget = union(enum) { idle: ?u64, run: u64 };
 pub const ViewRequest = @import("view_request.zig").Request;
 pub const ViewReceiptQuery = @import("view_request.zig").ReceiptQuery;
 
-pub const Error = view_cache.Error || task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -1200,6 +1203,11 @@ pub const Runtime = struct {
     revision: u64 = 0,
     projection_security_epoch: u64 = 1,
     encoded_views: view_cache.Cache = .{},
+    view_read: view_plan.Plan = .{},
+    capture_view: ?*view_plan.Plan = null,
+    view_step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
+    next_view_read_id: u64 = 0,
+    view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize } = @splat(null),
     projection_history_epoch: u64 = 1,
     view_credentials: ?[]const []const u8 = null,
     default_approval_mode: ApprovalMode = .auto_review,
@@ -4786,6 +4794,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
             _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
@@ -6376,6 +6385,7 @@ pub const Runtime = struct {
 
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
     pub const writeAggregateFixture = if (builtin.is_test) TestSupport.writeAggregateFixture else {};
+    pub const writeViewFixture = if (builtin.is_test) TestSupport.writeViewFixture else {};
 
     fn writeLiveContextFields(self: *Runtime, writer: *std.Io.Writer, include_revision: bool) Error!void {
         const schedule_persistence_ready =
@@ -6445,10 +6455,18 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})![]const u8 {
+    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
+        if (builtin.is_test) self.view_step_timing = .{};
+        self.cancelSnapshot();
+        errdefer self.cancelSnapshot();
         try request.validate();
         if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0) return error.InvalidViewRequest;
-        std.debug.assert(self.view_credentials == null);
+        std.debug.assert(self.view_credentials == null and self.capture_view == null);
+        self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
+        self.view_read.id = self.next_view_read_id;
+        self.view_read.security_epoch = self.projection_security_epoch;
+        self.capture_view = &self.view_read;
+        defer self.capture_view = null;
         var credentials = ProjectionCredentials{ .allocator = self.allocator };
         defer credentials.deinit();
         try credentials.add(self.execution_state.credential());
@@ -6475,16 +6493,31 @@ pub const Runtime = struct {
             const key = viewKey(request, kind);
             writer.writeAll(",\"" ++ field.name ++ "\":") catch return error.SnapshotTooLarge;
             const start = writer.end;
+            const point = self.view_read.mark();
+            const encoded_start = try self.view_read.encodedPosition(start);
             const version = if (self.encoded_views.get(key)) |entry| version: {
                 if (request.known_epoch != self.projection_security_epoch or @field(request.known_versions, field.name) != entry.version)
                     writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
                 break :version entry.version;
             } else version: {
                 try self.writeViewBlock(&writer, request, kind);
-                break :version try self.encoded_views.put(self.allocator, self.limits.max_snapshot_bytes, key, writer.buffered()[start..]);
+                const source = try self.view_read.blockSource(self.allocator, self.limits.max_snapshot_bytes, writer.buffered(), start, point);
+                defer {
+                    std.crypto.secureZero(u8, source);
+                    self.allocator.free(source);
+                }
+                const version = try self.encoded_views.putSource(self.allocator, self.limits.max_snapshot_bytes, key, source);
+                if (self.encoded_views.get(key)) |entry| {
+                    self.view_read.rollback(point);
+                    writer.end = start;
+                    writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
+                } else self.view_blocks[field.value] = .{ .key = key, .version = version, .start = encoded_start, .end = try self.view_read.encodedPosition(writer.end) };
+                break :version version;
             };
             @field(versions, field.name) = version;
             if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
+                self.view_read.rollback(point);
+                self.view_blocks[field.value] = null;
                 writer.end = start;
                 writer.writeAll("null") catch return error.SnapshotTooLarge;
                 reused[field.value] = true;
@@ -6508,7 +6541,32 @@ pub const Runtime = struct {
         writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
         try self.writeViewReceipts(&writer, request.receipts, true);
         writer.writeByte('}') catch return error.SnapshotTooLarge;
-        return writer.buffered();
+        try self.view_read.seal(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
+        return .{ .id = self.view_read.id, .bytes = self.view_read.total };
+    }
+
+    pub fn cancelSnapshot(self: *Runtime) void {
+        self.view_read.clear(self.allocator);
+        self.view_blocks = @splat(null);
+    }
+
+    pub fn writeSnapshotRange(self: *Runtime, read_id: u64, output: []u8, offset: usize, length: usize) Error!void {
+        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
+        if (length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
+        errdefer self.cancelSnapshot();
+        const encode_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
+        const end = offset + length;
+        if (end > self.view_read.produced) _ = try self.view_read.writeNext(output[self.view_read.produced..end]);
+        const cache_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
+        if (builtin.is_test) self.view_step_timing.encode_ns = encode_start.durationTo(cache_start).nanoseconds;
+        for (&self.view_blocks) |*maybe| if (maybe.*) |block| {
+            if (block.end <= self.view_read.produced) {
+                try self.encoded_views.installEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, output[block.start..block.end]);
+                maybe.* = null;
+            }
+        };
+        if (self.view_read.produced == self.view_read.total and self.view_read.skeleton.len != 0) self.view_read.releasePayload(self.allocator);
+        if (builtin.is_test) self.view_step_timing.cache_copy_ns = cache_start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
     }
 
     fn viewKey(request: ViewRequest, kind: view_cache.Kind) view_cache.Key {
@@ -6989,6 +7047,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
+        self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
         if (self.pending_model_intent) |*intent| intent.rollback();
         self.pending_model_intent = null;
@@ -7163,6 +7222,22 @@ pub const Runtime = struct {
         commentary_ends: []const u64,
     ) product_task.ProjectionError!bool {
         const self: *const Runtime = @ptrCast(@alignCast(context));
+        // A clean output already is the sanitized source. Preserve its segment
+        // boundaries directly instead of allocating and copying the whole Run.
+        if (!self.containsKnownCredential(value)) {
+            writer.writeByte('[') catch return error.SnapshotTooLarge;
+            var previous: usize = 0;
+            for (commentary_ends, 0..) |raw, index| {
+                const boundary = std.math.cast(usize, raw) orelse return error.SnapshotTooLarge;
+                if (boundary < previous or boundary > value.len or (boundary < value.len and (value[boundary] & 0xc0) == 0x80)) return error.SnapshotTooLarge;
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                self.projectedJsonValueWithKnownCredentials(writer, value[previous..boundary]) catch return error.SnapshotTooLarge;
+                previous = boundary;
+            }
+            writer.writeAll("],\"response\":") catch return error.SnapshotTooLarge;
+            self.projectedJsonValueWithKnownCredentials(writer, value[previous..]) catch return error.SnapshotTooLarge;
+            return false;
+        }
         const projected = self.allocator.alloc(u8, value.len) catch
             return error.OutOfMemory;
         defer {
@@ -8737,6 +8812,7 @@ pub const Runtime = struct {
         credential: []const u8,
     ) void {
         if (credential.len == 0) return;
+        self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
         // A newly learned or retiring credential changes the safety of every
         // previously published byte, even if a block's content did not change.
@@ -9081,6 +9157,10 @@ pub const Runtime = struct {
     }
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
+        if (self.view_credentials) |credentials| {
+            for (credentials) |known| if (std.mem.indexOf(u8, value, known) != null) return true;
+            return false;
+        }
         const current = self.execution_state.credential();
         if (containsKnownSecret(value, current)) return true;
         return self.task_runtime.containsExecutionCredential(value);
@@ -9124,6 +9204,27 @@ pub const Runtime = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) Error!void {
+        if (self.capture_view) |plan| {
+            const start = plan.text.items.len;
+            const contains = for (self.view_credentials.?) |known| {
+                if (std.mem.indexOf(u8, value, known) != null) break true;
+            } else false;
+            if (!contains) try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value) else {
+                var index: usize = 0;
+                var copied: usize = 0;
+                while (index < value.len) {
+                    if (self.knownCredentialEndAtCodepoint(value, index)) |end| {
+                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..index]);
+                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, "***"[0..@min(end - index, 3)]);
+                        index = end;
+                        copied = end;
+                    } else index += utf8CodepointLen(value, index);
+                }
+                try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..]);
+            }
+            try plan.commitString(self.allocator, writer, start);
+            return;
+        }
         if (self.view_credentials) |credentials| {
             const contains = for (credentials) |known| {
                 if (std.mem.indexOf(u8, value, known) != null) break true;
@@ -9450,6 +9551,13 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const maximumFixture = maximumProjectionFixture;
+    pub fn writeViewFixture(self: *Runtime, output: []u8, request: ViewRequest) ![]const u8 {
+        const read = try self.writeSnapshot(output, request);
+        var offset: usize = 0;
+        while (offset < read.bytes) : (offset += projection_step_bytes) try self.writeSnapshotRange(read.id, output, offset, @min(projection_step_bytes, read.bytes - offset));
+        return output[0..read.bytes];
+    }
     pub fn writeAggregateFixture(self: *Runtime, output: []u8) Error![]const u8 {
         var writer = std.Io.Writer.fixed(output);
         try self.writeLiveContextFields(&writer, true);
@@ -11829,7 +11937,7 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
     var view_storage: [16 * 1024]u8 = undefined;
-    const view = try control.writeSnapshot(&view_storage, .{ .task_id = 3, .management = .skills });
+    const view = try control.writeViewFixture(&view_storage, .{ .task_id = 3, .management = .skills });
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.product_view, "\r\n"), view);
 
     try std.testing.expect(
@@ -15445,14 +15553,14 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     control.redactAllProductProjectionsNoFail("");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     var storage: [96 * 1024]u8 = undefined;
-    const view = try control.writeSnapshot(&storage, .{});
+    const view = try control.writeViewFixture(&storage, .{});
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
     defer parsed.deinit();
     try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
     control.projection_security_epoch = std.math.maxInt(u64);
     control.redactAllProductProjectionsNoFail("retiring-credential");
     try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
-    try std.testing.expectError(error.InvalidViewRequest, control.writeSnapshot(&storage, .{}));
+    try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
 
 test "opaque credential redaction preserves UTF-8 projection validity" {
@@ -16783,7 +16891,7 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     control.finishAccountCommitNoFail();
 }
 
-test "default snapshot budget contains the maximum structural projection" {
+fn maximumProjectionFixture() !Runtime {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -16793,7 +16901,7 @@ test "default snapshot budget contains the maximum structural projection" {
         limits,
         .{},
     );
-    defer control.deinit();
+    errdefer control.deinit();
     try installMaximumAccountProjection(&control);
 
     for (0..limits.max_tasks) |task_index| {
@@ -16805,12 +16913,15 @@ test "default snapshot budget contains the maximum structural projection" {
         );
         product_workspace.testing.installOwned(&control.workspace, task_index, .{
             .id = @intCast(task_index + 1),
+            .kind = if (task_index < limits.max_workspaces) .manual else .automatic,
+            .automatic_task_id = if (task_index < limits.max_workspaces) 0 else @intCast(task_index + 1),
+            .visible = task_index < limits.max_workspaces,
             .canonical_root = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_storage = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_len = root.len,
             .display_name_storage = try control.copyBounded("maximum", limits.max_workspace_bytes),
             .display_name_len = "maximum".len,
-            .recent_order = @intCast(task_index + 1),
+            .recent_order = if (task_index < limits.max_workspaces) @intCast(task_index + 1) else 0,
         });
         control.skill.registerWorkspaceOwned(.{
             .id = @intCast(task_index + 1),
@@ -17017,6 +17128,13 @@ test "default snapshot budget contains the maximum structural projection" {
     );
     try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
+    return control;
+}
+
+test "default snapshot budget contains the maximum structural projection" {
+    const limits = Limits{};
+    var control = try maximumProjectionFixture();
+    defer control.deinit();
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
     const snapshot = try control.writeAggregateFixture(storage);
@@ -20061,7 +20179,7 @@ test "Product view cached delivery confirms versions without rebuilding stable b
     var control = try testRuntime();
     defer control.deinit();
     var storage: [96 * 1024]u8 = undefined;
-    const first = try control.writeSnapshot(&storage, .{ .task_id = 3 });
+    const first = try control.writeViewFixture(&storage, .{ .task_id = 3 });
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first, .{});
     defer parsed.deinit();
     var versions: view_cache.Versions = .{};
@@ -20069,18 +20187,18 @@ test "Product view cached delivery confirms versions without rebuilding stable b
         @field(versions, field.name) = try std.fmt.parseInt(u64, parsed.value.object.get("blockVersions").?.object.get(field.name).?.string, 10);
     }
     const request: ViewRequest = .{ .task_id = 3, .known_epoch = control.projectionSecurityEpoch(), .known_versions = versions };
-    const second = try control.writeSnapshot(&storage, request);
+    const second = try control.writeViewFixture(&storage, request);
     var confirmed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, second, .{});
     defer confirmed.deinit();
     try std.testing.expectEqual(@as(usize, 7), confirmed.value.object.get("reusedBlocks").?.array.items.len);
     inline for (std.meta.fields(view_cache.Versions)) |field| try std.testing.expect(confirmed.value.object.get(field.name).? == .null);
     const sequence = control.encoded_views.sequence;
     control.encoded_views.invalidateEvent(999, 999);
-    _ = try control.writeSnapshot(&storage, request);
+    _ = try control.writeViewFixture(&storage, request);
     try std.testing.expectEqual(sequence, control.encoded_views.sequence);
     control.redactAllProductProjectionsNoFail("revoked-cache-secret");
     try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
-    const secured = try control.writeSnapshot(&storage, request);
+    const secured = try control.writeViewFixture(&storage, request);
     var secured_view = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, secured, .{});
     defer secured_view.deinit();
     try std.testing.expectEqual(@as(usize, 0), secured_view.value.object.get("reusedBlocks").?.array.items.len);
@@ -20093,12 +20211,46 @@ test "Product view credential matcher preserves UTF-8 and clears its owned scan 
     execution_state.testing.setCredentialBytes(&control.execution_state, &.{0xa9});
     try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
     var storage: [96 * 1024]u8 = undefined;
-    const bytes = try control.writeSnapshot(&storage, .{ .task_id = 3 });
+    const bytes = try control.writeViewFixture(&storage, .{ .task_id = 3 });
     try std.testing.expect(std.unicode.utf8ValidateSlice(bytes));
     try std.testing.expect(std.mem.indexOf(u8, bytes, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "caf** ***") != null);
     try std.testing.expect(control.view_credentials == null);
     var short: [1]u8 = undefined;
-    try std.testing.expectError(error.SnapshotTooLarge, control.writeSnapshot(&short, .{}));
+    try std.testing.expectError(error.SnapshotTooLarge, control.writeViewFixture(&short, .{}));
     try std.testing.expect(control.view_credentials == null);
+}
+
+test "Product view frozen read survives business updates and rejects replaced revoked and shutdown handles" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var expected_storage: [96 * 1024]u8 = undefined;
+    const expected = try control.writeViewFixture(&expected_storage, .{ .task_id = 3 });
+    var output: [96 * 1024]u8 = undefined;
+    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 1, 1));
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    var unrelated_storage: [96 * 1024]u8 = undefined;
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &unrelated_storage, 64, 64));
+    var first: [64]u8 = undefined;
+    @memcpy(&first, output[0..64]);
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
+    control.bumpRevision();
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expectEqualSlices(u8, &first, output[0..64]);
+    try std.testing.expectEqual(@as(usize, 64), control.view_read.produced);
+    var offset: usize = 64;
+    while (offset < read.bytes) : (offset += 64) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 64), read.bytes - offset));
+    try std.testing.expectEqualStrings(expected, output[0..read.bytes]);
+    const next = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expect(next.id != read.id);
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 1));
+    control.redactAllProductProjectionsNoFail("newly-learned-secret");
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 1));
+    const last = try control.writeSnapshot(&output, .{});
+    control.beginShutdown();
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(last.id, &output, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.skeleton.len);
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.text.items.len);
 }

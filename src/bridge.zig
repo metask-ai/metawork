@@ -26,6 +26,7 @@ pub const WindowChromeControlAction = dispatcher_impl.WindowChromeControlAction;
 pub const ProductDelivery = product_delivery_impl.Delivery;
 pub const ProductDeliveryTransport = product_delivery_impl.Transport;
 pub const SnapshotWriter = product_delivery_impl.SnapshotWriter;
+pub const SnapshotStart = product_delivery_impl.SnapshotStart;
 pub const ProductRevisionResult = product_delivery_impl.RevisionResult;
 pub const product_retry_timer_id = product_delivery_impl.retry_timer_id;
 pub const product_event_name = product_delivery_impl.event_name;

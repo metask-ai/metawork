@@ -1,3 +1,4 @@
+import { readProbeProductState } from "./probe-product-state.mjs";
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -510,42 +511,7 @@ async function snapshot() {
 }
 
 async function readSnapshot() {
-  const descriptor = await invokeBridge("metawork.workbench.snapshot", {});
-  if (descriptor === null) {
-    const error = new Error("snapshot descriptor response was unavailable");
-    error.retryableSnapshotRead = true;
-    throw error;
-  }
-  if (
-    !descriptor ||
-    !isWireId(descriptor.snapshotId) ||
-    !Number.isSafeInteger(descriptor.bytes) ||
-    descriptor.bytes <= 0 ||
-    !Number.isSafeInteger(descriptor.chunkBytes) ||
-    descriptor.chunkBytes <= 0
-  )
-    throw new Error(
-      `invalid snapshot descriptor: ${JSON.stringify(descriptor)}`,
-    );
-  const bytes = Buffer.alloc(descriptor.bytes);
-  for (
-    let offset = 0;
-    offset < descriptor.bytes;
-    offset += descriptor.chunkBytes
-  ) {
-    const chunk = await invokeBridge("metawork.workbench.snapshot.chunk", {
-      snapshotId: descriptor.snapshotId,
-      offset: String(offset),
-    });
-    if (chunk === null) {
-      const error = new Error("snapshot chunk response was unavailable");
-      error.retryableSnapshotRead = true;
-      throw error;
-    }
-    const decoded = Buffer.from(chunk.data, "base64");
-    decoded.copy(bytes, offset);
-  }
-  return JSON.parse(bytes.toString("utf8"));
+  return readProbeProductState(invokeBridge, { forbidden: [credential] });
 }
 
 function assertAcceptedIfPresent(result, label) {
