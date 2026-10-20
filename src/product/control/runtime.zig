@@ -8075,6 +8075,9 @@ pub const Runtime = struct {
     }
 
     fn clearRestoredTaskStateNoFail(self: *Runtime) void {
+        // A replacement of history objects can reuse persisted identities and
+        // fresh runtime content versions. Ordinary commands never change this.
+        self.projection_history_epoch = std.math.add(u64, self.projection_history_epoch, 1) catch 0;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
@@ -9566,7 +9569,6 @@ pub const Runtime = struct {
 
     fn bumpRevision(self: *Runtime) void {
         self.encoded_views.invalidateAll();
-        self.projection_history_epoch = std.math.add(u64, self.projection_history_epoch, 1) catch 0;
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 
@@ -20328,4 +20330,31 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
+}
+
+test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
+    var control = try maximumProjectionFixture();
+    defer control.deinit();
+    const epoch = control.projection_history_epoch;
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const unrelated = control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version;
+    const version = run.projection_content_version;
+    control.bumpRevision(); // Account, Schedule or other Task header changes.
+    try std.testing.expectEqual(epoch, control.projection_history_epoch);
+    try std.testing.expectEqual(version, run.projection_content_version);
+    run.pending_file_change_artifacts = 1;
+    const change = run.file_changes[0].?;
+    try std.testing.expect(control.task_runtime.completeFileChangeArtifact(1, run.generation, change.order, null, false));
+    control.bumpRevision();
+    try std.testing.expect(run.projection_content_version > version);
+    try std.testing.expectEqual(unrelated, control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version);
+    try std.testing.expectEqual(epoch, control.projection_history_epoch);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const bytes = try control.writeViewFixture(output, .{ .task_id = 1, .before_run_id = 5 });
+    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer decoded.deinit();
+    const observed = decoded.value.object.get("taskPage").?.object.get("runManifest").?.array.items[0].object.get("contentVersion").?.string;
+    try std.testing.expectEqual(run.projection_content_version, try std.fmt.parseInt(u64, observed, 10));
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
 }

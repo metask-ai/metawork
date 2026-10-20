@@ -261,15 +261,14 @@ export function workbenchReducer(
     );
     for (const run of snapshot.historyPage?.runs ?? []) runs.set(run.id, run);
     for (const run of page.task.runs) runs.set(run.id, run);
+    let first = page.runManifest.length;
+    while (first > 0 && runs.has(page.runManifest[first - 1]!.id)) first--;
     snapshot = {
       ...snapshot,
       tasks: [
         {
           ...page.task,
-          runs: page.runManifest.flatMap((run) => {
-            const loaded = runs.get(run.id);
-            return loaded ? [loaded] : [];
-          }),
+          runs: page.runManifest.slice(first).map((run) => runs.get(run.id)!),
         },
       ],
     };

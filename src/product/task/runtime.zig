@@ -2091,6 +2091,7 @@ pub const Runtime = struct {
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
+                run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.sequence = sequence;
@@ -2101,6 +2102,7 @@ pub const Runtime = struct {
                 result.sequence = sequence;
             },
             .unknown => {
+                run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.state = .unknown;
@@ -2172,6 +2174,7 @@ pub const Runtime = struct {
                 has_payload = has_payload or record.raw_text != null;
             };
             if (!run.input_continuation_pending and !has_payload) continue;
+            run.noteProjectionChange();
             run.input_continuation_cancelled = true;
             run.input_continuation_pending = false;
             run.input_continuation_failure = reason;
@@ -2232,6 +2235,7 @@ pub const Runtime = struct {
             _ = self.cancelInputContinuation(task_id, source.id, .binding_changed);
             return .ended;
         }
+        source.noteProjectionChange();
         source.input_continuation_pending = false;
         source.input_continuation_attempted = true;
         const text = self.mergeInputContinuation(source, max_bytes) catch |err| {
@@ -2245,6 +2249,7 @@ pub const Runtime = struct {
     pub fn finishInputContinuation(self: *Runtime, task_id: u64, source_id: u64, reason: ?SendInputReason) void {
         const task = self.find(task_id) orelse return;
         const source = task_state.findRun(task.durable.runs, source_id) orelse return;
+        source.noteProjectionChange();
         if (reason) |failure| source.input_continuation_failure = failure;
         self.discardInputPayloads(source);
     }
@@ -2252,6 +2257,7 @@ pub const Runtime = struct {
     pub fn markInputTransferred(self: *Runtime, task_id: u64, source_id: u64, target_id: ?u64) void {
         const task = self.find(task_id) orelse unreachable;
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
+        run.noteProjectionChange();
         for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .unadopted and record.state != .transferred) continue;
             if (record.continuation_cancel_reason != null) continue;
@@ -3633,10 +3639,10 @@ pub const Runtime = struct {
             .record_file_changes_fn = recordEventFileChanges,
         };
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
-        if (versioned_run) |run| if (run.projection_event_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
+        if (versioned_run) |run| if (run.projection_content_version == 0 or run.projection_content_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
         const application_result = try task_state.applyEvent(task, envelope, projection);
         if (application_result == .applied) if (versioned_run) |run| {
-            run.projection_event_version += 1;
+            run.noteProjectionChange();
         };
         if (application_result == .applied) {
             const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
@@ -3687,6 +3693,7 @@ pub const Runtime = struct {
             }
         }
         if (target_run.pending_file_change_artifacts == 0) return false;
+        target_run.noteProjectionChange();
         target_run.pending_file_change_artifacts -= 1;
         const change = target orelse {
             _ = markFileChangesIncomplete(target_run);
@@ -5117,6 +5124,7 @@ pub const Runtime = struct {
                     record.raw_text = null;
                 }
             };
+            run.noteProjectionChange();
             run.input_continuation_pending = pending;
             changed = true;
         }
@@ -5889,6 +5897,7 @@ fn excludePendingConversationTail(task: *task_state.Task) bool {
         const run = &(entry.* orelse continue);
         if (run.coverage == .pending) {
             run.coverage = .excluded;
+            run.noteProjectionChange();
             changed = true;
         }
     }

@@ -37,7 +37,7 @@ ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、�
 
 `snapshot` 请求精确包含消费者范围 `taskId / beforeRunId / runLimit / management / search / receipts` 和 `known = { securityEpoch, versions }`。`versions` 与响应 `blockVersions` 使用同一闭合块目录：`context / workspaces / taskIndex / taskPage / historyPage / management / searchIndex`；请求未知版本为 `"0"`，响应版本为非零 canonical decimal u64。请求中的版本仅是交付提示，不授予 authority，也不参与消费者范围 identity。Host 对相同范围、相同安全代次及相同内容版本确认复用时，响应将块正文置 null 并在唯一、无重复的 `reusedBlocks` 中列出；其他 null 仍按该块原有空值语义解释。Renderer 必须持有本次读取开始时捕获的完全匹配缓存才可补全，严格解码与跨块关联校验成功后才原子安装，禁止根据版本猜测、接受不完整缓存或回退全量通道。实时上下文不重复携带提交 revision；根 revision 绑定本次冻结响应。
 
-已加载历史的复用另受根 `historyEpoch` 与 Run manifest 的 `contentVersion` 确认。非 CoreEvent 的产品变更推进 historyEpoch；CoreEvent 只推进所修改 Run 的运行期内容版本。Renderer 只保留同一 Task、安全代次、historyEpoch 且 manifest 仍确认相同内容版本的已加载 Run；新返回的当前页和历史页覆盖同 identity 的旧内容。这些失效标识不进入历史持久化格式。Product 编码缓存和 Renderer 交付缓存均按总字节预算有界，淘汰只造成后续重建，不改变可访问数据容量；安全失效清空缓存，旧版本不得重新分配给不同内容。
+已加载历史的复用另受根 `historyEpoch` 与 Run manifest 的 `contentVersion` 确认。historyEpoch 只在整体历史对象被替换时推进，防止持久 identity 与新运行期版本重用；普通产品 revision 不作废其他 Task 的历史。CoreEvent、终态发布、后续输入转移或取消、coverage 排除及异步文件变更结果都推进所修改 Run 的运行期内容版本。Renderer 只保留同一 Task、安全代次、historyEpoch 且 manifest 仍确认相同内容版本的已加载 Run；新返回的当前页和历史页覆盖同 identity 的旧内容。Renderer 只呈现 Host manifest 确认的连续已加载区间，阅读目标按稳定 Run identity 保存，运输游标随连续区间重新计算；范围切换或内容失效造成缺页时有界重取，不得把两端拼成完整历史或丢失访问中间 Run 的入口。这些失效标识不进入历史持久化格式。Product 编码缓存和 Renderer 交付缓存均按总字节预算有界，淘汰只造成后续重建，不改变可访问数据容量；安全失效清空缓存，旧版本不得重新分配给不同内容。
 
 Product 在 begin 时冻结脱敏后的 owned 读取计划、精确编码长度、块版本与安全代次；读取计划不保留 Product 对象借用、执行句柄或 credential。大字符串的 JSON 转义随 chunk 请求有界推进，每次最多一个 Product 编码步，后续步骤只消费冻结内容，不重新查询实时业务状态。Bridge 保存读取 identity 和运输 bytes，不解释计划或执行 JSON 投影。Renderer 按 descriptor 的 chunk 大小递增读取；允许重读已生成前缀，拒绝越过前缀跳读。旧读取被替换、断开、安全失效或关闭时撤销其计划。编码结果只有在源内容仍有效时才能回填当前块缓存；同一次冻结读取不因普通后续业务更新而混入新内容。
 
@@ -137,7 +137,6 @@ response result 精确为：
 Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
 
 同一 `metawork.files.preview` 接纳 PNG、JPEG 和静态 WebP：worker 在相同路径和 authority 校验下读取最多 10 MiB 原件；主线程通过现有 Native 图片准备 capability 生成最多 384 KiB PNG，并拒绝命中已知 credential 的原件或预览。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { mediaType: "image/png", dataBase64 }`；Base64 最多 524288 字符，总响应仍受 Native SDK 上限约束。文本响应不含 `image`；非 ready 响应不得携带图片。Renderer 仅将这一 closed variant 作为内存中的 PNG 显示，不接收磁盘路径、file URL 或任意 MIME；内联生成图预览与右栏沿用相同请求身份和失败语义，跨 Task 或引用失效不保留图片。
-
 
 Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 

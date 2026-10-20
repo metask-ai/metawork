@@ -1,3 +1,8 @@
+import {
+  historyProgress,
+  earlierHistoryGoal,
+  type HistoryGoal,
+} from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
 import { newComposerOperationId } from "../features/composer/drafts.ts";
 import {
@@ -391,20 +396,18 @@ export default function App() {
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
-  const [historyRequest, setHistoryRequest] = useState<{
-    taskId: string;
-    beforeRunId: string;
-  } | null>(null);
-  const historyCursor =
-    historyRequest?.taskId === workbench.activeTaskId
-      ? historyRequest.beforeRunId
-      : null;
+  const [historyRequests, setHistoryRequests] = useState<
+    Record<string, HistoryGoal>
+  >({});
+  const history = historyProgress(
+    snapshot,
+    workbench.activeTaskId,
+    historyRequests[workbench.activeTaskId ?? ""] ?? null,
+  );
+  const historyCursor = history.beforeRunId;
   const historyLoading =
-    snapshot.scope.taskId !== workbench.activeTaskId ||
-    snapshot.scope.beforeRunId !== historyCursor;
-  const nextHistoryCursor =
-    snapshot.historyPage?.nextBeforeRunId ??
-    (historyCursor === null ? snapshot.taskPage?.nextBeforeRunId : null);
+    history.loading || snapshot.scope.taskId !== workbench.activeTaskId;
+  const nextHistoryCursor = history.nextBeforeRunId;
   const selectedTaskSummary = snapshot.taskIndex.find(
     (task) => task.id === workbench.activeTaskId,
   );
@@ -1060,7 +1063,7 @@ export default function App() {
             latestSnapshotRef.current &&
             latestSnapshotRef.current.securityEpoch !== next.securityEpoch
           )
-            setHistoryRequest(null);
+            setHistoryRequests({});
           latestSnapshotRef.current = next;
           publishApprovalObservations(
             approvalRequestsRef.current.observe(next, generation),
@@ -1082,6 +1085,15 @@ export default function App() {
             ),
           );
           const projectedTaskIds = next.taskIndex.map((task) => task.id);
+          setHistoryRequests((goals) => {
+            if (Object.keys(goals).every((id) => projectedTaskIds.includes(id)))
+              return goals;
+            return Object.fromEntries(
+              Object.entries(goals).filter(([id]) =>
+                projectedTaskIds.includes(id),
+              ),
+            );
+          });
           const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
             ...pendingTaskDraftRetention.current,
@@ -1138,7 +1150,7 @@ export default function App() {
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
         latestSnapshotRef.current = null;
-        setHistoryRequest(null);
+        setHistoryRequests({});
         filePreviewTabs.clear();
         clearFileChanges();
         approvalRequestsRef.current.reset(generation);
@@ -1151,7 +1163,7 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
-          setHistoryRequest(null);
+          setHistoryRequests({});
           setLocalSubmissions((entries) =>
             entries.map((entry) =>
               entry.state === "submitting" || entry.state === "accepted"
@@ -3957,11 +3969,18 @@ export default function App() {
                     available: Boolean(nextHistoryCursor),
                     loading: historyLoading,
                     onLoad: () => {
-                      if (nextHistoryCursor && workbench.activeTaskId)
-                        setHistoryRequest({
-                          taskId: workbench.activeTaskId,
-                          beforeRunId: nextHistoryCursor,
-                        });
+                      if (nextHistoryCursor && workbench.activeTaskId) {
+                        const goal = earlierHistoryGoal(
+                          snapshot,
+                          workbench.activeTaskId,
+                          nextHistoryCursor,
+                        );
+                        if (goal)
+                          setHistoryRequests((current) => ({
+                            ...current,
+                            [goal.taskId]: goal,
+                          }));
+                      }
                     },
                   }}
                   localSubmissions={pendingMessages}

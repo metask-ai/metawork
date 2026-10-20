@@ -69,7 +69,7 @@ test "Product projection legal maximum performance" {
                 if (scenario.value == @intFromEnum(Scenario.targeted_update)) {
                     const run = &runtime.task_runtime.tasks[0].?.durable.runs[15].?;
                     run.input.text.value[0] = if (run.input.text.value[0] == 'a') 'b' else 'a';
-                    run.projection_event_version += 1;
+                    run.projection_content_version += 1;
                     runtime.encoded_views.invalidateEvent(1, 16);
                 }
                 const start = std.Io.Timestamp.now(std.testing.io, .awake);

@@ -272,7 +272,8 @@ pub fn writeRunManifest(writer: *std.Io.Writer, task: *const task_state.Task) Er
         if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         count += 1;
         const facts = task_state.runProjectionFacts(run);
-        writer.print("{{\"id\":\"{d}\",\"contentVersion\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"terminal\":", .{ run.id, run.projection_event_version, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
+        if (run.projection_content_version == 0) return error.SnapshotTooLarge;
+        writer.print("{{\"id\":\"{d}\",\"contentVersion\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"terminal\":", .{ run.id, run.projection_content_version, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
         if (facts.terminal) |terminal| {
             writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
             if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;

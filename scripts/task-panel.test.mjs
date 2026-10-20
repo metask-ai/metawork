@@ -5534,6 +5534,20 @@ test("App pages through all retained history while keeping the current Run live"
   await publishAppFixture(fixture);
   await screen.findByText("Current Run still receives live output");
   assert.ok(screen.getByText("History input 1"));
+  fixture.snapshot.historyEpoch = "2";
+  await publishAppFixture(fixture);
+  for (const id of [1, 5, 9, 16])
+    await screen.findByText(`History input ${id}`);
+  source.runs[5].contentVersion = "2";
+  source.runs[5].input.text = "Updated historical Run 6";
+  await publishAppFixture(fixture);
+  await screen.findByText("Updated historical Run 6");
+  for (const id of [1, 5, 9, 16])
+    assert.ok(screen.getByText(`History input ${id}`));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
+  for (const id of [1, 5, 9, 16])
+    await screen.findByText(`History input ${id}`);
   fixture.snapshot.securityEpoch = "2";
   await publishAppFixture(fixture);
   await waitFor(() =>
