@@ -96,7 +96,7 @@ const ImageNoEffects = struct {
         self.calls += 1;
         return error.Unexpected;
     }
-    fn commit(_: *anyopaque, _: []const u8, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
+    fn commit(_: *anyopaque, _: []const u8, _: lifecycle.ImageGenerationFormat, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
         return .{ .failed = .{ .code = .write_failed } };
     }
 };
@@ -311,7 +311,7 @@ test "GenerateImage preallocates result before sending and performs no allocatio
             @memcpy(buffer[0..self.body.len], self.body);
             return .{ .status = 200, .body = buffer[0..self.body.len] };
         }
-        fn commit(context: *anyopaque, bytes: []const u8, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
+        fn commit(context: *anyopaque, bytes: []const u8, _: lifecycle.ImageGenerationFormat, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.commits += 1;
             // The minimum budget is still held, including result capacity.
@@ -319,7 +319,7 @@ test "GenerateImage preallocates result before sending and performs no allocatio
             std.testing.expect(!self.runtime.image_budget.acquire(1)) catch return .{ .failed = .{ .code = .write_failed } };
             // Everything after commit must succeed with all future allocations disabled.
             self.allocator.fail_index = self.allocator.alloc_index;
-            return .{ .saved = lifecycle.ImageGenerationReceipt.init("saved.png", bytes.len) catch unreachable };
+            return .{ .saved = lifecycle.ImageGenerationReceipt.init("saved.png", bytes.len, .png) catch unreachable };
         }
     };
     const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/agent/testdata/generated.png", std.testing.allocator, .limited(1024));

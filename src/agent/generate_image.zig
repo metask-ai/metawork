@@ -3,7 +3,7 @@ const std = @import("std");
 const image = @import("image_generation.zig");
 
 pub const name = "GenerateImage";
-pub const description = "Generate one new PNG image from a prompt and save it in the current workspace. Every invocation is a new generation intent and may be charged, including identical prompts. Available only when the host supplies image execution configuration. A failed or interrupted call may already have generated or charged for an image; do not automatically retry. Make another call only for an explicit new generation intent. The result is a saved file reference, not a claim that you have viewed the image.";
+pub const description = "Generate one new image (PNG, JPEG, or WebP) from a prompt and save it in the current workspace. Every invocation is a new generation intent and may be charged, including identical prompts. Available only when the host supplies image execution configuration. A failed or interrupted call may already have generated or charged for an image; do not automatically retry. Make another call only for an explicit new generation intent. The result is a saved file reference, not a claim that you have viewed the image.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested image."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -27,7 +27,7 @@ pub fn result(buffer: []u8, outcome: image.Outcome) ![]const u8 {
         .saved => |*receipt| try std.json.Stringify.value(.{
             .status = "saved",
             .path = receipt.pathView(),
-            .media_type = "image/png",
+            .media_type = receipt.format.mediaType(),
             .size_bytes = receipt.size_bytes,
         }, .{}, &writer),
         .failed => |failure| try std.json.Stringify.value(.{ .status = @tagName(failure) }, .{}, &writer),
@@ -50,7 +50,7 @@ test "GenerateImage arguments reject execution configuration and duplicate keys"
 
 test "GenerateImage every valid receipt fits the minimum result budget including JSON escaping" {
     const path = [_]u8{1} ** image.Receipt.max_path_bytes;
-    const receipt = try image.Receipt.init(&path, std.math.maxInt(usize));
+    const receipt = try image.Receipt.init(&path, std.math.maxInt(usize), .jpeg);
     var buffer: [image.min_result_bytes]u8 = undefined;
     const encoded = try result(&buffer, .{ .saved = receipt });
     const decoded = try std.json.parseFromSlice(struct { status: []const u8, path: []const u8, media_type: []const u8, size_bytes: usize }, std.testing.allocator, encoded, .{});

@@ -125,18 +125,18 @@ const Sink = struct {
     fn output(self: *Sink) agent.ImageGenerationOutput {
         return .{ .context = self, .commit_fn = commitResult };
     }
-    fn commitResult(context: *anyopaque, bytes: []const u8, cancellation: *const agent.CompletionCancellation) agent.ImageGenerationOutputResult {
-        return .{ .saved = commit(context, bytes, cancellation) catch |err|
+    fn commitResult(context: *anyopaque, bytes: []const u8, format: agent.ImageGenerationFormat, cancellation: *const agent.CompletionCancellation) agent.ImageGenerationOutputResult {
+        return .{ .saved = commit(context, bytes, format, cancellation) catch |err|
             return .{ .failed = .{ .code = if (err == error.Cancelled) .cancelled else .write_failed } } };
     }
-    fn commit(context: *anyopaque, bytes: []const u8, cancellation: *const agent.CompletionCancellation) !agent.ImageGenerationReceipt {
+    fn commit(context: *anyopaque, bytes: []const u8, format: agent.ImageGenerationFormat, cancellation: *const agent.CompletionCancellation) !agent.ImageGenerationReceipt {
         const self: *Sink = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(std.testing.io);
         defer self.mutex.unlock(std.testing.io);
         self.attempts += 1;
         var name_storage: [200]u8 = @splat('a');
-        const name = if (self.long_name) &name_storage else try std.fmt.bufPrint(&name_storage, "image-{d}.png", .{if (self.force_conflict) @as(usize, 1) else self.attempts});
-        const receipt = try agent.ImageGenerationReceipt.init(name, bytes.len);
+        const name = if (self.long_name) &name_storage else try std.fmt.bufPrint(&name_storage, "image-{d}.{s}", .{ if (self.force_conflict) @as(usize, 1) else self.attempts, format.extension() });
+        const receipt = try agent.ImageGenerationReceipt.init(name, bytes.len, format);
         const file = try self.dir.createFile(std.testing.io, name, .{ .exclusive = true });
         var closed = false;
         defer if (!closed) file.close(std.testing.io);
@@ -1281,6 +1281,11 @@ test "GenerateImage canonical Product Run freezes authorization and restores wit
     try expectCanonicalImageProduct("success", false);
 }
 
+test "GenerateImage canonical Product preserves JPEG and WebP files and receipts" {
+    try expectCanonicalImageProduct("jpeg", false);
+    try expectCanonicalImageProduct("webp", false);
+}
+
 test "GenerateImage canonical Product stop joins image HTTP and releases its owned preparation" {
     try expectCanonicalImageProduct("hold", false);
 }
@@ -1369,8 +1374,17 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"image\""));
     try std.testing.expectEqual(@as(usize, 0), count(trace, "fixture_error"));
     try std.testing.expectEqual(!cancelled, std.mem.indexOf(u8, trace, "\\\"status\\\":\\\"saved\\\"") != null);
-    const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
-    defer std.testing.allocator.free(png);
+    const format: agent.ImageGenerationFormat = if (std.mem.eql(u8, mode, "jpeg")) .jpeg else if (std.mem.eql(u8, mode, "webp")) .webp else .png;
+    const expected_path = try std.fs.path.join(std.testing.allocator, &.{ std.fs.path.dirname(options.png_path).?, switch (format) {
+        .png => "generated.png",
+        .jpeg => "generated.jpg",
+        .webp => "generated.webp",
+    } });
+    defer std.testing.allocator.free(expected_path);
+    const expected_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, expected_path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(expected_bytes);
+    var media_needle: [80]u8 = undefined;
+    if (!cancelled) try std.testing.expect(std.mem.indexOf(u8, trace, try std.fmt.bufPrint(&media_needle, "\\\"media_type\\\":\\\"{s}\\\"", .{format.mediaType()})) != null);
     const directory: ?std.Io.Dir = h.tmp.dir.openDir(std.testing.io, "generated-images", .{ .iterate = true }) catch |err| if (cancelled and err == error.FileNotFound) null else return err;
     var files: usize = 0;
     if (directory) |dir| {
@@ -1379,7 +1393,9 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
         while (try entries.next(std.testing.io)) |entry| {
             const bytes = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(1024));
             defer std.testing.allocator.free(bytes);
-            try std.testing.expectEqualSlices(u8, png, bytes);
+            try std.testing.expectEqualSlices(u8, expected_bytes, bytes);
+            var extension: [8]u8 = undefined;
+            try std.testing.expect(std.mem.endsWith(u8, entry.name, try std.fmt.bufPrint(&extension, ".{s}", .{format.extension()})));
             files += 1;
         }
     }

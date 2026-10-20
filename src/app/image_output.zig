@@ -9,6 +9,7 @@ const Result = agent.ImageGenerationOutputResult;
 const Failure = agent.ImageGenerationOutputFailure;
 const Cancellation = agent.ImageGenerationCancellation;
 const Receipt = agent.ImageGenerationReceipt;
+const Format = agent.ImageGenerationFormat;
 pub const directory_name = "generated-images";
 const max_name_attempts = 4;
 
@@ -48,12 +49,12 @@ pub const Output = struct {
         return .{ .context = self, .commit_fn = commit };
     }
 
-    fn commit(context: *anyopaque, bytes: []const u8, cancellation: *const Cancellation) Result {
+    fn commit(context: *anyopaque, bytes: []const u8, format: Format, cancellation: *const Cancellation) Result {
         const self: *Output = @ptrCast(@alignCast(context));
         if (std.Thread.getCurrentId() == self.main_thread_id or bytes.len == 0)
             return failed(.unavailable);
         if (cancellation.isRequested()) return failed(.cancelled);
-        var attempt: Attempt = .{ .output = self, .bytes = bytes, .cancellation = cancellation };
+        var attempt: Attempt = .{ .output = self, .bytes = bytes, .format = format, .cancellation = cancellation };
         var events: [2]Event = undefined;
         var selection = std.Io.Select(Event).init(self.io, &events);
         selection.async(.operation, Attempt.run, .{&attempt});
@@ -79,15 +80,16 @@ pub const Output = struct {
     const Attempt = struct {
         output: *Output,
         bytes: []const u8,
+        format: Format,
         cancellation: *const Cancellation,
         result: Result = failed(.cancelled),
 
         fn run(self: *Attempt) void {
-            self.result = self.output.write(self.bytes, self.cancellation);
+            self.result = self.output.write(self.bytes, self.format, self.cancellation);
         }
     };
 
-    fn write(self: *Output, bytes: []const u8, cancellation: *const Cancellation) Result {
+    fn write(self: *Output, bytes: []const u8, format: Format, cancellation: *const Cancellation) Result {
         if (cancellation.isRequested()) return failed(.cancelled);
         var root = openRoot(self.io, self.root) catch |err| return failed(code(err));
         defer root.close(self.io);
@@ -105,10 +107,10 @@ pub const Output = struct {
             var random: [16]u8 = undefined;
             std.Io.randomSecure(self.io, &random) catch |err| return failed(code(err));
             var name_buffer: [64]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buffer, "image-{x}.png", .{random}) catch unreachable;
+            const name = std.fmt.bufPrint(&name_buffer, "image-{x}.{s}", .{ random, format.extension() }) catch unreachable;
             var path_buffer: [Receipt.max_path_bytes]u8 = undefined;
             const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory_name, name }) catch unreachable;
-            const receipt = Receipt.init(path, bytes.len) catch unreachable;
+            const receipt = Receipt.init(path, bytes.len, format) catch unreachable;
             self.hook(.before_create, directory, null, name, cancellation) catch |err| return failed(code(err));
             const file = directory.createFile(self.io, name, .{ .read = true, .exclusive = true, .permissions = filePermissions() }) catch |err| {
                 if (err == error.PathAlreadyExists) continue;
@@ -243,11 +245,12 @@ const TestWork = struct {
     output: *Output,
     cancellation: *const Cancellation,
     bytes: []const u8 = "fixture image bytes",
+    format: Format = .png,
     result: Result = failed(.unavailable),
 
     fn run(self: *TestWork) void {
         const port = self.output.port();
-        self.result = port.commit_fn(port.context, self.bytes, self.cancellation);
+        self.result = port.commit_fn(port.context, self.bytes, self.format, self.cancellation);
     }
 
     fn execute(self: *TestWork) !void {
@@ -273,10 +276,10 @@ test "Workspace image output captures authority without effects and commits uniq
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, directory_name, .{}));
     var cancellation: Cancellation = .{};
     const port = output.port();
-    try std.testing.expectEqual(Failure.Code.unavailable, port.commit_fn(port.context, "bytes", &cancellation).failed.code);
+    try std.testing.expectEqual(Failure.Code.unavailable, port.commit_fn(port.context, "bytes", .png, &cancellation).failed.code);
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, directory_name, .{}));
-    var first: TestWork = .{ .output = &output, .cancellation = &cancellation };
-    var second: TestWork = .{ .output = &output, .cancellation = &cancellation };
+    var first: TestWork = .{ .output = &output, .cancellation = &cancellation, .format = .jpeg };
+    var second: TestWork = .{ .output = &output, .cancellation = &cancellation, .format = .webp };
     const a = try std.Thread.spawn(.{}, TestWork.run, .{&first});
     const b = std.Thread.spawn(.{}, TestWork.run, .{&second}) catch |err| {
         a.join();
@@ -290,6 +293,8 @@ test "Workspace image output captures authority without effects and commits uniq
         defer std.testing.allocator.free(bytes);
         try std.testing.expectEqualSlices(u8, work.bytes, bytes);
         try std.testing.expectEqual(work.bytes.len, receipt.size_bytes);
+        try std.testing.expectEqual(work.format, receipt.format);
+        try std.testing.expect(std.mem.endsWith(u8, receipt.pathView(), work.format.extension()));
     }
     try std.testing.expect(!std.mem.eql(u8, first.result.saved.pathView(), second.result.saved.pathView()));
     try std.testing.expectEqual(@as(u64, 1), output.workspace_id);

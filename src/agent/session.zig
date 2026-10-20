@@ -36,6 +36,7 @@ pub const ImageGenerationOutputResult = image_generation.OutputResult;
 pub const ImageGenerationOutputFailure = image_generation.OutputFailure;
 pub const ImageGenerationCancellation = image_http.Cancellation;
 pub const ImageGenerationReceipt = image_generation.Receipt;
+pub const ImageGenerationFormat = image_generation.Format;
 pub const ImageGenerationLimits = image_generation.Limits;
 pub const image_generation_limits = image_generation.production_limits;
 /// Binding bytes are borrowed only through preparation. Effect contexts remain

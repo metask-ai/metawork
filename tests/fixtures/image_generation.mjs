@@ -28,7 +28,10 @@ if (mode === "output-root-junction") {
   symlinkSync(outside, join(base, "redirect"), "junction");
 }
 const png = readFileSync(
-  new URL("../../src/agent/testdata/generated.png", import.meta.url),
+  new URL(
+    `../../src/agent/testdata/generated.${mode === "jpeg" ? "jpg" : mode === "webp" ? "webp" : "png"}`,
+    import.meta.url,
+  ),
 );
 const trace = (event) =>
   appendFileSync(tracePath, `${JSON.stringify(event)}\n`);

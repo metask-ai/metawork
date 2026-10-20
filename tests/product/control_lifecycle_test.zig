@@ -10347,7 +10347,7 @@ const ImageAdmissionProbe = struct {
     fn imageHttp(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
         @panic("this Product lifecycle scenario must not execute image effects");
     }
-    fn output(_: *anyopaque, _: []const u8, _: *const lifecycle.ImageGenerationCancellation) lifecycle.ImageGenerationOutputResult {
+    fn output(_: *anyopaque, _: []const u8, _: lifecycle.ImageGenerationFormat, _: *const lifecycle.ImageGenerationCancellation) lifecycle.ImageGenerationOutputResult {
         @panic("this Product lifecycle scenario must not execute image effects");
     }
 };
