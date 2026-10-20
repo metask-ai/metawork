@@ -2186,8 +2186,8 @@ test("successful terminal keeps commentary and collapsed technical process visib
   assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
   assert.equal(
-    document.querySelector(".ai-exchange").lastElementChild.className,
-    "response-copy-actions",
+    document.querySelector(".response-copy-actions").parentElement,
+    screen.getByText("Final response").closest(".run-assistant-output"),
   );
 });
 
@@ -2247,6 +2247,59 @@ test("terminal transition preserves an explicitly expanded Tool detail", async (
   );
   assert.ok(screen.getByRole("region", { name: "Details for Read" }));
   assert.ok(screen.getByText("recorded evidence"));
+});
+
+test("reply metadata stays with its response before a later user interjection", () => {
+  for (const responseKind of ["final", "partial"]) {
+    const value = task({
+      runs: [
+        run({
+          finishedAtUnixMs: String(Date.now() - 120_000),
+          output: {
+            ...run().output,
+            commentary: ["Earlier explanation"],
+            response: "Here is the answer",
+            responseKind,
+          },
+          additionalInputs: [
+            {
+              id: "later-input",
+              afterOutputCount: 2,
+              operationId: "follow-up",
+              text: "Generate a starry sky",
+              redacted: false,
+              sequence: 1,
+              adoptedTurn: null,
+              order: null,
+              state: "unadopted",
+            },
+          ],
+          tools: [technicalTool()],
+        }),
+      ],
+    });
+    const view = render(taskContentElement(value));
+    const response = screen.getByText("Here is the answer");
+    const message = response.closest(".run-assistant-output");
+    const footer = view.container.querySelector(".response-copy-actions");
+    const laterInput = screen.getByText("Generate a starry sky");
+    assert.equal(footer.parentElement, message);
+    assert.equal(message.lastElementChild, footer);
+    assert.ok(footer.querySelector("time"));
+    assert.equal(
+      within(message).getAllByRole("button", { name: "Copy response" }).length,
+      1,
+    );
+    assert.ok(
+      footer.compareDocumentPosition(laterInput) &
+        dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    assert.equal(
+      view.container.querySelectorAll(".response-copy-actions").length,
+      1,
+    );
+    cleanup();
+  }
 });
 
 test("reply footer uses the product tooltip for the finished time", async (context) => {
@@ -2445,8 +2498,8 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
   assert.ok(
-    markup.indexOf('class="ai-activity"') <
-      markup.indexOf('class="response-copy-actions"'),
+    markup.indexOf('class="response-copy-actions"') <
+      markup.indexOf('class="ai-activity"'),
   );
 });
 
@@ -2885,16 +2938,16 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
   );
   assert.ok(
-    visible.indexOf(">File changes<") <
-      visible.indexOf('class="response-copy-actions"'),
+    visible.indexOf('class="response-copy-actions"') <
+      visible.indexOf(">File changes<"),
   );
   assert.match(visible, />Execution details</);
   assert.match(visible, />Turn time 0:12</);
   assert.ok(
     visible.indexOf(">File changes<") <
       visible.indexOf(">Execution details<") &&
-      visible.indexOf(">Execution details<") <
-        visible.indexOf('class="response-copy-actions"'),
+      visible.indexOf('class="response-copy-actions"') <
+        visible.indexOf(">Execution details<"),
   );
 
   const incomplete = task({
@@ -3929,6 +3982,62 @@ test("manual and fallback permission cards keep keyboard-driven decisions usable
     await user.keyboard("{Enter}");
     assert.deepEqual(responses, [
       { kind: "permission", permission: "deny_once" },
+    ]);
+    cleanup();
+  }
+});
+
+test("permission actions use split styling only when their own menu exists", async () => {
+  for (const sessionChoices of [
+    [],
+    ["allow_session"],
+    ["deny_session"],
+    ["allow_session", "deny_session"],
+  ]) {
+    const responses = [];
+    const view = render(
+      localizedView(
+        createElement(ApprovalPanel, {
+          pending: {
+            requestId: "image-permission",
+            tool: "GenerateImage",
+            args: '{"prompt":"Starry sky"}',
+            availableChoices: ["deny_once", "allow_once", ...sessionChoices],
+          },
+          task: {
+            uiHistory: [],
+            restorePermission: null,
+            permissionReviewState: "idle",
+          },
+          busy: false,
+          responsePhase: "idle",
+          respond: (payload) => responses.push(payload),
+        }),
+      ),
+    );
+    for (const [label, choice] of [
+      ["Deny", "deny_session"],
+      ["Allow once", "allow_session"],
+    ]) {
+      const button = screen.getByRole("button", { name: label });
+      assert.equal(
+        button.classList.contains("approval-split-main"),
+        sessionChoices.includes(choice),
+      );
+      assert.equal(
+        button.parentElement.querySelector(".approval-split-trigger") !== null,
+        sessionChoices.includes(choice),
+      );
+    }
+    assert.equal(
+      view.container.querySelectorAll(".approval-split-trigger").length,
+      sessionChoices.length,
+    );
+    const user = userEvent.setup({ document: dom.window.document });
+    screen.getByRole("button", { name: "Allow once" }).focus();
+    await user.keyboard("{Enter}");
+    assert.deepEqual(responses, [
+      { kind: "permission", permission: "allow_once" },
     ]);
     cleanup();
   }
