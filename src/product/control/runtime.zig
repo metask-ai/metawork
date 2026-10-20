@@ -2719,7 +2719,7 @@ pub const Runtime = struct {
             return .rejected(.test_unavailable);
         const result = self.custom_providers.submitCommand(command);
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
+            self.reconcileModelsDefaultNoFail(true, false);
             self.finishExecutionCommitNoFail();
         }
         return result;
@@ -2754,7 +2754,10 @@ pub const Runtime = struct {
         succeeded: bool,
     ) models_contract.CommandResult {
         const result = self.custom_providers.completeTest(command, succeeded);
-        if (result.accepted) self.finishExecutionCommitNoFail();
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(true, false);
+            self.finishExecutionCommitNoFail();
+        }
         return result;
     }
 
@@ -2921,7 +2924,9 @@ pub const Runtime = struct {
             return;
         }
 
-        const execution_generation = if (execution_authority_aligned)
+        const installed = self.execution_state.executionInput();
+        const image_declarations_aligned = installed != null and models_contract.sameImageCapabilities(installed.?.target.image_capabilities, candidate_input.target.image_capabilities);
+        const execution_generation = if (execution_authority_aligned and image_declarations_aligned)
             self.executionGeneration()
         else
             self.nextExecutionGeneration(self.executionGeneration()) catch {
@@ -4093,6 +4098,7 @@ pub const Runtime = struct {
         // global default still resolves independently and gets a new identity.
         const active = self.execution_state.executionInput();
         const same_connection = !attached and active != null and self.execution_state.activeSourceGeneration() == execution.source_generation and
+            models_contract.sameImageCapabilities(active.?.target.image_capabilities, execution.target.image_capabilities) and
             active.?.target.protocol == execution.target.protocol and std.mem.eql(u8, active.?.target.provider_id, execution.target.provider_id) and
             std.mem.eql(u8, active.?.target.base_url, execution.target.base_url) and std.mem.eql(u8, active.?.api_key, execution.api_key);
         const generation = if (same_connection) active.?.execution_generation else self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
@@ -9363,6 +9369,9 @@ pub const TestSupport = if (builtin.is_test) struct {
             "",
         );
         errdefer execution.deinit();
+        var source = (try control.custom_providers.resolveDefault()).?;
+        defer source.deinit();
+        execution.image_capabilities = source.image_capabilities.take();
         try control.beginExecutionReplacement();
         errdefer control.endExecutionReplacementNoFail();
         try control.prepareExecutionInstall(execution.input());
@@ -14702,7 +14711,7 @@ test "same-source default model change preserves execution generation and advanc
     defer control.deinit();
 
     const models = [_]models_contract.ModelView{
-        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = false } } },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
     try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
@@ -19755,4 +19764,35 @@ test "active input wire identity borrows stable Run memory until history encodin
     const projected = scratch.state.tasks[0].runs[0].additional_inputs[0];
     try std.testing.expectEqual(run.additional_inputs[0].?.operationId().ptr, projected.operation_id.ptr);
     try std.testing.expectEqualStrings(operation_id, projected.operation_id);
+}
+
+test "complete model metadata image refresh changes default generation while existing Task stays frozen" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const old_execution = control.execution_state.executionInput().?;
+    const generation = old_execution.execution_generation;
+    const old_capabilities = (try control.task_runtime.testExecutionInput(task_id)).target.image_capabilities;
+    try std.testing.expectEqual(@as(usize, 1), old_capabilities.len);
+    try std.testing.expect(!old_capabilities[0].supported);
+    const current = control.modelsView();
+    const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = true } } }};
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        "SECRET-KEY",
+        &models,
+        "fixture-model",
+        control.execution_state.activeSourceGeneration(),
+        current.metask_selection_revision + 1,
+        current.selection_revision + 1,
+        current.providers[0].catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(true, false);
+    const refreshed = control.execution_state.executionInput().?;
+    try std.testing.expect(refreshed.execution_generation > generation);
+    try std.testing.expect(refreshed.target.image_capabilities[0].supported);
+    const pinned = try control.task_runtime.testExecutionInput(task_id);
+    try std.testing.expectEqual(generation, pinned.execution_generation);
+    try std.testing.expect(!pinned.target.image_capabilities[0].supported);
 }

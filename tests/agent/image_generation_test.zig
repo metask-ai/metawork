@@ -1222,7 +1222,7 @@ const image_product = struct {
             .source_id = id,
             .expected_provider_revision = created.provider_revision,
             .expected_catalog_generation = created.catalog_generation,
-            .model = .{ .id = model },
+            .model = .{ .id = model, .metadata = .{ .capabilities = .{ .image_input = false } } },
         } }).accepted);
         const configured = control.modelsView().custom_providers[0];
         const command: models.CustomModelTestCommand = .{
@@ -1354,6 +1354,11 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
         if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
+    {
+        var access = try control.task_runtime.find(task_id).?.runtime.acquireAccess();
+        defer access.deinit();
+        try expectImageDeclaration(h.runtime, access.session.?, false, .host);
+    }
     const first_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
     const task = control.task_runtime.find(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
@@ -1440,6 +1445,11 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     if (recovered.runtime.last_restore_failure) |failure| std.debug.print("image Product restore failed: {s}\n", .{@tagName(failure)});
     try std.testing.expect(recovered.runtime.last_restore_failure == null);
     try std.testing.expect(recovered.runtime.hasAttachedSession());
+    {
+        var access = try recovered.runtime.acquireAccess();
+        defer access.deinit();
+        try expectImageDeclaration(h.runtime, access.session.?, false, .host);
+    }
     const second_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
     try std.testing.expect(recovered.durable.runs[1].?.image_execution == null);
     try image_product.finish(&control, task_id, second_id, null);
@@ -1450,4 +1460,66 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     try std.testing.expect(std.mem.indexOf(u8, final_trace, "unavailable") != null);
     try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
     try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
+}
+
+fn expectImageDeclaration(runtime: *agent.Runtime, session: *agent.Session, supported: bool, source: sdk.protocol.ImageInputSource) !void {
+    var encoded = std.mem.zeroes(sdk.types.OwnedBytesV1);
+    defer if (encoded.ptr != null) runtime.api.bufferRelease()(&encoded);
+    var diagnostic = std.mem.zeroes(sdk.types.OwnedBytesV1);
+    defer if (diagnostic.ptr != null) runtime.api.bufferRelease()(&diagnostic);
+    try std.testing.expectEqual(sdk.types.STATUS_OK, runtime.api.sessionControl().describe()(session.raw, &encoded, &diagnostic));
+    var parsed = try sdk.decodeSessionDescription(std.testing.allocator, try sdk.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }));
+    defer parsed.deinit();
+    try std.testing.expectEqual(supported, parsed.value.image_input.supported);
+    try std.testing.expectEqual(source, parsed.value.image_input.source);
+}
+
+test "model image declarations reach canonical Core create restore and set_model without a provider call" {
+    var h: Harness = undefined;
+    try h.init("success", .{});
+    defer h.deinit();
+    var declarations = [_]agent.ModelImageCapability{
+        .{ .model = "glm-5.3-flash", .supported = true },
+        .{ .model = "gpt-4o", .supported = false },
+    };
+    var options_value = openOptions(h.root, &h.fixture, .full_access);
+    options_value.model_binding.target.model = "glm-5.3-flash";
+    options_value.model_binding.image_capabilities = &declarations;
+    const session = try h.runtime.createSession(options_value);
+    // Core must own the borrowed declarations before this call returns.
+    declarations[0].supported = false;
+    try expectImageDeclaration(h.runtime, session, true, .host);
+    try session.setModel("gpt-4o");
+    try expectImageDeclaration(h.runtime, session, false, .host);
+    try session.setModel("glm-5.3-flash");
+    try expectImageDeclaration(h.runtime, session, true, .host);
+    const limits: agent.CheckpointLimits = .{ .hard_bytes = 1024 * 1024, .max_section_bytes = 1024 * 1024, .max_string_bytes = 512 * 1024, .max_messages = 128, .max_blocks_per_message = 128, .chunk_bytes = 64 * 1024 };
+    var bytes: RestoreBytes = .{};
+    defer bytes.bytes.deinit(std.testing.allocator);
+    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, 0, 0, "glm-5.3-flash");
+    defer exported.deinit();
+    const checkpoint = switch (exported) {
+        .success => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try session.close(.session_close);
+    try h.runtime.releaseClosedSession(session);
+    declarations[1].supported = true;
+    const restored = try h.runtime.restoreSessionRoute(.{
+        .session = options_value,
+        .checkpoint_limits = limits,
+        .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
+        .expectation = .{ .logical_session_id = checkpoint.description.session_id, .checkpoint_generation = checkpoint.checkpoint.generation, .last_run_id = 0, .last_compact_id = 0, .model = "glm-5.3-flash" },
+    });
+    try std.testing.expectEqual(agent.CheckpointRestoreHealth.complete, restored.report.health);
+    // Restore uses current Host facts rather than the checkpoint's old facts.
+    try expectImageDeclaration(h.runtime, restored.session, false, .host);
+    try restored.session.setModel("gpt-4o");
+    try expectImageDeclaration(h.runtime, restored.session, true, .host);
+    options_value.model_binding.target.model = "metawork-unknown-vision-model";
+    options_value.model_binding.image_capabilities = &.{};
+    const unknown = try h.runtime.createSession(options_value);
+    try expectImageDeclaration(h.runtime, unknown, false, .unknown);
+    // The fixture creates its trace only when a request arrives.
+    try std.testing.expectError(error.FileNotFound, h.trace());
 }

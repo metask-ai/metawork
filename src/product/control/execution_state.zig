@@ -36,6 +36,7 @@ pub const NewTaskAdmissionView = struct {
 };
 
 const ActiveExecution = struct {
+    image_capabilities: models_contract.OwnedImageCapabilities = .{},
     allocator: std.mem.Allocator,
     credential_storage: []u8,
     model_storage: []u8,
@@ -64,6 +65,7 @@ const ActiveExecution = struct {
     }
 
     fn deinit(self: *ActiveExecution) void {
+        self.image_capabilities.deinit();
         std.crypto.secureZero(u8, self.credential_storage);
         self.allocator.free(self.base_url_storage);
         self.allocator.free(self.model_storage);
@@ -79,6 +81,8 @@ const ActiveExecution = struct {
             models_contract.validateConfigStructure(input);
         validation catch @panic("Product received an invalid ExecutionConfig");
         self.installBytesNoFail(input);
+        self.image_capabilities.deinit();
+        self.image_capabilities = execution.image_capabilities.take();
         execution.deinit();
     }
 
@@ -105,6 +109,7 @@ const ActiveExecution = struct {
     }
 
     fn clearNoFail(self: *ActiveExecution) void {
+        self.image_capabilities.deinit();
         std.crypto.secureZero(u8, self.credential_storage);
         self.credential_len = 0;
         self.model_len = 0;
@@ -419,6 +424,7 @@ pub const State = struct {
         if (!self.execution.ready()) return null;
         return .{
             .target = .{
+                .image_capabilities = self.execution.image_capabilities.entries,
                 .provider_id = self.execution.providerId(),
                 .protocol = self.execution.protocol.?,
                 .model = self.execution.model(),

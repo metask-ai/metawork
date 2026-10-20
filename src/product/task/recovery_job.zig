@@ -494,8 +494,12 @@ pub const Job = struct {
 
         const execution = self.attempt.execution.input();
         const capabilities = if (self.rebind) |rebind| rebind.capabilities else null;
+        var image_capabilities: [models_contract.max_model_image_capabilities]agent.ModelImageCapability = undefined;
+        std.debug.assert(execution.target.image_capabilities.len <= image_capabilities.len);
+        for (execution.target.image_capabilities, 0..) |entry, index| image_capabilities[index] = .{ .model = entry.model, .supported = entry.supported };
         const options: agent.SessionOpenOptions = .{
             .model_binding = .{
+                .image_capabilities = image_capabilities[0..execution.target.image_capabilities.len],
                 .target = .{
                     .provider_id = execution.target.provider_id,
                     .protocol = agent_protocol.toAgent(execution.target.protocol),

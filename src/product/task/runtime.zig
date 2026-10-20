@@ -1635,8 +1635,12 @@ pub const Runtime = struct {
             input.permission_profile,
             input.permission_interaction,
         );
+        var image_capabilities: [models_contract.max_model_image_capabilities]agent.ModelImageCapability = undefined;
+        std.debug.assert(input.execution.target.image_capabilities.len <= image_capabilities.len);
+        for (input.execution.target.image_capabilities, 0..) |entry, index| image_capabilities[index] = .{ .model = entry.model, .supported = entry.supported };
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .model_binding = .{
+                .image_capabilities = image_capabilities[0..input.execution.target.image_capabilities.len],
                 .target = .{
                     .provider_id = input.execution.target.provider_id,
                     .protocol = agent_protocol.toAgent(input.execution.target.protocol),

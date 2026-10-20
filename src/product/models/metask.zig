@@ -223,6 +223,16 @@ pub const CatalogSession = struct {
             "",
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.SourceCandidateInvalid;
         errdefer result.deinit();
+        var declarations: [contract.max_model_image_capabilities]contract.ModelImageCapability = undefined;
+        var count: usize = 0;
+        for (self.models.items) |*entry| {
+            if (entry.protocol != protocol) continue;
+            const image_input = entry.metadata.capabilities.image_input orelse continue;
+            if (count == declarations.len) return error.SourceCandidateInvalid;
+            declarations[count] = .{ .model = entry.id.view(), .supported = image_input };
+            count += 1;
+        }
+        result.image_capabilities = try .copy(self.allocator, declarations[0..count]);
         contract.validateMetaskSourceCandidate(result.input()) catch
             return error.SourceCandidateInvalid;
         return result;
@@ -1355,4 +1365,32 @@ test "root token fields are authoritative and nested limits are ignored" {
         try std.testing.expectEqual(case.input, parsed.entries.items[0].metadata.max_input_tokens);
         try std.testing.expectEqual(case.output, parsed.entries.items[0].metadata.max_output_tokens);
     }
+}
+
+test "Metask image declarations freeze the exact execution route and survive ownership transfers" {
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    try TestSupport.loadCatalogResponse(&session, "principal", "synthetic-token",
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"glm-5.3-flash","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"text-model","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":false}}}},
+        \\{"id":"other-route","object":"model","type":"model","capabilities":{"endpoints":{"responses":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"image-model","object":"model","type":"model","capabilities":{"endpoints":{"images_generations":{"supported":true}},"input":{"image":{"supported":true}}}}
+        \\]}
+    );
+    var candidate = try session.prepareSourceCandidate("glm-5.3-flash", 1);
+    defer candidate.deinit();
+    var moved = candidate.take();
+    defer moved.deinit();
+    var config = try moved.intoConfig(3);
+    defer config.deinit();
+    var owned = config.take();
+    defer owned.deinit();
+    session.reset();
+    const declarations = owned.input().target.image_capabilities;
+    try std.testing.expectEqual(@as(usize, 2), declarations.len);
+    try std.testing.expectEqualStrings("glm-5.3-flash", declarations[0].model);
+    try std.testing.expect(declarations[0].supported);
+    try std.testing.expectEqualStrings("text-model", declarations[1].model);
+    try std.testing.expect(!declarations[1].supported);
 }

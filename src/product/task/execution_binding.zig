@@ -4,6 +4,7 @@ const std = @import("std");
 const models_contract = @import("metawork_product_models_contract");
 
 pub const OwnedTaskExecution = struct {
+    image_capabilities: models_contract.OwnedImageCapabilities = .{},
     allocator: std.mem.Allocator,
     provider_id: []u8,
     protocol: models_contract.Protocol,
@@ -40,6 +41,7 @@ pub const OwnedTaskExecution = struct {
             allocator.free(owned_secret);
         }
         return .{
+            .image_capabilities = try .copy(allocator, source.target.image_capabilities),
             .allocator = allocator,
             .provider_id = provider_id,
             .protocol = source.target.protocol,
@@ -54,6 +56,7 @@ pub const OwnedTaskExecution = struct {
         std.debug.assert(self.owned);
         const result = self.*;
         self.owned = false;
+        self.image_capabilities = .{};
         self.provider_id = &.{};
         self.model = &.{};
         self.base_url = &.{};
@@ -66,6 +69,7 @@ pub const OwnedTaskExecution = struct {
         std.debug.assert(self.owned);
         return .{
             .target = .{
+                .image_capabilities = self.image_capabilities.entries,
                 .provider_id = self.provider_id,
                 .protocol = self.protocol,
                 .model = self.model,
@@ -77,7 +81,7 @@ pub const OwnedTaskExecution = struct {
     }
 
     pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
-        return self.owned and self.source_generation != 0 and self.source_generation == target.source_generation and
+        return self.owned and models_contract.sameImageCapabilities(self.image_capabilities.entries, target.target.image_capabilities) and self.source_generation != 0 and self.source_generation == target.source_generation and
             self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and
             std.mem.eql(u8, self.base_url, target.target.base_url) and std.mem.eql(u8, self.secret, target.api_key);
     }
@@ -93,6 +97,7 @@ pub const OwnedTaskExecution = struct {
 
     pub fn deinit(self: *OwnedTaskExecution) void {
         if (!self.owned) return;
+        self.image_capabilities.deinit();
         self.clearCredential();
         self.allocator.free(self.base_url);
         self.allocator.free(self.model);

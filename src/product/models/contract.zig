@@ -202,7 +202,59 @@ pub const CatalogRefreshPrepareResult = union(enum) {
     rejected: ModelsError,
 };
 
+/// Route-scoped declarations frozen with an execution binding. Unknown models
+/// are omitted; an explicit false remains an authoritative declaration.
+pub const ModelImageCapability = struct {
+    model: []const u8,
+    supported: bool,
+};
+
+pub const max_model_image_capabilities: usize = 256;
+
+pub fn sameImageCapabilities(a: []const ModelImageCapability, b: []const ModelImageCapability) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (!std.mem.eql(u8, left.model, right.model) or left.supported != right.supported) return false;
+    }
+    return true;
+}
+
+pub const OwnedImageCapabilities = struct {
+    allocator: ?std.mem.Allocator = null,
+    entries: []const ModelImageCapability = &.{},
+
+    pub fn copy(allocator: std.mem.Allocator, entries: []const ModelImageCapability) std.mem.Allocator.Error!OwnedImageCapabilities {
+        if (entries.len == 0) return .{};
+        const owned = try allocator.alloc(ModelImageCapability, entries.len);
+        var copied: usize = 0;
+        errdefer {
+            for (owned[0..copied]) |entry| allocator.free(entry.model);
+            allocator.free(owned);
+        }
+        for (entries, 0..) |entry, index| {
+            owned[index] = .{ .model = try allocator.dupe(u8, entry.model), .supported = entry.supported };
+            copied += 1;
+        }
+        return .{ .allocator = allocator, .entries = owned };
+    }
+
+    pub fn take(self: *OwnedImageCapabilities) OwnedImageCapabilities {
+        const result = self.*;
+        self.* = .{};
+        return result;
+    }
+
+    pub fn deinit(self: *OwnedImageCapabilities) void {
+        if (self.allocator) |allocator| {
+            for (self.entries) |entry| allocator.free(entry.model);
+            allocator.free(self.entries);
+        }
+        self.* = .{};
+    }
+};
+
 pub const Target = struct {
+    image_capabilities: []const ModelImageCapability = &.{},
     /// Source-qualified service instance reference; never a wire adapter name.
     provider_id: []const u8,
     protocol: Protocol,
@@ -557,6 +609,7 @@ pub const OwnedImageCandidate = struct {
 /// Linear candidate transferred from an execution source into Product
 /// Control. It deliberately has no Product execution generation.
 pub const OwnedSourceCandidate = struct {
+    image_capabilities: OwnedImageCapabilities = .{},
     provider_id: OwnedBuffer,
     protocol: Protocol,
     model: OwnedBuffer,
@@ -619,6 +672,7 @@ pub const OwnedSourceCandidate = struct {
 
     pub fn take(self: *OwnedSourceCandidate) OwnedSourceCandidate {
         return .{
+            .image_capabilities = self.image_capabilities.take(),
             .provider_id = self.provider_id.take(),
             .protocol = self.protocol,
             .model = self.model.take(),
@@ -632,6 +686,7 @@ pub const OwnedSourceCandidate = struct {
     pub fn input(self: *const OwnedSourceCandidate) SourceCandidateInput {
         return .{
             .target = .{
+                .image_capabilities = self.image_capabilities.entries,
                 .provider_id = self.provider_id.view(),
                 .protocol = self.protocol,
                 .model = self.model.view(),
@@ -649,6 +704,7 @@ pub const OwnedSourceCandidate = struct {
     ) error{InvalidExecutionConfig}!OwnedConfig {
         if (execution_generation == 0) return error.InvalidExecutionConfig;
         var result: OwnedConfig = .{
+            .image_capabilities = self.image_capabilities.take(),
             .provider_id = self.provider_id.take(),
             .protocol = self.protocol,
             .model = self.model.take(),
@@ -666,6 +722,7 @@ pub const OwnedSourceCandidate = struct {
     }
 
     pub fn deinit(self: *OwnedSourceCandidate) void {
+        self.image_capabilities.deinit();
         self.provider_id.deinit();
         self.model.deinit();
         self.base_url.deinit();
@@ -679,6 +736,7 @@ pub const OwnedSourceCandidate = struct {
 /// Linear resolved configuration carrying a generation assigned by its
 /// receiving owner. The provider does not choose that consumer identity.
 pub const OwnedConfig = struct {
+    image_capabilities: OwnedImageCapabilities = .{},
     provider_id: OwnedBuffer,
     protocol: Protocol,
     model: OwnedBuffer,
@@ -743,6 +801,7 @@ pub const OwnedConfig = struct {
 
     pub fn take(self: *OwnedConfig) OwnedConfig {
         return .{
+            .image_capabilities = self.image_capabilities.take(),
             .provider_id = self.provider_id.take(),
             .protocol = self.protocol,
             .model = self.model.take(),
@@ -756,6 +815,7 @@ pub const OwnedConfig = struct {
     pub fn input(self: *const OwnedConfig) ConfigInput {
         return .{
             .target = .{
+                .image_capabilities = self.image_capabilities.entries,
                 .provider_id = self.provider_id.view(),
                 .protocol = self.protocol,
                 .model = self.model.view(),
@@ -767,6 +827,7 @@ pub const OwnedConfig = struct {
     }
 
     pub fn deinit(self: *OwnedConfig) void {
+        self.image_capabilities.deinit();
         self.provider_id.deinit();
         self.model.deinit();
         self.base_url.deinit();
@@ -989,7 +1050,18 @@ pub fn validateCustomProviderView(view: CustomProviderView) ValidationError!void
         return error.InconsistentState;
 }
 
+fn validateImageCapabilities(entries: []const ModelImageCapability) ValidationError!void {
+    if (entries.len > max_model_image_capabilities) return error.CollectionTooLarge;
+    for (entries, 0..) |entry, index| {
+        try validateRequired(entry.model, Limits.model_id_bytes);
+        for (entries[0..index]) |prior| {
+            if (std.ascii.eqlIgnoreCase(prior.model, entry.model)) return error.InvalidMetadata;
+        }
+    }
+}
+
 pub fn validateConfigStructure(input: ConfigInput) ValidationError!void {
+    try validateImageCapabilities(input.target.image_capabilities);
     try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
@@ -998,6 +1070,7 @@ pub fn validateConfigStructure(input: ConfigInput) ValidationError!void {
 }
 
 pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationError!void {
+    try validateImageCapabilities(input.target.image_capabilities);
     try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
@@ -1386,4 +1459,26 @@ test "ready custom provider view requires a ready credential and exact model pro
         .source_generation = 2,
         .catalog_generation = 3,
     });
+}
+
+fn copyImageCapabilitiesUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var model = "vision-model".*;
+    const entries = [_]ModelImageCapability{ .{ .model = &model, .supported = true }, .{ .model = "text-model", .supported = false } };
+    var owned = try OwnedImageCapabilities.copy(allocator, &entries);
+    defer owned.deinit();
+    var moved = owned.take();
+    defer moved.deinit();
+    @memset(&model, 'x');
+    try std.testing.expectEqualStrings("vision-model", moved.entries[0].model);
+    try std.testing.expect(moved.entries[0].supported);
+    try std.testing.expect(!moved.entries[1].supported);
+    try std.testing.expectEqual(@as(usize, 0), owned.entries.len);
+}
+
+test "image capability ownership survives transfer and allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, copyImageCapabilitiesUnderAllocationFailure, .{});
+    const duplicate = [_]ModelImageCapability{ .{ .model = "GLM", .supported = true }, .{ .model = "glm", .supported = false } };
+    try std.testing.expectError(error.InvalidMetadata, validateImageCapabilities(&duplicate));
+    const excessive = [_]ModelImageCapability{.{ .model = "m", .supported = true }} ** (max_model_image_capabilities + 1);
+    try std.testing.expectError(error.CollectionTooLarge, validateImageCapabilities(&excessive));
 }

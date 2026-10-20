@@ -910,6 +910,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        var model_capabilities: [wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1 = undefined;
+        configureImageCapabilities(&host_config, binding.image_capabilities, &model_capabilities);
         host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
         host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
@@ -1167,6 +1169,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        var model_capabilities: [wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1 = undefined;
+        configureImageCapabilities(&host_config, binding.image_capabilities, &model_capabilities);
         host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
         host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
@@ -1602,8 +1606,25 @@ fn emptyOwnedBytes() wire.OwnedBytesV1 {
     return .{ .ptr = null, .len = 0 };
 }
 
+/// Both ABI entry points borrow this table only until their synchronous return.
+fn configureImageCapabilities(host: *wire.SessionHostConfigV1, entries: []const model_binding.ModelImageCapability, storage: *[wire.MAX_MODEL_CAPABILITIES_V1]wire.ModelCapabilityV1) void {
+    for (entries, 0..) |entry, index| {
+        storage[index] = std.mem.zeroes(wire.ModelCapabilityV1);
+        storage[index].struct_size = @sizeOf(wire.ModelCapabilityV1);
+        storage[index].model = sdk.bytesView(entry.model);
+        storage[index].image_input_code = if (entry.supported) wire.CAPABILITY_SUPPORTED else wire.CAPABILITY_UNSUPPORTED;
+    }
+    host.model_capabilities = if (entries.len == 0) null else storage;
+    host.model_capability_count = entries.len;
+}
+
 fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
     if (buffer.ptr != null or buffer.len != 0) api.bufferRelease()(buffer);
 }
 
 const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
+
+test "image capability consumer limit matches the canonical ABI" {
+    try std.testing.expectEqual(@as(u64, 256), wire.MAX_MODEL_CAPABILITIES_V1);
+    try std.testing.expectEqual(@as(u64, model_binding.max_model_bytes), wire.MAX_MODEL_CAPABILITY_MODEL_BYTES_V1);
+}

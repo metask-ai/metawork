@@ -1556,7 +1556,7 @@ fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
 
 fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
     const models = [_]models_contract.ModelView{
-        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = false } } },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
     product_control.TestSupport.replaceMetaskCatalog(

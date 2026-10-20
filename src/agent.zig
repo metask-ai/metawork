@@ -139,6 +139,7 @@ pub const mcpHttpReservedRequestHeaderNames = mcp_http.reserved_request_header_n
 pub const Protocol = protocol.Protocol;
 pub const ModelTarget = model_binding.ModelTarget;
 pub const ModelBinding = model_binding.ModelBinding;
+pub const ModelImageCapability = model_binding.ModelImageCapability;
 pub const Completion = completion.Completion;
 pub const CompletionTransport = completion.Transport;
 pub const CompletionHttpRequest = completion.HttpRequest;

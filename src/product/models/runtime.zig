@@ -1251,25 +1251,30 @@ pub const Runtime = struct {
         defer std.crypto.secureZero(u8, &secret_storage);
         const secret = (try vault.get(binding.provider_id, &secret_storage)) orelse
             return error.CredentialNotFound;
-        const model_id = try self.allocator.dupe(u8, binding.model_id);
-        errdefer self.allocator.free(model_id);
-        const normalized_base_url = try self.allocator.dupe(u8, binding.normalized_base_url);
-        errdefer self.allocator.free(normalized_base_url);
+        var declarations: [contract.max_model_image_capabilities]contract.ModelImageCapability = undefined;
+        var owned_capabilities = try contract.OwnedImageCapabilities.copy(self.allocator, self.registry.imageCapabilities(binding.provider_id, &declarations));
+        errdefer owned_capabilities.deinit();
+        var model_id: ?[]u8 = try self.allocator.dupe(u8, binding.model_id);
+        errdefer if (model_id) |bytes| self.allocator.free(bytes);
+        var normalized_base_url: ?[]u8 = try self.allocator.dupe(u8, binding.normalized_base_url);
+        errdefer if (normalized_base_url) |bytes| self.allocator.free(bytes);
         const credential = try self.allocator.dupe(u8, secret);
-        errdefer {
-            std.crypto.secureZero(u8, credential);
-            self.allocator.free(credential);
-        }
-        return contract.OwnedSourceCandidate.initOwned(
+        const transferred_model = model_id.?;
+        const transferred_url = normalized_base_url.?;
+        model_id = null;
+        normalized_base_url = null;
+        var result = try contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .custom_provider,
             binding.protocol,
-            model_id,
-            normalized_base_url,
+            transferred_model,
+            transferred_url,
             binding.source_generation,
             credential,
             binding.provider_id,
         );
+        result.image_capabilities = owned_capabilities.take();
+        return result;
     }
 
     fn commitCandidate(

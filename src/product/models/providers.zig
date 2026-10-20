@@ -767,6 +767,18 @@ pub const Registry = struct {
         }
     }
 
+    pub fn imageCapabilities(self: *const Registry, provider_id: []const u8, output: *[contract.max_model_image_capabilities]contract.ModelImageCapability) []const contract.ModelImageCapability {
+        const provider = self.providers.items[self.findIndex(provider_id).?];
+        var count: usize = 0;
+        for (provider.models.items) |model| {
+            if (!modelReady(&provider, model)) continue;
+            const supported = model.metadata.capabilities.image_input orelse continue;
+            output[count] = .{ .model = model.id, .supported = supported };
+            count += 1;
+        }
+        return output[0..count];
+    }
+
     pub const DefaultBinding = struct {
         provider_id: []const u8,
         model_id: []const u8,
@@ -2212,4 +2224,27 @@ test "complete model declarations and tokens survive registry persistence" {
     const with_unknown = try std.mem.replaceOwned(u8, std.testing.allocator, encoded, "\"metadata\":{", "\"metadata\":{\"unexpected\":true,");
     defer std.testing.allocator.free(with_unknown);
     try std.testing.expectError(error.InvalidData, decode(std.testing.allocator, with_unknown));
+}
+
+test "image declarations do not admit a Custom model before readiness proof" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try testCreate(&registry, .{
+        .provider_id = "vision-provider",
+        .spec = .{ .display_name = "Vision", .protocol = .anthropic_messages, .normalized_base_url = "https://example.com/v1/messages" },
+        .credential_slot = .{ .id = "vision-provider" },
+        .model = .{ .id = "vision-model", .metadata = .{ .capabilities = .{ .image_input = true } } },
+    });
+    var output: [contract.max_model_image_capabilities]contract.ModelImageCapability = undefined;
+    try std.testing.expectEqual(@as(usize, 0), registry.imageCapabilities("vision-provider", &output).len);
+    const command: contract.CustomModelTestCommand = .{ .model = .{ .source_id = "vision-provider", .model_id = "vision-model" }, .expected_provider_revision = 1, .expected_source_generation = 2, .expected_catalog_generation = 3 };
+    try registry.markTesting(command);
+    try registry.completeTest(command, false);
+    try std.testing.expectEqual(@as(usize, 0), registry.imageCapabilities("vision-provider", &output).len);
+    try registry.markTesting(command);
+    try registry.completeTest(command, true);
+    const declarations = registry.imageCapabilities("vision-provider", &output);
+    try std.testing.expectEqual(@as(usize, 1), declarations.len);
+    try std.testing.expectEqualStrings("vision-model", declarations[0].model);
+    try std.testing.expect(declarations[0].supported);
 }
