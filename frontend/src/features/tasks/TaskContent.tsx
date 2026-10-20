@@ -57,6 +57,15 @@ import {
 } from "./response-copy.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
+export function createTaskReadingMemory() {
+  return {
+    reading: new Map<string, ReadingState>(),
+    processDisclosure: new Map<string, RunProcessDisclosure>(),
+    toolDisclosure: new Map<string, ReadonlySet<string>>(),
+  };
+}
+export type TaskReadingMemory = ReturnType<typeof createTaskReadingMemory>;
+
 const emptyToolDisclosure: ReadonlySet<string> = new Set();
 
 function formatAttachmentSize(value: string) {
@@ -232,8 +241,10 @@ export function TaskContent({
   renderPendingUi,
   localSubmissions,
   history,
+  memory,
 }: {
   task: TaskView | null;
+  memory?: TaskReadingMemory;
   history?: { available: boolean; loading: boolean; onLoad: () => void };
   localSubmissions?: ReactNode;
   snapshotReceivedAt: number | null;
@@ -270,9 +281,9 @@ export function TaskContent({
 }) {
   const { locale, t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
-  const reading = useRef(new Map<string, ReadingState>());
-  const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
-  const toolDisclosure = useRef(new Map<string, ReadonlySet<string>>());
+  const [localMemory] = useState(createTaskReadingMemory);
+  const { reading, processDisclosure, toolDisclosure } = memory ?? localMemory;
+  const restoringTask = useRef<string | null>(null);
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
   const previousLayout = useRef<{
@@ -398,14 +409,18 @@ export function TaskContent({
       previousTaskId.current = null;
       return;
     }
-    if (previousTaskId.current !== taskId) {
-      const saved = reading.current.get(taskId);
+    if (previousTaskId.current !== taskId && history?.loading)
+      restoringTask.current = taskId;
+    if (restoringTask.current === taskId && history?.loading) return;
+    if (previousTaskId.current !== taskId || restoringTask.current === taskId) {
+      restoringTask.current = null;
+      const saved = reading.get(taskId);
       node.scrollTop = saved?.scrollTop ?? node.scrollHeight;
       setShowJumpLatest(saved ? !saved.followingLatest : false);
       previousTaskId.current = taskId;
       return;
     }
-    const saved = reading.current.get(taskId);
+    const saved = reading.get(taskId);
     if (
       before?.taskId === taskId &&
       firstRunId &&
@@ -416,7 +431,7 @@ export function TaskContent({
         (saved?.scrollTop ?? node.scrollTop) +
         node.scrollHeight -
         before.height;
-      reading.current.set(taskId, {
+      reading.set(taskId, {
         scrollTop: node.scrollTop,
         followingLatest: false,
       });
@@ -425,20 +440,20 @@ export function TaskContent({
     }
     if (!saved || saved.followingLatest) {
       node.scrollTop = node.scrollHeight;
-      reading.current.set(taskId, {
+      reading.set(taskId, {
         scrollTop: node.scrollTop,
         followingLatest: true,
       });
       setShowJumpLatest(false);
     }
-  }, [task?.id, task?.runs, revision]);
+  }, [task?.id, task?.runs, revision, history?.loading]);
 
   function updateReadingState() {
     const node = viewport.current;
-    if (!node || !task) return;
+    if (!node || !task || restoringTask.current !== null) return;
     const followingLatest =
       node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
-    reading.current.set(task.id, {
+    reading.set(task.id, {
       scrollTop: node.scrollTop,
       followingLatest,
     });
@@ -448,7 +463,7 @@ export function TaskContent({
   function jumpToLatest() {
     const node = viewport.current;
     if (!node || !task) return;
-    reading.current.set(task.id, {
+    reading.set(task.id, {
       scrollTop: node.scrollHeight,
       followingLatest: true,
     });
@@ -460,10 +475,10 @@ export function TaskContent({
     const node = viewport.current;
     const taskId = task?.id;
     if (!node || !taskId) return;
-    const saved = reading.current.get(taskId);
+    const saved = reading.get(taskId);
     if (saved && !saved.followingLatest) return;
     node.scrollTop = node.scrollHeight;
-    reading.current.set(taskId, {
+    reading.set(taskId, {
       scrollTop: node.scrollTop,
       followingLatest: true,
     });
@@ -539,14 +554,14 @@ export function TaskContent({
         );
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
-          processDisclosure.current.get(disclosureKey),
+          processDisclosure.get(disclosureKey),
         );
-        processDisclosure.current.set(disclosureKey, disclosure);
+        processDisclosure.set(disclosureKey, disclosure);
         const expandedToolIds =
-          toolDisclosure.current.get(disclosureKey) ?? emptyToolDisclosure;
+          toolDisclosure.get(disclosureKey) ?? emptyToolDisclosure;
 
         function setProcessExpanded(expanded: boolean) {
-          processDisclosure.current.set(
+          processDisclosure.set(
             disclosureKey,
             toggleRunProcessDisclosure(expanded),
           );
@@ -554,10 +569,10 @@ export function TaskContent({
         }
 
         function setToolExpanded(toolId: string, expanded: boolean) {
-          const next = new Set(toolDisclosure.current.get(disclosureKey) ?? []);
+          const next = new Set(toolDisclosure.get(disclosureKey) ?? []);
           if (expanded) next.add(toolId);
           else next.delete(toolId);
-          toolDisclosure.current.set(disclosureKey, next);
+          toolDisclosure.set(disclosureKey, next);
           setDisclosureRevision((value) => value + 1);
         }
 

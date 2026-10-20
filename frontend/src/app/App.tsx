@@ -97,7 +97,10 @@ import {
   NewTaskApprovalModeMenu,
   TaskWorkspace,
 } from "../features/tasks/NewTaskView.tsx";
-import { TaskContent } from "../features/tasks/TaskContent.tsx";
+import {
+  TaskContent,
+  createTaskReadingMemory,
+} from "../features/tasks/TaskContent.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -396,6 +399,16 @@ export default function App() {
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
+  const [taskReadingMemory] = useState(createTaskReadingMemory);
+  function retainHistoryForPanel(taskId: string, runId: string) {
+    setHistoryRequests((goals) => {
+      const previous = goals[taskId];
+      return previous && BigInt(previous.oldestRunId) <= BigInt(runId)
+        ? goals
+        : { ...goals, [taskId]: { taskId, oldestRunId: runId } };
+    });
+  }
+
   const [historyRequests, setHistoryRequests] = useState<
     Record<string, HistoryGoal>
   >({});
@@ -441,6 +454,7 @@ export default function App() {
     const tab = createTaskPanelPreviewTab(taskId, runId, selected);
     setRightPanelOpen(true);
     taskPanelOpeners.current.set(tab.tabId, opener);
+    retainHistoryForPanel(taskId, runId);
     taskPanel.openPreview(taskId, runId, selected);
     filePreviewTabs.open(taskId, runId, selected);
     focusTaskPanelTab(tab.tabId);
@@ -591,6 +605,7 @@ export default function App() {
       (tab) => tab.kind === "review",
     );
     if (existingReview?.runId !== runId) taskPanelViews.reset(tab.tabId);
+    retainHistoryForPanel(taskId, runId);
     taskPanel.openReview(taskId, runId);
     if (focus)
       taskPanelViews.setFileExpanded(tab.tabId, focus.displayPath, true);
@@ -681,6 +696,14 @@ export default function App() {
       const run = task?.runs.find(
         (candidate) => candidate.id === current.runId,
       );
+      if (
+        !run &&
+        snapshot.taskPage?.task.id === current.taskId &&
+        snapshot.taskPage.runManifest.some(
+          (entry) => entry.id === current.runId,
+        )
+      )
+        return current;
       const recorded = run?.fileChanges;
       if (!task || !run || !recorded || recorded.changes.length === 0) {
         fileChangesGeneration.current += 1;
@@ -707,6 +730,7 @@ export default function App() {
   const taskPanel = useTaskPanelTarget(
     panelTask,
     snapshot.capabilities.typedFileChanges,
+    snapshot.taskPage?.runManifest,
   );
   const previewTabIds = useMemo(
     () =>
@@ -727,7 +751,7 @@ export default function App() {
     [client],
   );
   const filePreviewTabs = useFilePreviewTabs(
-    panelTask?.id ?? null,
+    route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
   );
@@ -1151,6 +1175,9 @@ export default function App() {
         if (cancelled) return;
         latestSnapshotRef.current = null;
         setHistoryRequests({});
+        taskReadingMemory.reading.clear();
+        taskReadingMemory.processDisclosure.clear();
+        taskReadingMemory.toolDisclosure.clear();
         filePreviewTabs.clear();
         clearFileChanges();
         approvalRequestsRef.current.reset(generation);
@@ -1164,6 +1191,9 @@ export default function App() {
       onGeneration: (generation) => {
         if (!cancelled) {
           setHistoryRequests({});
+          taskReadingMemory.reading.clear();
+          taskReadingMemory.processDisclosure.clear();
+          taskReadingMemory.toolDisclosure.clear();
           setLocalSubmissions((entries) =>
             entries.map((entry) =>
               entry.state === "submitting" || entry.state === "accepted"
@@ -3473,9 +3503,7 @@ export default function App() {
                 tasks={navigableTaskItems}
                 workspaces={snapshot.workspaces}
                 activeTaskId={
-                  route === "workbench" && activeTask !== null
-                    ? activeTask.id
-                    : null
+                  route === "workbench" ? workbench.activeTaskId : null
                 }
                 suppressedCompletionTaskId={suppressedCompletionTaskId}
                 showArchived={showArchived}
@@ -3518,6 +3546,7 @@ export default function App() {
             activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
             actions={
+              !taskPanel.waitingForRun &&
               panelTarget.kind === "preview" &&
               previewMatchesTarget &&
               filePreviewViewState ? (
@@ -3531,7 +3560,11 @@ export default function App() {
             onCloseTab={closeTaskPanelTab}
             onClose={dismissTaskPanel}
           >
-            {panelTarget.kind === "empty" ? (
+            {taskPanel.waitingForRun ? (
+              <p role="status" aria-busy="true">
+                {t("common.loading")}
+              </p>
+            ) : panelTarget.kind === "empty" ? (
               <p className="task-panel-empty">{t("task_panel.empty")}</p>
             ) : panelTarget.kind === "preview" &&
               previewMatchesTarget &&
@@ -3962,66 +3995,58 @@ export default function App() {
             composer={composerFooter}
             pendingContent={pendingMessages}
             taskContent={
-              activeTask ? (
-                <TaskContent
-                  task={activeTask}
-                  history={{
-                    available: Boolean(nextHistoryCursor),
-                    loading: historyLoading,
-                    onLoad: () => {
-                      if (nextHistoryCursor && workbench.activeTaskId) {
-                        const goal = earlierHistoryGoal(
-                          snapshot,
-                          workbench.activeTaskId,
-                          nextHistoryCursor,
-                        );
-                        if (goal)
-                          setHistoryRequests((current) => ({
-                            ...current,
-                            [goal.taskId]: goal,
-                          }));
-                      }
-                    },
-                  }}
-                  localSubmissions={pendingMessages}
-                  webLink={markdownWebLink}
-                  snapshotReceivedAt={workbench.snapshotReceivedAt}
-                  synchronized={!bridgeUnavailable}
-                  requestingStop={Boolean(
-                    activeTask && activeTask.id in cancelPending,
-                  )}
-                  revision={snapshot.revision}
-                  composerHasDraft={composerDraftHasContent(composerDraft)}
-                  retryAvailable={taskCanCompose && !taskOperationInFlight}
-                  responseDisabled={bridgeUnavailable}
-                  fileChangesEnabled={snapshot.capabilities.typedFileChanges}
-                  onPrepareRetry={prepareRetry}
-                  onPreviewFile={openFilePreview}
-                  loadFilePreview={loadFilePreview}
-                  onReviewFileChanges={openFileChanges}
-                  onRespond={(payload) => void respondUi(payload)}
-                  renderPendingUi={(props) => {
-                    const { taskId, ...panelProps } = props;
-                    const identity = uiRequestIdentity(taskId, props.pending);
-                    return (
-                      <ApprovalPanel
-                        {...panelProps}
-                        responsePhase={uiResponsePhase(
-                          uiResponseStates,
-                          identity,
-                        )}
-                      />
-                    );
-                  }}
-                />
-              ) : (
-                <>
-                  <p role="status" aria-busy="true">
-                    {t("common.loading")}
-                  </p>
-                  {pendingMessages}
-                </>
-              )
+              <TaskContent
+                task={activeTask}
+                memory={taskReadingMemory}
+                history={{
+                  available: Boolean(nextHistoryCursor),
+                  loading: historyLoading,
+                  onLoad: () => {
+                    if (nextHistoryCursor && workbench.activeTaskId) {
+                      const goal = earlierHistoryGoal(
+                        snapshot,
+                        workbench.activeTaskId,
+                        nextHistoryCursor,
+                      );
+                      if (goal)
+                        setHistoryRequests((current) => ({
+                          ...current,
+                          [goal.taskId]: goal,
+                        }));
+                    }
+                  },
+                }}
+                localSubmissions={pendingMessages}
+                webLink={markdownWebLink}
+                snapshotReceivedAt={workbench.snapshotReceivedAt}
+                synchronized={!bridgeUnavailable}
+                requestingStop={Boolean(
+                  activeTask && activeTask.id in cancelPending,
+                )}
+                revision={snapshot.revision}
+                composerHasDraft={composerDraftHasContent(composerDraft)}
+                retryAvailable={taskCanCompose && !taskOperationInFlight}
+                responseDisabled={bridgeUnavailable}
+                fileChangesEnabled={snapshot.capabilities.typedFileChanges}
+                onPrepareRetry={prepareRetry}
+                onPreviewFile={openFilePreview}
+                loadFilePreview={loadFilePreview}
+                onReviewFileChanges={openFileChanges}
+                onRespond={(payload) => void respondUi(payload)}
+                renderPendingUi={(props) => {
+                  const { taskId, ...panelProps } = props;
+                  const identity = uiRequestIdentity(taskId, props.pending);
+                  return (
+                    <ApprovalPanel
+                      {...panelProps}
+                      responsePhase={uiResponsePhase(
+                        uiResponseStates,
+                        identity,
+                      )}
+                    />
+                  );
+                }}
+              />
             }
           />
         </div>

@@ -81,7 +81,7 @@ const { useTaskPanelTarget } = await vite.ssrLoadModule(
 const { useFilePreviewTabs } = await vite.ssrLoadModule(
   "/src/features/task-panel/useFilePreviewTabs.ts",
 );
-const { TaskContent } = await vite.ssrLoadModule(
+const { TaskContent, createTaskReadingMemory } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
 const { GeneratedImagePreview } = await vite.ssrLoadModule(
@@ -2445,6 +2445,112 @@ test("Task switches restore each Task reading position without cross-contaminati
   view.rerender(taskContentElement(taskA, "3"));
   assert.equal(viewport.scrollTop, 180);
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
+test("reading memory survives unloaded bodies and remount, and restores after history refill", () => {
+  const memory = createTaskReadingMemory();
+  const value = task({
+    id: "task-a",
+    runs: [
+      run({
+        id: "1",
+        tools: [
+          technicalTool({
+            id: "tool-preserved",
+            content: "preserved tool output",
+          }),
+        ],
+      }),
+      run({ id: "9" }),
+    ],
+  });
+  const view = render(taskContentElement(value, "1", { memory }));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+  fireEvent.click(document.querySelector(".run-process-header"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Show or hide details for Read" }),
+  );
+  assert.ok(screen.getByText("preserved tool output"));
+  view.rerender(taskContentElement(null, "2", { memory }));
+  view.unmount();
+  const history = { available: true, loading: true, onLoad() {} };
+  const remounted = render(
+    taskContentElement({ ...value, runs: [run({ id: "9" })] }, "3", {
+      memory,
+      history,
+    }),
+  );
+  const nextViewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(nextViewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 40 },
+  });
+  fireEvent.scroll(nextViewport);
+  assert.equal(memory.reading.get("task-a").scrollTop, 180);
+  remounted.rerender(
+    taskContentElement(value, "4", {
+      memory,
+      history: { ...history, loading: false },
+    }),
+  );
+  assert.equal(nextViewport.scrollTop, 180);
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByText("preserved tool output"));
+});
+
+test("panel tabs distinguish a manifest-confirmed unloaded Run from deleted evidence", () => {
+  const reference = { id: "file-1", title: "a.txt", displayPath: "a.txt" };
+  const selected = task({
+    runs: [
+      run({
+        tools: [technicalTool({ fileRefs: [reference] })],
+        fileChanges: { observation: "complete", changes: [fileChange()] },
+      }),
+    ],
+  });
+  const selectedRun = selected.runs[0];
+  const tab = createTaskPanelPreviewTab(selected.id, selectedRun.id, reference);
+  const opened = openTaskPanelTab(emptyTaskPanelSession, tab, selected, true);
+  const unloaded = { ...selected, runs: [] };
+  const manifest = [{ id: selectedRun.id, contentVersion: "2" }];
+  const withReview = openTaskPanelTab(
+    opened,
+    createTaskPanelReviewTab(selected.id, selectedRun.id),
+    selected,
+    true,
+  );
+  const retained = reconcileTaskPanelSession(
+    withReview,
+    unloaded,
+    true,
+    manifest,
+  );
+  assert.equal(retained.tabs.length, 2);
+  assert.deepEqual(retained.tabs[0], tab);
+  assert.equal(
+    reconcileTaskPanelSession(retained, unloaded, true, []).tabs.length,
+    0,
+  );
+  const removedReference = {
+    ...selected,
+    runs: [{ ...selectedRun, tools: [] }],
+  };
+  assert.deepEqual(
+    reconcileTaskPanelSession(
+      retained,
+      removedReference,
+      true,
+      manifest,
+    ).tabs.map((entry) => entry.kind),
+    ["review"],
+  );
 });
 
 test("prepending a history page preserves the visible reading position", () => {
@@ -5544,10 +5650,19 @@ test("App pages through all retained history while keeping the current Run live"
   await screen.findByText("Updated historical Run 6");
   for (const id of [1, 5, 9, 16])
     assert.ok(screen.getByText(`History input ${id}`));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 2000 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
   await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   for (const id of [1, 5, 9, 16])
     await screen.findByText(`History input ${id}`);
+  assert.equal(document.querySelector(".ai-conversation-viewport"), viewport);
+  assert.equal(viewport.scrollTop, 180);
   fixture.snapshot.securityEpoch = "2";
   await publishAppFixture(fixture);
   await waitFor(() =>
@@ -6782,4 +6897,63 @@ test("App removes revoked Host conversation before replacement snapshot can succ
   setSnapshotFailure(false);
   await act(async () => publish());
   await waitFor(() => assert.ok(document.querySelector("[data-run-id]")));
+});
+
+test("App keeps a preview through a missing history page and closes it only after reference removal", async (ctx) => {
+  const fixture = await renderAppFixture(ctx);
+  await selectRecentTask(/First task/);
+  fireEvent.click(filePreviewOpener("a.txt"));
+  await act(async () =>
+    fixture.previews[0].resolve({
+      state: "ready",
+      content: "retained preview body",
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  await screen.findByText("retained preview body");
+  const source = fixture.snapshot.tasks[0];
+  const older = source.runs[0];
+  older.phase = "completed";
+  older.activity = null;
+  older.terminal = terminal();
+  older.contentVersion = "2";
+  source.runs = [
+    older,
+    ...Array.from({ length: 4 }, (_, index) => ({
+      ...structuredClone(older),
+      id: String(Number(older.id) + index + 1),
+      tools: [],
+      fileChanges: { observation: "complete", changes: [] },
+    })),
+  ];
+  source.currentRunId = source.runs.at(-1).id;
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(
+      Boolean(
+        document.querySelector('[data-run-id="11"]') &&
+        document.querySelector('[data-run-id="7"]'),
+      ),
+      true,
+    ),
+  );
+  await screen.findByText("retained preview body");
+  assert.equal(fixture.previews.length, 1);
+  older.tools = [];
+  older.contentVersion = "3";
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(screen.queryByText("retained preview body") === null, true),
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelectorAll('#task-panel [role="tab"]').length,
+      0,
+    ),
+  );
+  assert.equal(screen.queryByText("retained preview body") === null, true);
 });
