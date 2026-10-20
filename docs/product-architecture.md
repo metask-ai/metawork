@@ -181,7 +181,6 @@ Task 决定等待来源事件、Session 调用、worker lease 与 checkpoint 全
 
 Task stop 在同一次主线程事务里取消当时已有等待消息与接续，并请求停止当前 operation；此后接收的消息等待停止完成，不被旧 stopped/cancelled 终态取消。独立真实失败首次收口时结束当时等待项，之后新输入不被旧回调追溯取消。指定 Run cancel 的取消意图绑定来源 Run，独立于普通 cancel_requested。有效 Stop、归档、删除、移除 Workspace、关闭 Task、显式退出、实际审批修改或 authority 失效，在目标接纳前均结束本批；来源已 terminal 仍可停止预留，旧来源 Stop 不影响已接纳目标。取消只覆盖当时已有的消息；若审批修改后来源仍在运行，随后新接收的插话可以形成新批次，但不得恢复旧消息的接续。隐藏窗口、切页面或 Renderer 断连不取消 Host 意图。来源转入关联与真实目标 Run 在同一候选历史中发布；准备失败且目标回滚时恢复未采纳，普通准入已接纳的目标即使 enqueue 失败也保留真实终态与转入关联。沿用普通 admission 的 best-effort 历史写入语义，不从写入错误推断执行未接纳、不自动重试。目标后续失败或停止不回流来源；完成通知与未读回执语义保持现状。
 
-
 Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。
 
 Product Control 拥有全局的新 Task 默认 `ApprovalMode`，在 create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 记住其模式，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。旧合法历史缺少模式默认值时，从原默认 profile 恢复人工审批或完全访问；不得把新默认值覆盖到已有 Task。
@@ -341,7 +340,7 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 
 大视图读取使用 Product-owned 的单个有界冻结计划。计划只持已脱敏的 owned 内容、结构和内容版本，按编码预算逐步写入调用期借用的运输 buffer；JSON 编码和缓存回填仍属于 Product 投影职责，Bridge 不持计划或解释内容。冻结不推进业务；后续编码步不读取新的 aggregate 事实。版本比较基于精确的脱敏源内容，不能为取得长度或确认稳定版本而先同步编码完整正文；缓存只接纳源内容仍有效的结果。普通业务更新可以使当前缓存失效，但不会把已冻结读取拼接成多个提交；安全失效、读取替换和关闭则直接撤销计划。
 
-安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；相关 credential 集合或 authority 变化同时使旧代次缓存和在途展示结果失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
+安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗本身不推进代次。已知凭据按精确字节值及现有 Host owner 判定，重复取得或释放仍有其他 owner 持有的同值副本不改变安全边界，不额外建立长期凭据副本。真实凭据集合或执行安全 authority 变化使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
 
 主线程上的展示构建、编码、复制和分块处理必须满足[验证规范](validation.md#产品视图与执行隔离验收)的连续时间预算。首先使用有界范围与稳定块复用；只有测量表明仍超预算时，才引入有界分片或独立执行容量。异步投影不能持有 credential、Product Runtime 或可变 aggregate 指针，只接受 owned 数据或不可变输入；接纳结果前重新校验对象、连接、内容版本和安全代次。不能以编码已经移出主线程为由接受仍然超预算的脱敏操作。
 

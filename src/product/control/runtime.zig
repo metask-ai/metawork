@@ -2599,6 +2599,7 @@ pub const Runtime = struct {
         self: *Runtime,
         execution: *models_contract.OwnedConfig,
     ) void {
+        self.invalidateProjectionSecurity();
         self.execution_state.installMetaskNoFail(
             execution,
             execution.input().execution_generation,
@@ -2627,6 +2628,7 @@ pub const Runtime = struct {
         execution: *models_contract.OwnedConfig,
         prepared_binding: *PreparedCustomProviderBinding,
     ) void {
+        self.invalidateProjectionSecurity();
         self.execution_state.installCustomProviderNoFail(
             execution,
             prepared_binding,
@@ -2635,6 +2637,7 @@ pub const Runtime = struct {
     }
 
     pub fn clearExecutionNoFail(self: *Runtime) void {
+        self.invalidateProjectionSecurity();
         self.execution_state.clearNoFail(self.executionProjectionRedaction());
     }
 
@@ -3031,6 +3034,7 @@ pub const Runtime = struct {
             self.execution_state.rejectReplacementNoFail(metaskStageError(err));
             return;
         };
+        self.invalidateProjectionSecurity();
         switch (desired.source) {
             .metask => self.execution_state.installMetaskNoFail(
                 &execution,
@@ -4134,7 +4138,7 @@ pub const Runtime = struct {
         const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
         const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        self.redactAllProductProjectionsNoFail(target.input().api_key);
+        self.learnProjectionCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (attached) {
@@ -8422,7 +8426,7 @@ pub const Runtime = struct {
 
     fn redactTaskRuntimeProducts(context: *anyopaque, credential: []const u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+        self.retireProjectionCredential(credential);
     }
 
     fn releaseTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
@@ -8804,20 +8808,41 @@ pub const Runtime = struct {
         self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
-    /// A credential may become known after older product facts were stored,
-    /// or may be about to leave the set scanned by snapshot serialization.
-    /// Permanently scrub every Renderer-facing projection before either edge.
-    fn redactAllProductProjectionsNoFail(
-        self: *Runtime,
-        credential: []const u8,
-    ) void {
+    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
+        if (credential.len == 0) return false;
+        const installed = self.execution_state.credential();
+        if ((releasing == null or installed.ptr != releasing.?) and std.mem.eql(u8, installed, credential)) return true;
+        return self.task_runtime.retainsCredential(credential, releasing);
+    }
+
+    fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
+        if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
+        if (credential.len == 0) return;
+        // All aliases into the retiring owner disappear together. Other owned
+        // copies of the exact value still protect the same projection boundary.
+        if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    fn invalidateProjectionSecurity(self: *Runtime) void {
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
-        // A newly learned or retiring credential changes the safety of every
-        // previously published byte, even if a block's content did not change.
         if (self.projection_security_epoch != 0)
             self.projection_security_epoch = std.math.add(u64, self.projection_security_epoch, 1) catch 0;
+        // Security revocation must be published even if the surrounding command
+        // subsequently rejects without a normal product revision or completion.
+        _ = self.change_notifier.notify();
+    }
+
+    /// Scrubbing is required at every acquisition/release; it is not itself a
+    /// change of security authority and must not revoke unrelated UI state.
+    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
+        if (credential.len == 0) return;
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
         _ = self.schedule.redactInMemoryNoFail(
@@ -9457,7 +9482,7 @@ pub const Runtime = struct {
         const preparation = self.image_run_preparation orelse return null;
         const image = preparation.prepare(workspace) orelse return null;
         // Scrub facts written before this newly acquired credential was known.
-        self.redactAllProductProjectionsNoFail(image.candidate.input().bearer);
+        self.learnProjectionCredential(image.candidate.input().bearer);
         return image;
     }
 
@@ -15551,7 +15576,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     var control = try testRuntime();
     defer control.deinit();
     const epoch = control.projectionSecurityEpoch();
-    control.redactAllProductProjectionsNoFail("future-credential");
+    control.learnProjectionCredential("future-credential");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     control.redactAllProductProjectionsNoFail("");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
@@ -15561,7 +15586,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     defer parsed.deinit();
     try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
     control.projection_security_epoch = std.math.maxInt(u64);
-    control.redactAllProductProjectionsNoFail("retiring-credential");
+    control.retireProjectionCredential("retiring-credential");
     try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
     try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
@@ -20203,7 +20228,7 @@ test "Product view cached delivery confirms versions without rebuilding stable b
     control.encoded_views.invalidateEvent(999, 999);
     _ = try control.writeViewFixture(&storage, request);
     try std.testing.expectEqual(sequence, control.encoded_views.sequence);
-    control.redactAllProductProjectionsNoFail("revoked-cache-secret");
+    control.learnProjectionCredential("revoked-cache-secret");
     try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
     const secured = try control.writeViewFixture(&storage, request);
     var secured_view = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, secured, .{});
@@ -20253,11 +20278,54 @@ test "Product view frozen read survives business updates and rejects replaced re
     const next = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expect(next.id != read.id);
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 1));
-    control.redactAllProductProjectionsNoFail("newly-learned-secret");
+    control.learnProjectionCredential("newly-learned-secret");
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 1));
     const last = try control.writeSnapshot(&output, .{});
     control.beginShutdown();
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(last.id, &output, 0, 1));
     try std.testing.expectEqual(@as(usize, 0), control.view_read.skeleton.len);
     try std.testing.expectEqual(@as(usize, 0), control.view_read.text.items.len);
+}
+
+test "Product view duplicate credential ownership preserves reads while exact new values revoke and wake" {
+    const Host = struct {
+        wakes: std.atomic.Value(usize) = .init(0),
+        fn wake(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            _ = self.wakes.fetchAdd(1, .monotonic);
+            return true;
+        }
+    };
+    var host: Host = .{};
+    var control = try testRuntimeWith(.{ .change_notifier = .{ .context = &host, .wake = Host.wake } });
+    defer control.deinit();
+    var output: [96 * 1024]u8 = undefined;
+    _ = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    const epoch = control.projectionSecurityEpoch();
+    const wakes = host.wakes.load(.monotonic);
+    const duplicate = try control.allocator.dupe(u8, control.execution_state.credential());
+    defer control.allocator.free(duplicate);
+    control.learnProjectionCredential(duplicate);
+    control.retireProjectionCredential(duplicate);
+    control.redactAllProductProjectionsNoFail(duplicate);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes, host.wakes.load(.monotonic));
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    // A substring of a known credential is a different value, not a known owner.
+    control.learnProjectionCredential("SECRET");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
+    const next = try control.writeSnapshot(&output, .{});
+    // The Task retains a different owned copy of SECRET-KEY. Retiring the
+    // installed copy preserves the set; retiring the remaining Task copy does not.
+    control.retireProjectionCredential(control.execution_state.credential());
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    execution_state.testing.setCredentialBytes(&control.execution_state, "GLOBAL");
+    const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
+    control.retireProjectionCredential(task_credential);
+    try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
 }

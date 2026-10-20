@@ -32,11 +32,13 @@ pub const State = struct {
     }
 
     pub fn deinitOwnedBuffers(self: *State) void {
+        self.invalidate();
         if (self.allocator) |allocator| allocator.free(self.storage);
         self.* = .{};
     }
 
     pub fn invalidate(self: *State) void {
+        std.crypto.secureZero(u8, self.storage[0..self.len]);
         self.len = 0;
         self.generation = 0;
         self.window_id = 0;

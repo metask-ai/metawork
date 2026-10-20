@@ -4362,6 +4362,21 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// Exact value membership, excluding aliases of an owner about to release.
+    /// The caller borrows bytes synchronously; this creates no secret registry.
+    pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
+        if (value.len == 0) return false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
+                if (releasing != null and credential.ptr == releasing.?) continue;
+                if (std.mem.eql(u8, credential, value)) return true;
+            }
+        }
+        return false;
+    }
+
     /// Borrow each retained execution credential only during the callback.
     /// Projection composition may build its own bounded, securely owned matcher;
     /// it must not retain pointers into Task attachments or Run bindings.

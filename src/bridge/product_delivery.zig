@@ -100,7 +100,7 @@ pub const Delivery = struct {
         self.window_id = window_id;
         self.revision.resetConnection();
         self.emitted_security_epoch = 0;
-        self.snapshot.invalidate();
+        self.invalidateSnapshot();
         return self.generation;
     }
 
@@ -119,7 +119,7 @@ pub const Delivery = struct {
         self.window_id = null;
         self.revision.resetConnection();
         self.emitted_security_epoch = 0;
-        self.snapshot.invalidate();
+        self.invalidateSnapshot();
     }
 
     pub fn connectedGeneration(self: *const Delivery) ?u64 {
@@ -158,9 +158,7 @@ pub const Delivery = struct {
         const window_id = self.window_id orelse return error.NoConnection;
         if (security_epoch == 0) return error.StaleSnapshot;
         if (security_epoch != self.snapshot_security_epoch) {
-            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
-            self.snapshot.invalidate();
-            self.snapshot_security_epoch = 0;
+            self.invalidateSnapshot();
         }
         if (!self.revision.needsDelivery(revision) and self.emitted_security_epoch == security_epoch) return .unchanged;
         var detail_storage: [160]u8 = undefined;
@@ -193,10 +191,8 @@ pub const Delivery = struct {
     ) !SnapshotDescriptor {
         const generation = try self.requireWindow(window_id);
         if (security_epoch == 0) return error.StaleSnapshot;
-        if (self.snapshot_security_epoch != security_epoch)
-            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
-        self.snapshot.invalidate();
-        self.snapshot_security_epoch = 0;
+        self.invalidateSnapshot();
+        errdefer std.crypto.secureZero(u8, self.snapshot.storage);
         const prepared = try writer.write(self.snapshot.storage);
         if (prepared.read_id == 0 or prepared.bytes == 0 or prepared.bytes > self.snapshot.storage.len)
             return error.InvalidStorage;
@@ -216,19 +212,21 @@ pub const Delivery = struct {
     ) ![]const u8 {
         const generation = try self.requireWindow(window_id);
         if (security_epoch == 0 or security_epoch != self.snapshot_security_epoch) {
-            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
-            self.snapshot.invalidate();
-            self.snapshot_security_epoch = 0;
+            self.invalidateSnapshot();
             return error.StaleSnapshot;
         }
         const chunk = try self.snapshot.chunk(snapshot_id, generation, window_id, offset);
         materializer.write_fn(materializer.context, self.snapshot_product_read_id, self.snapshot.storage, offset, chunk.len) catch |err| {
-            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
-            self.snapshot.invalidate();
-            self.snapshot_product_read_id = 0;
+            self.invalidateSnapshot();
             return err;
         };
         return chunk;
+    }
+
+    fn invalidateSnapshot(self: *Delivery) void {
+        self.snapshot.invalidate();
+        self.snapshot_security_epoch = 0;
+        self.snapshot_product_read_id = 0;
     }
 
     fn requireConnection(
@@ -418,4 +416,35 @@ test "Product view security notification revokes a descriptor before Renderer re
     try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(7, 1, descriptor.id, 0, .{ .write_fn = preencodedTestRange }));
     try std.testing.expectEqual(RevisionResult.unchanged, try delivery.deliverRevision(1, 2, 2, transport));
     try std.testing.expectError(error.StaleSnapshot, delivery.deliverRevision(1, 0, 3, transport));
+}
+
+test "Product view failed replacement clears all partial transport bytes and revokes the old descriptor" {
+    const Host = struct {
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn good(_: ?*anyopaque, output: []u8) !SnapshotStart {
+            @memset(output[0..12], 's');
+            return .{ .read_id = 1, .bytes = 12 };
+        }
+        fn bad(_: ?*anyopaque, output: []u8) !SnapshotStart {
+            @memset(output[0..3], 'x');
+            return error.InjectedCaptureFailure;
+        }
+    };
+    var bytes: [32]u8 = @splat(0);
+    var delivery: Delivery = .{ .snapshot = .{ .storage = &bytes } };
+    const transport: Transport = .{ .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel };
+    _ = try delivery.connect(1, transport);
+    const first = try delivery.publishSnapshot(1, 1, .{ .write_fn = Host.good });
+    try std.testing.expectError(error.InjectedCaptureFailure, delivery.publishSnapshot(1, 1, .{ .write_fn = Host.bad }));
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(1, 1, first.id, 0, .{ .write_fn = preencodedTestRange }));
+    _ = try delivery.publishSnapshot(1, 1, .{ .write_fn = Host.good });
+    delivery.breakConnection(transport);
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    _ = try delivery.connect(1, transport);
+    _ = try delivery.publishSnapshot(1, 1, .{ .write_fn = Host.good });
+    _ = try delivery.connect(1, transport);
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
