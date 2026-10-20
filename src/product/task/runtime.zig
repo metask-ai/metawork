@@ -6180,7 +6180,9 @@ fn replaceEventFileReferences(
     else
         null;
     clearEventFileReferences(context, tool);
-    const values = refs orelse return;
+    const CoreFileReference = std.meta.Child(@TypeOf(refs.?));
+    const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
+    const values = if (envelope.generated_image_path != null) &generated else refs orelse return;
     if (values.len > context.effects.max_file_refs_per_tool)
         return error.ToolCapacity;
     if (tool.file_refs == null) {
@@ -6215,6 +6217,7 @@ fn replaceEventFileReferences(
             index + 1,
         );
         var owned = task_state.FileReferenceView{
+            .generated_image = envelope.generated_image_path != null,
             .id = undefined,
             .title = undefined,
             .display_path = undefined,

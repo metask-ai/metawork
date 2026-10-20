@@ -836,43 +836,43 @@ pub const Dispatcher = struct {
     ) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = self.callbacks.enter() catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         defer callback.deinit();
         self.requireWindow(invocation.source.window_id) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         var parsed = handlers.parsePayload(
             handlers.FilePreviewRequest,
             invocation.request.payload,
         ) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         defer parsed.deinit();
         if (parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         }
         const task_id = handlers.parseWireId(parsed.value.taskId) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         const run_id = handlers.parseWireId(parsed.value.runId) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         const workbench = self.requireProductControl() catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         const completion_id = self.reserveFilePreview(
             responder,
             invocation.request.id,
         ) orelse {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
             return;
         };
         switch (workbench.beginFilePreview(
@@ -945,6 +945,7 @@ pub const Dispatcher = struct {
                 result.content,
                 result.truncated,
                 result.redacted,
+                result.image_png,
             );
             return;
         }
@@ -961,7 +962,7 @@ pub const Dispatcher = struct {
             );
             const request_id = request_id_storage[0..slot.request_id_len];
             slot.* = .{};
-            respondFilePreview(responder, request_id, .failed, "", false, false);
+            respondFilePreview(responder, request_id, .failed, "", false, false, &.{});
         }
     }
 
@@ -972,6 +973,7 @@ pub const Dispatcher = struct {
         content: []const u8,
         truncated: bool,
         redacted: bool,
+        image_png: []const u8,
     ) void {
         var result_buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&result_buffer);
@@ -998,6 +1000,22 @@ pub const Dispatcher = struct {
             responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
             return;
         };
+        if (state == .ready and image_png.len != 0) {
+            writer.writeAll(",\"image\":{\"mediaType\":\"image/png\",\"dataBase64\":\"") catch {
+                responder.fail(request_id, .internal_error, "Image preview encoding failed") catch {};
+                return;
+            };
+            const encoded_len = std.base64.standard.Encoder.calcSize(image_png.len);
+            const encoded = writer.writableSlice(encoded_len) catch {
+                responder.fail(request_id, .internal_error, "Image preview exceeds Bridge limit") catch {};
+                return;
+            };
+            _ = std.base64.standard.Encoder.encode(encoded, image_png);
+            writer.writeAll("\"}") catch {
+                responder.fail(request_id, .internal_error, "Image preview encoding failed") catch {};
+                return;
+            };
+        }
         writer.print(",\"truncated\":{},\"redacted\":{}}}", .{
             state == .ready and truncated,
             state == .ready and redacted,
@@ -5655,6 +5673,7 @@ test "file preview async response preserves the exact bounded wire shape" {
         "line 1\nline 2",
         true,
         true,
+        &.{},
     );
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     var ready = try std.json.parseFromSlice(
@@ -5684,6 +5703,7 @@ test "file preview async response preserves the exact bounded wire shape" {
         "must not cross the Bridge",
         true,
         true,
+        &.{},
     );
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     var restricted = try std.json.parseFromSlice(
@@ -5704,6 +5724,29 @@ test "file preview async response preserves the exact bounded wire shape" {
     );
     try std.testing.expect(!restricted_result.get("truncated").?.bool);
     try std.testing.expect(!restricted_result.get("redacted").?.bool);
+    const fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("file_preview_image.fixture"), .{});
+    defer fixture.deinit();
+    const base64 = fixture.value.object.get("image").?.object.get("dataBase64").?.string;
+    var png: [256]u8 = undefined;
+    const png_len = try std.base64.standard.Decoder.calcSizeForSlice(base64);
+    try std.base64.standard.Decoder.decode(png[0..png_len], base64);
+    capture.reset();
+    Dispatcher.respondFilePreview(responder, "preview-image", .ready, "", false, false, png[0..png_len]);
+    var image = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer image.deinit();
+    const image_result = image.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings(base64, image_result.get("image").?.object.get("dataBase64").?.string);
+    try std.testing.expectEqualStrings("image/png", image_result.get("image").?.object.get("mediaType").?.string);
+    try std.testing.expectEqualStrings("", image_result.get("content").?.string);
+    const maximum_png = try std.testing.allocator.alloc(u8, 384 * 1024);
+    defer std.testing.allocator.free(maximum_png);
+    @memset(maximum_png, 0);
+    capture.reset();
+    Dispatcher.respondFilePreview(responder, "preview-max", .ready, "", false, false, maximum_png);
+    try std.testing.expect(capture.response.?.len < native_sdk.bridge.max_result_bytes);
+    var maximum = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer maximum.deinit();
+    try std.testing.expectEqual(@as(usize, 524288), maximum.value.object.get("result").?.object.get("image").?.object.get("dataBase64").?.string.len);
 }
 
 test "file change diff async response preserves the strict wire variants" {

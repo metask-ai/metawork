@@ -125,6 +125,7 @@ pub const RunCause = enum {
     session_close,
     app_shutdown,
     event_pipeline_failure,
+    event_payload_too_large,
     queue_capacity_failure,
     ui_pipeline_failure,
     permission_required,
@@ -263,6 +264,7 @@ pub const FileReferenceRangeView = struct {
 pub const FileReferenceLocatorKind = enum { workspace_path, absolute_path, uri };
 
 pub const FileReferenceView = struct {
+    generated_image: bool = false,
     id: []u8,
     title: []u8,
     display_path: []u8,
@@ -1551,6 +1553,45 @@ fn appendNewOutput(
     return projection.appendAssistant(target, suffix, run.redaction_secret);
 }
 
+/// Product history retains an image-read receipt, while Core keeps the full
+/// multimodal result for the model. This grants no file/preview authority.
+fn imageReadSummary(name: []const u8, is_error: bool, content: []const u8) ?[]const u8 {
+    if (is_error or !std.mem.eql(u8, name, "Read")) return null;
+    var scratch: [2048]u8 = undefined;
+    var memory = std.heap.FixedBufferAllocator.init(&scratch);
+    const value = std.json.parseFromSliceLeaky(struct {
+        type: []const u8,
+        media_type: []const u8,
+        data: []const u8,
+    }, memory.allocator(), content, .{ .allocate = .alloc_if_needed }) catch return null;
+    if (!std.mem.eql(u8, value.type, "image") or value.data.len == 0) return null;
+    const size = std.base64.standard.Decoder.calcSizeForSlice(value.data) catch return null;
+    if (size > agent.multimodal_input_limits.max_image_raw_bytes) return null;
+    const unpadded = std.mem.trimEnd(u8, value.data, "=");
+    for (unpadded) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '+' and byte != '/') return null;
+    inline for (.{ "png", "jpeg", "gif", "webp" }) |format| {
+        if (std.mem.eql(u8, value.media_type, "image/" ++ format)) return "[Image read: image/" ++ format ++ "]";
+    }
+    return null;
+}
+
+test "image Read projection accepts the canonical full payload with fixed scratch and rejects unrelated content" {
+    const prefix = "{\"type\":\"image\",\"media_type\":\"image/png\",\"data\":\"";
+    const data_len = std.base64.standard.Encoder.calcSize(agent.multimodal_input_limits.max_image_raw_bytes);
+    const content = try std.testing.allocator.alloc(u8, prefix.len + data_len + 2);
+    defer std.testing.allocator.free(content);
+    @memcpy(content[0..prefix.len], prefix);
+    @memset(content[prefix.len..][0..data_len], 'A');
+    @memcpy(content[content.len - 2 ..], "\"}");
+    try std.testing.expectEqualStrings("[Image read: image/png]", imageReadSummary("Read", false, content).?);
+    try std.testing.expect(imageReadSummary("Bash", false, content) == null);
+    try std.testing.expect(imageReadSummary("Read", true, content) == null);
+    content[prefix.len] = '!';
+    try std.testing.expect(imageReadSummary("Read", false, content) == null);
+    try std.testing.expect(imageReadSummary("Read", false, "{\"type\":\"image\",\"media_type\":\"image/png\",\"data\":\"AAAA\",\"unknown\":true}") == null);
+    try std.testing.expect(imageReadSummary("Read", false, "ordinary text") == null);
+}
+
 /// Applies one canonical Agent event to the Task aggregate. Event pumping,
 /// late-event diagnostics, durable commit, and revision publication remain at
 /// the composition boundary and are selected from the returned outcome.
@@ -1674,7 +1715,7 @@ pub fn applyEvent(
             );
             const content = try projection.replaceText(
                 &tool.content,
-                result.content,
+                imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
                 run.redaction_secret,
             );
             tool.input_truncated = input.truncated;

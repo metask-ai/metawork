@@ -17,7 +17,7 @@ pub const Candidate = struct {
 };
 pub const ImagePreparation = struct {
     context: ?*anyopaque = null,
-    prepare_fn: ?*const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8 = null,
+    prepare_fn: ?*const fn (?*anyopaque, std.mem.Allocator, []const u8, usize) anyerror![]u8 = null,
 };
 /// Application-validated development resources. An ordinary Bash invocation,
 /// not a filesystem or shell authority grant.
@@ -425,7 +425,7 @@ pub const Runtime = struct {
                 std.crypto.secureZero(u8, raw);
                 self.allocator.free(raw);
             }
-            const preview = prepare(self.images.context, self.allocator, raw) catch return error.UnsupportedType;
+            const preview = prepare(self.images.context, self.allocator, raw, max_image_preview_bytes) catch return error.UnsupportedType;
             if (preview.len == 0 or preview.len > max_image_preview_bytes) {
                 self.allocator.free(preview);
                 return error.UnsupportedType;
@@ -800,7 +800,7 @@ const TestStore = struct {
         self.store.deinit();
         self.tmp.cleanup();
     }
-    fn image(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+    fn image(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
         if (std.mem.endsWith(u8, bytes, "invalid")) return error.UnsupportedType;
         return allocator.dupe(u8, bytes);
     }

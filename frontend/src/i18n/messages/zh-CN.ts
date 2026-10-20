@@ -732,7 +732,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_changes.file_count.one": "{fileCount} 个文件",
   "file_changes.file_count.other": "{fileCount} 个文件",
   "file_changes.incomplete_label": "记录可能不完整",
-  "file_changes.incomplete_empty": "文件修改记录可能不完整",
+  "file_changes.incomplete_empty": "未能完整确认本轮的文件修改情况",
   "file_changes.review": "审查更改",
   "file_changes.review_file": "审查 {path} 的更改",
   "file_changes.incomplete_notice":
@@ -1187,7 +1187,8 @@ export const zhCN: Record<MessageId, string> = {
   "cause.session_close": "会话已释放",
   "cause.app_shutdown": "工作台已关闭",
   "cause.event_pipeline_failure": "活动传递失败",
-  "cause.queue_capacity_failure": "工作台容量已满",
+  "cause.event_payload_too_large": "单次执行结果超过大小限制，任务已中断",
+  "cause.queue_capacity_failure": "执行队列容量不足，任务未能继续",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.agent_failure": "Agent 执行失败，请重试",
   "cause.provider_failure": "模型服务请求失败",

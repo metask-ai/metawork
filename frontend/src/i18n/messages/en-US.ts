@@ -825,7 +825,7 @@ export const enUS = {
   "file_changes.file_count.one": "{fileCount} file",
   "file_changes.file_count.other": "{fileCount} files",
   "file_changes.incomplete_label": "Record may be incomplete",
-  "file_changes.incomplete_empty": "The file change record may be incomplete",
+  "file_changes.incomplete_empty": "File changes for this run could not be fully verified",
   "file_changes.review": "Review changes",
   "file_changes.review_file": "Review changes to {path}",
   "file_changes.incomplete_notice":
@@ -1325,7 +1325,8 @@ export const enUS = {
   "cause.session_close": "Session released",
   "cause.app_shutdown": "Workbench closed",
   "cause.event_pipeline_failure": "Activity delivery failed",
-  "cause.queue_capacity_failure": "Workbench capacity reached",
+  "cause.event_payload_too_large": "A single execution result exceeded the size limit; the task was interrupted",
+  "cause.queue_capacity_failure": "The execution queue had insufficient capacity to continue",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure": "Agent execution failed. Try again.",
   "cause.provider_failure": "Model service request failed",

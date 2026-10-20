@@ -7,13 +7,14 @@ pub const OwnedCoreEvent = event_sink.OwnedCoreEvent;
 pub const EventClass = enum { data, control };
 
 pub const Limits = struct {
-    max_event_bytes: usize = 512 * 1024,
+    // A legal Core Read image carries up to 5 MB of Base64 plus the JSON envelope.
+    max_event_bytes: usize = sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 + 64 * 1024,
     global_count: usize = 512,
-    global_bytes: usize = 8 * 1024 * 1024,
+    global_bytes: usize = 32 * 1024 * 1024,
     global_control_reserved_count: usize = 64,
     global_control_reserved_bytes: usize = 2 * 1024 * 1024,
     per_session_count: usize = 128,
-    per_session_bytes: usize = 2 * 1024 * 1024,
+    per_session_bytes: usize = 8 * 1024 * 1024,
     per_session_control_reserved_count: usize = 16,
     per_session_control_reserved_bytes: usize = 512 * 1024,
     session_slots: usize,
@@ -171,7 +172,7 @@ pub const EventPump = struct {
     fn enqueueLocked(self: *EventPump, envelope: OwnedCoreEvent) Error!void {
         if (envelope.session_id == 0 or envelope.run_id == 0) return error.InvalidIdentity;
         if (envelope.encoded_bytes != envelope.json.len or
-            envelope.encoded_bytes > self.limits.max_event_bytes)
+            envelope.ownedBytes() > self.limits.max_event_bytes)
             return error.EventTooLarge;
         const class = classify(envelope.event.value);
         const usage = self.findOrReserveSession(envelope.session_id) orelse
@@ -179,18 +180,18 @@ pub const EventPump = struct {
         errdefer {
             if (usage.count == 0) usage.* = .{};
         }
-        if (!fits(self.count, envelope.encoded_bytes, self.limits.global_count, self.limits.global_bytes, self.bytes))
+        if (!fits(self.count, envelope.ownedBytes(), self.limits.global_count, self.limits.global_bytes, self.bytes))
             return error.GlobalCapacity;
-        if (!fits(usage.count, envelope.encoded_bytes, self.limits.per_session_count, self.limits.per_session_bytes, usage.bytes))
+        if (!fits(usage.count, envelope.ownedBytes(), self.limits.per_session_count, self.limits.per_session_bytes, usage.bytes))
             return error.SessionCapacity;
         if (class == .data) {
             const global_count = self.limits.global_count - self.limits.global_control_reserved_count;
             const global_bytes = self.limits.global_bytes - self.limits.global_control_reserved_bytes;
-            if (!fits(self.data_count, envelope.encoded_bytes, global_count, global_bytes, self.data_bytes))
+            if (!fits(self.data_count, envelope.ownedBytes(), global_count, global_bytes, self.data_bytes))
                 return error.GlobalCapacity;
             const session_count = self.limits.per_session_count - self.limits.per_session_control_reserved_count;
             const session_bytes = self.limits.per_session_bytes - self.limits.per_session_control_reserved_bytes;
-            if (!fits(usage.data_count, envelope.encoded_bytes, session_count, session_bytes, usage.data_bytes))
+            if (!fits(usage.data_count, envelope.ownedBytes(), session_count, session_bytes, usage.data_bytes))
                 return error.SessionCapacity;
         }
         if (self.next_order == std.math.maxInt(u64)) return error.SequenceExhausted;
@@ -198,14 +199,14 @@ pub const EventPump = struct {
         self.next_order += 1;
         self.entries[slot] = .{ .envelope = envelope, .order = self.next_order, .class = class };
         self.count += 1;
-        self.bytes += envelope.encoded_bytes;
+        self.bytes += envelope.ownedBytes();
         usage.count += 1;
-        usage.bytes += envelope.encoded_bytes;
+        usage.bytes += envelope.ownedBytes();
         if (class == .data) {
             self.data_count += 1;
-            self.data_bytes += envelope.encoded_bytes;
+            self.data_bytes += envelope.ownedBytes();
             usage.data_count += 1;
-            usage.data_bytes += envelope.encoded_bytes;
+            usage.data_bytes += envelope.ownedBytes();
         }
     }
 
@@ -239,14 +240,14 @@ pub const EventPump = struct {
 
     fn removeUsage(self: *EventPump, usage: *SessionUsage, entry: Entry) void {
         self.count -= 1;
-        self.bytes -= entry.envelope.encoded_bytes;
+        self.bytes -= entry.envelope.ownedBytes();
         usage.count -= 1;
-        usage.bytes -= entry.envelope.encoded_bytes;
+        usage.bytes -= entry.envelope.ownedBytes();
         if (entry.class == .data) {
             self.data_count -= 1;
-            self.data_bytes -= entry.envelope.encoded_bytes;
+            self.data_bytes -= entry.envelope.ownedBytes();
             usage.data_count -= 1;
-            usage.data_bytes -= entry.envelope.encoded_bytes;
+            usage.data_bytes -= entry.envelope.ownedBytes();
         }
         if (usage.count == 0) usage.* = .{};
     }

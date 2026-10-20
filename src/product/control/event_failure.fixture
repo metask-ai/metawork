@@ -1,0 +1,4 @@
+[
+  {"outcome":"failed","cause":"event_payload_too_large","diagnosticDisposition":"absent"},
+  {"outcome":"failed","cause":"queue_capacity_failure","diagnosticDisposition":"absent"}
+]

@@ -930,3 +930,22 @@ test "additional input migration preserves old Run rows with an empty history ar
     try std.testing.expectEqual(@as(?i64, 1), count.value);
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET additional_inputs_json=X'61'" } }}));
 }
+
+test "history file reference JSON preserves Host image provenance and defaults old records to false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // The checked-in legacy fixture deliberately has no generated_image field.
+    const state = try history.fixture(allocator);
+    const reference = &state.tasks[0].runs[0].tools[0].file_refs.?[0];
+    try std.testing.expect(!reference.generated_image);
+    for ([_]bool{ false, true }) |generated| {
+        reference.generated_image = generated;
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(allocator, database.capability(), state);
+        try expectSame(allocator, database.capability(), state);
+        const loaded = try history.load(allocator, database.capability());
+        try std.testing.expectEqual(generated, loaded.tasks[0].runs[0].tools[0].file_refs.?[0].generated_image);
+    }
+}

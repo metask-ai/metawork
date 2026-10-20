@@ -85,8 +85,10 @@ const Fixture = struct {
     provider_endpoint: []u8,
 
     fn start(trace: []const u8, mode: []const u8) !Fixture {
+        var image_limit_buffer: [32]u8 = undefined;
+        const image_limit = try std.fmt.bufPrint(&image_limit_buffer, "{d}", .{agent.multimodal_input_limits.max_image_raw_bytes});
         var child = try std.process.spawn(std.testing.io, .{
-            .argv = &.{ options.node_path, options.fixture_path, trace, mode },
+            .argv = &.{ options.node_path, options.fixture_path, trace, mode, image_limit },
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .inherit,
@@ -1208,7 +1210,7 @@ const image_product = struct {
         }
     };
 
-    fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8) !void {
+    fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8, image_input: bool) !void {
         try std.testing.expect(control.createCustomProviderWithCredential("synthetic-dialogue-key", .{
             .display_name = "Local dialogue fixture",
             .protocol = .anthropic_messages,
@@ -1222,7 +1224,7 @@ const image_product = struct {
             .source_id = id,
             .expected_provider_revision = created.provider_revision,
             .expected_catalog_generation = created.catalog_generation,
-            .model = .{ .id = model, .metadata = .{ .capabilities = .{ .image_input = false } } },
+            .model = .{ .id = model, .metadata = .{ .capabilities = .{ .image_input = image_input } } },
         } }).accepted);
         const configured = control.modelsView().custom_providers[0];
         const command: models.CustomModelTestCommand = .{
@@ -1286,6 +1288,10 @@ test "GenerateImage canonical Product preserves JPEG and WebP files and receipts
     try expectCanonicalImageProduct("webp", false);
 }
 
+test "GenerateImage canonical Product reads a full-size image through Core and restores its receipt without Base64 history" {
+    try expectCanonicalImageProduct("read-large", false);
+}
+
 test "GenerateImage canonical Product stop joins image HTTP and releases its owned preparation" {
     try expectCanonicalImageProduct("hold", false);
 }
@@ -1319,6 +1325,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
     defer checkpoints.deinit();
     var configuration = image_product.fixture_api.productControlConfiguration();
+    configuration.attachment_images = .{ .prepare_fn = testGeneratedImagePreview };
     configuration.task_persistence = image_product.History.port(&history);
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
@@ -1326,7 +1333,8 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     var control_live = true;
     defer if (control_live) control.deinit();
     try control.startCustomProviders(h.root, effects.vault());
-    try image_product.configureDialogue(&control, h.fixture.provider_endpoint);
+    const large_read = std.mem.eql(u8, mode, "read-large");
+    try image_product.configureDialogue(&control, h.fixture.provider_endpoint, large_read);
     var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(effects.imageTransport());
@@ -1357,7 +1365,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     {
         var access = try control.task_runtime.find(task_id).?.runtime.acquireAccess();
         defer access.deinit();
-        try expectImageDeclaration(h.runtime, access.session.?, false, .host);
+        try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
     const first_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
     const task = control.task_runtime.find(task_id).?;
@@ -1372,6 +1380,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
     try std.testing.expect(task.durable.checkpoint != null);
+    if (!cancelled) try expectProductGeneratedImagePreview(&control, task_id, first_id);
     try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
     const trace = try h.trace();
@@ -1396,9 +1405,13 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
         defer dir.close(std.testing.io);
         var entries = dir.iterate();
         while (try entries.next(std.testing.io)) |entry| {
-            const bytes = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(1024));
+            const bytes = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(agent.multimodal_input_limits.max_image_raw_bytes + 1));
             defer std.testing.allocator.free(bytes);
-            try std.testing.expectEqualSlices(u8, expected_bytes, bytes);
+            if (large_read) {
+                try std.testing.expectEqual(agent.multimodal_input_limits.max_image_raw_bytes, bytes.len);
+                try std.testing.expect(std.mem.startsWith(u8, bytes, expected_bytes[0 .. expected_bytes.len - 12]));
+                try std.testing.expect(std.mem.endsWith(u8, bytes, expected_bytes[expected_bytes.len - 12 ..]));
+            } else try std.testing.expectEqualSlices(u8, expected_bytes, bytes);
             var extension: [8]u8 = undefined;
             try std.testing.expect(std.mem.endsWith(u8, entry.name, try std.fmt.bufPrint(&extension, ".{s}", .{format.extension()})));
             files += 1;
@@ -1408,6 +1421,20 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     var snapshot: [256 * 1024]u8 = undefined;
     const encoded = try control.writeSnapshot(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-image-key") == null);
+    if (large_read) {
+        try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"model_image\""));
+        const run = task.durable.runs[0].?;
+        var read_seen = false;
+        for (run.tools) |entry| if (entry) |tool| {
+            if (!std.mem.eql(u8, tool.name, "Read")) continue;
+            try std.testing.expectEqualStrings("[Image read: image/png]", tool.content);
+            try std.testing.expectEqual(image_product.task_api.testing.state_module.ToolState.completed, tool.state);
+            try std.testing.expect(!tool.content_truncated);
+            read_seen = true;
+        };
+        try std.testing.expect(read_seen);
+        try std.testing.expect(std.mem.indexOf(u8, encoded, "iVBORw0KGgo") == null);
+    }
     try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
     try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
     // Restart Product from its real history and opaque canonical checkpoint.
@@ -1445,10 +1472,11 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     if (recovered.runtime.last_restore_failure) |failure| std.debug.print("image Product restore failed: {s}\n", .{@tagName(failure)});
     try std.testing.expect(recovered.runtime.last_restore_failure == null);
     try std.testing.expect(recovered.runtime.hasAttachedSession());
+    if (!cancelled) try expectProductGeneratedImagePreview(&control, task_id, first_id);
     {
         var access = try recovered.runtime.acquireAccess();
         defer access.deinit();
-        try expectImageDeclaration(h.runtime, access.session.?, false, .host);
+        try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
     const second_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
     try std.testing.expect(recovered.durable.runs[1].?.image_execution == null);
@@ -1522,4 +1550,51 @@ test "model image declarations reach canonical Core create restore and set_model
     try expectImageDeclaration(h.runtime, unknown, false, .unknown);
     // The fixture creates its trace only when a request arrives.
     try std.testing.expectError(error.FileNotFound, h.trace());
+}
+
+fn testGeneratedImagePreview(_: ?*anyopaque, allocator: std.mem.Allocator, _: []const u8, max_bytes: usize) anyerror![]u8 {
+    // Product boundary substitute; public Native preview sizing is tested in Application.
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, allocator, .limited(max_bytes));
+}
+
+fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtime, task_id: u64, run_id: u64) !void {
+    const task = control.task_runtime.find(task_id).?;
+    var reference: ?[]const u8 = null;
+    for (task.durable.runs[0].?.tools) |entry| {
+        const tool = entry orelse continue;
+        if (tool.file_refs) |refs| for (refs) |item| {
+            const ref = item orelse continue;
+            if (ref.generated_image) reference = ref.id;
+        };
+    }
+    try std.testing.expect(reference != null);
+    const Capture = struct {
+        calls: usize = 0,
+        state: image_product.control_api.FilePreviewState = .failed,
+        image_len: usize = 0,
+        fn receive(context: *anyopaque, result: image_product.control_api.FilePreviewResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.state = result.state;
+            std.debug.assert(result.content.len == 0 and !result.truncated and !result.redacted);
+            self.image_len = result.image_png.len;
+            if (result.image_png.len != 0) std.debug.assert(std.mem.startsWith(u8, result.image_png, "\x89PNG\r\n\x1a\n"));
+        }
+    };
+    var capture: Capture = .{};
+    switch (control.beginFilePreview(77, task_id, run_id, reference.?)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(.{ .context = &capture, .complete_fn = Capture.receive });
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
+    try std.testing.expect(capture.image_len > 0);
+    var snapshot: [256 * 1024]u8 = undefined;
+    const json = try control.writeSnapshot(&snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);
 }

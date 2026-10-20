@@ -199,8 +199,8 @@ pub const Limits = struct {
 const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 64 * 1024 * 1024,
     .max_section_bytes = 16 * 1024 * 1024,
-    // Each encoded image preview fits with its checkpoint framing.
-    .max_string_bytes = 2 * 1024 * 1024,
+    // Core Read stores the complete image JSON as one checkpoint string.
+    .max_string_bytes = std.base64.standard.Encoder.calcSize(lifecycle.multimodal_input_limits.max_image_raw_bytes) + 64 * 1024,
     .max_messages = 4096,
     .max_blocks_per_message = 256,
     .chunk_bytes = 256 * 1024,
@@ -971,6 +971,7 @@ pub const FilePreviewState = file_preview.State;
 /// authority and known-credential redaction and must not be retained by the
 /// sink after `complete_fn` returns.
 pub const FilePreviewResult = struct {
+    image_png: []const u8 = &.{},
     completion_id: u64,
     state: FilePreviewState,
     content: []const u8,
@@ -1774,6 +1775,7 @@ pub const Runtime = struct {
             var truncated = false;
             var redacted = false;
             var safe_buffer: []u8 = &.{};
+            var image_png: []const u8 = &.{};
             var safe_content: []const u8 = &.{};
             defer if (safe_buffer.len != 0) {
                 std.crypto.secureZero(u8, safe_buffer);
@@ -1793,6 +1795,21 @@ pub const Runtime = struct {
                 !self.filePreviewWorkspaceAuthorized(reference.?))
             {
                 state = .restricted;
+            } else if (state == .ready and raw.image) {
+                if (self.containsKnownCredential(raw.content)) {
+                    state = .restricted;
+                } else if (self.attachments.images.prepare_fn) |prepare| {
+                    if (prepare(self.attachments.images.context, self.allocator, raw.content, file_preview.max_image_preview_bytes)) |prepared| {
+                        safe_buffer = prepared;
+                        if (safe_buffer.len == 0 or safe_buffer.len > file_preview.max_image_preview_bytes) {
+                            state = .unsupported;
+                        } else if (self.containsKnownCredential(safe_buffer)) {
+                            state = .restricted;
+                        } else {
+                            image_png = safe_buffer;
+                        }
+                    } else |_| state = .failed;
+                } else state = .unsupported;
             } else if (state == .ready) {
                 const cutoff = self.filePreviewCredentialSafeCutoff(
                     raw.content,
@@ -1830,6 +1847,7 @@ pub const Runtime = struct {
                 .completion_id = raw.completion_id,
                 .state = state,
                 .content = safe_content,
+                .image_png = image_png,
                 .truncated = truncated,
                 .redacted = redacted,
             });
@@ -11571,7 +11589,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
-fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
     return allocator.dupe(u8, bytes);
 }
 
@@ -18232,6 +18250,28 @@ test "projection failure after Agent terminal becomes a product failure" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
+}
+
+test "event capacity causes serialize to the shared Renderer fixture" {
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8 }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    defer cases.deinit();
+    for (cases.value) |expected| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
+        control.markTerminalRunsBeforeEventDrain();
+        control.finalizeMarkedTerminalRunsAfterEventDrain();
+        detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
+        var storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeSnapshot(&storage);
+        const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer decoded.deinit();
+        const terminal = decoded.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object;
+        try std.testing.expectEqualStrings(expected.outcome, terminal.get("outcome").?.string);
+        try std.testing.expectEqualStrings(expected.cause, terminal.get("cause").?.string);
+        try std.testing.expectEqualStrings(expected.diagnosticDisposition, terminal.get("diagnosticDisposition").?.string);
+    }
 }
 
 test "event drain barrier atomically publishes terminal product state" {

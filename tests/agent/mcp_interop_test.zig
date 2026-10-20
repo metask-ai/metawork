@@ -1531,7 +1531,7 @@ const task_switch_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAA
 // The platform preview port receives one already encoded canonical PNG. Core,
 // Product staging, owned originals, checkpoints and all protocol codecs are real;
 // OS image decoding and preview generation belong to desktop acceptance.
-fn prepareTaskSwitchPng(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+fn prepareTaskSwitchPng(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, _: usize) anyerror![]u8 {
     var expected: [128]u8 = undefined;
     const size = try std.base64.standard.Decoder.calcSizeForSlice(task_switch_png_base64);
     try std.base64.standard.Decoder.decode(expected[0..size], task_switch_png_base64);

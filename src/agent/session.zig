@@ -495,6 +495,7 @@ pub const SessionRestoreRoute = struct {
     report: CheckpointRestoreReport,
 };
 
+const default_event_limits: event_pump.Limits = .{ .session_slots = 1 };
 pub const Limits = struct {
     max_sessions: usize,
     /// Consumed exactly once during successful Agent Runtime construction.
@@ -505,14 +506,14 @@ pub const Limits = struct {
     /// Runtime-wide owned parts and encoded bytes, including concurrent prepareRun calls.
     max_multimodal_input_bytes: usize = 64 * 1024 * 1024,
     event_capacity: usize = 512,
-    event_bytes: usize = 8 * 1024 * 1024,
+    event_bytes: usize = default_event_limits.global_bytes,
     per_session_event_capacity: usize = 128,
-    per_session_event_bytes: usize = 2 * 1024 * 1024,
+    per_session_event_bytes: usize = default_event_limits.per_session_bytes,
     control_reserved_capacity: usize = 64,
     control_reserved_bytes: usize = 2 * 1024 * 1024,
     per_session_control_reserved_capacity: usize = 16,
     per_session_control_reserved_bytes: usize = 512 * 1024,
-    max_event_bytes: usize = 512 * 1024,
+    max_event_bytes: usize = default_event_limits.max_event_bytes,
     event_enqueue_timeout: std.Io.Duration = .fromMilliseconds(100),
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
@@ -630,6 +631,7 @@ pub const Session = struct {
     image_fixture_binding: ?image_generation.OwnedBinding = null,
     run_image: ?RunImage = null,
     image_sends: usize = 0,
+    image_receipts: [image_generation.production_limits.sends_per_run]?image_generation.Receipt = @splat(null),
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     id: u64,
     provider_id: []u8,
@@ -797,6 +799,7 @@ pub const Session = struct {
         self.run_image = image.*;
         image.* = null;
         self.image_sends = 0;
+        @memset(&self.image_receipts, null);
         self.input_ready = false;
         self.input_window_started = false;
         self.submitted_inputs = .{};
@@ -2397,6 +2400,14 @@ pub const Session = struct {
         const outcome = self.performImage(arguments);
         const encoded = generate_image.result(allocation[@sizeOf(ImageResultHeader)..], outcome) catch
             return staticImageFailure(runtime, result_out, image_unknown_result);
+        if (outcome == .saved) {
+            self.lock();
+            defer self.unlock();
+            for (&self.image_receipts) |*slot| if (slot.* == null) {
+                slot.* = outcome.saved;
+                break;
+            };
+        }
         reserved -= allocation_len;
         transferred = true;
         std.mem.bytesAsValue(ImageResultHeader, allocation[0..@sizeOf(ImageResultHeader)]).* = .{ .allocation_len = allocation_len };
@@ -2480,6 +2491,29 @@ pub const Session = struct {
         return image_generation.perform(runtime.allocator, transport, &image.binding, prompt, limits, &call);
     }
 
+    fn takeGeneratedImagePath(self: *Session, event: sdk.DecodedCoreEvent) !?[]u8 {
+        const result = switch (event) {
+            .known => |value| switch (value) {
+                .tool_result => |result| result,
+                else => return null,
+            },
+            .unknown => return null,
+        };
+        if (result.is_error or !std.mem.eql(u8, result.name, generate_image.name)) return null;
+        self.lock();
+        defer self.unlock();
+        for (&self.image_receipts) |*slot| {
+            const receipt = slot.* orelse continue;
+            var buffer: [4096]u8 = undefined;
+            const expected = generate_image.result(&buffer, .{ .saved = receipt }) catch unreachable;
+            if (!std.mem.eql(u8, result.content, expected)) continue;
+            const path = try self.agent_runtime.allocator.dupe(u8, receipt.pathView());
+            slot.* = null;
+            return path;
+        }
+        return null;
+    }
+
     pub fn onEvent(
         context: ?*anyopaque,
         raw_run: ?*const wire.RunContextV1,
@@ -2558,7 +2592,14 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.EVENT_FATAL;
         };
+        const generated_image_path = self.takeGeneratedImagePath(parsed.value) catch {
+            self.agent_runtime.allocator.free(owned_json);
+            parsed.deinit();
+            self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
+            return wire.EVENT_FATAL;
+        };
         var envelope = OwnedCoreEvent{
+            .generated_image_path = generated_image_path,
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,
@@ -3211,4 +3252,34 @@ test {
     _ = session_control;
     _ = session_binding;
     _ = session_runtime;
+}
+
+test "generated image attestation requires one matching committed Host receipt" {
+    // Exercise the matching boundary with only its allocator, mutex and receipt storage.
+    var runtime: Runtime = undefined;
+    runtime.io = std.testing.io;
+    runtime.allocator = std.testing.allocator;
+    var session: Session = undefined;
+    session.agent_runtime = &runtime;
+    session.mutex = .init;
+    session.image_receipts = @splat(null);
+    const receipt = try image_generation.Receipt.init("generated-images/real.jpg", 123, .jpeg);
+    var buffer: [4096]u8 = undefined;
+    const content = try generate_image.result(&buffer, .{ .saved = receipt });
+    var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = generate_image.name, .input = "{}", .content = content, .is_error = false } } };
+    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    session.image_receipts[0] = receipt;
+    event.known.tool_result.name = "Read";
+    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    event.known.tool_result.name = generate_image.name;
+    event.known.tool_result.is_error = true;
+    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    event.known.tool_result.is_error = false;
+    event.known.tool_result.content = "{\"status\":\"saved\",\"path\":\"generated-images/forged.jpg\"}";
+    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+    event.known.tool_result.content = content;
+    const path = (try session.takeGeneratedImagePath(event)).?;
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings(receipt.pathView(), path);
+    try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
 }

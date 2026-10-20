@@ -65,6 +65,8 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 `activity` 是 nullable discriminated union：简单 kind 为 `queued | starting | waiting_model | thinking | writing_response | waiting_user | compacting_context | finalizing | stopping`；`executing_tools.inFlight` 为 nullable canonical decimal wire integer string，非空时必须为正数；`retrying_provider.attempt/max/delayMs` 要么全部为空、要么都是 canonical decimal wire integer string，attempt/max 为正数、delayMs 可为零且 attempt 不超过 max。`terminal` 精确为 `null | { outcome, cause, diagnosticDisposition }`；非 terminal Run 必须具有 activity 且 terminal 为 null，terminal Run 必须没有 activity且 terminal 非空，phase 与 outcome 必须一致。`cause` 保留 Product 已知的稳定分类。`diagnosticDisposition = absent | withheld`：absent 表示 Agent/Provider 终态没有附加诊断，withheld 表示 Host 接收过非空、被截断或被 credential 清洗的附加诊断，但这些内容按安全边界只留在 Host，不进入 snapshot。该字段不证明诊断的具体类别，也不得被 Renderer 扩写成鉴权、限流、网络或配置结论。AgentCore `api_error`、`tool_error` 与 `image_input_unsupported` 分别映射为 Product `provider_failure`、`tool_failure` 与 `image_input_unsupported`，不得折叠成 `agent_failure` 或把 provider raw diagnostic 发布给 Renderer。queued、waiting_ui、stopping phase 分别只接受 queued、waiting_user、stopping activity。旧字段、缺失 execution/terminal 或额外兼容 shape 一律由严格 decoder 拒绝，不归一化、不 fallback。
 
+Run terminal cause `event_payload_too_large` 表示单次执行事件超过 Host 有界接收上限；`queue_capacity_failure` 表示执行或事件队列无法继续准入。两者不代表磁盘空间不足。文件修改 observation 的 incomplete 只表示未能完整确认修改情况，不推断已保存文件损坏。
+
 每个 Run 另精确发布 `fileChanges = null | { observation, changes }`。null 表示没有建立 typed observation，不能解释为“确认没有修改”；observation 只取 `collecting | complete | incomplete`。`changes[]` entry 精确为 `{ id, order, kind, status, displayPath, fromDisplayPath, beforeBytes, afterBytes, diffAvailable, diffComplete, redacted }`：id 是 Run 内 opaque identity，order、beforeBytes、afterBytes 是 canonical decimal `u64` string；kind 只取 `created | modified | deleted | moved`，status 只取 `applied | partial`，fromDisplayPath 只在 moved 时非空，其余安全标志均为 boolean。同一 Run 的 id 和 order 必须唯一并按 order 严格递增；同路径多次记录不得合并。该投影不运输 raw locator、absolute path、AgentCore handle、agent depth、unified diff、credential 或文件当前内容。根 capability `typedFileChanges` 为 true 时 Renderer 才可消费此字段。
 
 每个 Task 精确发布 `context = { pressure, lastAutoCompact }`。pressure 为 null，或 `{ sourceRunId, currentTokens, warningThreshold, autoCompactThreshold, blockingLimit, severity }`；lastAutoCompact 为 null，或 `{ sourceRunId, dropped, kept, beforeTokens, afterTokens }`。所有计量使用 canonical decimal wire integer，sourceRunId 必须引用同一 Task 的 Run history；threshold 顺序、severity 与 token 数必须一致。context 属于当前 attached Conversation，可跨同一 Session 的 Run 保留，但 Task detach/replacement/restart 后两项均为空，且 detached Task 不得发布 observation。该 surface 不运输 raw CoreEvent tag、transition sequence、private reasoning、provider diagnostic 或 `file_changes`。
@@ -118,7 +120,10 @@ response result 精确为：
 
 Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
 
-Snapshot `tools[].fileRefs[]` entry 精确只含 `{ id, title, displayPath }`。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
+同一 `metawork.files.preview` 接纳 PNG、JPEG 和静态 WebP：worker 在相同路径和 authority 校验下读取最多 10 MiB 原件；主线程通过现有 Native 图片准备 capability 生成最多 384 KiB PNG，并拒绝命中已知 credential 的原件或预览。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { mediaType: "image/png", dataBase64 }`；Base64 最多 524288 字符，总响应仍受 Native SDK 上限约束。文本响应不含 `image`；非 ready 响应不得携带图片。Renderer 仅将这一 closed variant 作为内存中的 PNG 显示，不接收磁盘路径、file URL 或任意 MIME；内联生成图预览与右栏沿用相同请求身份和失败语义，跨 Task 或引用失效不保留图片。
+
+
+Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
 ## File changes diff command
 

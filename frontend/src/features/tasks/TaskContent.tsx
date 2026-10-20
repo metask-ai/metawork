@@ -1,3 +1,7 @@
+import {
+  GeneratedImagePreview,
+  type FilePreviewLoader,
+} from "./GeneratedImagePreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
@@ -221,6 +225,7 @@ export function TaskContent({
   webLink,
   onPrepareRetry,
   onPreviewFile,
+  loadFilePreview,
   onReviewFileChanges,
   onRespond,
   renderPendingUi,
@@ -238,6 +243,7 @@ export function TaskContent({
   fileChangesEnabled: boolean;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
+  loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
     taskId: string,
     runId: string,
@@ -647,6 +653,22 @@ export function TaskContent({
                 ) : null,
               )}
             </div>
+            {run.tools
+              .flatMap((tool) => tool.fileRefs)
+              .filter((reference) => reference.generatedImage)
+              .map((reference) => (
+                <GeneratedImagePreview
+                  key={`${task.id}:${run.id}:${reference.id}`}
+                  taskId={task.id}
+                  runId={run.id}
+                  reference={reference}
+                  enabled={Boolean(synchronized && !responseDisabled)}
+                  load={loadFilePreview}
+                  onOpen={(opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
+                  }
+                />
+              ))}
             {presentation.active && (
               <RunProcess
                 presentation={presentation}

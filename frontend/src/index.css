@@ -9714,3 +9714,65 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .additional-input {
   min-width: 0;
 }
+
+.generated-image-preview {
+  margin: 16px 0;
+  width: fit-content;
+  max-width: min(100%, 576px);
+}
+.generated-image-open {
+  display: block;
+  padding: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-align: left;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface-panel);
+  color: inherit;
+  cursor: pointer;
+}
+.generated-image-open:disabled {
+  cursor: default;
+}
+.generated-image-open img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  background: var(--ui-surface-panel-2);
+}
+.generated-image-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 160px;
+  padding: 16px;
+  color: var(--ui-content-muted);
+}
+.generated-image-retry {
+  color: var(--ui-action-primary);
+}
+.generated-image-retry {
+  min-height: 44px;
+  padding: 8px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.task-panel-preview-image {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+.task-panel-preview-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}

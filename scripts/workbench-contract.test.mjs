@@ -1115,6 +1115,8 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
     "provider_failure",
     "tool_failure",
     "image_input_unsupported",
+    "event_payload_too_large",
+    "queue_capacity_failure",
   ]) {
     const agentFailure = clone(fixture);
     const task = agentFailure.tasks[0];
@@ -1126,6 +1128,21 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
     task.runs[0].terminal = terminal("failed", cause);
 
     assert.deepEqual(decodeWorkbenchSnapshot(agentFailure), agentFailure);
+  }
+});
+
+test("event size and queue capacity retain distinct Host fixture causes", () => {
+  const cases = JSON.parse(readFileSync(new URL("../src/product/control/event_failure.fixture", import.meta.url), "utf8"));
+  for (const expected of cases) {
+    const value = clone(fixture);
+    const task = value.tasks[0];
+    task.activeOperation = null;
+    task.currentRunId = "0";
+    task.currentRunPhase = null;
+    task.runs[0].phase = "failed";
+    task.runs[0].activity = null;
+    task.runs[0].terminal = expected;
+    assert.deepEqual(decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal, expected);
   }
 });
 
@@ -3430,4 +3447,38 @@ test("Models rejects retired image selection projection and execution authority"
     value.models[key] = {};
     assert.throws(() => decodeWorkbenchSnapshot(value));
   }
+});
+
+test("file preview admits only bounded ready PNG image variants", () => {
+  const value = {
+    state: "ready",
+    content: "",
+    truncated: false,
+    redacted: false,
+    image: { mediaType: "image/png", dataBase64: "iVBORw0KGgo=" },
+  };
+  assert.deepEqual(decodeFilePreview(value), value);
+  for (const invalid of [
+    { ...value, state: "missing" },
+    { ...value, content: "binary must not become text" },
+    { ...value, truncated: true },
+    { ...value, image: { ...value.image, mediaType: "image/svg+xml" } },
+    {
+      ...value,
+      image: { ...value.image, dataBase64: "https://example.test/a.png" },
+    },
+    {
+      ...value,
+      image: {
+        ...value.image,
+        dataBase64: "iVBORw0KGgo=" + "A".repeat(524288),
+      },
+    },
+  ])
+    assert.throws(() => decodeFilePreview(invalid), /Invalid Host contract/);
+});
+
+test("file image preview matches the Host shared fixture", () => {
+  const value = JSON.parse(readFileSync(new URL("../src/bridge/file_preview_image.fixture", import.meta.url), "utf8"));
+  assert.deepEqual(decodeFilePreview(value), value);
 });

@@ -300,12 +300,14 @@ export type ExecutionCommandResult = {
 };
 
 export type FileReferenceView = {
+  generatedImage?: true;
   id: string;
   title: string;
   displayPath: string;
 };
 
 export type FilePreview = {
+  image?: { mediaType: "image/png"; dataBase64: string };
   state:
     "ready" | "missing" | "restricted" | "unsupported" | "changing" | "error";
   content: string;
@@ -609,6 +611,7 @@ export const runCauses = [
   "session_close",
   "app_shutdown",
   "event_pipeline_failure",
+  "event_payload_too_large",
   "queue_capacity_failure",
   "ui_pipeline_failure",
   "permission_required",

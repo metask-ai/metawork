@@ -695,11 +695,15 @@ export default function App() {
     () => new Set(taskPanel.session.tabs.map((tab) => tab.tabId)),
     [taskPanel.session.tabs],
   );
+  const loadFilePreview = useCallback(
+    (taskId: string, runId: string, referenceId: string) =>
+      client.previewFile(taskId, runId, referenceId),
+    [client],
+  );
   const filePreviewTabs = useFilePreviewTabs(
     panelTask?.id ?? null,
     previewTabIds,
-    (taskId, runId, referenceId) =>
-      client.previewFile(taskId, runId, referenceId),
+    loadFilePreview,
   );
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
@@ -3839,6 +3843,7 @@ export default function App() {
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 onPrepareRetry={prepareRetry}
                 onPreviewFile={openFilePreview}
+                loadFilePreview={loadFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {

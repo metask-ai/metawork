@@ -83,6 +83,9 @@ const { useFilePreviewTabs } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
+const { GeneratedImagePreview } = await vite.ssrLoadModule(
+  "/src/features/tasks/GeneratedImagePreview.tsx",
+);
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
@@ -2960,7 +2963,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const incompleteMarkup = renderToStaticMarkup(
     taskContentElement(incomplete, "1", { fileChangesEnabled: true }),
   );
-  assert.match(incompleteMarkup, /The file change record may be incomplete/);
+  assert.match(incompleteMarkup, /File changes for this run could not be fully verified/);
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
@@ -6524,3 +6527,131 @@ for (const outcome of ["committed", "timeout"]) {
     assert.equal(calls, 1);
   });
 }
+
+const generatedPng =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8k8AAAAASUVORK5CYII=";
+
+test("generated image loads only its reference and opens the existing preview", async () => {
+  const calls = [];
+  const opened = [];
+  const reference = {
+    id: "host-image-1",
+    title: "",
+    displayPath: "generated-images/ocean.jpg",
+    generatedImage: true,
+  };
+  const view = render(
+    localizedView(
+      createElement(GeneratedImagePreview, {
+        taskId: "17",
+        runId: "23",
+        reference,
+        enabled: true,
+        load: async (...identity) => {
+          calls.push(identity);
+          return {
+            state: "ready",
+            content: "",
+            truncated: false,
+            redacted: false,
+            image: { mediaType: "image/png", dataBase64: generatedPng },
+          };
+        },
+        onOpen: (opener) => opened.push(opener),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.equal(view.container.querySelectorAll("img").length, 1),
+  );
+  assert.deepEqual(calls, [["17", "23", "host-image-1"]]);
+  assert.equal(view.container.textContent, "");
+  assert.match(view.container.querySelector("button").getAttribute("aria-label"), /generated-images\/ocean\.jpg/);
+  assert.equal(
+    view.container.querySelector("img").getAttribute("src"),
+    `data:image/png;base64,${generatedPng}`,
+  );
+  view.container.querySelector("button").click();
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0], view.container.querySelector("button"));
+});
+
+test("generated image ignores late completion after reference replacement and unmount", async () => {
+  const pending = [];
+  const props = {
+    taskId: "17",
+    runId: "23",
+    enabled: true,
+    load: () => new Promise((resolve) => pending.push(resolve)),
+    onOpen() {},
+  };
+  const reference = {
+    id: "old",
+    title: "",
+    displayPath: "old.jpg",
+    generatedImage: true,
+  };
+  const view = render(
+    localizedView(
+      createElement(GeneratedImagePreview, { ...props, reference }),
+    ),
+  );
+  view.rerender(
+    localizedView(
+      createElement(GeneratedImagePreview, {
+        ...props,
+        reference: { ...reference, id: "new", displayPath: "new.jpg" },
+      }),
+    ),
+  );
+  await act(async () =>
+    pending[0]({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image: { mediaType: "image/png", dataBase64: generatedPng },
+    }),
+  );
+  assert.equal(view.container.querySelector("img"), null);
+  view.unmount();
+  await act(async () =>
+    pending[1]({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image: { mediaType: "image/png", dataBase64: generatedPng },
+    }),
+  );
+});
+
+test("right file panel renders a PNG preview instead of source code", () => {
+  const view = render(
+    localizedView(
+      createElement(FilePreviewView, {
+        state: {
+          selected: { id: "image", title: "", displayPath: "ocean.jpg" },
+          phase: "settled",
+          preview: {
+            state: "ready",
+            content: "",
+            truncated: false,
+            redacted: false,
+            image: { mediaType: "image/png", dataBase64: generatedPng },
+          },
+        },
+        mode: "preview",
+        scrollTop: 0,
+        onModeChange() {},
+        onScrollTopChange() {},
+        onRetry() {},
+      }),
+    ),
+  );
+  assert.equal(view.container.querySelectorAll("img").length, 1);
+  assert.equal(
+    view.container.querySelector(".task-panel-preview-source"),
+    null,
+  );
+});
