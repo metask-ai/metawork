@@ -1897,14 +1897,18 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     };
     const FakeHost = struct {
         confirmations: std.atomic.Value(usize) = .init(0),
+        opens: usize = 0,
+        fail_open: bool = false,
 
         fn confirm(context: *anyopaque, _: []const u8, _: []const u8, _: []const u8) Confirmation {
             const self: *@This() = @ptrCast(@alignCast(context));
             _ = self.confirmations.fetchAdd(1, .acq_rel);
             return .approved;
         }
-        fn open(_: *anyopaque, _: []const u8) bool {
-            return true;
+        fn open(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.opens += 1;
+            return !self.fail_open;
         }
         fn now(_: *anyopaque) ?u64 {
             return 1_000;
@@ -2115,7 +2119,23 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     try std.testing.expectEqual(@as(usize, 4), host_context.confirmations.load(.acquire));
 
-    const shutdown_start = try coordinator.authorizeOauth(6, uncertain_server_id);
+    // Cancelled and stale registration completions never reach the browser.
+    try std.testing.expectEqual(@as(usize, 1), host_context.opens);
+    fake_http.registration_failure.store(0, .release);
+    host_context.fail_open = true;
+    const failed_start = try coordinator.authorizeOauth(6, canonical_server_id);
+    try std.testing.expect(failed_start == .started);
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(coordinator.flow == null);
+    try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
+    try std.testing.expectEqual(@as(usize, 2), host_context.opens);
+    _ = coordinator.drain();
+    try std.testing.expectEqual(@as(usize, 2), host_context.opens);
+    host_context.fail_open = false;
+
+    const shutdown_generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
+    const shutdown_start = try coordinator.authorizeOauth(shutdown_generation, uncertain_server_id);
     try std.testing.expect(shutdown_start == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -2123,7 +2143,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     coordinator.shutdown();
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
-    try std.testing.expectEqual(@as(usize, 5), host_context.confirmations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 6), host_context.confirmations.load(.acquire));
 }
 
 fn waitForCoordinatorJob(coordinator: *Coordinator) void {

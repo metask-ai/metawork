@@ -145,8 +145,10 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 | --- | --- | --- | --- |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
-| `external_link_handoff` | 一级 | Renderer 只提交用户显式点击的有界 `http`、`https` 或 `mailto` URL；Bridge 校验 connection/window、协议、绝对地址、无 credential 与控制字符后，Application 通过公开 `PlatformServices.openExternalUrl` 交给系统 handler。URL 不进入 Product、Snapshot、日志或持久化，失败只返回闭合结果 | SDK Runtime API 提供不要求全局放宽 WebView navigation policy、可逐次接收同等严格目标的 external-open 能力并通过 macOS/Windows 验收 |
+| `external_link_handoff` | 一级 | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
+
+`external_link_handoff` 只允许三种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
 

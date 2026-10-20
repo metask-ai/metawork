@@ -49,7 +49,7 @@ npm run check
 npm test
 ```
 
-Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
+Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放及受限 Host URL handoff；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
 
 模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
 
@@ -206,6 +206,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 | `system_webview_resize`                                              | 已验证：上沿与两上角真实鼠标缩放、光标、原生边缘双击、绘制、重载及隐藏重开；不再承担标题栏序列重置 | 不适用于已登记兼容 seam | `E-WIN-TOP-RESIZE-20260916`（历史）、`E-WIN-CHROME-GESTURES-20260919` | 混合 DPI 跨屏、负坐标实屏、高对比模式及其他 Windows 版本；SDK 正式能力需等价验收 |
 | SDK System WebView 窗口控制（原 `system_webview_maximize_restore` / `maximized_state` / `user_close` 已移除） | 已验证：SDK 窗口事实、真实按钮与双击、Alt+F4、任务栏恢复、关闭交错、hide/reopen、reload 与 clean shutdown | 本次未改变 macOS 原生窗口控制路径 | [E-WIN-SDK-CONTROLS-20261017](#e-win-sdk-controls-20261017)；旧 compatibility 证据仅作历史 | Windows 11、混合 DPI、其他 WebView2 与安装包；不关闭顶部缩放 seam 的独立 Gate |
 | `app_single_instance`                                                | 已验证：多进程仲裁、activation 转交、restart 与 crash 后 lease 恢复；人工验收待完成：交互失败与安装升级 | 已验证（历史）：交叉语义编译；人工验收待完成：socket 权限、peer identity、并发转交、提示、shutdown 和 crash recovery | `E-WIN-SINGLE-20260828`、`E-MACOS-SINGLE-COMPILE-20260828` | 两平台分别取得完整实例仲裁与 activation 验收                |
+| `external_link_handoff` | binding 回归已覆盖；原生 handler 验收待完成 | binding 回归已覆盖；原生 handler 验收待完成 | `zig build test-sdk-consumption`（SDK TestHarness） | 两平台真实浏览器、邮件 handler、完整 OAuth、取消与失败验收；在专用测试用户或虚拟机执行 |
 | `macos_icon_composer_package`                                        | 不适用                                                                                                  | 自动化已覆盖：源结构与编译输入输出；已验证：历史本机 `actool` compile；人工验收待完成：签名、公证和视觉              | `E-MACOS-ICON-20260825`                                    | Developer ID、DMG、公证、macOS 26 明暗视觉和旧系统 fallback |
 
 Runtime 已提供语义等价能力的 Application effect 不能作为 compatibility 长期豁免；受限 public primitive 的允许边界由高层架构拥有。在结构 guard 和对应线程、行为、shutdown 证据全部完成前，仓库级兼容 Gate 保持打开。定向 binding 回归不替代领域事务或真实平台证据，单项兼容能力通过也不能证明全仓低层能力路径合规。

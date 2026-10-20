@@ -2961,3 +2961,21 @@ test("Application SDK bindings retain Runtime dependencies for migrated effects"
   assert.match(window, /runtime\.showNotification\(/u);
   assert.match(window, /runtime\.windowChrome\(/u);
 });
+
+test("Host URL handoff preserves denied WebView navigation", () => {
+  assert.match(
+    read("app.zon"),
+    /external_links\s*=\s*\.\{\s*\.action\s*=\s*"deny"/u,
+  );
+  const handoff = read("src/app/platform.zig").match(
+    /pub fn openMcpAuthorizationUrl\([\s\S]*?\n    \}/u,
+  )?.[0];
+  assert.ok(handoff);
+  assert.match(handoff, /main_thread_id/u);
+  assert.match(handoff, /services_value\.openExternalUrl\(url\)/u);
+  assert.doesNotMatch(handoff, /runtime\.openExternalUrl|external_links\s*=/u);
+  assert.doesNotMatch(
+    read("src/app.zig"),
+    /external_links\s*=|allowed_urls\s*=/u,
+  );
+});

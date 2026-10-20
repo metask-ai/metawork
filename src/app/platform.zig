@@ -253,14 +253,26 @@ pub const Adapter = struct {
     }
 
     pub fn openMcpAuthorizationUrl(self: *Adapter, url: []const u8) bool {
-        const runtime = self.native_runtime orelse return false;
-        runtime.openExternalUrl(url) catch return false;
+        if (std.Thread.getCurrentId() != self.main_thread_id or self.native_runtime == null)
+            return false;
+        // The MCP owner binds this URL to the current consent/attempt. Keep
+        // Host handoff independent of the WebView's deny-navigation policy.
+        if (url.len == 0 or url.len > native_sdk.platform.max_external_url_bytes or
+            !std.unicode.utf8ValidateSlice(url)) return false;
+        for (url) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\') return false;
+        const uri = std.Uri.parse(url) catch return false;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https") or uri.host == null or
+            uri.host.?.isEmpty() or uri.user != null or uri.password != null or
+            uri.fragment != null) return false;
+        const services_value = self.platform_services orelse return false;
+        services_value.openExternalUrl(url) catch return false;
         return true;
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) !void {
         const self: *Adapter = @ptrCast(@alignCast(context orelse
             return error.RuntimeUnavailable));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.WrongThread;
         const services_value = self.platform_services orelse
             return error.RuntimeUnavailable;
         try services_value.openExternalUrl(url);
@@ -505,6 +517,48 @@ test "main-loop wake publishes Native startup to the live activation listener" {
     // Guaranteed post-bind request in addition to the concurrent stress.
     try std.testing.expectEqual(T.activation.Status.accepted, queue.accept(frame));
     try std.testing.expect(T.calls.load(.monotonic) > 0);
+}
+
+const ExternalUrlTest = struct {
+    var calls: usize = 0;
+    var fail = false;
+    var exact = false;
+    const url = "https://oauth.example.invalid/authorize?state=synthetic&code_challenge=synthetic";
+    fn open(_: ?*anyopaque, value: []const u8) anyerror!void {
+        calls += 1;
+        exact = std.mem.eql(u8, value, url);
+        if (fail) return error.InjectedHandlerFailure;
+    }
+};
+
+test "SDK consumption MCP Host handoff preserves deny policy and exact target" {
+    const T = ExternalUrlTest;
+    T.calls = 0;
+    T.fail = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.open_external_url_fn = T.open;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+    try std.testing.expectError(error.NavigationDenied, harness.runtime.openExternalUrl(T.url));
+    try std.testing.expectEqual(@as(usize, 0), T.calls);
+    try std.testing.expect(adapter.supportsMcpExternalAuthorization());
+    try std.testing.expect(adapter.openMcpAuthorizationUrl(T.url));
+    try std.testing.expectEqual(@as(usize, 1), T.calls);
+    try std.testing.expect(T.exact);
+    try std.testing.expectEqual(native_sdk.security.ExternalLinkAction.deny, harness.runtime.options.security.navigation.external_links.action);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.options.security.navigation.external_links.allowed_urls.len);
+    for ([_][]const u8{ "", "http://oauth.example.invalid/", "mailto:a@example.invalid", "https://user:pass@oauth.example.invalid/", "https://oauth.example.invalid/#fragment", "https://oauth.example.invalid/\n" }) |invalid| {
+        try std.testing.expect(!adapter.openMcpAuthorizationUrl(invalid));
+    }
+    try std.testing.expectEqual(@as(usize, 1), T.calls);
+    T.fail = true;
+    try std.testing.expect(!adapter.openMcpAuthorizationUrl(T.url));
+    try std.testing.expectEqual(@as(usize, 2), T.calls);
+    adapter.main_thread_id +%= 1;
+    try std.testing.expect(!adapter.openMcpAuthorizationUrl(T.url));
+    try std.testing.expectEqual(@as(usize, 2), T.calls);
 }
 
 test "SDK consumption timers preserve producer IDs and explicit failures" {
