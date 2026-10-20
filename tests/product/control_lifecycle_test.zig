@@ -10270,7 +10270,7 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         switch (read) {
             .revision => _ = control.currentRevision(),
             .snapshot => _ = try control.writeAggregateFixture(&snapshot),
-            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id }),
+            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true }),
             .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
             .personal_catalog => _ = control.skillCatalog(),
             .task_catalog => _ = try control.taskCatalog(task.durable.id),
@@ -10287,11 +10287,19 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         try std.testing.expectEqual(before_revision, control.revision);
         try std.testing.expectEqual(before_phase, task_state.runPhase(run));
         try std.testing.expectEqual(before_commits, history.commits);
+        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) != null);
         // Worker completion advances without a Renderer once Application
         // consumes its wake through the explicit Product event boundary.
         try control.drainAgentEvents();
         try std.testing.expect(run.event_stream_finalized);
         try std.testing.expectEqual(.completed, task_state.runPhase(run));
+        if (read == .view) {
+            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) == null);
+            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true });
+            var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, finalized, .{});
+            defer decoded.deinit();
+            try std.testing.expect(decoded.value.object.get("searchIndex").?.array.items[0].object.get("output").? != .null);
+        }
     }
 }
 

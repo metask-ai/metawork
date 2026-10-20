@@ -80,7 +80,9 @@ pub const Cache = struct {
     pub fn invalidateEvent(self: *Cache, task_id: u64, run_id: u64) void {
         self.invalidate(.workspaces);
         self.invalidate(.taskIndex);
-        self.invalidate(.searchIndex);
+        // Search contains immutable inputs and completed output. Admission,
+        // terminal publication and security changes invalidate it through the
+        // Product revision boundary; streaming deltas cannot change its body.
         if (self.entries[@intFromEnum(Kind.taskPage)]) |*entry| {
             if (entry.key.task_id == task_id) entry.dirty = true;
         }
@@ -139,6 +141,17 @@ test "Product view block capacity eviction and safety clearing cannot reuse revo
     try std.testing.expect(cache.get(second) == null);
     const fresh = try seed(&cache, std.testing.allocator, 14, first, "context");
     try std.testing.expect(fresh > old);
+}
+
+test "Product view search survives streaming and invalidates at lifecycle boundaries" {
+    var cache: Cache = .{};
+    defer cache.clear(std.testing.allocator);
+    const key = Key{ .kind = .searchIndex, .limit = 1 };
+    const version = try seed(&cache, std.testing.allocator, 128, key, "completed search corpus");
+    cache.invalidateEvent(1, 2);
+    try std.testing.expectEqual(version, cache.get(key).?.version);
+    cache.invalidateAll();
+    try std.testing.expect(cache.get(key) == null);
 }
 
 test "Product view cache allocation failure and version exhaustion preserve the previous block" {

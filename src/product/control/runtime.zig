@@ -9552,6 +9552,9 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const maximumFixture = maximumProjectionFixture;
+    pub fn maximumToolFixture() !Runtime {
+        return maximumProjectionFixtureWithTools(true);
+    }
     pub fn writeViewFixture(self: *Runtime, output: []u8, request: ViewRequest) ![]const u8 {
         const read = try self.writeSnapshot(output, request);
         var offset: usize = 0;
@@ -16892,6 +16895,10 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
 }
 
 fn maximumProjectionFixture() !Runtime {
+    return maximumProjectionFixtureWithTools(false);
+}
+
+fn maximumProjectionFixtureWithTools(tool_inputs: bool) !Runtime {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -16965,8 +16972,8 @@ fn maximumProjectionFixture() !Runtime {
                     .route_digest = toolRouteDigest(""),
                     .id = try control.copyBounded(tool_id, limits.max_tool_field_bytes),
                     .order = @intCast(tool_index + 1),
-                    .name = try control.copyBounded("tool", limits.max_tool_field_bytes),
-                    .input = try control.copyBounded("", limits.max_tool_field_bytes),
+                    .name = try control.copyBounded(if (tool_inputs and task_index == 0) "Bash" else "tool", limits.max_tool_field_bytes),
+                    .input = try control.copyBounded(if (tool_inputs and task_index == 0) "{\"command\":\"echo\"}" else "", limits.max_tool_field_bytes),
                     .progress = try control.copyBounded("", limits.max_tool_field_bytes),
                     .content = try control.copyBounded("", limits.max_tool_field_bytes),
                     .state = .completed,
