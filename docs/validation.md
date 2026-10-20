@@ -158,11 +158,11 @@ Task completion receipt 的最小充分证据必须跨越实际 owner：Product 
 
 File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
-### GenerateImage 正式服务的输出格式缺口
+### GenerateImage 输出格式验证
 
-此前 Windows x86_64 的一次正式接口探测复用 Account 正常授权 lease：目录声明默认图片模型可用，单张 `b64_json` 请求返回 HTTP 200，但解码字节未通过旧版 PNG-only signature 检查。该探测未保留返回图片，不能据此确认实际 MIME、尺寸或图片内容，也没有重试。
+codec 按内容签名和有界容器结构接纳 PNG、JPEG 与静态 WebP，并原样交付文件输出。离线回归覆盖基线/渐进 JPEG、有损/无损/透明 WebP、截断和尺寸约束；canonical Product 链路核对原字节、扩展名及 receipt MIME，不要求服务端统一输出 PNG。
 
-当前 codec 已按内容签名和有界容器结构接纳 PNG、JPEG 与静态 WebP，并原样交付文件输出。离线回归覆盖基线/渐进 JPEG、有损/无损/透明 WebP、截断和尺寸约束；canonical Product 链路核对原字节、扩展名及 receipt MIME。该证据不代替正式服务和实际文件的验收。收费探测须按用户明确授权范围执行，不能因格式校验失败自动重试；后续正式服务结果在此更新。
+Windows x86_64 的已授权正式请求取得可完整解码的 JPEG。临时探针在记录诊断签名长度时因整数类型收窄溢出而退出，完整图片字节已保留；随后将同一字节经修复后的 Agent codec、真实 Application worker 与文件输出零网络回放，得到 JPEG receipt，文件扩展名、MIME、字节数与原字节完全一致。此证据分别覆盖正式接口返回、原字节兼容和真实文件输出，不冒充同一次正式 Core Run 的连续端到端验收，也不证明其他格式的正式返回或其他平台。收费探测须按用户明确授权范围执行，不得因格式或诊断失败自动重试。
 
 ### GenerateImage 工具集合迁移的恢复缺口
 
