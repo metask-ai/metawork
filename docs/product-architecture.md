@@ -290,7 +290,7 @@ Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过
 2. 替换或清空默认 execution 前，清洗 Workspace、Task、Run、Tool、UI 与 Schedule 的 durable candidate；
 3. 释放 quiescent Task-owned ExecutionConfig 前，再用即将释放的 credential 清洗该 Task 的全部产品历史；
 4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
-5. serializer 继续扫描所有 live credential，作为提交前的第二道防线。
+5. 新构建的投影块在交付前继续扫描所有 live credential，作为提交前的第二道防线；仅在内容版本和安全代次均未改变时，才允许复用已经检查过的编码块。
 
 Models desired default 在自身 registry transaction 中先提交，不等待 Schedule scrub。Schedule scrub 明确失败或 outcome unknown 时不得安装新的 active execution；Product Control 保留旧 active credential owner、关闭 desired/active 不匹配的新 Task admission并发布 recovery。恢复成功后按当前 Models desired authority重新 resolve和安装，不回滚 Models，也不改写 Account fact。
 
@@ -332,6 +332,18 @@ Application 关闭 Product 路径时必须遵守以下顺序：
 6. Models 停止新管理命令，cancel/join Metask catalog与模型测试 worker并释放 credential vault port；Account committed shutdown effect取消自身 timer、join attempt worker并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
 
 Agent Session、callback、UI request、event pump、close race、错误映射和 Agent Runtime 内部销毁顺序只由[AgentCore 集成契约](agentcore-integration.md)定义；Product/Application 不得拆开或替代 Agent-owned shutdown fence。
+
+### 3.1 产品视图与执行推进
+
+Product aggregate 独占产品事实、局部事务和执行资格。Product Control 投影只读取已经提交的事实，生成用于展示的摘要、页面上下文、当前 Task 和有界历史，不接纳 Run、不推进 lifecycle、不提交历史。Bridge 可达的版本、Workspace、Task、catalog、permission 与视图查询适用同一约束。Application 按明确 command、Agent event、worker completion 和 lifecycle wake 安排业务推进；有无 Renderer、读频率、分块和重试不得改变必要的推进路径。
+
+投影按稳定产品 identity 和内容版本维护有界编码缓存。无关 Task 的正文不参与局部展示更新；terminal Run 的脱敏、coverage 或关联事实变化仍须使对应块失效。缓存只保存可重建的产品视图，不成为产品事实或持久化的第二 owner。容量不足时淘汰可重建块，不能缩小产品限制、丢失历史访问能力或把合格数据永久变成不可显示。
+
+安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；相关 credential 集合或 authority 变化同时使旧代次缓存和在途展示结果失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
+
+主线程上的展示构建、编码、复制和分块处理必须满足[验证规范](validation.md#产品视图与执行隔离验收)的连续时间预算。首先使用有界范围与稳定块复用；只有测量表明仍超预算时，才引入有界分片或独立执行容量。异步投影不能持有 credential、Product Runtime 或可变 aggregate 指针，只接受 owned 数据或不可变输入；接纳结果前重新校验对象、连接、内容版本和安全代次。不能以编码已经移出主线程为由接受仍然超预算的脱敏操作。
+
+持久化和 credential 事务仍由原 owner 决定，展示缓存不改变持久化格式或 commit 语义。两类操作的主线程成本必须与投影成本分开测量；若任一同步路径在展示压力下使 event pump 超时或改变 Run 终态，仍属于执行隔离验收的阻塞项，不得通过放宽队列、超时或跳过安全检查掩盖。
 
 ## 4. 产品历史、持久化与恢复
 

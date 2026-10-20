@@ -65,6 +65,8 @@ flowchart TB
 
 Renderer 拥有 WebUI 页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以缓存 canonical Product projection，但不能成为 Workspace、Task、Run、Account、Agent execution、持久化历史、permission 或原生窗口状态的唯一 owner；WebView reload 或重连后必须能够从 Host Snapshot 重建界面。
 
+Renderer 按消费者范围读取 Host 产品视图：导航使用摘要，页面使用实时上下文，Task 使用当前内容和有界历史。恢复只要求重建当前所需范围，不要求先加载全部 Task 正文。Renderer 缓存只保存 Host 已发布的产品块，内容或安全代次失效时必须按 Host 指示替换；不消费 raw CoreEvent 来重建 Product 状态机。完整运输和一致性语义由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义。
+
 Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 实现，不作为与 Host 对立的恶意安全主体。它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，并在用户显式交互的有界生命周期内持有对应领域合同允许的 UI 输入或本地资源 locator；本地路径是否可以进入某个 typed command 由对应领域合同决定，不因数据先到达 Renderer 就要求 Native SDK 提供功能重复的 Host-only 接口。credential、raw file content 与原生 handle 仍只按各自明确合同处理，这一定位不授予通用访问权。
 
 可信 UI 身份不使 Renderer 成为 Product authority、credential store 或原生系统 effect owner。Renderer 不访问任意文件或进程，不持有原生 identity/handle，不执行未登记的窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。Bridge 对 payload 的严格解码和 Host 对 identity、revision、membership、资源范围与时效的重新校验用于维护 owner、处理陈旧 UI 状态、实现错误隔离并拒绝格式错误，不以 Renderer 是恶意代码为前提。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
@@ -78,6 +80,8 @@ Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged 
 Bridge 是 Renderer 与 Host 之间的唯一产品通信边界。产品命令面只严格解码、校验 source/window authority、dispatch typed command 并运输 Snapshot/Event；受限平台 capability 面只接受已登记的封闭 intent 并交给 Application。两面可以复用 transport 和 origin policy，但不共享产品状态或系统执行 authority。
 
 Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，Bridge 不接收 raw secret；这些命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
+
+ProductDelivery 调用的 Product 查询和版本通知接口不得推进业务；读取、刷新、分块、重试或连接状态不能接纳 Run、安排评审、触发恢复、提交历史或完成删除。业务推进由明确的 command、Agent event、worker completion 和 lifecycle wake 驱动。展示数据构建必须有界，不能让界面读取占据任务调度和 Agent event 消费所需的主线程；具体并发和资源责任由 [Product 架构](product-architecture.md#31-产品视图与执行推进)定义。
 
 ### 3.3 Product
 
