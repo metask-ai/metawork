@@ -400,6 +400,18 @@ export default function App() {
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const [taskReadingMemory] = useState(createTaskReadingMemory);
+  useEffect(() => {
+    // Reclaim after TaskContent's unmount cleanup has saved its last position.
+    taskReadingMemory.prune(
+      new Set(snapshot.taskIndex.map((task) => task.id)),
+      snapshot.taskPage?.task
+        ? {
+            taskId: snapshot.taskPage.task.id,
+            runIds: new Set(snapshot.taskPage.runManifest.map((run) => run.id)),
+          }
+        : undefined,
+    );
+  }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
   function retainHistoryForPanel(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];

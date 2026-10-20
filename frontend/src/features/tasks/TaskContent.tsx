@@ -58,12 +58,33 @@ import {
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
 export function createTaskReadingMemory() {
-  return {
+  const memory = {
     reading: new Map<string, ReadingState>(),
     processDisclosure: new Map<string, RunProcessDisclosure>(),
     toolDisclosure: new Map<string, ReadonlySet<string>>(),
   };
+  return {
+    ...memory,
+    prune(
+      taskIds: ReadonlySet<string>,
+      manifest?: { taskId: string; runIds: ReadonlySet<string> },
+    ) {
+      for (const taskId of memory.reading.keys())
+        if (!taskIds.has(taskId)) memory.reading.delete(taskId);
+      for (const entries of [memory.processDisclosure, memory.toolDisclosure]) {
+        for (const key of entries.keys()) {
+          const [taskId, runId] = key.split(":");
+          if (
+            !taskIds.has(taskId!) ||
+            (manifest?.taskId === taskId && !manifest.runIds.has(runId!))
+          )
+            entries.delete(key);
+        }
+      }
+    },
+  };
 }
+
 export type TaskReadingMemory = ReturnType<typeof createTaskReadingMemory>;
 
 const emptyToolDisclosure: ReadonlySet<string> = new Set();

@@ -6957,3 +6957,26 @@ test("App keeps a preview through a missing history page and closes it only afte
   );
   assert.equal(screen.queryByText("retained preview body") === null, true);
 });
+
+test("reading memory prunes confirmed deletions while preserving unloaded scopes", () => {
+  const memory = createTaskReadingMemory();
+  for (const taskId of ["1", "2"]) {
+    memory.reading.set(taskId, { scrollTop: 180, followingLatest: false });
+    for (const runId of ["1", "2"]) {
+      memory.processDisclosure.set(`${taskId}:${runId}`, {});
+      memory.toolDisclosure.set(`${taskId}:${runId}`, new Set(["tool"]));
+    }
+  }
+  memory.prune(new Set(["1", "2"]));
+  assert.equal(memory.processDisclosure.size, 4);
+  assert.equal(memory.toolDisclosure.size, 4);
+  memory.prune(new Set(["1", "2"]), { taskId: "1", runIds: new Set(["2"]) });
+  assert.equal(memory.processDisclosure.has("1:1"), false);
+  assert.equal(memory.toolDisclosure.has("1:2"), true);
+  assert.equal(memory.processDisclosure.has("2:1"), true);
+  memory.prune(new Set(["2"]));
+  assert.equal(memory.reading.has("1"), false);
+  assert.equal(memory.processDisclosure.has("1:2"), false);
+  assert.equal(memory.toolDisclosure.has("1:2"), false);
+  assert.equal(memory.reading.get("2").scrollTop, 180);
+});
