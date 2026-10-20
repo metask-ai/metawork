@@ -49,6 +49,8 @@ npm run check
 npm test
 ```
 
+Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
+
 模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
 
 Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影、严格 Bridge payload 与逐 generation 的不可变 Run protocol 历史。真实 Task/Run 与 Session setModel 行为归 `test-lifecycle`；其中跨连接事务必须观察完整目标配置、基线确认、旧 Session 释放、目标 checkpoint adoption、失败后一次原配置恢复，以及下一次显式 admission 使用新模型。Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；fixture 不替代真实 Core、能力连续性和桌面验收。
@@ -206,7 +208,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 | `app_single_instance`                                                | 已验证：多进程仲裁、activation 转交、restart 与 crash 后 lease 恢复；人工验收待完成：交互失败与安装升级 | 已验证（历史）：交叉语义编译；人工验收待完成：socket 权限、peer identity、并发转交、提示、shutdown 和 crash recovery | `E-WIN-SINGLE-20260828`、`E-MACOS-SINGLE-COMPILE-20260828` | 两平台分别取得完整实例仲裁与 activation 验收                |
 | `macos_icon_composer_package`                                        | 不适用                                                                                                  | 自动化已覆盖：源结构与编译输入输出；已验证：历史本机 `actool` compile；人工验收待完成：签名、公证和视觉              | `E-MACOS-ICON-20260825`                                    | Developer ID、DMG、公证、macOS 26 明暗视觉和旧系统 fallback |
 
-以下不是可长期豁免的 capability：Application adapter 中仍存在 Runtime 已覆盖能力的直接低层调用。它们在架构收口、结构 guard 和对应线程、行为、shutdown 证据全部完成前，仓库级兼容 Gate 保持打开。单项兼容能力通过不能证明全仓低层能力路径合规。
+Runtime 已提供语义等价能力的 Application effect 不能作为 compatibility 长期豁免；受限 public primitive 的允许边界由高层架构拥有。在结构 guard 和对应线程、行为、shutdown 证据全部完成前，仓库级兼容 Gate 保持打开。定向 binding 回归不替代领域事务或真实平台证据，单项兼容能力通过也不能证明全仓低层能力路径合规。
 
 主循环 wake 按[高层架构](architecture.md#35-native-sdk)属于正常 SDK 消费，不再等待缺口确认或独立 compatibility seam。Application 回归由正式 Native graph 与 `zig build test-single-instance` 覆盖：服务缺失、启动绑定与 pending 交接、显式通知失败、已消费与较早需求的结算、停止入口及在途 callback join。架构 guard 约束启动前不发布回调、绑定晚于平台启动、join 早于平台清理；Agent 的有界重试/合并与 required completion 的失败策略保持各自 owner。macOS 真实 SDK 投递与竞态对照见 `E-MACOS-WAKE-20261019`；Windows Named Pipe、原生 wake 投递及 OS enqueue 失败的错误传播仍需独立平台证据，不能用注入错误或 SDK 返回成功代替。
 

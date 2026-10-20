@@ -177,7 +177,7 @@ pub const Adapter = struct {
         const delay_ms = if (due_unix_ms > current) due_unix_ms - current else 1;
         const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch
             std.math.maxInt(u64);
-        (self.platform_services orelse return false).startTimer(
+        (self.native_runtime orelse return false).startTimer(
             mcp_oauth_timer_id,
             delay_ns,
             false,
@@ -186,8 +186,8 @@ pub const Adapter = struct {
     }
 
     pub fn cancelMcpOauthTimer(self: *Adapter) void {
-        if (self.platform_services) |services_value|
-            services_value.cancelTimer(mcp_oauth_timer_id) catch {};
+        if (self.native_runtime) |runtime|
+            runtime.cancelTimer(mcp_oauth_timer_id) catch {};
     }
 
     pub fn mcpCatalogNowMonotonicMs(_: ?*anyopaque) ?u64 {
@@ -200,7 +200,7 @@ pub const Adapter = struct {
         const delay_ms = if (deadline_ms > current) deadline_ms - current else 1;
         const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch
             return false;
-        (self.platform_services orelse return false).startTimer(
+        (self.native_runtime orelse return false).startTimer(
             mcp_catalog_timer_id,
             delay_ns,
             false,
@@ -210,8 +210,8 @@ pub const Adapter = struct {
 
     pub fn cancelMcpCatalogTimer(context: ?*anyopaque) void {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return));
-        if (self.platform_services) |services_value|
-            services_value.cancelTimer(mcp_catalog_timer_id) catch {};
+        if (self.native_runtime) |runtime|
+            runtime.cancelTimer(mcp_catalog_timer_id) catch {};
     }
 
     /// Shows every byte of a Host-only MCP trust or OAuth consent document in
@@ -281,7 +281,7 @@ pub const Adapter = struct {
             delay_seconds,
             std.time.ns_per_s,
         ) catch return false;
-        (self.platform_services orelse return false).startTimer(
+        (self.native_runtime orelse return false).startTimer(
             scheduled_task_timer_id,
             delay_ns,
             false,
@@ -291,8 +291,8 @@ pub const Adapter = struct {
 
     pub fn cancelScheduledTaskTimer(context: ?*anyopaque) void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        if (self.platform_services) |services_value|
-            services_value.cancelTimer(scheduled_task_timer_id) catch {};
+        if (self.native_runtime) |runtime|
+            runtime.cancelTimer(scheduled_task_timer_id) catch {};
     }
 
     pub fn notifyScheduledTask(
@@ -300,8 +300,8 @@ pub const Adapter = struct {
         notification: control_ports.ScheduleNotification,
     ) bool {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
-        const services_value = self.platform_services orelse return false;
-        return self.window.notifyScheduledTask(services_value, notification);
+        const runtime = self.native_runtime orelse return false;
+        return self.window.notifyScheduledTask(runtime, notification);
     }
 
     fn wake(context: ?*anyopaque) anyerror!void {
@@ -340,7 +340,7 @@ pub const Adapter = struct {
         repeats: bool,
     ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        try (self.platform_services orelse return error.RuntimeUnavailable).startTimer(
+        try (self.native_runtime orelse return error.RuntimeUnavailable).startTimer(
             timer_id,
             interval_ns,
             repeats,
@@ -349,7 +349,7 @@ pub const Adapter = struct {
 
     fn cancelTimer(context: ?*anyopaque, timer_id: u64) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        try (self.platform_services orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
+        try (self.native_runtime orelse return error.RuntimeUnavailable).cancelTimer(timer_id);
     }
 
     fn showOpenDialog(
@@ -358,11 +358,7 @@ pub const Adapter = struct {
         output: []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.window.showOpenDialog(
-            self.platform_services orelse return error.RuntimeUnavailable,
-            options,
-            output,
-        );
+        return (self.native_runtime orelse return error.RuntimeUnavailable).showOpenDialog(options, output);
     }
 
     fn canonicalizeDirectory(
@@ -389,17 +385,6 @@ pub const Adapter = struct {
         return true;
     }
 
-    fn showMessageDialog(
-        context: ?*anyopaque,
-        options: native_sdk.platform.MessageDialogOptions,
-    ) anyerror!native_sdk.platform.MessageDialogResult {
-        const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.window.showMessageDialog(
-            self.platform_services orelse return error.RuntimeUnavailable,
-            options,
-        );
-    }
-
     fn windowChromeConnect(
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
@@ -407,11 +392,10 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         if (comptime builtin.os.tag == .windows) return self.window.connectWindows(
             self.native_runtime orelse return error.RuntimeUnavailable,
-            self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
         );
         return self.window.connect(
-            self.platform_services orelse return error.RuntimeUnavailable,
+            self.native_runtime orelse return error.RuntimeUnavailable,
             window_id,
         );
     }
@@ -423,11 +407,10 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         if (comptime builtin.os.tag == .windows) return self.window.refreshWindows(
             self.native_runtime orelse return error.RuntimeUnavailable,
-            self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
         );
         return self.window.refresh(
-            self.platform_services orelse return error.RuntimeUnavailable,
+            self.native_runtime orelse return error.RuntimeUnavailable,
             window_id,
         );
     }
@@ -522,4 +505,108 @@ test "main-loop wake publishes Native startup to the live activation listener" {
     // Guaranteed post-bind request in addition to the concurrent stress.
     try std.testing.expectEqual(T.activation.Status.accepted, queue.accept(frame));
     try std.testing.expect(T.calls.load(.monotonic) > 0);
+}
+
+test "SDK consumption timers preserve producer IDs and explicit failures" {
+    const Spy = struct {
+        var id: u64 = 0;
+        var interval: u64 = 0;
+        var repeats = false;
+        var fail = false;
+        fn start(_: ?*anyopaque, timer_id: u64, ns: u64, repeated: bool) anyerror!void {
+            id = timer_id;
+            interval = ns;
+            repeats = repeated;
+            if (fail) return error.InjectedTimerFailure;
+        }
+        fn cancel(_: ?*anyopaque, timer_id: u64) anyerror!void {
+            id = timer_id;
+            if (fail) return error.InjectedTimerFailure;
+        }
+    };
+    Spy.fail = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.start_timer_fn = Spy.start;
+    harness.runtime.options.platform.services.cancel_timer_fn = Spy.cancel;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+    const port = adapter.dispatcherPlatform();
+    try port.start_timer_fn(port.context, 99, 123, true);
+    try std.testing.expectEqual(@as(u64, 99), Spy.id);
+    try std.testing.expectEqual(@as(u64, 123), Spy.interval);
+    try std.testing.expect(Spy.repeats);
+    try port.cancel_timer_fn(port.context, 99);
+    try std.testing.expectEqual(@as(u64, 99), Spy.id);
+    try std.testing.expect(adapter.armMcpOauthTimer(0));
+    try std.testing.expectEqual(mcp_oauth_timer_id, Spy.id);
+    try std.testing.expectEqual(std.time.ns_per_ms, Spy.interval);
+    adapter.cancelMcpOauthTimer();
+    try std.testing.expectEqual(mcp_oauth_timer_id, Spy.id);
+    try std.testing.expect(Adapter.armMcpCatalogTimer(&adapter, 0));
+    try std.testing.expectEqual(mcp_catalog_timer_id, Spy.id);
+    Adapter.cancelMcpCatalogTimer(&adapter);
+    try std.testing.expectEqual(mcp_catalog_timer_id, Spy.id);
+    try std.testing.expect(Adapter.armScheduledTaskTimer(&adapter, 0));
+    try std.testing.expectEqual(scheduled_task_timer_id, Spy.id);
+    try std.testing.expectEqual(std.time.ns_per_s, Spy.interval);
+    try std.testing.expect(!Spy.repeats);
+    Adapter.cancelScheduledTaskTimer(&adapter);
+    try std.testing.expectEqual(scheduled_task_timer_id, Spy.id);
+    Spy.fail = true;
+    try std.testing.expectError(error.InjectedTimerFailure, port.start_timer_fn(port.context, 99, 1, false));
+    try std.testing.expectError(error.InjectedTimerFailure, port.cancel_timer_fn(port.context, 99));
+    try std.testing.expect(!adapter.armMcpOauthTimer(0));
+    try std.testing.expect(!Adapter.armMcpCatalogTimer(&adapter, 0));
+    try std.testing.expect(!Adapter.armScheduledTaskTimer(&adapter, 0));
+    adapter.stop(&harness.runtime);
+    try std.testing.expectError(error.RuntimeUnavailable, port.start_timer_fn(port.context, 99, 1, false));
+}
+
+test "SDK consumption file picker keeps multi-selection cancel and Runtime validation" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var mode: enum { selected, cancel, fail } = .selected;
+        fn open(_: ?*anyopaque, options: native_sdk.platform.OpenDialogOptions, output: []u8) anyerror!native_sdk.platform.OpenDialogResult {
+            calls += 1;
+            try std.testing.expect(options.allow_multiple);
+            try std.testing.expectEqualStrings("Images", options.filters[0].name);
+            try std.testing.expectEqualStrings("png", options.filters[0].extensions[0]);
+            switch (mode) {
+                .cancel => return .{ .paths = "", .count = 0 },
+                .fail => return error.InjectedPickerFailure,
+                .selected => {},
+            }
+            const paths = "/first.png\n/second.png";
+            if (output.len < paths.len) return error.NoSpaceLeft;
+            @memcpy(output[0..paths.len], paths);
+            return .{ .paths = output[0..paths.len], .count = 2 };
+        }
+    };
+    Spy.calls = 0;
+    Spy.mode = .selected;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.show_open_dialog_fn = Spy.open;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+    const port = adapter.dispatcherPlatform();
+    const options: native_sdk.platform.OpenDialogOptions = .{
+        .allow_multiple = true,
+        .filters = &.{.{ .name = "Images", .extensions = &.{"png"} }},
+    };
+    var output: [128]u8 = undefined;
+    const result = try port.show_open_dialog_fn(port.context, options, &output);
+    try std.testing.expectEqual(@as(usize, 2), result.count);
+    try std.testing.expectEqualStrings("/first.png\n/second.png", result.paths);
+    Spy.mode = .cancel;
+    try std.testing.expectEqual(@as(usize, 0), (try port.show_open_dialog_fn(port.context, options, &output)).count);
+    Spy.mode = .fail;
+    try std.testing.expectError(error.InjectedPickerFailure, port.show_open_dialog_fn(port.context, options, &output));
+    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
+    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, options, &.{}));
+    try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, .{ .title = "bad\x00title" }, &output));
+    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
 }

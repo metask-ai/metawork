@@ -78,7 +78,7 @@ pub const State = struct {
 
     pub fn notifyScheduledTask(
         _: *State,
-        services: native_sdk.platform.PlatformServices,
+        runtime: *native_sdk.Runtime,
         notification: control_ports.ScheduleNotification,
     ) bool {
         const body = switch (notification.kind) {
@@ -87,66 +87,50 @@ pub const State = struct {
             .skipped => "A run was skipped because the previous run is still active",
             .needs_attention => "Scheduled task needs attention",
         };
-        services.showNotification(.{
+        if (!std.unicode.utf8ValidateSlice(notification.title)) return false;
+        var end = @min(notification.title.len, native_sdk.platform.max_notification_subtitle_bytes);
+        while (!std.unicode.utf8ValidateSlice(notification.title[0..end])) end -= 1;
+        runtime.showNotification(.{
             .title = "MetaWork",
-            .subtitle = notification.title,
+            .subtitle = notification.title[0..end],
             .body = body,
         }) catch return false;
         return true;
     }
 
-    pub fn showOpenDialog(
-        _: *State,
-        services: native_sdk.platform.PlatformServices,
-        options: native_sdk.platform.OpenDialogOptions,
-        output: []u8,
-    ) !native_sdk.platform.OpenDialogResult {
-        return services.showOpenDialog(options, output);
-    }
-
-    pub fn showMessageDialog(
-        _: *State,
-        services: native_sdk.platform.PlatformServices,
-        options: native_sdk.platform.MessageDialogOptions,
-    ) !native_sdk.platform.MessageDialogResult {
-        return services.showMessageDialog(options);
-    }
-
     pub fn connectWindows(
         _: *State,
         runtime: *native_sdk.Runtime,
-        services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
         const window = try requireLiveMainWindow(runtime, window_id);
-        return environment(services.windowChrome(window_id), window.maximized);
+        return environment(try runtime.windowChrome(window_id), window.maximized);
     }
 
     pub fn refreshWindows(
         self: *State,
         runtime: *native_sdk.Runtime,
-        services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        return self.connectWindows(runtime, services, window_id);
+        return self.connectWindows(runtime, window_id);
     }
 
     // Existing SDK/disabled-controls path for non-Windows platforms.
     pub fn connect(
         _: *State,
-        services: native_sdk.platform.PlatformServices,
+        runtime: *native_sdk.Runtime,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
         try requireMainWindow(window_id);
-        return environment(services.windowChrome(window_id), false);
+        return environment(try runtime.windowChrome(window_id), false);
     }
 
     pub fn refresh(
         self: *State,
-        services: native_sdk.platform.PlatformServices,
+        runtime: *native_sdk.Runtime,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        return self.connect(services, window_id);
+        return self.connect(runtime, window_id);
     }
 
     pub fn control(
@@ -344,8 +328,7 @@ test "Windows window controls follow SDK frame state without a native controls b
     _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
     var window: State = .{};
     defer window.deinit();
-    const services = harness.runtime.options.platform.services;
-    const initial = try window.connectWindows(&harness.runtime, services, 1);
+    const initial = try window.connectWindows(&harness.runtime, 1);
     try std.testing.expect(initial.renderer_controls);
     try std.testing.expect(!initial.maximized);
     var context: u8 = 0;
@@ -353,24 +336,24 @@ test "Windows window controls follow SDK frame state without a native controls b
 
     try window.control(&harness.runtime, 1, .toggle_maximize);
     // Only the host frame event commits maximized state to the SDK Runtime.
-    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, 1)).maximized);
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.windowFrameEvent(1).?);
-    try std.testing.expect((try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try std.testing.expect((try window.refreshWindows(&harness.runtime, 1)).maximized);
     try window.control(&harness.runtime, 1, .toggle_maximize);
     try std.testing.expect(!harness.null_platform.windows[0].maximized);
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.windowFrameEvent(1).?);
-    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, 1)).maximized);
 
     // A native double-click or system command uses that same observed state.
     var state = harness.null_platform.windowFrameEvent(1).?.window_frame_changed;
     state.maximized = true;
     try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
-    try std.testing.expect((try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try std.testing.expect((try window.refreshWindows(&harness.runtime, 1)).maximized);
     try harness.runtime.hideWindow(1);
-    _ = try window.refreshWindows(&harness.runtime, services, 1);
-    try std.testing.expectError(error.WindowIdentityMismatch, window.connectWindows(&harness.runtime, services, 2));
+    _ = try window.refreshWindows(&harness.runtime, 1);
+    try std.testing.expectError(error.WindowIdentityMismatch, window.connectWindows(&harness.runtime, 2));
     try window.requestExplicitQuit(&harness.runtime);
-    try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, services, 1));
+    try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, 1));
 }
 
 test "Windows user close preserves SDK hide policy while explicit quit closes" {
@@ -396,4 +379,86 @@ test "Windows user close preserves SDK hide policy while explicit quit closes" {
     try requireUnhiddenMainWindow(&harness.runtime, 1);
     try window.requestExplicitQuit(&harness.runtime);
     try std.testing.expectError(error.WindowUnavailable, requireLiveMainWindow(&harness.runtime, 1));
+}
+
+test "SDK consumption notification bounds presentation without changing Product title" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var seen: [native_sdk.platform.max_notification_subtitle_bytes]u8 = undefined;
+        var len: usize = 0;
+        var fail = false;
+        fn notify(_: ?*anyopaque, options: native_sdk.platform.NotificationOptions) anyerror!void {
+            calls += 1;
+            try std.testing.expect(std.unicode.utf8ValidateSlice(options.subtitle));
+            try std.testing.expect(options.subtitle.len <= seen.len);
+            @memcpy(seen[0..options.subtitle.len], options.subtitle);
+            len = options.subtitle.len;
+            if (fail) return error.InjectedNotificationFailure;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.show_notification_fn = Spy.notify;
+    var window: State = .{};
+    defer window.deinit();
+    const long = "a" ** 127 ++ "界" ++ "b" ** 50;
+    const notification: control_ports.ScheduleNotification = .{ .scheduled_task_id = 1, .title = long, .kind = .completed };
+    // Runtime validation would reject the original, unbounded subtitle.
+    try std.testing.expectError(error.NotificationFieldTooLarge, harness.runtime.showNotification(.{ .title = "MetaWork", .subtitle = long }));
+    try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+    try std.testing.expect(window.notifyScheduledTask(&harness.runtime, notification));
+    try std.testing.expectEqual(@as(usize, 127), Spy.len);
+    try std.testing.expectEqualStrings("a" ** 127, Spy.seen[0..Spy.len]);
+    try std.testing.expectEqualStrings(long, notification.title);
+    try std.testing.expect(window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .title = "界", .kind = .failed }));
+    try std.testing.expectEqualStrings("界", Spy.seen[0..Spy.len]);
+    Spy.fail = true;
+    try std.testing.expect(!window.notifyScheduledTask(&harness.runtime, notification));
+    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
+}
+
+test "SDK consumption chrome queries enter Runtime recording and replay divergence" {
+    const Spy = struct {
+        var calls: usize = 0;
+        fn chrome(_: ?*anyopaque, _: native_sdk.platform.WindowId) native_sdk.platform.WindowChrome {
+            calls += 1;
+            return .{ .insets = .{ .left = 17 } };
+        }
+        fn write(_: *anyopaque, _: []const u8) anyerror!void {}
+    };
+    Spy.calls = 0;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.window_chrome_fn = Spy.chrome;
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    var window: State = .{};
+    defer window.deinit();
+    const recorder = try std.testing.allocator.create(native_sdk.runtime.SessionRecorder);
+    defer std.testing.allocator.destroy(recorder);
+    var context: u8 = 0;
+    recorder.* = .{ .sink = .{ .context = &context, .write_fn = Spy.write } };
+    recorder.begin(native_sdk.runtime.sessionHeaderNow("null", "sdk-chrome-test", 100, 100));
+    harness.runtime.options.session_recorder = recorder;
+    defer harness.runtime.options.session_recorder = null;
+    recorder.stageEvent(.app_start);
+    const live = try window.connectWindows(&harness.runtime, 1);
+    recorder.commitEvent();
+    try std.testing.expectEqual(@as(f32, 17), live.left);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expectEqual(@as(u64, 1), recorder.window_chrome_count);
+    try std.testing.expect(!recorder.failed);
+    harness.runtime.options.session_recorder = null;
+    harness.runtime.replay_window_chrome_active = true;
+    harness.runtime.replay_window_chrome[0] = .{ .window_id = 1, .chrome = .{ .insets = .{ .left = 29 } } };
+    harness.runtime.replay_window_chrome_count = 1;
+    const replay = try window.refreshWindows(&harness.runtime, 1);
+    try std.testing.expectEqual(@as(f32, 29), replay.left);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expectError(error.ReplayChromeDivergence, window.refreshWindows(&harness.runtime, 1));
+    try std.testing.expect(harness.runtime.replay_window_chrome_failed);
+    try std.testing.expectError(error.WindowIdentityMismatch, window.connectWindows(&harness.runtime, 2));
+    // The non-Windows path must also propagate Runtime errors.
+    try std.testing.expectError(error.ReplayChromeDivergence, window.refresh(&harness.runtime, 1));
 }

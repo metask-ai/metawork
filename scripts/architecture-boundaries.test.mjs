@@ -2948,4 +2948,16 @@ test("Application SDK bindings retain Runtime dependencies for migrated effects"
   const account = read("src/app/account_platform_binding.zig");
   assert.match(account, /self\.runtime\.startTimer\(/u);
   assert.match(account, /self\.runtime\.cancelTimer\(/u);
+  const platform = read("src/app/platform.zig");
+  for (const method of ["startTimer", "cancelTimer", "showOpenDialog"])
+    assert.match(
+      platform,
+      new RegExp(
+        `self\\.native_runtime orelse return error\\.RuntimeUnavailable\\)\\.${method}\\(`,
+        "u",
+      ),
+    );
+  const window = read("src/app/window.zig");
+  assert.match(window, /runtime\.showNotification\(/u);
+  assert.match(window, /runtime\.windowChrome\(/u);
 });
