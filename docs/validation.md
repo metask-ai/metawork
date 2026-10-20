@@ -158,6 +158,12 @@ Task completion receipt 的最小充分证据必须跨越实际 owner：Product 
 
 File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
+### GenerateImage 正式服务的输出格式缺口
+
+Windows x86_64 上，经用户明确授权的一次正式接口探测复用 Account 正常授权 lease：目录声明默认图片模型可用，单张 `b64_json` 请求返回 HTTP 200，但返回值解码后的字节未通过 PNG signature 检查。当前 Agent codec 只接受 PNG，因此正式服务的成功响应尚不能作为 GenerateImage 已成功保存文件的证据。该探测未保留返回图片，不能据此确认实际 MIME、尺寸或图片内容，也没有重试。
+
+关闭此缺口需要验证正式服务的输出格式合同与应用解码、文件格式及 receipt 的一致性；HTTP 200、可解码 base64 和本地 PNG fixture 均不能单独替代该验收。进一步收费调用须取得新的明确授权，本次单次探测授权已经使用。
+
 ### GenerateImage 工具集合迁移的恢复缺口
 
 Windows x86_64 的 canonical AgentCore `0.11.0-dev+68ac95c2d42b`（ABI revision 24、对应 target lock）在旧集合无 Session grant 的 checkpoint 恢复到新增 `GenerateImage` 的集合时，返回 `health = degraded`、所有 invalidation 计数为 0、`issues = []`。同一 bundle 的官方 SDK 明确拒绝这个自相矛盾的 summary；MetaWork 因而返回 `RestoreContractFailed`，未安装 Session。此缺口阻塞新包发布前的旧工具集合迁移验收，不阻塞内部测试启用与新任务使用，不能按合法 degraded 恢复处理，不能放宽 SDK/Host 校验或改写 checkpoint 绕过。
