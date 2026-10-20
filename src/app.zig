@@ -222,6 +222,9 @@ const App = struct {
             @panic("Account coordinator is not composed");
         const models_management = self.models_coordinator orelse
             @panic("Models coordinator is not composed");
+        // run() only reserves Product storage; Runtime.init above must finish
+        // before installing capabilities that initialization would overwrite.
+        control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -697,8 +700,6 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
-    control.setImageRunPreparation(models_coordinator_state.imageRunPreparation());
-    defer control.setImageRunPreparation(null);
     account_coordinator_state.setCommitObserver(.{
         .context = &models_coordinator_state,
         .notify_fn = notifyModelsAuthorizationChanged,
