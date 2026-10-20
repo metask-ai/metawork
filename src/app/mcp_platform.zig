@@ -21,13 +21,13 @@ const max_stdio_argv_bytes: usize = 64 * 1024;
 
 pub const CredentialStore = struct {
     io: std.Io,
-    services: native_sdk.platform.PlatformServices,
+    runtime: *native_sdk.Runtime,
     main_thread_id: std.Thread.Id,
 
     pub fn resolver(self: *CredentialStore) mcp_configuration.CredentialResolver {
         return .{
             .context = self,
-            .available = self.services.get_credential_fn != null,
+            .available = self.runtime.options.platform.services.get_credential_fn != null,
             .resolve_fn = resolve,
         };
     }
@@ -43,7 +43,7 @@ pub const CredentialStore = struct {
     pub fn cleanup(self: *CredentialStore) mcp_configuration.CredentialCleanup {
         return .{
             .context = self,
-            .available = self.services.delete_credential_fn != null,
+            .available = self.runtime.options.platform.services.delete_credential_fn != null,
             .delete_fn = delete,
         };
     }
@@ -51,9 +51,9 @@ pub const CredentialStore = struct {
     pub fn effects(self: *CredentialStore) mcp_configuration.CredentialEffects {
         return .{
             .context = self,
-            .available = self.services.get_credential_fn != null and
-                self.services.set_credential_fn != null and
-                self.services.delete_credential_fn != null,
+            .available = self.runtime.options.platform.services.get_credential_fn != null and
+                self.runtime.options.platform.services.set_credential_fn != null and
+                self.runtime.options.platform.services.delete_credential_fn != null,
             .probe_fn = probe,
             .create_fn = create,
             .delete_fn = delete,
@@ -93,13 +93,10 @@ pub const CredentialStore = struct {
             return .unavailable;
         var storage: [native_sdk.platform.max_credential_secret_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &storage);
-        const value = self.services.getCredential(.{
+        const value = (self.runtime.getCredential(.{
             .service = credential_service,
             .account = locator,
-        }, &storage) catch |err| return switch (err) {
-            error.CredentialNotFound => .missing,
-            else => .unavailable,
-        };
+        }, &storage) catch return .unavailable) orelse return .missing;
         return .{ .value = allocator.dupe(u8, value) catch return .out_of_memory };
     }
 
@@ -112,13 +109,10 @@ pub const CredentialStore = struct {
             return .unavailable;
         var storage: [native_sdk.platform.max_credential_secret_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &storage);
-        _ = self.services.getCredential(.{
+        _ = (self.runtime.getCredential(.{
             .service = credential_service,
             .account = locator,
-        }, &storage) catch |err| return switch (err) {
-            error.CredentialNotFound => .missing,
-            else => .unavailable,
-        };
+        }, &storage) catch return .unavailable) orelse return .missing;
         return .present;
     }
 
@@ -133,7 +127,7 @@ pub const CredentialStore = struct {
             secret.len > native_sdk.platform.max_credential_secret_bytes or
             probe(context, locator) != .missing)
             return false;
-        self.services.setCredential(.{
+        self.runtime.setCredential(.{
             .service = credential_service,
             .account = locator,
             .secret = secret,
@@ -144,13 +138,10 @@ pub const CredentialStore = struct {
     fn delete(context: ?*anyopaque, locator: []const u8) bool {
         const self: *CredentialStore = @ptrCast(@alignCast(context orelse return false));
         if (std.Thread.getCurrentId() != self.main_thread_id) return false;
-        self.services.deleteCredential(.{
+        _ = self.runtime.deleteCredential(.{
             .service = credential_service,
             .account = locator,
-        }) catch |err| switch (err) {
-            error.CredentialNotFound => {},
-            else => return false,
-        };
+        }) catch return false;
         return true;
     }
 };
@@ -2513,4 +2504,75 @@ fn testHostEnvironment() HostEnvironment {
         else
             null,
     };
+}
+
+test "SDK consumption MCP credentials distinguish null empty unavailable and idempotent delete" {
+    const Failure = struct {
+        fn write(_: ?*anyopaque, _: native_sdk.platform.Credential) anyerror!void {
+            return error.CredentialStoreLocked;
+        }
+        fn read(_: ?*anyopaque, _: native_sdk.platform.CredentialKey, _: []u8) anyerror![]const u8 {
+            return error.PermissionDenied;
+        }
+        fn empty(_: ?*anyopaque, _: native_sdk.platform.CredentialKey, output: []u8) anyerror![]const u8 {
+            return output[0..0];
+        }
+        fn delete(_: ?*anyopaque, _: native_sdk.platform.CredentialKey) anyerror!void {
+            return error.PermissionDenied;
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var store: CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    const effects = store.effects();
+    const locator = "mcp-test-locator";
+    try std.testing.expect(effects.available);
+    try std.testing.expectEqual(mcp_configuration.CredentialPresence.missing, effects.probe_fn(effects.context, locator));
+    try std.testing.expect(store.resolveSecret(std.testing.allocator, locator) == .missing);
+    try std.testing.expect(effects.delete_fn(effects.context, locator));
+    try std.testing.expect(effects.create_fn(effects.context, locator, "test-mcp-secret"));
+    try std.testing.expect(!effects.create_fn(effects.context, locator, "replacement"));
+    try std.testing.expectEqualStrings(credential_service, harness.null_platform.credential_service[0..harness.null_platform.credential_service_len]);
+    try std.testing.expectEqualStrings(locator, harness.null_platform.credential_account[0..harness.null_platform.credential_account_len]);
+    const resolved = store.resolveSecret(std.testing.allocator, locator);
+    try std.testing.expect(resolved == .value);
+    defer {
+        std.crypto.secureZero(u8, resolved.value);
+        std.testing.allocator.free(resolved.value);
+    }
+    try std.testing.expectEqualStrings("test-mcp-secret", resolved.value);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(store.resolveSecret(failing.allocator(), locator) == .out_of_memory);
+    const get_fn = harness.runtime.options.platform.services.get_credential_fn;
+    harness.runtime.options.platform.services.get_credential_fn = Failure.empty;
+    try std.testing.expectEqual(mcp_configuration.CredentialPresence.present, effects.probe_fn(effects.context, locator));
+    const empty = store.resolveSecret(std.testing.allocator, locator);
+    try std.testing.expect(empty == .value);
+    defer std.testing.allocator.free(empty.value);
+    try std.testing.expectEqual(@as(usize, 0), empty.value.len);
+    harness.runtime.options.platform.services.get_credential_fn = Failure.read;
+    try std.testing.expectEqual(mcp_configuration.CredentialPresence.unavailable, effects.probe_fn(effects.context, locator));
+    try std.testing.expect(store.resolveSecret(std.testing.allocator, locator) == .unavailable);
+    harness.runtime.options.platform.services.get_credential_fn = null;
+    try std.testing.expect(!store.resolver().available);
+    try std.testing.expect(!store.effects().available);
+    harness.runtime.options.platform.services.get_credential_fn = get_fn;
+    const delete_fn = harness.runtime.options.platform.services.delete_credential_fn;
+    harness.runtime.options.platform.services.delete_credential_fn = Failure.delete;
+    try std.testing.expect(!effects.delete_fn(effects.context, locator));
+    harness.runtime.options.platform.services.delete_credential_fn = delete_fn;
+    store.main_thread_id +%= 1;
+    try std.testing.expect(store.resolveSecret(std.testing.allocator, locator) == .unavailable);
+    try std.testing.expect(!effects.create_fn(effects.context, locator, "wrong-thread"));
+    try std.testing.expect(!effects.delete_fn(effects.context, locator));
+    store.main_thread_id -%= 1;
+    try std.testing.expect(effects.delete_fn(effects.context, locator));
+    const cleanup = store.cleanup();
+    try std.testing.expect(cleanup.delete_fn(cleanup.context, locator));
+    try std.testing.expect(store.resolveSecret(std.testing.allocator, locator) == .missing);
+    const set_fn = harness.runtime.options.platform.services.set_credential_fn;
+    harness.runtime.options.platform.services.set_credential_fn = Failure.write;
+    try std.testing.expect(!effects.create_fn(effects.context, locator, "replacement"));
+    harness.runtime.options.platform.services.set_credential_fn = set_fn;
+    try std.testing.expect(store.resolveSecret(std.testing.allocator, locator) == .missing);
 }

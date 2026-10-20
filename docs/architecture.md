@@ -127,7 +127,7 @@ Application 只通过以下受限路径消费系统 effect、主循环唤醒与�
 
 附件图片预览是 Application 对公开 `PlatformServices.decodeImage` 与 `canvas.app_icon.encodePng` 的正常组合，不属于 compatibility capability，也不因缺少 Runtime 封装而成为 SDK 缺口。Application 在 Native loop thread 生成按像素和输出字节有界的 PNG，负责临时内存的 ownership 与释放，调用失败必须明确返回；这项许可不授予其他低层系统调用权。Product 独占原件、类型、配额和生命周期，精确合同见 [Product 架构](product-architecture.md#26-文件-attachment-staging)；Renderer 不参与图片转换，不注册额外 host tool。
 
-系统 effect 与 SDK-owned runtime state 已有 Runtime API 时，绕过它调用低层函数属于架构违规。Compatibility 的治理单位是 capability seam，而不是文件或目录；每项 seam 必须：
+系统 effect 与 SDK-owned runtime state 在 Runtime API 已提供语义等价能力时，必须通过 Runtime 消费；等价性包含参数约束、policy、状态与生命周期，不能仅凭方法同名判断。公开 PlatformServices 可以在本节定义的正常路径或已登记 compatibility 边界内使用。Compatibility 的治理单位是 capability seam，而不是文件或目录；每项 seam 必须：
 
 - 只存在于 Application-owned、按 capability 和平台收窄的实现中，且只向消费者注入完成该职责所需的能力；
 - 明确 capability identity、SDK 缺口、调用者、目标平台、线程、资源 ownership、失败、shutdown、验证和删除条件；

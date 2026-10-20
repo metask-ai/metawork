@@ -2242,7 +2242,7 @@ test("Account owns platform ports while Application binds Native SDK effects", (
     runtime,
     /account_path|account_dir|AccountDirectoryUnavailable/,
   );
-  assert.match(binding, /native_sdk\.platform\.PlatformServices/);
+  assert.match(binding, /runtime: \*native_sdk\.Runtime/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
   assert.doesNotMatch(
     binding,
@@ -2921,4 +2921,31 @@ test("development and macOS distribution signing owners stay isolated", () => {
     distribution,
     /from "\.\/dev\.mjs"|setup-macos-local-signing|Apple Development|\.metawork-local-signing|runDevelopment|signWithStableRequirement/u,
   );
+});
+
+test("Application SDK bindings retain Runtime dependencies for migrated effects", () => {
+  // Wiring checks for these bindings only. Runtime behavior is verified by
+  // test-sdk-consumption; these patterns do not resolve arbitrary Zig aliases.
+  for (const path of [
+    "src/app/account_platform_binding.zig",
+    "src/app/models_platform_binding.zig",
+    "src/app/mcp_platform.zig",
+  ]) {
+    const source = read(path);
+    assert.match(source, /runtime: \*native_sdk\.Runtime/u, path);
+    assert.doesNotMatch(
+      source,
+      /^\s*(?:platform_)?services:\s*\??native_sdk\.platform\.PlatformServices/mu,
+      path,
+    );
+    for (const method of ["setCredential", "getCredential", "deleteCredential"])
+      assert.match(
+        source,
+        new RegExp(`self\\.runtime\\.${method}\\(`, "u"),
+        path,
+      );
+  }
+  const account = read("src/app/account_platform_binding.zig");
+  assert.match(account, /self\.runtime\.startTimer\(/u);
+  assert.match(account, /self\.runtime\.cancelTimer\(/u);
 });

@@ -118,7 +118,7 @@ const App = struct {
             })) self.platform.activateMainWindow();
         self.mcp_credential_store = .{
             .io = self.io,
-            .services = self.platform.services().?,
+            .runtime = native_runtime,
             .main_thread_id = self.main_thread_id,
         };
         const mcp_management_host = mcp_management_coordinator.platformHost(&self.platform);
@@ -250,14 +250,14 @@ const App = struct {
                     "automation execution fixture is invalid",
                 );
             }
-        } else if (self.platform.services()) |services| {
+        } else if (self.platform.services() != null) {
             self.models_platform_binding = models_platform_binding.Adapter.init(
-                services,
+                native_runtime,
                 self.io,
                 self.main_thread_id,
             );
             self.account_platform_binding = account_platform_binding.Adapter.init(
-                services,
+                native_runtime,
                 self.io,
                 self.main_thread_id,
             ) catch null;
@@ -772,6 +772,13 @@ test "Windows window chrome Application test roots" {
 test "main-loop wake Application test roots" {
     std.testing.refAllDecls(app_platform);
     std.testing.refAllDecls(app_single_instance);
+}
+
+test "SDK consumption Application test roots" {
+    std.testing.refAllDecls(app_platform);
+    std.testing.refAllDecls(app_window);
+    std.testing.refAllDecls(account_platform_binding);
+    std.testing.refAllDecls(models_platform_binding);
 }
 
 test "MCP Application composition imports the startup owner" {
