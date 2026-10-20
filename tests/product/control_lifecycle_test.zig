@@ -1194,6 +1194,7 @@ fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !vo
 
 fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !void {
     for (0..5000) |_| {
+        try workbench.drainAgentEvents();
         if ((try workbench.taskCatalog(task_id)).availability != .loading) return;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
@@ -2614,6 +2615,7 @@ fn waitCatalogReady(
     workspace_id: u64,
 ) !product_control.CatalogProjection {
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const projection = try workbench.workspaceCatalog(workspace_id);
         switch (projection.availability) {
             .ready, .degraded => return projection,
@@ -3921,6 +3923,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     }
     try std.testing.expect(blob_ready);
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         _ = try workbench.writeSnapshot(&snapshot);
         if (persistence.commits > terminal_commits) break;
         std.Thread.yield() catch {};
@@ -4026,6 +4029,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
             std.Thread.yield() catch {};
             continue;
         };
+        try workbench.drainAgentEvents();
         const snapshot_json = try workbench.writeSnapshot(&snapshot);
         if (std.mem.indexOf(u8, snapshot_json, "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"") != null) {
             outcome_observed = true;
@@ -4455,6 +4459,7 @@ fn waitCatalogUnavailable(
     workspace_id: u64,
 ) !void {
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const projection = try workbench.workspaceCatalog(workspace_id);
         switch (projection.availability) {
             .unavailable => return,
@@ -5514,6 +5519,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     fake_core.setCatalogPlan(.query_incomplete);
     fake_core.releaseCatalogQuery();
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         if (workbench.currentRevision() > refresh_revision) break;
         std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     } else return error.TestUnexpectedResult;
@@ -6367,6 +6373,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     try installControlExecution(&workbench);
 
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const personal = workbench.skillCatalog();
         if (personal.availability == .ready or personal.availability == .degraded)
             break;
@@ -10202,6 +10209,55 @@ test "active input checkpoint export failure ends continuation without retry" {
     for (0..5) |_| scenario.control.syncLifecycle();
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
     try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+}
+
+test "ProductDelivery reads do not advance worker lifecycle" {
+    const Read = enum { revision, snapshot, workspace_catalog, personal_catalog, task_catalog, workspace_epoch, workspace_kind, task_workspace, permission_profile, permission_interaction, binding_epoch, mcp_authority, workspace_projections, schedule_epoch };
+    inline for (std.meta.tags(Read)) |read| {
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = history.capability();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const control = &scenario.control;
+        const task = control.task_runtime.find(scenario.task_id).?;
+        const run = &task.durable.runs[0].?;
+        fake_core.releaseControlled();
+        for (0..5000) |_| {
+            if (run.terminal_publication.load(.acquire) == .published) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(.published, run.terminal_publication.load(.acquire));
+        const before_revision = control.revision;
+        const before_phase = task_state.runPhase(run);
+        const before_commits = history.commits;
+        var snapshot: [512 * 1024]u8 = undefined;
+        var workspaces: [1]product_control.WorkspaceProjection = undefined;
+        switch (read) {
+            .revision => _ = control.currentRevision(),
+            .snapshot => _ = try control.writeSnapshot(&snapshot),
+            .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
+            .personal_catalog => _ = control.skillCatalog(),
+            .task_catalog => _ = try control.taskCatalog(task.durable.id),
+            .workspace_epoch => _ = try control.workspaceEpoch(task.durable.workspace_id),
+            .workspace_kind => _ = try control.workspaceKind(task.durable.workspace_id),
+            .task_workspace => _ = try control.taskWorkspaceId(task.durable.id),
+            .permission_profile => _ = try control.taskPermissionProfile(task.durable.id),
+            .permission_interaction => _ = try control.taskPermissionInteraction(task.durable.id),
+            .binding_epoch => _ = try control.taskBindingEpoch(task.durable.id),
+            .mcp_authority => _ = try control.taskMcpAuthority(task.durable.id),
+            .workspace_projections => _ = try control.copyWorkspaceProjections(&workspaces),
+            .schedule_epoch => _ = control.scheduledTaskEpoch(0) catch 0,
+        }
+        try std.testing.expectEqual(before_revision, control.revision);
+        try std.testing.expectEqual(before_phase, task_state.runPhase(run));
+        try std.testing.expectEqual(before_commits, history.commits);
+        // Worker completion advances without a Renderer once Application
+        // consumes its wake through the explicit Product event boundary.
+        try control.drainAgentEvents();
+        try std.testing.expect(run.event_stream_finalized);
+        try std.testing.expectEqual(.completed, task_state.runPhase(run));
+    }
 }
 
 test "Task message acceptance synchronously submits ready text without duplicating owned input" {

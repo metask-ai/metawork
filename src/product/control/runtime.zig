@@ -3334,17 +3334,15 @@ pub const Runtime = struct {
     }
 
     pub fn workspaceCatalog(
-        self: *Runtime,
+        self: *const Runtime,
         workspace_id: u64,
     ) Error!CatalogProjection {
-        self.syncLifecycle();
         const workspace = self.workspace.binding(workspace_id) orelse
             return error.UnknownWorkspace;
         return self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch);
     }
 
-    pub fn skillCatalog(self: *Runtime) CatalogProjection {
-        self.syncLifecycle();
+    pub fn skillCatalog(self: *const Runtime) CatalogProjection {
         return self.skill.personalCatalogProjection();
     }
 
@@ -3427,10 +3425,9 @@ pub const Runtime = struct {
     }
 
     pub fn taskCatalog(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!CatalogProjection {
-        self.syncLifecycle();
         return self.task_runtime.catalogProjection(task_id) orelse error.UnknownTask;
     }
 
@@ -3511,38 +3508,33 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    pub fn workspaceEpoch(self: *Runtime, workspace_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.epoch;
     }
 
     pub fn workspaceKind(
-        self: *Runtime,
+        self: *const Runtime,
         workspace_id: u64,
     ) Error!WorkspaceKind {
-        self.syncLifecycle();
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.kind;
     }
 
-    pub fn taskWorkspaceId(self: *Runtime, task_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn taskWorkspaceId(self: *const Runtime, task_id: u64) Error!u64 {
         return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
 
-    pub fn taskPermissionProfile(self: *Runtime, task_id: u64) Error!PermissionProfile {
-        self.syncLifecycle();
+    pub fn taskPermissionProfile(self: *const Runtime, task_id: u64) Error!PermissionProfile {
         return self.task_runtime.taskPermissionProfile(task_id) orelse error.UnknownTask;
     }
 
     pub fn taskPermissionInteraction(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!PermissionInteraction {
-        self.syncLifecycle();
         return self.task_runtime.taskPermissionInteraction(task_id) orelse error.UnknownTask;
     }
 
@@ -3552,10 +3544,9 @@ pub const Runtime = struct {
     /// their Task routes remain addressable. Aggregate signals are computed
     /// from canonical Task state.
     pub fn copyWorkspaceProjections(
-        self: *Runtime,
+        self: *const Runtime,
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
-        self.syncLifecycle();
         return product_workspace.copyProjections(
             &self.workspace,
             output,
@@ -4669,16 +4660,14 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn taskBindingEpoch(self: *const Runtime, task_id: u64) Error!u64 {
         return self.task_runtime.taskBindingEpoch(task_id) orelse error.UnknownTask;
     }
 
     pub fn taskMcpAuthority(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!product_task.McpAuthorityAtCreation {
-        self.syncLifecycle();
         return self.task_runtime.taskMcpAuthority(task_id) orelse error.UnknownTask;
     }
 
@@ -5188,7 +5177,6 @@ pub const Runtime = struct {
         self: *Runtime,
         id: u64,
     ) Error!u64 {
-        self.syncLifecycle();
         return self.schedule.epoch(id);
     }
 
@@ -5268,8 +5256,7 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn currentRevision(self: *Runtime) u64 {
-        self.syncLifecycle();
+    pub fn currentRevision(self: *const Runtime) u64 {
         return self.revision;
     }
 
@@ -6349,7 +6336,6 @@ pub const Runtime = struct {
     }
 
     pub fn writeSnapshot(self: *Runtime, output: []u8) Error![]const u8 {
-        self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
         const schedule_persistence_ready =
             self.schedule.persistenceHealth() == .ready;
@@ -8532,7 +8518,6 @@ pub const Runtime = struct {
         scope: skill_runtime.ManagementScope,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
         switch (scope) {
             .personal => if (self.canonical_user_home == null)
                 return error.WorkspaceUnavailable,
