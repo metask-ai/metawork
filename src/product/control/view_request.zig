@@ -1,6 +1,7 @@
 //! Product-owned consumer scope. Bridge only parses and transports this request.
 pub const Management = enum { none, skills, mcp, schedules };
 pub const ReceiptQuery = struct { task_id: u64, operation_id: []const u8 };
+pub const Versions = @import("view_cache.zig").Versions;
 
 pub const Request = struct {
     task_id: ?u64 = null,
@@ -9,6 +10,8 @@ pub const Request = struct {
     management: Management = .none,
     search: bool = false,
     receipts: []const ReceiptQuery = &.{},
+    known_epoch: u64 = 0,
+    known_versions: Versions = .{},
 
     pub fn validate(self: Request) error{InvalidViewRequest}!void {
         if (self.run_limit == 0 or self.run_limit > 4) return error.InvalidViewRequest;

@@ -77,7 +77,11 @@ export function productViewFixture(
     searchIndex: ignoredSearch,
     historyPage: ignoredHistory,
     securityEpoch: ignoredSecurityEpoch,
+    historyEpoch: ignoredHistoryEpoch,
     receipts: ignoredReceipts,
+    revision: ignoredRevision,
+    blockVersions: ignoredVersions,
+    reusedBlocks: ignoredReused,
     ...context
   } = structuredClone(state);
   const selected = tasks.find((task) => task.id === scope.taskId);
@@ -88,8 +92,9 @@ export function productViewFixture(
           selected.runs.length > scope.runLimit
             ? selected.runs.at(-scope.runLimit).id
             : null,
-        runManifest: selected.runs.map((run) =>
-          Object.fromEntries(
+        runManifest: selected.runs.map((run) => ({
+          contentVersion: run.contentVersion ?? "1",
+          ...Object.fromEntries(
             [
               "id",
               "phase",
@@ -98,13 +103,26 @@ export function productViewFixture(
               "terminal",
             ].map((key) => [key, run[key]]),
           ),
-        ),
+        })),
         task: { ...selected, runs: selected.runs.slice(-scope.runLimit) },
       }
     : null;
   return {
     revision: state.revision,
+    blockVersions: Object.fromEntries(
+      [
+        "context",
+        "workspaces",
+        "taskIndex",
+        "taskPage",
+        "historyPage",
+        "management",
+        "searchIndex",
+      ].map((name) => [name, state.revision === "0" ? "1" : state.revision]),
+    ),
+    reusedBlocks: [],
     securityEpoch: state.securityEpoch ?? "1",
+    historyEpoch: state.historyEpoch ?? "1",
     scope: { ...scope },
     receipts: scope.receipts.map((query) => ({
       ...query,
@@ -163,7 +181,10 @@ export function productStateFixture(
   const wire = productViewFixture(state, scope);
   return {
     ...wire.context,
+    revision: wire.revision,
+    blockVersions: wire.blockVersions,
     securityEpoch: wire.securityEpoch,
+    historyEpoch: wire.historyEpoch,
     scope: wire.scope,
     receipts: wire.receipts,
     searchIndex: wire.searchIndex,

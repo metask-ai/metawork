@@ -78,6 +78,7 @@ import {
   decodeExternalLinkOpenResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
+import { ViewCache } from "./snapshot/view-cache.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 import { AttachmentAddOperation } from "./attachment-receive.ts";
 
@@ -108,6 +109,7 @@ export type BridgeClientOptions = {
 };
 
 export class BridgeClient {
+  private readonly viewCache = new ViewCache();
   private readonly bridgeOverride?: NativeBridge;
   private readonly commandTimeoutMs: number;
   private attachmentConnection:
@@ -191,6 +193,7 @@ export class BridgeClient {
   }
 
   async connect() {
+    this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
       contractId: RENDERER_BRIDGE_CONTRACT_ID,
       contractRevision: RENDERER_BRIDGE_CONTRACT_REVISION,
@@ -226,6 +229,7 @@ export class BridgeClient {
   }
 
   async disconnect(generation: string) {
+    this.viewCache.clear();
     if (this.attachmentConnection?.generation === generation)
       this.attachmentConnection = undefined;
     assertDisconnected(
@@ -238,6 +242,7 @@ export class BridgeClient {
     return fetchWorkbenchSnapshot(
       (command, payload) => this.invoke(command, payload),
       scope,
+      this.viewCache,
     );
   }
 

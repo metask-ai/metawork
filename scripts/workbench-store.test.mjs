@@ -373,3 +373,65 @@ test("removing a Workspace keeps its New task draft identity", () => {
   assert.equal(removed.draftWorkspaceId, "1");
   assert.equal(removed.draftOpen, true);
 });
+
+test("loaded history survives streaming only while Host confirms its exact Run content", () => {
+  const older = { id: "1", output: { text: "old" } };
+  const latest = { id: "2", output: { text: "current" } };
+  function page({
+    historyEpoch = "1",
+    securityEpoch = "1",
+    contentVersion = "1",
+    history = true,
+  } = {}) {
+    const selected = { ...task("17", "1"), runs: [latest] };
+    return {
+      ...initialWorkbenchState.snapshot,
+      revision: "2",
+      historyEpoch,
+      securityEpoch,
+      workspaces: [workspace("1")],
+      taskIndex: [selected],
+      tasks: [selected],
+      taskPage: {
+        task: selected,
+        beforeRunId: null,
+        nextBeforeRunId: "2",
+        runManifest: [
+          { id: "1", contentVersion },
+          { id: "2", contentVersion: "1" },
+        ],
+      },
+      historyPage: history
+        ? { beforeRunId: "2", nextBeforeRunId: null, runs: [older] }
+        : null,
+    };
+  }
+  const accept = (state, snapshot) =>
+    workbenchReducer(state, {
+      type: "snapshot.accepted",
+      snapshot,
+      receivedAt: 1,
+    });
+  const loaded = accept(initialWorkbenchState, page());
+  assert.deepEqual(
+    loaded.snapshot.tasks[0].runs.map((run) => run.id),
+    ["1", "2"],
+  );
+  const streamed = accept(loaded, page({ history: false }));
+  assert.equal(streamed.snapshot.tasks[0].runs[0], older);
+  for (const changed of [
+    { historyEpoch: "2" },
+    { securityEpoch: "2" },
+    { contentVersion: "2" },
+  ]) {
+    const refreshed = accept(loaded, page({ ...changed, history: false }));
+    assert.deepEqual(
+      refreshed.snapshot.tasks[0].runs.map((run) => run.id),
+      ["2"],
+    );
+  }
+  const updated = { ...older, output: { text: "new" } };
+  const snapshot = page({ contentVersion: "2" });
+  snapshot.historyPage.runs = [updated];
+  assert.equal(accept(loaded, snapshot).snapshot.tasks[0].runs[0], updated);
+});

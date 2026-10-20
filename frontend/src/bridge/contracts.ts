@@ -1039,7 +1039,7 @@ export function cloneViewScope(scope: ViewScope): ViewScope {
 export type RunManifest = Pick<
   RunView,
   "id" | "phase" | "permissionProfile" | "permissionInteraction" | "terminal"
->;
+> & { contentVersion: string };
 
 export type TaskSummary = Pick<
   TaskView,
@@ -1064,9 +1064,32 @@ export type TaskSummary = Pick<
   > | null;
 };
 
+export const viewBlockNames = [
+  "context",
+  "workspaces",
+  "taskIndex",
+  "taskPage",
+  "historyPage",
+  "management",
+  "searchIndex",
+] as const;
+export type ViewBlockName = (typeof viewBlockNames)[number];
+export type ViewVersions = Record<ViewBlockName, string>;
+export const emptyViewVersions: ViewVersions = {
+  context: "0",
+  workspaces: "0",
+  taskIndex: "0",
+  taskPage: "0",
+  historyPage: "0",
+  management: "0",
+  searchIndex: "0",
+};
+
 export type WorkbenchSnapshot = {
   revision: string;
+  blockVersions: ViewVersions;
   securityEpoch: string;
+  historyEpoch: string;
   scope: ViewScope;
   taskIndex: TaskSummary[];
   receipts: { taskId: string; operationId: string; observed: boolean }[];

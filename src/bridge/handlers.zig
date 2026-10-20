@@ -19,6 +19,15 @@ pub const RendererBridgeConnect = struct {
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
+pub const ViewVersions = struct {
+    context: []const u8,
+    workspaces: []const u8,
+    taskIndex: []const u8,
+    taskPage: []const u8,
+    historyPage: []const u8,
+    management: []const u8,
+    searchIndex: []const u8,
+};
 pub const ProductViewRequest = struct {
     taskId: ?[]const u8,
     beforeRunId: ?[]const u8,
@@ -26,11 +35,12 @@ pub const ProductViewRequest = struct {
     management: @FieldType(product_control.ViewRequest, "management"),
     search: bool,
     receipts: []const struct { taskId: []const u8, operationId: []const u8 },
+    known: struct { securityEpoch: []const u8, versions: ViewVersions },
 
     pub fn product(self: ProductViewRequest, storage: []product_control.ViewReceiptQuery) !product_control.ViewRequest {
         if (self.receipts.len > 64 or self.receipts.len > storage.len) return error.InvalidViewRequest;
         for (self.receipts, storage[0..self.receipts.len]) |query, *target| target.* = .{ .task_id = try parseWireId(query.taskId), .operation_id = query.operationId };
-        const request: product_control.ViewRequest = .{
+        var request: product_control.ViewRequest = .{
             .task_id = if (self.taskId) |id| try parseWireId(id) else null,
             .before_run_id = if (self.beforeRunId) |id| try parseWireId(id) else null,
             .run_limit = self.runLimit,
@@ -38,6 +48,8 @@ pub const ProductViewRequest = struct {
             .search = self.search,
             .receipts = storage[0..self.receipts.len],
         };
+        request.known_epoch = try parseWireId(self.known.securityEpoch);
+        inline for (std.meta.fields(ViewVersions)) |field| @field(request.known_versions, field.name) = try parseWireId(@field(self.known.versions, field.name));
         try request.validate();
         return request;
     }
@@ -1068,7 +1080,7 @@ test "complete model metadata incoming declarations retain capabilities and toke
 
 test "Product view request is closed and validates stable history identity" {
     var parsed = try parsePayload(ProductViewRequest,
-        \\{"taskId":"7","beforeRunId":"9","runLimit":4,"management":"skills","search":false,"receipts":[]}
+        \\{"taskId":"7","beforeRunId":"9","runLimit":4,"management":"skills","search":false,"receipts":[],"known":{"securityEpoch":"0","versions":{"context":"0","workspaces":"0","taskIndex":"0","taskPage":"0","historyPage":"0","management":"0","searchIndex":"0"}}}
     );
     defer parsed.deinit();
     var query_storage: [64]product_control.ViewReceiptQuery = undefined;
@@ -1084,6 +1096,6 @@ test "Product view request is closed and validates stable history identity" {
         \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"none","search":false,"receipts":[],"fields":["tasks"]}
     };
     for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductViewRequest, payload));
-    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = null, .beforeRunId = "2", .runLimit = 4, .management = .none, .search = false, .receipts = &.{} }).product(&query_storage));
-    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = "0", .beforeRunId = null, .runLimit = 4, .management = .none, .search = false, .receipts = &.{} }).product(&query_storage));
+    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = null, .beforeRunId = "2", .runLimit = 4, .management = .none, .search = false, .receipts = &.{}, .known = .{ .securityEpoch = "0", .versions = .{ .context = "0", .workspaces = "0", .taskIndex = "0", .taskPage = "0", .historyPage = "0", .management = "0", .searchIndex = "0" } } }).product(&query_storage));
+    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = "0", .beforeRunId = null, .runLimit = 4, .management = .none, .search = false, .receipts = &.{}, .known = .{ .securityEpoch = "0", .versions = .{ .context = "0", .workspaces = "0", .taskIndex = "0", .taskPage = "0", .historyPage = "0", .management = "0", .searchIndex = "0" } } }).product(&query_storage));
 }

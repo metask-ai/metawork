@@ -15,7 +15,11 @@ import {
   nonNegativeNumber,
   enumValue,
 } from "./wire-codec.ts";
-import { compactPhases } from "./contracts.ts";
+import {
+  viewBlockNames,
+  type ViewVersions,
+  compactPhases,
+} from "./contracts.ts";
 import {
   sendInputReasons,
   type SendInputResult,
@@ -4583,6 +4587,7 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
 function decodeRunManifest(value: unknown, path: string): RunManifest {
   const item = object(value, path, [
     "id",
+    "contentVersion",
     "phase",
     "permissionProfile",
     "permissionInteraction",
@@ -4592,6 +4597,10 @@ function decodeRunManifest(value: unknown, path: string): RunManifest {
   const terminal = decodeRunTerminal(item.terminal, `${path}.terminal`);
   validateRunTerminalState(phase, terminal, path);
   return {
+    contentVersion: positiveU64WireId(
+      item.contentVersion,
+      `${path}.contentVersion`,
+    ),
     id: positiveWireId(item.id, `${path}.id`),
     phase,
     terminal,
@@ -4730,10 +4739,23 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
   return summary;
 }
 
+export function decodeViewVersions(value: unknown): ViewVersions {
+  const item = object(value, "$.blockVersions", viewBlockNames);
+  return Object.fromEntries(
+    viewBlockNames.map((name) => [
+      name,
+      positiveU64WireId(item[name], `$.blockVersions.${name}`),
+    ]),
+  ) as ViewVersions;
+}
+
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const view = object(value, "$", [
     "revision",
     "securityEpoch",
+    "historyEpoch",
+    "blockVersions",
+    "reusedBlocks",
     "scope",
     "context",
     "workspaces",
@@ -4744,11 +4766,19 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "searchIndex",
     "receipts",
   ]);
+  const blockVersions = decodeViewVersions(view.blockVersions);
+  if (
+    arrayValue(view.reusedBlocks, "$.reusedBlocks", (item) => item).length !== 0
+  )
+    fail("$.reusedBlocks", "blocks must be materialized before decode");
   const scope = decodeViewScope(view.scope, "$.scope");
   const revision = wireId(view.revision, "$.revision");
-  const securityEpoch = positiveWireId(view.securityEpoch, "$.securityEpoch");
+  const securityEpoch = positiveU64WireId(
+    view.securityEpoch,
+    "$.securityEpoch",
+  );
+  const historyEpoch = positiveU64WireId(view.historyEpoch, "$.historyEpoch");
   const root = object(view.context, "$.context", [
-    "revision",
     "capabilities",
     "permissions",
     "account",
@@ -4757,8 +4787,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "automaticWorkspaceRoot",
     "skillCatalog",
   ]);
-  if (root.revision !== revision)
-    fail("$.context.revision", "mixed Product commits");
   const management = object(view.management, "$.management", ["kind", "value"]);
   if (
     management.kind !== scope.management ||
@@ -5449,7 +5477,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   }
   return {
     revision,
+    blockVersions,
     securityEpoch,
+    historyEpoch,
     scope,
     taskIndex,
     receipts,

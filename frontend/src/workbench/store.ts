@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
-import { initialViewScope } from "../bridge/contracts.ts";
+import { emptyViewVersions, initialViewScope } from "../bridge/contracts.ts";
 import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
@@ -31,7 +31,9 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
+    blockVersions: emptyViewVersions,
     securityEpoch: "1",
+    historyEpoch: "1",
     scope: initialViewScope,
     taskIndex: [],
     receipts: [],
@@ -224,10 +226,26 @@ export function workbenchReducer(
     // Retain only explicitly fetched Runs of this Task. Current header and
     // current Run always come from this commit, including during history reads.
     const previous =
-      state.snapshot.securityEpoch === snapshot.securityEpoch
+      state.snapshot.securityEpoch === snapshot.securityEpoch &&
+      state.snapshot.historyEpoch === snapshot.historyEpoch
         ? state.snapshot.tasks.find((task) => task.id === page.task.id)
         : undefined;
-    const runs = new Map(previous?.runs.map((run) => [run.id, run]));
+    const previousManifest = new Map(
+      state.snapshot.taskPage?.runManifest.map((run) => [
+        run.id,
+        run.contentVersion,
+      ]),
+    );
+    const confirmed = new Set(
+      page.runManifest
+        .filter((run) => previousManifest.get(run.id) === run.contentVersion)
+        .map((run) => run.id),
+    );
+    const runs = new Map(
+      previous?.runs
+        .filter((run) => confirmed.has(run.id))
+        .map((run) => [run.id, run]),
+    );
     for (const run of snapshot.historyPage?.runs ?? []) runs.set(run.id, run);
     for (const run of page.task.runs) runs.set(run.id, run);
     snapshot = {

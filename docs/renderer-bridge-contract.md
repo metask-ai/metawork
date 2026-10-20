@@ -35,6 +35,10 @@ ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、�
 
 一次响应冻结同一 Product 提交 revision，明确所返回范围、产品块 identity、内容版本及安全代次。Renderer 只复用 Host 确认仍有效的块，并原子接纳本次页面所需的摘要、上下文和 Task 内容；没有返回某个范围不等于该范围为空。内容版本表达数据变化，不是第二个协议版本。缺失块、错误关联、重复 identity 和未知范围均严格拒绝，不能从其他 Task 或全局默认补造事实。
 
+`snapshot` 请求精确包含消费者范围 `taskId / beforeRunId / runLimit / management / search / receipts` 和 `known = { securityEpoch, versions }`。`versions` 与响应 `blockVersions` 使用同一闭合块目录：`context / workspaces / taskIndex / taskPage / historyPage / management / searchIndex`；请求未知版本为 `"0"`，响应版本为非零 canonical decimal u64。请求中的版本仅是交付提示，不授予 authority，也不参与消费者范围 identity。Host 对相同范围、相同安全代次及相同内容版本确认复用时，响应将块正文置 null 并在唯一、无重复的 `reusedBlocks` 中列出；其他 null 仍按该块原有空值语义解释。Renderer 必须持有本次读取开始时捕获的完全匹配缓存才可补全，严格解码与跨块关联校验成功后才原子安装，禁止根据版本猜测、接受不完整缓存或回退全量通道。实时上下文不重复携带提交 revision；根 revision 绑定本次冻结响应。
+
+已加载历史的复用另受根 `historyEpoch` 与 Run manifest 的 `contentVersion` 确认。非 CoreEvent 的产品变更推进 historyEpoch；CoreEvent 只推进所修改 Run 的运行期内容版本。Renderer 只保留同一 Task、安全代次、historyEpoch 且 manifest 仍确认相同内容版本的已加载 Run；新返回的当前页和历史页覆盖同 identity 的旧内容。这些失效标识不进入历史持久化格式。Product 编码缓存和 Renderer 交付缓存均按总字节预算有界，淘汰只造成后续重建，不改变可访问数据容量；安全失效清空缓存，旧版本不得重新分配给不同内容。
+
 Bridge transport storage 是有界 encoded bytes，不持有 Product 内部状态或 credential。Product writer 只在同步调用期间借用 output buffer；运输使用绑定读取 identity、generation、window、范围和安全代次的分块，base64 后仍须满足 Native SDK 单次 result 上限。新的 begin 或安全失效必须先撤销旧 descriptor；失败不得继续读取被部分覆盖或安全代次过期的 buffer。缓存和运输容量必须覆盖合法产品范围，不能通过永久 SnapshotTooLarge、缩小产品状态或回退旧全量路径处理合格数据。
 
 Product Control 改变安全代次后，旧代次缓存和在途读取立即失效；响应明确交付新安全代次。Renderer 清除旧代次正文、块版本和读取候选，按当前范围重新获取；迟到分块不得拼接或重新安装。Host 与 Renderer 都不得把旧安全代次命中当作缓存成功。

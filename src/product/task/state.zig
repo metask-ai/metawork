@@ -750,6 +750,8 @@ pub const OwnedImageExecution = struct {
 };
 
 pub const RunRecord = struct {
+    /// Projection invalidation only; never persisted or supplied to AgentCore.
+    projection_event_version: u64 = 1,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
 

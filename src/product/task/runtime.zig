@@ -110,7 +110,7 @@ pub const EventOutcome = union(enum) {
     unknown,
     unchanged,
     late_terminal: struct { task_id: u64, count: u64 },
-    applied: struct { durable_boundary: bool },
+    applied: struct { durable_boundary: bool, task_id: u64 },
 };
 
 pub const WorkspaceSignals = struct {
@@ -3616,7 +3616,7 @@ pub const Runtime = struct {
         self: *Runtime,
         envelope: *const agent.OwnedCoreEvent,
         effects: EventEffects,
-    ) (task_state.EventApplyError || error{UnknownTask})!EventOutcome {
+    ) (task_state.EventApplyError || error{ UnknownTask, ViewVersionExhausted })!EventOutcome {
         const task = self.findByRouteId(envelope.session_id) orelse
             return error.UnknownTask;
         var context = EventContext{ .runtime = self, .effects = effects, .image_secret = if (task_state.findRun(task.durable.runs, envelope.run_id)) |run| run.redactionSecrets()[1] else &.{} };
@@ -3632,7 +3632,12 @@ pub const Runtime = struct {
             .replace_file_references_fn = replaceEventFileReferences,
             .record_file_changes_fn = recordEventFileChanges,
         };
+        const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
+        if (versioned_run) |run| if (run.projection_event_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
         const application_result = try task_state.applyEvent(task, envelope, projection);
+        if (application_result == .applied) if (versioned_run) |run| {
+            run.projection_event_version += 1;
+        };
         if (application_result == .applied) {
             const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
             for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
@@ -3650,6 +3655,7 @@ pub const Runtime = struct {
             } },
             .applied => |application| .{ .applied = .{
                 .durable_boundary = application.durable_boundary,
+                .task_id = task.durable.id,
             } },
         };
     }
@@ -4354,6 +4360,19 @@ pub const Runtime = struct {
             }
         }
         return false;
+    }
+
+    /// Borrow each retained execution credential only during the callback.
+    /// Projection composition may build its own bounded, securely owned matcher;
+    /// it must not retain pointers into Task attachments or Run bindings.
+    pub fn visitExecutionCredentials(self: *const Runtime, context: *anyopaque, visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
+                if (credential.len != 0) try visit_fn(context, credential);
+            }
+        }
     }
 
     /// Applies a callback-scoped projection scrubber against every credential

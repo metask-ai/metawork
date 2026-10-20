@@ -3,6 +3,7 @@ import {
   maxSnapshotBytes,
   maxSnapshotChunkBytes,
 } from "../generated-wire.ts";
+import { ViewCache } from "./view-cache.ts";
 import { commands } from "../commands.ts";
 import { RendererBridgeContractError } from "../contract-error.ts";
 import {
@@ -95,9 +96,13 @@ function decodeBase64(value: string) {
 export async function fetchWorkbenchSnapshot(
   invoke: SnapshotInvoke,
   scope: ViewScope = initialViewScope,
+  cache: ViewCache = new ViewCache(),
 ): Promise<WorkbenchSnapshot> {
   const requested = cloneViewScope(scope);
-  const current = descriptor(await invoke(commands.snapshot, requested));
+  const captured = cache.capture(requested);
+  const current = descriptor(
+    await invoke(commands.snapshot, { ...requested, known: captured.known }),
+  );
   if (
     current.bytes > maxSnapshotBytes ||
     current.chunkBytes > maxSnapshotChunkBytes
@@ -138,9 +143,11 @@ export async function fetchWorkbenchSnapshot(
     invalidSnapshot("Workbench snapshot is not valid JSON");
   }
   try {
-    const next = decodeWorkbenchSnapshot(parsed);
+    const candidate = cache.materialize(parsed, requested, captured);
+    const next = decodeWorkbenchSnapshot(candidate.wire);
     if (!sameViewScope(next.scope, requested))
       invalidSnapshot("Product view scope mismatch");
+    candidate.install(next);
     return next;
   } catch (error) {
     if (error instanceof RendererBridgeContractError) throw error;

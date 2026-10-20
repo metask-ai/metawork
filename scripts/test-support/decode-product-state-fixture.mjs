@@ -52,6 +52,8 @@ export function decodeProductStateFixture(state) {
     taskPage,
     historyPage,
     securityEpoch,
+    historyEpoch,
+    blockVersions,
     searchIndex,
     receipts,
     ...fields
