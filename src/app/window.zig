@@ -10,6 +10,7 @@ pub const main_window_id: native_sdk.platform.WindowId = 1;
 
 pub const tray_open_id: native_sdk.platform.TrayItemId = 1;
 pub const tray_quit_id: native_sdk.platform.TrayItemId = 2;
+pub const TestSupport = if (builtin.is_test) startup_window.TestSupport else struct {};
 
 const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_open_id, .label = "Open MetaWork", .command = "metawork.tray.open" },

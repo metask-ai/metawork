@@ -418,6 +418,9 @@ test "single-instance coordinator reports SDK wake failure over real transport a
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
     defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try @import("window.zig").TestSupport.Window.init();
+    defer startup_window.deinit();
     var coordinator: Coordinator = undefined;
     try std.testing.expectEqual(Disposition.primary, try coordinator.init(std.testing.io, std.testing.allocator, .{ .vector = &.{} }, root, "wake-test", false, false));
     // Declare platform cleanup first: ingress must join before services clear.
@@ -459,6 +462,12 @@ test "single-instance coordinator reports SDK wake failure over real transport a
                 coordinator.queue.mutex.unlock(std.testing.io);
                 if (stopping) break;
                 std.Thread.yield() catch {};
+            }
+            // Queue.stop precedes transport cancellation. Keep the callback
+            // held until stop has reached join, so this test observes callback
+            // lifetime rather than racing cancellation against response I/O.
+            if (@import("builtin").os.tag == .windows) {
+                while (!coordinator.server.joiningForTest()) std.Thread.yield() catch {};
             }
             try std.testing.expect(!stop.completed.load(.acquire));
             try std.testing.expect(adapter.services() != null);

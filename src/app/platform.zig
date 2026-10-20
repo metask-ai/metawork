@@ -499,6 +499,9 @@ test "main-loop wake publishes Native startup to the live activation listener" {
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try app_window.TestSupport.Window.init();
+    defer startup_window.deinit();
     const identity = T.activation.Identity.init("wake-test", "/isolated");
     var queue = T.activation.ActivationQueue.init(std.testing.io, identity);
     var storage: [T.activation.max_frame_bytes]u8 = undefined;
