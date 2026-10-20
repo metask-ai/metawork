@@ -406,7 +406,7 @@ pub fn build(b: *std.Build) void {
     const single_instance_tests = b.addTest(.{
         .name = "metawork-app-single-instance",
         .root_module = test_modules.app,
-        .filters = &.{"single-instance coordinator"},
+        .filters = &.{ "single-instance coordinator", "activation queue", "main-loop wake" },
     });
     b.step(
         "test-single-instance",

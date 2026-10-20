@@ -221,23 +221,38 @@ pub const Notifier = struct {
     context: ?*anyopaque,
     notify_fn: *const fn (?*anyopaque) bool,
 
-    fn notify(self: Notifier) void {
-        _ = self.notify_fn(self.context);
+    fn notify(self: Notifier) bool {
+        return self.notify_fn(self.context);
     }
 };
 
 pub const ActivationQueue = struct {
     io: std.Io,
     identity: Identity,
-    notifier: Notifier,
+    notifier: ?Notifier = null,
     mutex: std.Io.Mutex = .init,
     pending: bool = false,
     stopping: bool = false,
 
-    pub fn init(io: std.Io, identity: Identity, notifier: Notifier) ActivationQueue {
-        return .{ .io = io, .identity = identity, .notifier = notifier };
+    pub fn init(io: std.Io, identity: Identity) ActivationQueue {
+        return .{ .io = io, .identity = identity };
     }
 
+    /// Publish only after Native startup. The listener copies the callback
+    /// under this same lock, ordering its platform reads after startup writes.
+    pub fn bindWakeAndDrain(self: *ActivationQueue, notifier: Notifier) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping) return false;
+        std.debug.assert(self.notifier == null);
+        self.notifier = notifier;
+        const result = self.pending;
+        self.pending = false;
+        return result;
+    }
+
+    /// Called serially by the transport listener. Main-thread bind/drain/stop
+    /// may interleave, but there is never another in-flight accept to revoke.
     pub fn accept(self: *ActivationQueue, frame: []const u8) Status {
         _ = decodeRequest(frame, self.identity) catch |err| return switch (err) {
             error.UnsupportedRevision, error.IdentityMismatch => .incompatible,
@@ -248,10 +263,23 @@ pub const ActivationQueue = struct {
             self.mutex.unlock(self.io);
             return .stopping;
         }
+        const was_pending = self.pending;
         self.pending = true;
+        const notifier = self.notifier;
         self.mutex.unlock(self.io);
-        self.notifier.notify();
-        return .accepted;
+        // Before binding, startup owns delivery through bindWakeAndDrain.
+        const ready = notifier orelse return .accepted;
+        // Keep the SDK call outside our lock. A delivered wake can drain this
+        // demand before an explicit enqueue error returns.
+        if (ready.notify()) return .accepted;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping) return .stopping;
+        if (!self.pending) return .accepted;
+        // Revoke only this unconsumed request, preserving earlier accepted
+        // demand. Do not replay it or report success without a wake.
+        self.pending = was_pending;
+        return .rejected;
     }
 
     pub fn drain(self: *ActivationQueue) bool {
@@ -267,6 +295,7 @@ pub const ActivationQueue = struct {
         defer self.mutex.unlock(self.io);
         self.stopping = true;
         self.pending = false;
+        self.notifier = null;
     }
 };
 
@@ -346,10 +375,11 @@ test "activation request rejects revision identity and malformed payload" {
 
 test "activation queue acknowledges only compatible requests and coalesces" {
     const identity = Identity.init("development", "C:/Data/MetaWork");
-    var queue = ActivationQueue.init(std.testing.io, identity, .{
+    var queue = ActivationQueue.init(std.testing.io, identity);
+    try std.testing.expect(!queue.bindWakeAndDrain(.{
         .context = null,
         .notify_fn = ignoreNotify,
-    });
+    }));
     var storage: [max_frame_bytes]u8 = undefined;
     const frame = try encodeRequest(&storage, identity, "C:/", &.{"metawork"});
     try std.testing.expectEqual(Status.accepted, queue.accept(frame));
@@ -370,9 +400,96 @@ test "activation queue acknowledges only compatible requests and coalesces" {
     );
 }
 
+test "activation queue defers startup requests until binding and never rebinds after stop" {
+    const Spy = struct {
+        calls: usize = 0,
+        fn notify(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return true;
+        }
+    };
+    var spy: Spy = .{};
+    const notifier: Notifier = .{ .context = &spy, .notify_fn = Spy.notify };
+    const identity = Identity.init("development", "/isolated");
+    var queue = ActivationQueue.init(std.testing.io, identity);
+    var storage: [max_frame_bytes]u8 = undefined;
+    const frame = try encodeRequest(&storage, identity, "/", &.{"metawork"});
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
+    try std.testing.expect(queue.bindWakeAndDrain(notifier));
+    try std.testing.expect(!queue.drain());
+    try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+    try std.testing.expect(queue.drain());
+    queue.stop();
+    try std.testing.expect(!queue.bindWakeAndDrain(notifier));
+    try std.testing.expectEqual(Status.stopping, queue.accept(frame));
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+    try std.testing.expect(!queue.drain());
+
+    var failed_start = ActivationQueue.init(std.testing.io, identity);
+    try std.testing.expectEqual(Status.accepted, failed_start.accept(frame));
+    failed_start.stop();
+    try std.testing.expect(!failed_start.bindWakeAndDrain(notifier));
+    try std.testing.expect(!failed_start.drain());
+}
+
 test "activation response round trips exact status" {
     inline for (std.meta.tags(Status)) |status| {
         var storage: [response_frame_bytes]u8 = undefined;
         try std.testing.expectEqual(status, try decodeResponse(encodeResponse(&storage, status)));
+    }
+}
+
+test "activation queue settles wake failures without losing or replaying demand" {
+    const Spy = struct {
+        queue: *ActivationQueue,
+        mode: enum { succeed, fail, drain_then_fail, stop_then_fail } = .fail,
+        calls: usize = 0,
+        consumed: usize = 0,
+
+        fn notify(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            switch (self.mode) {
+                .succeed => return true,
+                .fail => {},
+                .drain_then_fail => {
+                    if (self.queue.drain()) self.consumed += 1;
+                },
+                .stop_then_fail => self.queue.stop(),
+            }
+            return false;
+        }
+    };
+    const identity = Identity.init("development", "/isolated");
+    var storage: [max_frame_bytes]u8 = undefined;
+    const frame = try encodeRequest(&storage, identity, "/", &.{"metawork"});
+    inline for (.{ false, true }) |prior_pending| {
+        inline for ([_]@FieldType(Spy, "mode"){ .fail, .drain_then_fail, .stop_then_fail }) |mode| {
+            var queue = ActivationQueue.init(std.testing.io, identity);
+            var spy: Spy = .{ .queue = &queue, .mode = .succeed };
+            try std.testing.expect(!queue.bindWakeAndDrain(.{ .context = &spy, .notify_fn = Spy.notify }));
+            if (prior_pending) try std.testing.expectEqual(Status.accepted, queue.accept(frame));
+            const previous_calls = spy.calls;
+            spy.mode = mode;
+            const expected: Status = switch (mode) {
+                .fail => .rejected,
+                .drain_then_fail => .accepted,
+                .stop_then_fail => .stopping,
+                .succeed => unreachable,
+            };
+            try std.testing.expectEqual(expected, queue.accept(frame));
+            try std.testing.expectEqual(previous_calls + 1, spy.calls);
+            try std.testing.expectEqual(@as(usize, if (mode == .drain_then_fail) 1 else 0), spy.consumed);
+            try std.testing.expectEqual(prior_pending and mode == .fail, queue.drain());
+            try std.testing.expect(!queue.drain());
+            spy.mode = .succeed;
+            try std.testing.expectEqual(if (mode == .stop_then_fail) Status.stopping else Status.accepted, queue.accept(frame));
+            try std.testing.expectEqual(mode != .stop_then_fail, queue.drain());
+            try std.testing.expect(!queue.drain());
+        }
     }
 }

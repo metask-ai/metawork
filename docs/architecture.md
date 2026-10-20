@@ -108,19 +108,26 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统 eff
 | 标准 WebView Clipboard API | Renderer | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
 | 标准 WebView paste 事件 | Renderer | 只允许普通 Composer 的显式图片粘贴输入，按文件附件合同消费本次 File；不开放主动 clipboard read |
 | Bridge API / data-only DTO | Bridge、Application | transport、source/window authority 与无执行权数据 |
-| `PlatformServices` public primitive | 已登记一级 compatibility seam | 只补 Runtime API 的明确缺口 |
+| `PlatformServices` public primitive | Application 的主循环唤醒、附件图片解码、已登记一级 compatibility seam | 唤醒与附件仅按下述边界消费；其他调用只补 Runtime API 的明确缺口 |
+| 公开 PNG 编码 API | Application | 只用于下述附件内存图片转换 |
 | 公开 OS API / platform handle | 已登记二级 compatibility seam | 只补 SDK 也未提供原语的明确缺口 |
 | `PlatformServices.context` | 无 | SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转 |
 
-系统能力只通过以下路径消费：
+Application 只通过以下受限路径消费系统 effect、主循环唤醒与附件图片处理：
 
 | 路径 | 调用链 | 适用条件 |
 | --- | --- | --- |
 | 正常路径 | Application → Native SDK Runtime API → SDK internals → OS | Runtime API 已提供完整能力 |
+| 主循环唤醒正常路径 | Application → 公开 `PlatformServices.wake` → SDK platform loop | 只提交有界、非阻塞的跨线程唤醒，不执行窗口或 Product effect |
+| 附件图片正常路径 | Application → SDK 公开图片解码与 PNG 编码 API | 只完成下述有界内存图片转换 |
 | 一级兼容 | Application narrow seam → public `PlatformServices` primitive → OS | Runtime API 缺失，但 SDK 公开低层原语足够 |
 | 二级兼容 | Application narrow platform seam → public OS API | SDK 没有可用原语，必须暂时补齐平台实现 |
 
-Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compatibility 的治理单位是 capability seam，而不是文件或目录；每项 seam 必须：
+主循环唤醒是 Application 对 SDK 公开跨线程 enqueue 原语的正常消费，不属于 compatibility capability。Application 在 Native 服务就绪且 wake 可用后才发布回调，以生产者启动或 owner 内同步建立可见性；关闭时先停止入口并 join 在途生产者，再清理平台引用。Native 就绪前的单实例激活只保留有界合并需求，由主线程绑定回调时消费；就绪后的单实例通知显式失败时，不得为尚未消费的本次需求返回成功，也不得撤销较早已接受的需求或自动重放。SDK 调用成功只代表 enqueue 合同，不代表窗口已激活或 Product effect 已完成；最终 effect 仍由主线程处理。这项许可不开放其他低层系统 effect。
+
+附件图片预览是 Application 对公开 `PlatformServices.decodeImage` 与 `canvas.app_icon.encodePng` 的正常组合，不属于 compatibility capability，也不因缺少 Runtime 封装而成为 SDK 缺口。Application 在 Native loop thread 生成按像素和输出字节有界的 PNG，负责临时内存的 ownership 与释放，调用失败必须明确返回；这项许可不授予其他低层系统调用权。Product 独占原件、类型、配额和生命周期，精确合同见 [Product 架构](product-architecture.md#26-文件-attachment-staging)；Renderer 不参与图片转换，不注册额外 host tool。
+
+系统 effect 与 SDK-owned runtime state 已有 Runtime API 时，绕过它调用低层函数属于架构违规。Compatibility 的治理单位是 capability seam，而不是文件或目录；每项 seam 必须：
 
 - 只存在于 Application-owned、按 capability 和平台收窄的实现中，且只向消费者注入完成该职责所需的能力；
 - 明确 capability identity、SDK 缺口、调用者、目标平台、线程、资源 ownership、失败、shutdown、验证和删除条件；
@@ -139,7 +146,6 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `external_link_handoff` | 一级 | Renderer 只提交用户显式点击的有界 `http`、`https` 或 `mailto` URL；Bridge 校验 connection/window、协议、绝对地址、无 credential 与控制字符后，Application 通过公开 `PlatformServices.openExternalUrl` 交给系统 handler。URL 不进入 Product、Snapshot、日志或持久化，失败只返回闭合结果 | SDK Runtime API 提供不要求全局放宽 WebView navigation policy、可逐次接收同等严格目标的 external-open 能力并通过 macOS/Windows 验收 |
-| `attachment_image_preview` | 一级 | Application 在 Native loop thread 通过公开 `PlatformServices.decodeImage` 生成按像素有界的 RGBA，并通过公开 `canvas.app_icon.encodePng` 编码有界 PNG；Product 独占原件、类型、配额和生命周期，Renderer 不参与图片转换。不调用 SDK 私有 codec，不注册额外 host tool | Native SDK Runtime 提供等价有界附件图片转换 API 并通过 macOS/Windows 验收后原位替换此 primitive seam |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
