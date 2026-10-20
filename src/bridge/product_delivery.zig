@@ -56,7 +56,11 @@ pub const Transport = struct {
     }
 };
 
-pub const SnapshotStart = struct { read_id: u64, bytes: usize };
+pub const SnapshotStart = struct { read_id: u64, bytes: usize, scratch_bytes: usize = 0 };
+pub const SnapshotPreparer = struct {
+    context: ?*anyopaque = null,
+    prepare_fn: *const fn (?*anyopaque, u64, []u8) anyerror!SnapshotStart,
+};
 pub const SnapshotWriter = struct {
     context: ?*anyopaque = null,
     write_fn: *const fn (?*anyopaque, []u8) anyerror!SnapshotStart,
@@ -194,12 +198,32 @@ pub const Delivery = struct {
         self.invalidateSnapshot();
         errdefer std.crypto.secureZero(u8, self.snapshot.storage);
         const prepared = try writer.write(self.snapshot.storage);
-        if (prepared.read_id == 0 or prepared.bytes == 0 or prepared.bytes > self.snapshot.storage.len)
+        if (prepared.read_id == 0 or @max(prepared.bytes, prepared.scratch_bytes) > self.snapshot.storage.len)
             return error.InvalidStorage;
         try self.snapshot.publish(prepared.bytes, generation, window_id, snapshot_chunk_bytes);
+        self.snapshot.dirty_len = prepared.scratch_bytes;
         self.snapshot_product_read_id = prepared.read_id;
         self.snapshot_security_epoch = security_epoch;
         return .{ .id = self.snapshot.id, .bytes = self.snapshot.len };
+    }
+
+    pub fn prepareSnapshot(self: *Delivery, window_id: WindowId, security_epoch: u64, snapshot_id: u64, preparer: SnapshotPreparer) !SnapshotDescriptor {
+        const generation = try self.requireWindow(window_id);
+        if (security_epoch == 0 or security_epoch != self.snapshot_security_epoch) {
+            self.invalidateSnapshot();
+            return error.StaleSnapshot;
+        }
+        if (snapshot_id == 0 or snapshot_id != self.snapshot.id or generation != self.snapshot.generation or window_id != self.snapshot.window_id) return error.StaleSnapshot;
+        if (self.snapshot.len != 0) return .{ .id = snapshot_id, .bytes = self.snapshot.len };
+        errdefer {
+            std.crypto.secureZero(u8, self.snapshot.storage);
+            self.invalidateSnapshot();
+        }
+        const prepared = try preparer.prepare_fn(preparer.context, self.snapshot_product_read_id, self.snapshot.storage);
+        if (prepared.read_id != self.snapshot_product_read_id or @max(prepared.bytes, prepared.scratch_bytes) > self.snapshot.storage.len) return error.InvalidStorage;
+        self.snapshot.dirty_len = @max(self.snapshot.dirty_len, prepared.scratch_bytes);
+        self.snapshot.len = prepared.bytes;
+        return .{ .id = snapshot_id, .bytes = prepared.bytes };
     }
 
     pub fn snapshotChunk(
@@ -447,4 +471,48 @@ test "Product view failed replacement clears all partial transport bytes and rev
     _ = try delivery.publishSnapshot(1, 1, .{ .write_fn = Host.good });
     _ = try delivery.connect(1, transport);
     for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "Product view pending preparation binds identity and clears its scratch on revocation" {
+    const Host = struct {
+        calls: usize = 0,
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn begin(_: ?*anyopaque, output: []u8) !SnapshotStart {
+            @memset(output[0..12], 'x');
+            return .{ .read_id = 42, .bytes = 0, .scratch_bytes = 12 };
+        }
+        fn prepare(context: ?*anyopaque, read_id: u64, output: []u8) !SnapshotStart {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(u64, 42), read_id);
+            self.calls += 1;
+            @memset(output[0..18], 'y');
+            return .{ .read_id = 42, .bytes = if (self.calls == 2) 18 else 0, .scratch_bytes = 18 };
+        }
+    };
+    var host: Host = .{};
+    var bytes: [32]u8 = @splat(0);
+    var delivery: Delivery = .{ .snapshot = .{ .storage = &bytes } };
+    const transport: Transport = .{ .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel };
+    const preparer: SnapshotPreparer = .{ .context = &host, .prepare_fn = Host.prepare };
+    _ = try delivery.connect(7, transport);
+    const pending = try delivery.publishSnapshot(7, 1, .{ .write_fn = Host.begin });
+    try std.testing.expectEqual(@as(usize, 0), pending.bytes);
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(7, 1, pending.id, 0, .{ .write_fn = preencodedTestRange }));
+    try std.testing.expectError(error.EventWindowMismatch, delivery.prepareSnapshot(8, 1, pending.id, preparer));
+    try std.testing.expectError(error.StaleSnapshot, delivery.prepareSnapshot(7, 1, pending.id + 1, preparer));
+    try std.testing.expectEqual(@as(usize, 0), host.calls);
+    _ = try delivery.prepareSnapshot(7, 1, pending.id, preparer);
+    try std.testing.expectEqual(@as(usize, 18), delivery.snapshot.dirty_len);
+    try std.testing.expectError(error.StaleSnapshot, delivery.prepareSnapshot(7, 2, pending.id, preparer));
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    const next = try delivery.publishSnapshot(7, 2, .{ .write_fn = Host.begin });
+    const ready = try delivery.prepareSnapshot(7, 2, next.id, preparer);
+    try std.testing.expectEqual(@as(usize, 18), ready.bytes);
+    delivery.breakConnection(transport);
+    for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    _ = try delivery.connect(7, transport);
+    try std.testing.expectError(error.StaleSnapshot, delivery.prepareSnapshot(7, 2, next.id, preparer));
+    delivery.breakConnection(transport);
 }

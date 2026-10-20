@@ -1,6 +1,8 @@
 import {
   decodeSnapshotDescriptor,
+  decodeSnapshotPreparing,
   maxSnapshotBytes,
+  maxSnapshotPreparationSteps,
   maxSnapshotChunkBytes,
 } from "../generated-wire.ts";
 import { ViewCache } from "./view-cache.ts";
@@ -100,9 +102,36 @@ export async function fetchWorkbenchSnapshot(
 ): Promise<WorkbenchSnapshot> {
   const requested = cloneViewScope(scope);
   const captured = cache.capture(requested);
-  const current = descriptor(
-    await invoke(commands.snapshot, { ...requested, known: captured.known }),
-  );
+  let response = await invoke(commands.snapshot, {
+    ...requested,
+    known: captured.known,
+  });
+  let preparingId: string | null = null;
+  let steps = 0;
+  while (
+    typeof response === "object" &&
+    response !== null &&
+    "phase" in response
+  ) {
+    let pending;
+    try {
+      pending = decodeSnapshotPreparing(response, "$snapshotPreparing");
+    } catch {
+      invalidSnapshot("Invalid Workbench snapshot preparation");
+    }
+    if (
+      ++steps > maxSnapshotPreparationSteps ||
+      (preparingId !== null && pending.snapshotId !== preparingId)
+    )
+      invalidSnapshot("Workbench snapshot preparation identity or step limit");
+    preparingId = pending.snapshotId;
+    response = await invoke(commands.snapshot, {
+      preparingSnapshotId: preparingId,
+    });
+  }
+  const current = descriptor(response);
+  if (preparingId !== null && current.snapshotId !== preparingId)
+    invalidSnapshot("Workbench snapshot preparation identity mismatch");
   if (
     current.bytes > maxSnapshotBytes ||
     current.chunkBytes > maxSnapshotChunkBytes

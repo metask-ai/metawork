@@ -268,12 +268,12 @@ try {
   }
   console.log("Projection stress: 18 real historical Runs retained.");
   await webview.evaluate(`(() => {
-    const state=window.__projectionPressure={reads:[],frames:[],longTasks:[],running:true};
+    const state=window.__projectionPressure={reads:[],preparations:0,frames:[],longTasks:[],running:true};
     const transport=window.chrome.webview; const post=transport.postMessage;
     state.post=post;
     transport.postMessage=function(message) {
       const envelope=typeof message==='string'?JSON.parse(message):message;
-      if(envelope.command==='metawork.workbench.snapshot') state.reads.push({taskId:envelope.payload.taskId,beforeRunId:envelope.payload.beforeRunId,management:envelope.payload.management,at:performance.now()});
+      if(envelope.command==='metawork.workbench.snapshot') {if ('preparingSnapshotId' in envelope.payload) state.preparations++; else state.reads.push({taskId:envelope.payload.taskId,beforeRunId:envelope.payload.beforeRunId,management:envelope.payload.management,at:performance.now()});}
       return post.call(this,message);
     };
     state.observer=new PerformanceObserver(list=>{for(const item of list.getEntries()) if(state.longTasks.length<2000) state.longTasks.push(item.duration);});
@@ -420,7 +420,7 @@ try {
     });
   }
   const browser = await webview.evaluate(
-    `(() => {const s=window.__projectionPressure;s.running=false;s.observer.disconnect();window.chrome.webview.postMessage=s.post;return {reads:s.reads,frames:s.frames,longTasks:s.longTasks};})()`,
+    `(() => {const s=window.__projectionPressure;s.running=false;s.observer.disconnect();window.chrome.webview.postMessage=s.post;return {reads:s.reads,preparations:s.preparations,frames:s.frames,longTasks:s.longTasks};})()`,
   );
   assert.ok(browser.reads.some((read) => read.beforeRunId !== null));
   assert.ok(browser.reads.some((read) => read.management === "skills"));

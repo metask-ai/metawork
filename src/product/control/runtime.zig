@@ -47,7 +47,7 @@ const build_options = @import("build_options");
 const view_cache = @import("view_cache.zig");
 const view_plan = @import("view_plan.zig");
 pub const projection_step_bytes = view_plan.max_step_bytes;
-pub const SnapshotRead = struct { id: u64, bytes: usize };
+pub const SnapshotRead = struct { id: u64, bytes: usize, scratch_bytes: usize = 0 };
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
@@ -1124,7 +1124,7 @@ const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struc
 pub const PreparedCustomProviderBinding =
     execution_state.PreparedCustomProviderBinding;
 
-// Exists only for one synchronous Host projection. No credential or borrowed
+// Exists only for one Host read preparation. No credential or borrowed
 // execution pointer enters encoded caches, Bridge storage or worker work items.
 const ProjectionCredentials = struct {
     allocator: std.mem.Allocator,
@@ -1152,6 +1152,32 @@ const ProjectionCredentials = struct {
             self.allocator.free(value);
         }
         self.values.deinit(self.allocator);
+    }
+};
+
+const ViewPreparation = struct {
+    const Block = struct { key: view_cache.Key, start: usize, end: usize, known: u64, version: u64 = 0, current: bool = true };
+    const Tool = struct { source: ?product_task.OwnedToolProjection, child: *view_plan.Plan, state: product_task.OwnedToolProjection.State = .{} };
+    credentials: ?ProjectionCredentials = null,
+    tools: std.ArrayList(Tool) = .empty,
+    raw_bytes: usize = 0,
+    tool_limit: usize = 0,
+    next_tool: usize = 0,
+    blocks: [7]Block = undefined,
+    next_block: usize = 0,
+    versions: view_cache.Versions = .{},
+    reused: [7]bool = @splat(false),
+    known_epoch: u64 = 0,
+    scratch_bytes: usize = 0,
+    tail: view_plan.Plan = .{},
+    ready: bool = false,
+
+    fn clear(self: *ViewPreparation, allocator: std.mem.Allocator) void {
+        for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
+        self.tools.deinit(allocator);
+        if (self.credentials) |*credentials| credentials.deinit();
+        self.tail.clear(allocator);
+        self.* = .{};
     }
 };
 
@@ -1204,6 +1230,7 @@ pub const Runtime = struct {
     projection_security_epoch: u64 = 1,
     encoded_views: view_cache.Cache = .{},
     view_read: view_plan.Plan = .{},
+    view_preparation: ViewPreparation = .{},
     capture_view: ?*view_plan.Plan = null,
     view_step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
     next_view_read_id: u64 = 0,
@@ -5852,6 +5879,18 @@ pub const Runtime = struct {
             .applied => |application| {
                 if (application.durable_boundary) self.commitTaskStateNoFail();
                 self.encoded_views.invalidateEvent(application.task_id, envelope.run_id);
+                if (!self.view_preparation.ready and self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
+                    switch (block.key.kind) {
+                        .workspaces, .taskIndex => block.current = false,
+                        .taskPage => if (block.key.task_id == application.task_id) {
+                            block.current = false;
+                        },
+                        .historyPage => if (block.key.task_id == application.task_id and envelope.run_id < block.key.cursor) {
+                            block.current = false;
+                        },
+                        else => {},
+                    }
+                };
                 if (self.revision != std.math.maxInt(u64)) self.revision += 1;
             },
         }
@@ -6471,12 +6510,14 @@ pub const Runtime = struct {
         self.view_read.security_epoch = self.projection_security_epoch;
         self.capture_view = &self.view_read;
         defer self.capture_view = null;
-        var credentials = ProjectionCredentials{ .allocator = self.allocator };
-        defer credentials.deinit();
+        self.view_preparation.credentials = .{ .allocator = self.allocator };
+        const credentials = &self.view_preparation.credentials.?;
         try credentials.add(self.execution_state.credential());
-        try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
+        try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         self.view_credentials = credentials.values.items;
         defer self.view_credentials = null;
+        self.view_preparation.known_epoch = request.known_epoch;
+        self.view_preparation.tool_limit = self.limits.max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
         for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
         var writer = std.Io.Writer.fixed(output);
         writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"historyEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch, self.projection_history_epoch }) catch return error.SnapshotTooLarge;
@@ -6490,73 +6531,181 @@ pub const Runtime = struct {
         if (request.task_id) |id| if (self.task_runtime.taskHasActiveOperation(id)) {
             self.encoded_views.invalidate(.taskPage);
         };
-        var versions: view_cache.Versions = .{};
-        var reused: [7]bool = @splat(false);
         inline for (std.meta.fields(view_cache.Kind)) |field| {
             const kind: view_cache.Kind = @enumFromInt(field.value);
             const key = viewKey(request, kind);
             writer.writeAll(",\"" ++ field.name ++ "\":") catch return error.SnapshotTooLarge;
             const start = writer.end;
-            const point = self.view_read.mark();
-            const encoded_start = try self.view_read.encodedPosition(start);
-            const version = if (self.encoded_views.get(key)) |entry| version: {
-                if (request.known_epoch != self.projection_security_epoch or @field(request.known_versions, field.name) != entry.version)
-                    writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
-                break :version entry.version;
-            } else version: {
-                try self.writeViewBlock(&writer, request, kind);
-                const source = try self.view_read.blockSource(self.allocator, self.limits.max_snapshot_bytes, writer.buffered(), start, point);
+            var version: u64 = 0;
+            if (self.encoded_views.get(key)) |entry| {
+                version = entry.version;
+                if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
+                    writer.writeAll("null") catch return error.SnapshotTooLarge;
+                    self.view_preparation.reused[field.value] = true;
+                } else writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
+            } else try self.writeViewBlock(&writer, request, kind);
+            self.view_preparation.blocks[field.value] = .{ .key = key, .start = start, .end = writer.end, .known = @field(request.known_versions, field.name), .version = version };
+            @field(self.view_preparation.versions, field.name) = version;
+        }
+        try self.view_read.capture(self.allocator, writer.buffered());
+        self.view_preparation.scratch_bytes = writer.end;
+        // Freeze receipt observations now too; only version/reuse metadata is
+        // appended later, without consulting mutable Product facts again.
+        var tail_storage: [16 * 1024]u8 = undefined;
+        var tail_writer = std.Io.Writer.fixed(&tail_storage);
+        self.view_preparation.tail.id = self.view_read.id;
+        self.view_preparation.tail.security_epoch = self.projection_security_epoch;
+        self.capture_view = &self.view_preparation.tail;
+        tail_writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
+        try self.writeViewReceipts(&tail_writer, request.receipts, true);
+        tail_writer.writeByte('}') catch return error.SnapshotTooLarge;
+        try self.view_preparation.tail.seal(self.allocator, self.limits.max_snapshot_bytes, tail_writer.buffered());
+        // Pure cache hits have no preparation work and preserve the fast path.
+        const all_cached = for (self.view_preparation.blocks) |block| {
+            if (block.version == 0) break false;
+        } else true;
+        if (all_cached) {
+            try self.finishSnapshotPreparation();
+        }
+        return self.snapshotReadStatus();
+    }
+
+    fn snapshotReadStatus(self: *const Runtime) SnapshotRead {
+        return .{ .id = self.view_read.id, .bytes = if (self.view_preparation.ready) self.view_read.total else 0, .scratch_bytes = self.view_preparation.scratch_bytes };
+    }
+
+    /// Each continuation performs bounded formatter stages, one block comparison,
+    /// or final metadata assembly. It never advances execution or samples new facts.
+    pub fn continueSnapshot(self: *Runtime, read_id: u64, output: []u8) Error!SnapshotRead {
+        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
+        if (self.view_preparation.ready) return self.snapshotReadStatus();
+        errdefer self.cancelSnapshot();
+        std.debug.assert(self.capture_view == null and self.view_credentials == null);
+        self.view_credentials = self.view_preparation.credentials.?.values.items;
+        defer self.view_credentials = null;
+        if (self.view_preparation.next_tool < self.view_preparation.tools.items.len) {
+            var stages: usize = 0;
+            var charged: usize = 0;
+            var finished: usize = 0;
+            while (self.view_preparation.next_tool < self.view_preparation.tools.items.len and finished < 4) {
+                const work = &self.view_preparation.tools.items[self.view_preparation.next_tool];
+                self.capture_view = work.child;
+                defer self.capture_view = null;
+                const size = work.source.?.ownedBytes();
+                if (stages != 0 and size > 32 * 1024 -| charged) break;
+                const first_string = work.child.strings.items.len;
+                var writer = std.Io.Writer.fixed(output);
+                try work.source.?.writeStage(&writer, self.taskTextProjection(), &work.state);
+                for (work.child.strings.items[first_string..]) |*item| item.at += work.child.skeleton.len;
+                try work.child.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
+                self.view_preparation.scratch_bytes = @max(self.view_preparation.scratch_bytes, writer.end);
+                if (work.state.stage == .done) {
+                    try work.child.finalize(self.limits.max_snapshot_bytes);
+                    work.source.?.deinit(self.allocator);
+                    work.source = null;
+                    self.view_preparation.raw_bytes -= size;
+                    self.view_preparation.next_tool += 1;
+                    finished += 1;
+                }
+                stages += 1;
+                charged += size;
+            }
+            return self.snapshotReadStatus();
+        }
+        // Cached metadata is already frozen. Skip these constant-size slots;
+        // each invoke is reserved for actual preparation rather than empty turns.
+        while (self.view_preparation.next_block < self.view_preparation.blocks.len and self.view_preparation.blocks[self.view_preparation.next_block].version != 0) self.view_preparation.next_block += 1;
+        if (self.view_preparation.next_block < self.view_preparation.blocks.len) {
+            const index = self.view_preparation.next_block;
+            const block = &self.view_preparation.blocks[index];
+            if (block.version == 0) {
+                const source = try self.view_read.sourceRange(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end);
                 defer {
                     std.crypto.secureZero(u8, source);
                     self.allocator.free(source);
                 }
-                const version = try self.encoded_views.putSource(self.allocator, self.limits.max_snapshot_bytes, key, source);
-                if (self.encoded_views.get(key)) |entry| {
-                    self.view_read.rollback(point);
-                    writer.end = start;
-                    writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
-                } else self.view_blocks[field.value] = .{ .key = key, .version = version, .start = encoded_start, .end = try self.view_read.encodedPosition(writer.end) };
-                break :version version;
-            };
-            @field(versions, field.name) = version;
-            if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
-                self.view_read.rollback(point);
-                self.view_blocks[field.value] = null;
-                writer.end = start;
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-                reused[field.value] = true;
+                block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
+                var replacement: ?[]const u8 = null;
+                if (self.view_preparation.known_epoch == self.projection_security_epoch and block.known == block.version) {
+                    replacement = "null";
+                    self.view_preparation.reused[index] = true;
+                } else if (self.encoded_views.get(block.key)) |entry| {
+                    if (entry.version == block.version) replacement = entry.bytes;
+                }
+                if (replacement) |value| {
+                    const delta = try self.view_read.replaceSpan(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end, value);
+                    block.end = block.start + value.len;
+                    for (self.view_preparation.blocks[index + 1 ..]) |*later| {
+                        later.start = @intCast(@as(isize, @intCast(later.start)) + delta);
+                        later.end = @intCast(@as(isize, @intCast(later.end)) + delta);
+                    }
+                } else if (block.current) {
+                    self.view_blocks[index] = .{ .key = block.key, .version = block.version, .start = try self.view_read.encodedPosition(block.start), .end = try self.view_read.encodedPosition(block.end) };
+                }
             }
+            inline for (std.meta.fields(view_cache.Kind)) |field| if (index == field.value) {
+                @field(self.view_preparation.versions, field.name) = block.version;
+            };
+            self.view_preparation.next_block += 1;
+            return self.snapshotReadStatus();
         }
+        try self.finishSnapshotPreparation();
+        return self.snapshotReadStatus();
+    }
+
+    fn finishSnapshotPreparation(self: *Runtime) Error!void {
+        var metadata: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&metadata);
         writer.writeAll(",\"blockVersions\":{") catch return error.SnapshotTooLarge;
         inline for (std.meta.fields(view_cache.Versions), 0..) |field, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            writer.print("\"" ++ field.name ++ "\":\"{d}\"", .{@field(versions, field.name)}) catch return error.SnapshotTooLarge;
+            writer.print("\"" ++ field.name ++ "\":\"{d}\"", .{@field(self.view_preparation.versions, field.name)}) catch return error.SnapshotTooLarge;
         }
         writer.writeAll("},\"reusedBlocks\":[") catch return error.SnapshotTooLarge;
         var first = true;
-        inline for (std.meta.fields(view_cache.Kind)) |field| {
-            if (reused[field.value]) {
-                if (!first) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                writer.writeAll("\"" ++ field.name ++ "\"") catch return error.SnapshotTooLarge;
-                first = false;
-            }
-        }
+        inline for (std.meta.fields(view_cache.Kind)) |field| if (self.view_preparation.reused[field.value]) {
+            if (!first) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("\"" ++ field.name ++ "\"") catch return error.SnapshotTooLarge;
+            first = false;
+        };
         writer.writeByte(']') catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
-        try self.writeViewReceipts(&writer, request.receipts, true);
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-        try self.view_read.seal(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
-        return .{ .id = self.view_read.id, .bytes = self.view_read.total };
+        const child = try self.view_read.appendChild(self.allocator, &writer);
+        self.view_read.strings.items[self.view_read.strings.items.len - 1].at += self.view_read.skeleton.len;
+        child.* = self.view_preparation.tail;
+        self.view_preparation.tail = .{};
+        try self.view_read.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
+        try self.view_read.finalize(self.limits.max_snapshot_bytes);
+        if (self.view_preparation.credentials) |*credentials| credentials.deinit();
+        self.view_preparation.credentials = null;
+        self.view_preparation.tools.deinit(self.allocator);
+        self.view_preparation.tools = .empty;
+        self.view_preparation.ready = true;
+    }
+
+    fn captureToolProjection(context: *const anyopaque, writer: *std.Io.Writer, tool: *const product_task.ToolProjection) product_task.ProjectionError!void {
+        const self: *Runtime = @ptrCast(@alignCast(@constCast(context)));
+        if (self.view_preparation.tools.items.len >= self.view_preparation.tool_limit) return error.SnapshotTooLarge;
+        const owned = self.view_read.ownedBytes() + self.view_preparation.raw_bytes;
+        var source = try product_task.OwnedToolProjection.capture(self.allocator, tool, self.limits.max_snapshot_bytes -| owned);
+        errdefer source.deinit(self.allocator);
+        const child = self.view_read.appendChild(self.allocator, writer) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.SnapshotTooLarge,
+        };
+        const size = source.ownedBytes();
+        try self.view_preparation.tools.append(self.allocator, .{ .source = source, .child = child });
+        self.view_preparation.raw_bytes += size;
     }
 
     pub fn cancelSnapshot(self: *Runtime) void {
+        self.view_preparation.clear(self.allocator);
         self.view_read.clear(self.allocator);
         self.view_blocks = @splat(null);
     }
 
     pub fn writeSnapshotRange(self: *Runtime, read_id: u64, output: []u8, offset: usize, length: usize) Error!void {
         if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
-        if (length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
+        if (!self.view_preparation.ready or length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
         errdefer self.cancelSnapshot();
         const encode_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
         const end = offset + length;
@@ -7320,6 +7469,7 @@ pub const Runtime = struct {
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
             .write_json_output_fn = writeTaskViewJsonOutput,
+            .capture_tool_fn = if (self.capture_view == &self.view_read) captureToolProjection else null,
             .write_json_parts_fn = writeTaskViewJsonParts,
         };
     }
@@ -9569,6 +9719,9 @@ pub const Runtime = struct {
 
     fn bumpRevision(self: *Runtime) void {
         self.encoded_views.invalidateAll();
+        if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
+            block.current = false;
+        };
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 
@@ -9580,10 +9733,74 @@ pub const Runtime = struct {
 pub const TestSupport = if (builtin.is_test) struct {
     pub const maximumFixture = maximumProjectionFixture;
     pub fn maximumToolFixture() !Runtime {
-        return maximumProjectionFixtureWithTools(true);
+        return maximumProjectionFixtureWithTools(true, .{});
+    }
+    pub fn maximumSmallFixture() !Runtime {
+        return maximumProjectionFixtureWithTools(true, .{ .max_tasks = 1, .max_runs_per_task = 1 });
+    }
+    pub fn installResultFixture(control: *Runtime, sparse: bool) !void {
+        const first = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        control.projection_bytes -= first.assistant.list.capacity;
+        first.assistant.list.deinit(control.allocator);
+        first.assistant = .{};
+        first.commentary_count = 0;
+        try control.replaceTracked(&first.tools[0].?.content, "", control.limits.max_tool_field_bytes);
+        const stdout = try control.allocator.alloc(u8, if (sparse) 65_000 else 640);
+        defer control.allocator.free(stdout);
+        @memset(stdout, '\n');
+        const result = try std.json.Stringify.valueAlloc(control.allocator, .{
+            .schema_version = "metacodes.bash-result.v2",
+            .stdout = stdout,
+            .stdout_encoding = "utf-8",
+            .stdout_capture_complete = true,
+            .stdout_truncated = false,
+            .stderr = "",
+            .stderr_encoding = "utf-8",
+            .stderr_capture_complete = true,
+            .stderr_truncated = false,
+            .exit_code = @as(i32, 0),
+        }, .{});
+        defer control.allocator.free(result);
+        const large_input = if (sparse) try std.json.Stringify.valueAlloc(control.allocator, .{ .command = stdout }, .{}) else null;
+        defer if (large_input) |value| control.allocator.free(value);
+        for (control.task_runtime.tasks[0].?.durable.runs) |*entry| if (entry.*) |*run| {
+            if (!sparse and run.id > 4 and run.id < 13) continue;
+            for (run.tools, 0..) |*tool_entry, index| {
+                if (sparse and index >= 5) break;
+                if (tool_entry.*) |*tool| {
+                    try control.replaceTracked(&tool.content, result, control.limits.max_tool_field_bytes);
+                    if (large_input) |value| {
+                        try control.replaceTracked(&tool.input, value, control.limits.max_tool_field_bytes);
+                        tool.state = .failed;
+                        tool.is_error = true;
+                    }
+                }
+            }
+        };
+        const remaining = control.limits.max_projection_bytes - control.projection_bytes;
+        const padding = try control.allocator.alloc(u8, remaining);
+        defer control.allocator.free(padding);
+        @memset(padding, 1);
+        // Fill the shared budget while respecting each individual field cap.
+        const assistant_bytes = @min(remaining, control.limits.max_assistant_message_bytes);
+        first.assistant.list = .{ .items = try control.allocTrackedCapacity(assistant_bytes), .capacity = assistant_bytes };
+        @memcpy(first.assistant.list.items, padding[0..assistant_bytes]);
+        first.assistant.committed_len = assistant_bytes;
+        first.commentary_count = @intFromBool(assistant_bytes != 0);
+        if (assistant_bytes != 0) first.commentary_ends[0] = assistant_bytes;
+        if (remaining > assistant_bytes) try control.replaceTracked(&first.tools[0].?.progress, padding[assistant_bytes..], control.limits.max_tool_field_bytes);
+        try std.testing.expectEqual(control.limits.max_projection_bytes, control.projection_bytes);
+    }
+    pub fn validatePersistedFixture(control: *Runtime) !void {
+        var state = try control.buildTaskStateWire();
+        defer state.deinit();
+        const output = try control.allocator.alloc(u8, task_persistence.max_store_bytes);
+        defer control.allocator.free(output);
+        _ = try task_persistence.encode(output, state.state, control.taskPersistenceLimits());
     }
     pub fn writeViewFixture(self: *Runtime, output: []u8, request: ViewRequest) ![]const u8 {
-        const read = try self.writeSnapshot(output, request);
+        var read = try self.writeSnapshot(output, request);
+        while (read.bytes == 0) read = try self.continueSnapshot(read.id, output);
         var offset: usize = 0;
         while (offset < read.bytes) : (offset += projection_step_bytes) try self.writeSnapshotRange(read.id, output, offset, @min(projection_step_bytes, read.bytes - offset));
         return output[0..read.bytes];
@@ -16922,11 +17139,10 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
 }
 
 fn maximumProjectionFixture() !Runtime {
-    return maximumProjectionFixtureWithTools(false);
+    return maximumProjectionFixtureWithTools(false, .{});
 }
 
-fn maximumProjectionFixtureWithTools(tool_inputs: bool) !Runtime {
-    const limits = Limits{};
+fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -17160,7 +17376,7 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool) !Runtime {
         escaped_tool,
         limits.max_tool_field_bytes,
     );
-    try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
+    if (limits.max_tasks == (Limits{}).max_tasks) try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
     return control;
 }
@@ -17448,10 +17664,10 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeAggregateFixture(&storage);
+        const snapshot = try control.writeViewFixture(&storage, .{ .task_id = 3 });
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer parsed.deinit();
-        const projected = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+        const projected = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
         const bash = projected.object.get("bash").?;
         const tool_json = try std.json.Stringify.valueAlloc(std.testing.allocator, projected, .{});
         defer std.testing.allocator.free(tool_json);
@@ -20261,7 +20477,8 @@ test "Product view frozen read survives business updates and rejects replaced re
     var expected_storage: [96 * 1024]u8 = undefined;
     const expected = try control.writeViewFixture(&expected_storage, .{ .task_id = 3 });
     var output: [96 * 1024]u8 = undefined;
-    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
     try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
     try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 1, 1));
     try control.writeSnapshotRange(read.id, &output, 0, 64);
@@ -20303,7 +20520,8 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     defer control.deinit();
     var output: [96 * 1024]u8 = undefined;
     _ = try control.writeViewFixture(&output, .{ .task_id = 3 });
-    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
     const epoch = control.projectionSecurityEpoch();
     const wakes = host.wakes.load(.monotonic);
     const duplicate = try control.allocator.dupe(u8, control.execution_state.credential());
@@ -20357,4 +20575,66 @@ test "Product view history versions ignore unrelated revisions and observe termi
     const observed = decoded.value.object.get("taskPage").?.object.get("runManifest").?.array.items[0].object.get("contentVersion").?.string;
     try std.testing.expectEqual(run.projection_content_version, try std.fmt.parseInt(u64, observed, 10));
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
+}
+
+test "Product view preparation owns frozen tools and cannot clean a changed cache" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"prepared\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo original\\\"}\",\"content\":\"old result\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    try std.testing.expectEqual(@as(usize, 1), control.view_preparation.tools.items.len);
+    try std.testing.expect(control.view_preparation.credentials != null);
+    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
+    const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
+    control.bumpRevision();
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+    var offset: usize = 0;
+    while (offset < read.bytes) : (offset += 31) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 31), read.bytes - offset));
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "new result") == null);
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 3 }, .taskPage)) == null);
+    const current = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, current, "new result") != null);
+    control.encoded_views.invalidateAll();
+    read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    control.learnProjectionCredential("new preparation boundary");
+    try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+}
+
+test "Product view failed formatter stage releases partially prepared source and credentials" {
+    var control = try testRuntimeWithLimits(.{}, .{});
+    defer control.deinit();
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"partial\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"result\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    const command = try std.testing.allocator.alloc(u8, 20_000);
+    defer std.testing.allocator.free(command);
+    @memset(command, '\n');
+    const input = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
+    defer std.testing.allocator.free(input);
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    read = try control.continueSnapshot(read.id, &output);
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    try std.testing.expect(control.view_preparation.tools.items[0].state.stage == .bash_input);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const original_allocator = control.allocator;
+    control.allocator = failing.allocator();
+    defer control.allocator = original_allocator;
+    try std.testing.expectError(error.SnapshotTooLarge, control.continueSnapshot(read.id, &output));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
 }

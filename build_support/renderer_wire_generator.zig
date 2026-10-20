@@ -9,7 +9,9 @@ pub fn main(init: std.process.Init) !void {
     try writer.writeAll("// Generated from Host wire types. Do not edit.\n");
     try writer.writeAll("import { object, positiveWireId, positiveNumber, enumValue } from './wire-codec.ts';\n");
     try writer.print("export const maxSnapshotBytes = {d};\nexport const maxSnapshotChunkBytes = {d};\n", .{ snapshot.max_snapshot_bytes, snapshot.chunk_bytes });
+    try writer.print("export const maxSnapshotPreparationSteps = {d};\n", .{snapshot.max_preparation_steps});
     try emitEnumValues(task_view.ApprovalFailureReason, "approvalFailureReasons", writer);
+    try emit(snapshot.SnapshotPreparing, "SnapshotPreparing", writer);
     try emit(snapshot.SnapshotDescriptor, "SnapshotDescriptor", writer);
     try emit(task_view.ApprovalResult, "TaskApprovalResultWire", writer);
     try writer.flush();

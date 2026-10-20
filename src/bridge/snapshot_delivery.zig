@@ -14,6 +14,7 @@ pub const State = struct {
     storage: []u8 = @constCast(&.{}),
     allocator: ?std.mem.Allocator = null,
     len: usize = 0,
+    dirty_len: usize = 0,
     id: u64 = 0,
     generation: u64 = 0,
     window_id: WindowId = 0,
@@ -38,8 +39,9 @@ pub const State = struct {
     }
 
     pub fn invalidate(self: *State) void {
-        std.crypto.secureZero(u8, self.storage[0..self.len]);
+        std.crypto.secureZero(u8, self.storage[0..@max(self.len, self.dirty_len)]);
         self.len = 0;
+        self.dirty_len = 0;
         self.generation = 0;
         self.window_id = 0;
     }
@@ -51,7 +53,7 @@ pub const State = struct {
         window_id: WindowId,
         step_bytes: usize,
     ) Error!void {
-        if (len == 0 or len > self.storage.len or step_bytes == 0 or step_bytes > chunk_bytes) return error.InvalidStorage;
+        if (len > self.storage.len or step_bytes == 0 or step_bytes > chunk_bytes) return error.InvalidStorage;
         self.id +%= 1;
         if (self.id == 0) self.id = 1;
         self.len = len;
@@ -69,6 +71,7 @@ pub const State = struct {
     ) Error![]const u8 {
         if (snapshot_id != self.id or generation != self.generation or window_id != self.window_id)
             return error.StaleSnapshot;
+        if (self.len == 0) return error.StaleSnapshot;
         if (offset >= self.len) return error.InvalidOffset;
         return self.storage[offset..@min(self.len, offset + self.step_bytes)];
     }

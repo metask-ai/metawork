@@ -18,6 +18,7 @@ pub const RendererBridgeConnect = struct {
 };
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
+pub const ProductSnapshotContinue = struct { preparingSnapshotId: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const ViewVersions = struct {
     context: []const u8,

@@ -104,6 +104,7 @@ pub const ModelSelectionAvailability = enum {
 /// The callbacks expose neither credential bytes nor the composition object.
 pub const TextProjection = struct {
     context: *const anyopaque,
+    capture_tool_fn: ?*const fn (*const anyopaque, *std.Io.Writer, *const ToolProjection) Error!void = null,
     contains_sensitive_fn: *const fn (*const anyopaque, []const u8) bool,
     write_json_fn: *const fn (*const anyopaque, *std.Io.Writer, []const u8) Error!void,
     write_json_output_fn: *const fn (
@@ -769,53 +770,143 @@ pub fn writeRun(
         const tool = &(entry.* orelse continue);
         if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         tool_count += 1;
-        writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, tool.id);
-        writer.print(",\"order\":\"{d}\"", .{tool.order}) catch
-            return error.SnapshotTooLarge;
-        writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, tool.name);
-        var presentation_redacted = try writeBashPresentation(writer, text_projection, tool);
-        presentation_redacted = (try writeToolPresentation(writer, text_projection, tool)) or presentation_redacted;
-        presentation_redacted = (try writeToolErrorDetail(writer, text_projection, tool)) or presentation_redacted;
-        writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-        // Decoding can reveal a credential hidden behind JSON escapes. Do not
-        // expose its reconstructible raw representation in secondary details.
-        try text_projection.writeJson(writer, if (presentation_redacted) "***" else tool.input);
-        writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, tool.progress);
-        writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, if (presentation_redacted) "***" else tool.content);
-        writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
-            @tagName(tool.state),
-            tool.is_error,
-            tool.elapsed_ms,
-            tool.input_truncated,
-            tool.progress_truncated,
-            tool.content_truncated,
-            tool.redacted or presentation_redacted,
-        }) catch return error.SnapshotTooLarge;
-        var file_ref_count: usize = 0;
-        if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
-            const reference = file_ref_entry.* orelse continue;
-            if (file_ref_count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            file_ref_count += 1;
-            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try text_projection.writeJson(writer, reference.id);
-            writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
-            try text_projection.writeJson(writer, reference.title);
-            writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
-            try text_projection.writeJson(writer, reference.display_path);
-            if (reference.generated_image) writer.writeAll(",\"generatedImage\":true") catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        };
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        if (text_projection.capture_tool_fn) |capture| {
+            try capture(text_projection.context, writer, tool);
+        } else try writeToolProjection(writer, text_projection, tool);
     }
     writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
     try writeFileChanges(writer, text_projection, run);
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
+
+/// Callback-scoped immutable Tool facts; no Session or execution capability.
+pub const ToolProjection = task_state.ToolView;
+
+pub const ToolStage = enum { identity, bash_input, bash_result, presentation_input, presentation_result, error_detail, details, done };
+pub const ToolWritingState = struct { stage: ToolStage = .identity, redacted: bool = false, presentation_open: bool = false };
+
+pub fn writeToolProjection(writer: *std.Io.Writer, text_projection: TextProjection, tool: *const ToolProjection) Error!void {
+    var state: ToolWritingState = .{};
+    while (state.stage != .done) try writeToolStage(writer, text_projection, tool, &state);
+}
+
+fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool: *const ToolProjection, state: *ToolWritingState) Error!void {
+    switch (state.stage) {
+        .identity => {
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try text_projection.writeJson(writer, tool.id);
+            writer.print(",\"order\":\"{d}\"", .{tool.order}) catch
+                return error.SnapshotTooLarge;
+            writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
+            try text_projection.writeJson(writer, tool.name);
+        },
+        .bash_input => state.redacted = (try writeBashInput(writer, text_projection, tool)) or state.redacted,
+        .bash_result => state.redacted = (try writeBashResult(writer, text_projection, tool)) or state.redacted,
+        .presentation_input => state.redacted = (try writeToolPresentation(writer, text_projection, tool, &state.presentation_open)) or state.redacted,
+        .presentation_result => if (state.presentation_open) {
+            state.redacted = (try writeToolPresentationResult(writer, text_projection, tool)) or state.redacted;
+        },
+        .error_detail => state.redacted = (try writeToolErrorDetail(writer, text_projection, tool)) or state.redacted,
+        .details => {
+            writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
+            // Decoding can reveal a credential hidden behind JSON escapes. Do not
+            // expose its reconstructible raw representation in secondary details.
+            try text_projection.writeJson(writer, if (state.redacted) "***" else tool.input);
+            writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
+            try text_projection.writeJson(writer, tool.progress);
+            writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
+            try text_projection.writeJson(writer, if (state.redacted) "***" else tool.content);
+            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
+                @tagName(tool.state),
+                tool.is_error,
+                tool.elapsed_ms,
+                tool.input_truncated,
+                tool.progress_truncated,
+                tool.content_truncated,
+                tool.redacted or state.redacted,
+            }) catch return error.SnapshotTooLarge;
+            var file_ref_count: usize = 0;
+            if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
+                const reference = file_ref_entry.* orelse continue;
+                if (file_ref_count != 0) writer.writeByte(',') catch
+                    return error.SnapshotTooLarge;
+                file_ref_count += 1;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, reference.id);
+                writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, reference.title);
+                writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, reference.display_path);
+                if (reference.generated_image) writer.writeAll(",\"generatedImage\":true") catch return error.SnapshotTooLarge;
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            };
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        },
+        .done => return,
+    }
+    state.stage = @enumFromInt(@intFromEnum(state.stage) + 1);
+}
+
+/// Host-only temporary source for a single bounded preparation step. Raw JSON
+/// can contain escaped sensitive text, so this source is never a delivery/cache
+/// payload or a worker input. The canonical formatter sanitizes before sealing.
+pub const OwnedToolProjection = struct {
+    storage: []u8,
+    references: ?[]?task_state.FileReferenceView,
+    value: ToolProjection,
+
+    pub fn capture(allocator: std.mem.Allocator, tool: *const ToolProjection, budget: usize) Error!OwnedToolProjection {
+        var size = tool.id.len + tool.name.len + tool.input.len + tool.progress.len + tool.content.len;
+        if (tool.file_refs) |refs| for (refs) |entry| if (entry) |ref| {
+            size += ref.id.len + ref.title.len + ref.display_path.len;
+        };
+        const ref_bytes = if (tool.file_refs) |refs| refs.len * @sizeOf(?task_state.FileReferenceView) else 0;
+        if (size > budget or ref_bytes > budget - size) return error.SnapshotTooLarge;
+        const storage = try allocator.alloc(u8, size);
+        errdefer {
+            std.crypto.secureZero(u8, storage);
+            allocator.free(storage);
+        }
+        const references = if (tool.file_refs) |refs| try allocator.alloc(?task_state.FileReferenceView, refs.len) else null;
+        errdefer if (references) |refs| allocator.free(refs);
+        var offset: usize = 0;
+        var value = tool.*;
+        inline for (.{ "id", "name", "input", "progress", "content" }) |field| @field(value, field) = copy(storage, &offset, @field(tool, field));
+        if (references) |refs| for (tool.file_refs.?, refs) |entry, *target| {
+            target.* = if (entry) |ref| .{
+                .id = copy(storage, &offset, ref.id),
+                .title = copy(storage, &offset, ref.title),
+                .display_path = copy(storage, &offset, ref.display_path),
+                .kind = &.{},
+                .locator_kind = .workspace_path,
+                .locator = &.{},
+                .generated_image = ref.generated_image,
+            } else null;
+        };
+        value.file_refs = references;
+        value.route_digest = @splat(0);
+        return .{ .storage = storage, .references = references, .value = value };
+    }
+    fn copy(storage: []u8, offset: *usize, source: []const u8) []u8 {
+        const result = storage[offset.*..][0..source.len];
+        @memcpy(result, source);
+        offset.* += source.len;
+        return result;
+    }
+    pub fn ownedBytes(self: *const OwnedToolProjection) usize {
+        return self.storage.len + if (self.references) |refs| refs.len * @sizeOf(?task_state.FileReferenceView) else 0;
+    }
+    pub fn deinit(self: *OwnedToolProjection, allocator: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, self.storage);
+        allocator.free(self.storage);
+        if (self.references) |refs| allocator.free(refs);
+        self.* = undefined;
+    }
+    pub const State = ToolWritingState;
+    pub fn writeStage(self: *const OwnedToolProjection, writer: *std.Io.Writer, text: TextProjection, state: *State) Error!void {
+        try writeToolStage(writer, text, &self.value, state);
+    }
+};
 
 const BashInput = struct {
     command: []const u8,
@@ -903,7 +994,7 @@ const BashResult = struct {
     }
 };
 
-fn writeBashPresentation(
+fn writeBashInput(
     writer: *std.Io.Writer,
     text: TextProjection,
     tool: *const task_state.ToolView,
@@ -935,7 +1026,16 @@ fn writeBashPresentation(
             try text.writeJson(writer, description);
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     } else writer.writeAll("null,\"description\":null") catch return error.SnapshotTooLarge;
-    allocator.reset();
+    return redacted;
+}
+
+fn writeBashResult(writer: *std.Io.Writer, text: TextProjection, tool: *const task_state.ToolView) Error!bool {
+    if (!std.mem.eql(u8, tool.name, "Bash")) return false;
+    var scratch: [128 * 1024]u8 = undefined;
+    var allocator = JsonScratch.init(&scratch);
+    defer allocator.clear();
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
+    var redacted = false;
     writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
     const result = if (tool.state != .running and !tool.content_truncated and tool.content.len != 0 and tool.content.len <= scratch.len)
         std.json.parseFromSliceLeaky(BashResult, allocator.allocator(), tool.content, options) catch null
@@ -963,6 +1063,7 @@ fn writeToolPresentation(
     writer: *std.Io.Writer,
     text: TextProjection,
     tool: *const task_state.ToolView,
+    pending_result: *bool,
 ) Error!bool {
     writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
     if (tool.input_truncated or tool.input.len == 0 or tool.input.len > 128 * 1024) {
@@ -1051,29 +1152,7 @@ fn writeToolPresentation(
         writer.writeAll("{\"kind\":\"bash_output\",\"jobId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, value.job_id);
         writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
-        allocator.reset();
-        const result = if (tool.state != .running and !tool.content_truncated and tool.content.len != 0 and tool.content.len <= scratch.len)
-            std.json.parseFromSliceLeaky(BashOutputResult, allocator.allocator(), tool.content, options) catch null
-        else
-            null;
-        if (result) |decoded| {
-            const result_value = decoded;
-            if (result_value.supported()) {
-                redacted = redacted or text.containsSensitive(result_value.stdout) or
-                    text.containsSensitive(result_value.stderr);
-                writer.writeAll("{\"status\":") catch return error.SnapshotTooLarge;
-                try text.writeJson(writer, result_value.status);
-                writer.writeAll(",\"stdout\":") catch return error.SnapshotTooLarge;
-                try text.writeJson(writer, result_value.stdout);
-                writer.writeAll(",\"stderr\":") catch return error.SnapshotTooLarge;
-                try text.writeJson(writer, result_value.stderr);
-                writer.print(",\"stdoutIncomplete\":{},\"stderrIncomplete\":{}}}", .{
-                    result_value.stdout_truncated,
-                    result_value.stderr_truncated,
-                }) catch return error.SnapshotTooLarge;
-            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        pending_result.* = true;
         return redacted;
     }
     if (kind == .KillShell) {
@@ -1112,7 +1191,46 @@ fn writeToolPresentation(
         try text.writeJson(writer, value.url);
         try writeOptionalProjectedText(writer, text, "prompt", value.prompt);
         writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
-        allocator.reset();
+        pending_result.* = true;
+        return redacted;
+    }
+
+    writer.writeAll("null") catch return error.SnapshotTooLarge;
+    return false;
+}
+
+fn writeToolPresentationResult(writer: *std.Io.Writer, text: TextProjection, tool: *const task_state.ToolView) Error!bool {
+    var scratch: [128 * 1024]u8 = undefined;
+    var allocator = JsonScratch.init(&scratch);
+    defer allocator.clear();
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
+    var redacted = false;
+    if (std.mem.eql(u8, tool.name, "BashOutput")) {
+        const result = if (tool.state != .running and !tool.content_truncated and tool.content.len != 0 and tool.content.len <= scratch.len)
+            std.json.parseFromSliceLeaky(BashOutputResult, allocator.allocator(), tool.content, options) catch null
+        else
+            null;
+        if (result) |decoded| {
+            const result_value = decoded;
+            if (result_value.supported()) {
+                redacted = redacted or text.containsSensitive(result_value.stdout) or
+                    text.containsSensitive(result_value.stderr);
+                writer.writeAll("{\"status\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.status);
+                writer.writeAll(",\"stdout\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.stdout);
+                writer.writeAll(",\"stderr\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.stderr);
+                writer.print(",\"stdoutIncomplete\":{},\"stderrIncomplete\":{}}}", .{
+                    result_value.stdout_truncated,
+                    result_value.stderr_truncated,
+                }) catch return error.SnapshotTooLarge;
+            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "WebFetch")) {
         const result = if (tool.state != .running and !tool.content_truncated and tool.content.len != 0 and tool.content.len <= scratch.len)
             std.json.parseFromSliceLeaky(WebFetchResult, allocator.allocator(), tool.content, options) catch null
         else
@@ -1131,9 +1249,7 @@ fn writeToolPresentation(
         writer.writeByte('}') catch return error.SnapshotTooLarge;
         return redacted;
     }
-
-    writer.writeAll("null") catch return error.SnapshotTooLarge;
-    return false;
+    unreachable;
 }
 
 fn writeToolErrorDetail(
@@ -1456,4 +1572,23 @@ test "interrupted Compact serializer matches the independent Renderer fixture" {
     try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").interrupted_compact, "\r\n"), writer.buffered());
     writer = std.Io.Writer.fixed(storage[0..8]);
     try std.testing.expectError(error.SnapshotTooLarge, writeCompact(&writer, &compact));
+}
+
+test "Product view owned Tool preparation copies facts and releases every allocation failure" {
+    const Harness = struct {
+        fn capture(allocator: std.mem.Allocator) !void {
+            var input = [_]u8{ 'o', 'l', 'd' };
+            var refs = [_]?task_state.FileReferenceView{.{ .id = @constCast("ref"), .title = @constCast("title"), .display_path = @constCast("path"), .kind = @constCast("file"), .locator_kind = .workspace_path, .locator = @constCast("private") }};
+            const tool: ToolProjection = .{ .route_digest = @splat(7), .id = @constCast("tool"), .order = 1, .name = @constCast("Bash"), .input = &input, .progress = @constCast(""), .content = @constCast("result"), .state = .completed, .file_refs = &refs };
+            var owned = try OwnedToolProjection.capture(allocator, &tool, 1024);
+            defer owned.deinit(allocator);
+            @memset(&input, 'x');
+            refs[0] = null;
+            try std.testing.expectEqualStrings("old", owned.value.input);
+            try std.testing.expectEqualStrings("path", owned.value.file_refs.?[0].?.display_path);
+            try std.testing.expectEqualStrings("", owned.value.file_refs.?[0].?.locator);
+            try std.testing.expectError(error.SnapshotTooLarge, OwnedToolProjection.capture(allocator, &tool, 1));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.capture, .{});
 }

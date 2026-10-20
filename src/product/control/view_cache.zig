@@ -43,6 +43,17 @@ pub const Cache = struct {
         self.bytes += source.len;
         return version;
     }
+    /// A frozen source can finish after live facts change. Its version remains
+    /// deliverable, but obsolete work must never make the current cache clean.
+    pub fn frozenSource(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, source: []const u8, current: bool) Error!u64 {
+        if (current) return self.putSource(allocator, budget, key, source);
+        if (self.entries[@intFromEnum(key.kind)]) |entry| {
+            if (std.meta.eql(entry.key, key) and std.mem.eql(u8, entry.source, source)) return entry.version;
+        }
+        self.sequence = std.math.add(u64, self.sequence, 1) catch return error.ViewVersionExhausted;
+        return self.sequence;
+    }
+
     /// A later Product mutation may have invalidated this frozen read. Such bytes
     /// remain valid for that read, but must not repopulate the current cache.
     pub fn installEncoded(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, version: u64, value: []const u8) Error!void {
@@ -184,4 +195,22 @@ test "Product view stale frozen encoding cannot refill a newer or invalidated so
     try cache.installEncoded(std.testing.allocator, 128, key, current, "new encoded");
     try std.testing.expectEqualStrings("new encoded", cache.get(key).?.bytes);
     try std.testing.expectError(error.ViewContentMismatch, cache.installEncoded(std.testing.allocator, 128, key, current, "different encoding"));
+}
+
+test "Product view obsolete preparation cannot confirm current cache source" {
+    var cache: Cache = .{};
+    defer cache.clear(std.testing.allocator);
+    const key: Key = .{ .kind = .taskPage, .task_id = 3, .limit = 4 };
+    const first = try seed(&cache, std.testing.allocator, 128, key, "original");
+    cache.invalidate(.taskPage);
+    try std.testing.expectEqual(first, try cache.frozenSource(std.testing.allocator, 128, key, "original", false));
+    try std.testing.expect(cache.get(key) == null);
+    const obsolete = try cache.frozenSource(std.testing.allocator, 128, key, "changed", false);
+    try std.testing.expect(obsolete != first);
+    try std.testing.expect(cache.get(key) == null);
+    const current = try cache.putSource(std.testing.allocator, 128, key, "current");
+    try cache.installEncoded(std.testing.allocator, 128, key, obsolete, "changed");
+    try std.testing.expect(cache.get(key) == null);
+    try cache.installEncoded(std.testing.allocator, 128, key, current, "current encoded");
+    try std.testing.expectEqualStrings("current encoded", cache.get(key).?.bytes);
 }

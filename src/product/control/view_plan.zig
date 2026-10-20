@@ -2,15 +2,13 @@
 //! String escaping uses Zig's encoder; no credential, execution handle or Product pointer is retained.
 const std = @import("std");
 // CPU work quantum; independent of the Bridge single-result transport ceiling.
-pub const max_step_bytes = 128 * 1024;
+pub const max_step_bytes = 32 * 1024;
 pub const Error = std.mem.Allocator.Error || error{ SnapshotTooLarge, InvalidViewEncoding, StaleSnapshot, InvalidOffset };
-const String = struct { at: usize, start: usize, len: usize, escaped_len: usize };
-pub const Mark = struct { strings: usize, text: usize, expansion: usize };
+const String = struct { at: usize, start: usize, len: usize, escaped_len: usize, child: ?*Plan = null };
 pub const Plan = struct {
     skeleton: []u8 = &.{},
     text: std.ArrayList(u8) = .empty,
     strings: std.ArrayList(String) = .empty,
-    expansion: usize = 0,
     total: usize = 0,
     id: u64 = 0,
     security_epoch: u64 = 0,
@@ -24,15 +22,6 @@ pub const Plan = struct {
     tail_at: usize = 0,
     tail_len: usize = 0,
 
-    pub fn mark(self: *const Plan) Mark {
-        return .{ .strings = self.strings.items.len, .text = self.text.items.len, .expansion = self.expansion };
-    }
-    pub fn rollback(self: *Plan, point: Mark) void {
-        std.crypto.secureZero(u8, self.text.items[point.text..]);
-        self.text.shrinkRetainingCapacity(point.text);
-        self.strings.shrinkRetainingCapacity(point.strings);
-        self.expansion = point.expansion;
-    }
     pub fn appendText(self: *Plan, allocator: std.mem.Allocator, budget: usize, text: []const u8) Error!void {
         if (text.len > budget -| self.text.items.len) return error.SnapshotTooLarge;
         try self.text.appendSlice(allocator, text);
@@ -47,38 +36,116 @@ pub const Plan = struct {
             else => 1,
         };
         try self.strings.append(allocator, .{ .at = writer.end, .start = start, .len = text.len, .escaped_len = escaped_len });
-        self.expansion = std.math.add(usize, self.expansion, escaped_len) catch return error.SnapshotTooLarge;
         writer.writeAll("\"\"") catch return error.SnapshotTooLarge;
     }
-    pub fn encodedPosition(self: *const Plan, skeleton_position: usize) Error!usize {
-        // Each placeholder already includes the opening and closing quote.
-        return std.math.add(usize, skeleton_position, self.expansion) catch error.SnapshotTooLarge;
+    /// A child is an owned Product fragment, prepared separately before the
+    /// final descriptor exists. It never borrows a mutable Product object.
+    pub fn appendChild(self: *Plan, allocator: std.mem.Allocator, writer: *std.Io.Writer) Error!*Plan {
+        const child = try allocator.create(Plan);
+        errdefer allocator.destroy(child);
+        child.* = .{ .id = self.id, .security_epoch = self.security_epoch };
+        writer.writeAll("[]") catch return error.SnapshotTooLarge;
+        try self.strings.append(allocator, .{ .at = writer.end - 2, .start = 0, .len = 0, .escaped_len = 0, .child = child });
+        return child;
     }
-    /// Canonical encoding-free identity for exact content/version comparisons.
-    pub fn blockSource(self: *const Plan, allocator: std.mem.Allocator, budget: usize, skeleton: []const u8, start: usize, point: Mark) Error![]u8 {
-        const strings = self.strings.items[point.strings..];
-        const token_bytes = std.math.mul(usize, strings.len, 16) catch return error.SnapshotTooLarge;
-        const total = std.math.add(usize, 8 + skeleton.len - start, token_bytes) catch return error.SnapshotTooLarge;
-        const bytes = std.math.add(usize, total, self.text.items.len - point.text) catch return error.SnapshotTooLarge;
-        if (bytes > budget) return error.SnapshotTooLarge;
-        const result = try allocator.alloc(u8, bytes);
-        var writer = std.Io.Writer.fixed(result);
-        writer.writeInt(u64, skeleton.len - start, .little) catch unreachable;
-        writer.writeAll(skeleton[start..]) catch unreachable;
-        for (strings) |item| {
-            writer.writeInt(u64, item.at - start, .little) catch unreachable;
-            writer.writeInt(u64, item.len, .little) catch unreachable;
-            writer.writeAll(self.text.items[item.start..][0..item.len]) catch unreachable;
+    pub fn encodedPosition(self: *const Plan, skeleton_position: usize) Error!usize {
+        var result = skeleton_position;
+        for (self.strings.items) |item| {
+            if (item.at >= skeleton_position) break;
+            const extra = if (item.child) |child| child.total -| 2 else item.escaped_len;
+            result = std.math.add(usize, result, extra) catch return error.SnapshotTooLarge;
         }
+        return result;
+    }
+    fn sourceSize(self: *const Plan, start: usize, end: usize) Error!usize {
+        var size = 8 + end - start;
+        for (self.strings.items) |item| {
+            if (item.at < start or item.at >= end) continue;
+            const payload = if (item.child) |child| try child.sourceSize(0, child.skeleton.len) else item.len;
+            size = std.math.add(usize, size, 17 + payload) catch return error.SnapshotTooLarge;
+        }
+        return size;
+    }
+    fn writeSource(self: *const Plan, writer: *std.Io.Writer, start: usize, end: usize) std.Io.Writer.Error!void {
+        try writer.writeInt(u64, end - start, .little);
+        try writer.writeAll(self.skeleton[start..end]);
+        for (self.strings.items) |item| {
+            if (item.at < start or item.at >= end) continue;
+            try writer.writeInt(u64, item.at - start, .little);
+            try writer.writeByte(@intFromBool(item.child != null));
+            const payload = if (item.child) |child| child.sourceSize(0, child.skeleton.len) catch unreachable else item.len;
+            try writer.writeInt(u64, payload, .little);
+            if (item.child) |child| try child.writeSource(writer, 0, child.skeleton.len) else try writer.writeAll(self.text.items[item.start..][0..item.len]);
+        }
+    }
+    /// Exact unescaped identity, including independently prepared fragments.
+    pub fn sourceRange(self: *const Plan, allocator: std.mem.Allocator, budget: usize, start: usize, end: usize) Error![]u8 {
+        const size = try self.sourceSize(start, end);
+        if (size > budget) return error.SnapshotTooLarge;
+        const result = try allocator.alloc(u8, size);
+        errdefer allocator.free(result);
+        var writer = std.Io.Writer.fixed(result);
+        self.writeSource(&writer, start, end) catch return error.SnapshotTooLarge;
         std.debug.assert(writer.end == result.len);
         return result;
     }
-    pub fn seal(self: *Plan, allocator: std.mem.Allocator, budget: usize, skeleton: []const u8) Error!void {
-        const total = try self.encodedPosition(skeleton.len);
-        if (total == 0 or total > budget or self.text.capacity + self.strings.capacity * @sizeOf(String) + skeleton.len > budget) return error.SnapshotTooLarge;
+    /// Capture skeleton ownership now; lengths can be finalized after children
+    /// have been prepared. The numeric output identity is never dereferenced.
+    pub fn capture(self: *Plan, allocator: std.mem.Allocator, skeleton: []const u8) Error!void {
         self.skeleton = try allocator.dupe(u8, skeleton);
         self.storage_identity = @intFromPtr(skeleton.ptr);
+    }
+    pub fn appendSkeleton(self: *Plan, allocator: std.mem.Allocator, budget: usize, suffix: []const u8) Error!void {
+        if (suffix.len > budget -| self.skeleton.len) return error.SnapshotTooLarge;
+        const old = self.skeleton.len;
+        self.skeleton = try allocator.realloc(self.skeleton, old + suffix.len);
+        @memcpy(self.skeleton[old..], suffix);
+    }
+    /// Replace a complete block with confirmed null or safe encoded cache bytes.
+    /// Later block offsets move by the returned signed delta.
+    pub fn replaceSpan(self: *Plan, allocator: std.mem.Allocator, budget: usize, start: usize, end: usize, replacement: []const u8) Error!isize {
+        const length = self.skeleton.len - (end - start) + replacement.len;
+        if (length > budget) return error.SnapshotTooLarge;
+        const next = try allocator.alloc(u8, length);
+        @memcpy(next[0..start], self.skeleton[0..start]);
+        @memcpy(next[start..][0..replacement.len], replacement);
+        @memcpy(next[start + replacement.len ..], self.skeleton[end..]);
+        const delta = @as(isize, @intCast(replacement.len)) - @as(isize, @intCast(end - start));
+        var kept: usize = 0;
+        for (self.strings.items) |original| {
+            var item = original;
+            if (item.at >= start and item.at < end) {
+                if (item.child) |child| {
+                    child.clear(allocator);
+                    allocator.destroy(child);
+                } else std.crypto.secureZero(u8, self.text.items[item.start..][0..item.len]);
+                continue;
+            }
+            if (item.at >= end) item.at = @intCast(@as(isize, @intCast(item.at)) + delta);
+            self.strings.items[kept] = item;
+            kept += 1;
+        }
+        self.strings.items.len = kept;
+        std.crypto.secureZero(u8, self.skeleton);
+        allocator.free(self.skeleton);
+        self.skeleton = next;
+        return delta;
+    }
+    pub fn finalize(self: *Plan, budget: usize) Error!void {
+        const total = try self.encodedPosition(self.skeleton.len);
+        if (total == 0 or total > budget or self.ownedBytes() > budget) return error.SnapshotTooLarge;
         self.total = total;
+    }
+    pub fn ownedBytes(self: *const Plan) usize {
+        var bytes = self.skeleton.len + self.text.capacity + self.strings.capacity * @sizeOf(String);
+        for (self.strings.items) |item| if (item.child) |child| {
+            bytes += @sizeOf(Plan) + child.ownedBytes();
+        };
+        return bytes;
+    }
+    pub fn seal(self: *Plan, allocator: std.mem.Allocator, budget: usize, skeleton: []const u8) Error!void {
+        try self.capture(allocator, skeleton);
+        try self.finalize(budget);
     }
     pub fn writeNext(self: *Plan, output: []u8) Error![]const u8 {
         if (self.id == 0) return error.StaleSnapshot;
@@ -94,6 +161,18 @@ pub const Plan = struct {
             const item = if (self.string_at < self.strings.items.len) self.strings.items[self.string_at] else null;
             if (item != null and self.skeleton_at == item.?.at) {
                 const string = item.?;
+                if (string.child) |child| {
+                    const size = @min(output.len - writer.end, child.total - child.produced);
+                    if (size != 0) {
+                        _ = try child.writeNext(output[writer.end..][0..size]);
+                        writer.end += size;
+                    }
+                    if (child.produced == child.total) {
+                        self.skeleton_at += 2;
+                        self.string_at += 1;
+                    }
+                    continue;
+                }
                 if (!self.opened) {
                     writer.writeByte('"') catch unreachable;
                     self.opened = true;
@@ -137,6 +216,10 @@ pub const Plan = struct {
         allocator.free(self.skeleton);
         std.crypto.secureZero(u8, self.text.items);
         self.text.deinit(allocator);
+        for (self.strings.items) |item| if (item.child) |child| {
+            child.clear(allocator);
+            allocator.destroy(child);
+        };
         self.strings.deinit(allocator);
         self.skeleton = &.{};
         self.text = .empty;
@@ -195,14 +278,69 @@ test "Product view frozen plan allocation failures release every owned buffer" {
             defer plan.clear(allocator);
             var output: [4096]u8 = undefined;
             var writer = std.Io.Writer.fixed(&output);
-            const point = plan.mark();
             try plan.appendText(allocator, output.len, "sanitized string");
             try plan.commitString(allocator, &writer, 0);
-            const source = try plan.blockSource(allocator, output.len, writer.buffered(), 0, point);
+            try plan.capture(allocator, writer.buffered());
+            const source = try plan.sourceRange(allocator, output.len, 0, plan.skeleton.len);
             defer allocator.free(source);
-            try plan.seal(allocator, output.len, writer.buffered());
+            try plan.finalize(output.len);
             _ = try plan.writeNext(output[0..plan.total]);
             try std.testing.expectEqual(plan.total, plan.produced);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "Product view prepared children preserve identity and exact output across every chunk boundary" {
+    const expected = "{\"tool\":{\"content\":\"line\\n\\\"quoted\\\"\"},\"other\":true}";
+    for (1..18) |quantum| {
+        var root: Plan = .{ .id = 1 };
+        defer root.clear(std.testing.allocator);
+        var scratch: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&scratch);
+        try writer.writeAll("{\"tool\":");
+        const child = try root.appendChild(std.testing.allocator, &writer);
+        try writer.writeAll(",\"other\":true}");
+        try root.capture(std.testing.allocator, writer.buffered());
+        var child_storage: [256]u8 = undefined;
+        var child_writer = std.Io.Writer.fixed(&child_storage);
+        try child_writer.writeAll("{\"content\":");
+        try child.appendText(std.testing.allocator, 1024, "line\n\"quoted\"");
+        try child.commitString(std.testing.allocator, &child_writer, 0);
+        try child_writer.writeByte('}');
+        try child.seal(std.testing.allocator, 4096, child_writer.buffered());
+        try root.finalize(4096);
+        const identity = try root.sourceRange(std.testing.allocator, 4096, 0, root.skeleton.len);
+        defer std.testing.allocator.free(identity);
+        var offset: usize = 0;
+        while (offset < root.total) {
+            const size = @min(quantum, root.total - offset);
+            _ = try root.writeNext(scratch[offset..][0..size]);
+            offset += size;
+        }
+        try std.testing.expectEqualStrings(expected, scratch[0..root.total]);
+        const after = try root.sourceRange(std.testing.allocator, 4096, 0, root.skeleton.len);
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualSlices(u8, identity, after);
+    }
+}
+
+test "Product view child allocation failure and block replacement release owned fragments" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var root: Plan = .{ .id = 1 };
+            defer root.clear(allocator);
+            var bytes: [128]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&bytes);
+            try writer.writeByte('[');
+            const child = try root.appendChild(allocator, &writer);
+            try child.seal(allocator, 4096, "{\"value\":1}");
+            try writer.writeByte(']');
+            try root.capture(allocator, writer.buffered());
+            _ = try root.replaceSpan(allocator, 4096, 1, 3, "null");
+            try root.finalize(4096);
+            _ = try root.writeNext(bytes[0..root.total]);
+            try std.testing.expectEqualStrings("[null]", bytes[0..root.total]);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});

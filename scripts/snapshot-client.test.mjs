@@ -1,4 +1,5 @@
 import { decodeWorkbenchSnapshot } from "../frontend/src/bridge/decode-contracts.ts";
+import { maxSnapshotPreparationSteps } from "../frontend/src/bridge/generated-wire.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -196,4 +197,62 @@ test("scoped snapshot transport assembles split UTF-8 and rejects malformed UTF-
     ),
     /not valid UTF-8/,
   );
+});
+
+test("snapshot preparation uses the same command and a fixed identity before chunks", async () => {
+  const expected = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/product-view.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const source = Buffer.from(JSON.stringify(expected));
+  let steps = 0;
+  const invoke = async (command, payload) => {
+    if (command === snapshotCommand) {
+      if (steps > 0) assert.deepEqual(payload, { preparingSnapshotId: "31" });
+      if (++steps < 4) return { snapshotId: "31", phase: "preparing" };
+      return {
+        snapshotId: "31",
+        bytes: source.length,
+        chunkBytes: source.length,
+      };
+    }
+    assert.equal(steps, 4);
+    return {
+      snapshotId: "31",
+      offset: 0,
+      bytes: source.length,
+      data: encoded(source),
+    };
+  };
+  assert.deepEqual(
+    await fetchWorkbenchSnapshot(invoke, expected.scope),
+    decodeWorkbenchSnapshot(expected),
+  );
+});
+
+test("snapshot preparation fails closed on identity changes, extra fields and endless preparation", async () => {
+  for (const kind of ["changed", "readyChanged", "extra", "endless"]) {
+    let calls = 0;
+    await assert.rejects(
+      fetchWorkbenchSnapshot(async (command) => {
+        assert.equal(command, snapshotCommand);
+        calls += 1;
+        if (kind === "extra")
+          return { snapshotId: "1", phase: "preparing", bytes: 1 };
+        if (calls > 1 && kind === "readyChanged")
+          return { snapshotId: "2", bytes: 1, chunkBytes: 1 };
+        return {
+          snapshotId: calls > 1 && kind === "changed" ? "2" : "1",
+          phase: "preparing",
+        };
+      }),
+      RendererBridgeContractError,
+    );
+    assert(calls <= maxSnapshotPreparationSteps + 1);
+  }
 });

@@ -783,6 +783,16 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
+        if (invocation.request.payload.len > 16 * 1024) return error.InvalidPayload;
+        var envelope = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, invocation.request.payload, .{});
+        defer envelope.deinit();
+        if (envelope.value == .object and envelope.value.object.contains("preparingSnapshotId")) {
+            var continuation = try handlers.parsePayload(handlers.ProductSnapshotContinue, invocation.request.payload);
+            defer continuation.deinit();
+            const control = try self.requireProductControl();
+            const descriptor = try self.delivery.prepareSnapshot(invocation.source.window_id, control.projectionSecurityEpoch(), try handlers.parseWireId(continuation.value.preparingSnapshotId), .{ .context = control, .prepare_fn = continueSnapshot });
+            return encodeSnapshotDescriptor(output, descriptor);
+        }
         var parsed = try handlers.parsePayloadWithLimit(handlers.ProductViewRequest, invocation.request.payload, 16 * 1024);
         defer parsed.deinit();
         var receipt_queries: [64]product_control.ViewReceiptQuery = undefined;
@@ -797,13 +807,20 @@ pub const Dispatcher = struct {
             }) == .retry);
             return err;
         };
+        return encodeSnapshotDescriptor(output, descriptor);
+    }
+
+    fn encodeSnapshotDescriptor(output: []u8, descriptor: product_delivery.SnapshotDescriptor) ![]const u8 {
         var writer = std.Io.Writer.fixed(output);
-        const wire = @import("snapshot_contract.zig").SnapshotDescriptor{
-            .snapshotId = .{ .value = descriptor.id },
-            .bytes = .{ .value = descriptor.bytes },
-            .chunkBytes = .{ .value = product_delivery.snapshot_chunk_bytes },
-        };
-        try std.json.Stringify.value(wire, .{}, &writer);
+        if (descriptor.bytes == 0) {
+            try std.json.Stringify.value(@import("snapshot_contract.zig").SnapshotPreparing{ .snapshotId = .{ .value = descriptor.id } }, .{}, &writer);
+        } else {
+            try std.json.Stringify.value(@import("snapshot_contract.zig").SnapshotDescriptor{
+                .snapshotId = .{ .value = descriptor.id },
+                .bytes = .{ .value = descriptor.bytes },
+                .chunkBytes = .{ .value = product_delivery.snapshot_chunk_bytes },
+            }, .{}, &writer);
+        }
         return writer.buffered();
     }
 
@@ -4944,7 +4961,12 @@ pub const Dispatcher = struct {
     fn writeSnapshot(context: ?*anyopaque, output: []u8) anyerror!product_delivery.SnapshotStart {
         const view: *const ViewWriteContext = @ptrCast(@alignCast(context.?));
         const read = try view.control.writeSnapshot(output, view.request);
-        return .{ .read_id = read.id, .bytes = read.bytes };
+        return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
+    }
+    fn continueSnapshot(context: ?*anyopaque, read_id: u64, output: []u8) anyerror!product_delivery.SnapshotStart {
+        const control: *product_control.Runtime = @ptrCast(@alignCast(context.?));
+        const read = try control.continueSnapshot(read_id, output);
+        return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
     }
     fn materializeSnapshot(context: ?*anyopaque, read_id: u64, output: []u8, offset: usize, length: usize) anyerror!void {
         const control: *product_control.Runtime = @ptrCast(@alignCast(context.?));
@@ -7562,8 +7584,19 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
     var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(begin, source, response), .{});
     defer descriptor.deinit();
-    const result = descriptor.value.object.get("result").?.object;
+    var result = descriptor.value.object.get("result").?.object;
     const id = try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10);
+    var preparation_request: [256]u8 = undefined;
+    var preparation_steps: usize = 0;
+    while (result.contains("phase")) {
+        try std.testing.expect(preparation_steps < @import("snapshot_contract.zig").max_preparation_steps);
+        preparation_steps += 1;
+        const request = try std.fmt.bufPrint(&preparation_request, "{{\"id\":\"prepare\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{{\"preparingSnapshotId\":\"{d}\"}}}}", .{id});
+        descriptor.deinit();
+        descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(request, source, response), .{});
+        result = descriptor.value.object.get("result").?.object;
+        try std.testing.expectEqual(id, try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10));
+    }
     const bytes: usize = @intCast(result.get("bytes").?.integer);
     try std.testing.expect(bytes > product_delivery.snapshot_chunk_bytes);
     try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
