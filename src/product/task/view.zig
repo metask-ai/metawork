@@ -128,7 +128,83 @@ pub const Input = struct {
     text: TextProjection,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
+    /// A consumer page is an explicit slice of this Task's stable Run order.
+    /// The Task header and its authority are independent of loaded history.
+    run_start: usize = 0,
+    run_end: usize = std.math.maxInt(usize),
 };
+
+/// Navigation facts deliberately contain no Run text, Tool data, catalog,
+/// pending input, or execution configuration. Inspecting terminal headers is
+/// bounded by the Task's retained Run slots and never visits their payloads.
+pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: TextProjection) Error!void {
+    writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{ task.durable.id, task.durable.recent_order }) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, task.durable.title);
+    writer.print(",\"workspaceId\":\"{d}\",\"archived\":{},\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"historyReadOnly\":{},\"permissionReviewState\":\"{s}\",\"currentRunPhase\":", .{
+        task.durable.workspace_id, task.durable.archived, @tagName(task_policy.taskLifecycle(task)), @tagName(task.deletion), task.read_only_history != null, @tagName(task.permissionReviewPhase()),
+    }) catch return error.SnapshotTooLarge;
+    if (task_policy.currentRunProjection(task)) |current| {
+        jsonValue(writer, @tagName(current.phase)) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"activeOperation\":") catch return error.SnapshotTooLarge;
+    switch (task.runtime.active_operation) {
+        .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
+        .run => |id| writer.print("{{\"kind\":\"run\",\"id\":\"{d}\"}}", .{id}) catch return error.SnapshotTooLarge,
+        .compact => |id| writer.print("{{\"kind\":\"compact\",\"id\":\"{d}\"}}", .{id}) catch return error.SnapshotTooLarge,
+        .restore => |attempt| writer.print("{{\"kind\":\"restore\",\"id\":\"{d}\"}}", .{attempt.id}) catch return error.SnapshotTooLarge,
+    }
+    writer.writeAll(",\"activeCompactPhase\":") catch return error.SnapshotTooLarge;
+    const active_compact = if (task.runtime.active_operation == .compact) task.runtime.active_operation.compact else null;
+    var active_phase: ?task_state.CompactPhase = null;
+    var last_phase: ?task_state.CompactPhase = null;
+    for (task.durable.compacts) |entry| if (entry) |*compact| {
+        last_phase = task_state.compactProjectionFacts(compact).phase;
+        if (active_compact == compact.id) active_phase = last_phase;
+    };
+    if (active_phase) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"lastCompactPhase\":") catch return error.SnapshotTooLarge;
+    if (last_phase) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"latestTerminal\":") catch return error.SnapshotTooLarge;
+    const latest_terminal = if (task_policy.latestTerminalRun(task.durable.runs)) |run| task_state.productTerminalFacts(run) else null;
+    if (latest_terminal) |terminal| {
+        writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
+        if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"unreadCompletionRunId\":") catch return error.SnapshotTooLarge;
+    if (task_policy.unreadCompletionRunId(task)) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+pub fn writeSearchRun(writer: *std.Io.Writer, task: *const task_state.Task, run: *const task_state.RunRecord, text: TextProjection) Error!void {
+    writer.print("{{\"taskId\":\"{d}\",\"runId\":\"{d}\",\"input\":", .{ task.durable.id, run.id }) catch return error.SnapshotTooLarge;
+    try writeInput(writer, text, run.input, null);
+    if (task_state.productTerminalFacts(run)) |terminal| {
+        if (terminal.outcome == .completed) {
+            try writeRunOutput(writer, text, run);
+        } else writer.writeAll(",\"output\":null") catch return error.SnapshotTooLarge;
+    } else writer.writeAll(",\"output\":null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+pub fn writeRunManifest(writer: *std.Io.Writer, task: *const task_state.Task) Error!void {
+    writer.writeByte('[') catch return error.SnapshotTooLarge;
+    var count: usize = 0;
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        count += 1;
+        const facts = task_state.runProjectionFacts(run);
+        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"terminal\":", .{ run.id, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
+        if (facts.terminal) |terminal| {
+            writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
+            if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"diagnosticDisposition\":\"{s}\"}}", .{@tagName(terminal.diagnostic_disposition)}) catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
+}
 
 pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     const task = input.task;
@@ -280,7 +356,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     try writeConversationContext(writer, task.conversation_observation);
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
-    for (task.durable.runs) |*entry| {
+    for (task.durable.runs, 0..) |*entry, run_index| {
+        if (run_index < input.run_start or run_index >= input.run_end) continue;
         const run = &(entry.* orelse continue);
         if (run_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         run_count += 1;
@@ -523,7 +600,7 @@ pub fn writeInputAcceptance(writer: *std.Io.Writer, text: TextProjection, result
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-fn writeRun(
+pub fn writeRun(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
     run: *const task_state.RunRecord,

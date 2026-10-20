@@ -34,6 +34,7 @@ import {
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
@@ -230,8 +231,10 @@ export function TaskContent({
   onRespond,
   renderPendingUi,
   localSubmissions,
+  history,
 }: {
   task: TaskView | null;
+  history?: { available: boolean; loading: boolean; onLoad: () => void };
   localSubmissions?: ReactNode;
   snapshotReceivedAt: number | null;
   synchronized: boolean;
@@ -272,6 +275,11 @@ export function TaskContent({
   const toolDisclosure = useRef(new Map<string, ReadonlySet<string>>());
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
+  const previousLayout = useRef<{
+    taskId: string;
+    firstRunId: string | null;
+    height: number;
+  } | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
   const hasRunTimes =
@@ -379,6 +387,11 @@ export function TaskContent({
     const node = viewport.current;
     if (!node) return;
     const taskId = task?.id ?? null;
+    const before = previousLayout.current;
+    const firstRunId = task?.runs[0]?.id ?? null;
+    previousLayout.current = taskId
+      ? { taskId, firstRunId, height: node.scrollHeight }
+      : null;
     if (!taskId) {
       node.scrollTop = 0;
       setShowJumpLatest(false);
@@ -393,6 +406,23 @@ export function TaskContent({
       return;
     }
     const saved = reading.current.get(taskId);
+    if (
+      before?.taskId === taskId &&
+      firstRunId &&
+      before.firstRunId &&
+      BigInt(firstRunId) < BigInt(before.firstRunId)
+    ) {
+      node.scrollTop =
+        (saved?.scrollTop ?? node.scrollTop) +
+        node.scrollHeight -
+        before.height;
+      reading.current.set(taskId, {
+        scrollTop: node.scrollTop,
+        followingLatest: false,
+      });
+      setShowJumpLatest(true);
+      return;
+    }
     if (!saved || saved.followingLatest) {
       node.scrollTop = node.scrollHeight;
       reading.current.set(taskId, {
@@ -401,7 +431,7 @@ export function TaskContent({
       });
       setShowJumpLatest(false);
     }
-  }, [task?.id, revision]);
+  }, [task?.id, task?.runs, revision]);
 
   function updateReadingState() {
     const node = viewport.current;
@@ -451,6 +481,18 @@ export function TaskContent({
           : undefined
       }
     >
+      {history && (history.available || history.loading) && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="md"
+          disabled={history.loading || !synchronized}
+          aria-busy={history.loading}
+          onClick={history.onLoad}
+        >
+          {t(history.loading ? "common.loading" : "task.load_earlier")}
+        </Button>
+      )}
       {hasExcludedCompactHistory && (
         <p
           className="projection-notice conversation-coverage-notice"
@@ -826,12 +868,15 @@ export function TaskContent({
           </section>
         );
       })}
-      {task && task.runs.length === 0 && (
-        <div className="ai-conversation-empty">
-          <h2>{t("task.empty_title")}</h2>
-          <p>{t("task.created_empty_body")}</p>
-        </div>
-      )}
+      {task &&
+        task.runs.length === 0 &&
+        submissions.length === 0 &&
+        !localSubmissions && (
+          <div className="ai-conversation-empty">
+            <h2>{t("task.empty_title")}</h2>
+            <p>{t("task.created_empty_body")}</p>
+          </div>
+        )}
       {localSubmissions}
     </Conversation>
   );

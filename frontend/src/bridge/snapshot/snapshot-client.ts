@@ -5,7 +5,13 @@ import {
 } from "../generated-wire.ts";
 import { commands } from "../commands.ts";
 import { RendererBridgeContractError } from "../contract-error.ts";
-import type { WorkbenchSnapshot } from "../contracts.ts";
+import {
+  initialViewScope,
+  cloneViewScope,
+  sameViewScope,
+  type ViewScope,
+  type WorkbenchSnapshot,
+} from "../contracts.ts";
 import { decodeWorkbenchSnapshot } from "../decode-contracts.ts";
 
 type SnapshotJson =
@@ -88,8 +94,10 @@ function decodeBase64(value: string) {
 
 export async function fetchWorkbenchSnapshot(
   invoke: SnapshotInvoke,
+  scope: ViewScope = initialViewScope,
 ): Promise<WorkbenchSnapshot> {
-  const current = descriptor(await invoke(commands.snapshot, {}));
+  const requested = cloneViewScope(scope);
+  const current = descriptor(await invoke(commands.snapshot, requested));
   if (
     current.bytes > maxSnapshotBytes ||
     current.chunkBytes > maxSnapshotChunkBytes
@@ -130,7 +138,10 @@ export async function fetchWorkbenchSnapshot(
     invalidSnapshot("Workbench snapshot is not valid JSON");
   }
   try {
-    return decodeWorkbenchSnapshot(parsed);
+    const next = decodeWorkbenchSnapshot(parsed);
+    if (!sameViewScope(next.scope, requested))
+      invalidSnapshot("Product view scope mismatch");
+    return next;
   } catch (error) {
     if (error instanceof RendererBridgeContractError) throw error;
     invalidSnapshot(error instanceof Error ? error.message : String(error));

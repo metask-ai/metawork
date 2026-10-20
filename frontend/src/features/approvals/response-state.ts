@@ -112,6 +112,11 @@ export function observeUiResponseSnapshot(
 ): UiResponseStates {
   let next: Record<string, UiResponseEntry> | null = null;
   for (const [key, entry] of Object.entries(states)) {
+    if (
+      !snapshot.tasks.some((task) => task.id === entry.taskId) &&
+      snapshot.taskIndex.some((task) => task.id === entry.taskId)
+    )
+      continue;
     if (snapshotHasUiRequest(snapshot, entry)) continue;
     if (!next) next = { ...states };
     delete next[key];

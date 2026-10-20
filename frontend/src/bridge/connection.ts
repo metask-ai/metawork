@@ -1,4 +1,11 @@
-import type { WorkbenchSnapshot } from "./contracts.ts";
+import {
+  initialViewScope,
+  cloneViewScope,
+  sameViewScope,
+  sameViewPageScope,
+  type ViewScope,
+  type WorkbenchSnapshot,
+} from "./contracts.ts";
 import { BridgeClient } from "./client.ts";
 import {
   RendererBridgeContractError,
@@ -73,6 +80,8 @@ type ConnectionReadState = {
 const retryDelays = [100, 250, 500, 1000];
 
 export class WorkbenchConnection {
+  private scope: ViewScope = { ...initialViewScope };
+  private scopeGeneration = 0;
   private state: ConnectionReadState | null = null;
   private reading: Promise<void> | null = null;
   private recovery: Promise<void> | null = null;
@@ -91,6 +100,20 @@ export class WorkbenchConnection {
   constructor(client: BridgeClient, callbacks: WorkbenchConnectionCallbacks) {
     this.client = client;
     this.callbacks = callbacks;
+  }
+
+  setScope(scope: ViewScope): Promise<void> {
+    if (sameViewScope(this.scope, scope)) return Promise.resolve();
+    const pageChanged = !sameViewPageScope(this.scope, scope);
+    this.scope = cloneViewScope(scope);
+    this.scopeGeneration++;
+    if (!this.state) return Promise.resolve();
+    if (pageChanged) {
+      for (const waiter of this.state.waiters)
+        waiter.reject(new Error("Product consumer scope changed"));
+      this.state.waiters.clear();
+    }
+    return this.refresh();
   }
 
   async start() {
@@ -210,10 +233,13 @@ export class WorkbenchConnection {
   private async read(state: ConnectionReadState) {
     if (!this.active(state)) return;
     const target = state.requested;
+    const scopeGeneration = this.scopeGeneration;
+    const scope = cloneViewScope(this.scope);
     const attempt = ++state.attempt;
     try {
-      const next = await this.client.fetchSnapshot();
-      if (!this.active(state)) return;
+      const next = await this.client.fetchSnapshot(scope);
+      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+        return;
       const revision = BigInt(next.revision);
       if (revision < state.latest || revision < target)
         throw new Error("Host returned a stale Workbench revision");
@@ -232,7 +258,8 @@ export class WorkbenchConnection {
         this.callbacks.onReady(true);
       }
     } catch (error) {
-      if (!this.active(state)) return;
+      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+        return;
       this.callbacks.onReady(false);
       if (error instanceof RendererBridgeContractError) {
         this.failContract("snapshot", error);

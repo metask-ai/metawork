@@ -70,6 +70,7 @@ pub const Delivery = struct {
     window_id: ?WindowId = null,
     revision: revision_impl.State = .{},
     snapshot: snapshot_impl.State = .{},
+    snapshot_security_epoch: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Delivery {
         return .{ .snapshot = try snapshot_impl.State.initOwned(allocator) };
@@ -171,25 +172,38 @@ pub const Delivery = struct {
     pub fn publishSnapshot(
         self: *Delivery,
         window_id: WindowId,
+        security_epoch: u64,
         writer: SnapshotWriter,
     ) !SnapshotDescriptor {
         const generation = try self.requireWindow(window_id);
+        if (security_epoch == 0) return error.StaleSnapshot;
+        if (self.snapshot_security_epoch != security_epoch)
+            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
         self.snapshot.invalidate();
+        self.snapshot_security_epoch = 0;
         const encoded = try writer.write(self.snapshot.storage);
         if (encoded.len == 0 or encoded.ptr != self.snapshot.storage.ptr or
             encoded.len > self.snapshot.storage.len)
             return error.InvalidStorage;
         try self.snapshot.publish(encoded.len, generation, window_id);
+        self.snapshot_security_epoch = security_epoch;
         return .{ .id = self.snapshot.id, .bytes = self.snapshot.len };
     }
 
     pub fn snapshotChunk(
-        self: *const Delivery,
+        self: *Delivery,
         window_id: WindowId,
+        security_epoch: u64,
         snapshot_id: u64,
         offset: usize,
     ) (ConnectionError || snapshot_impl.Error)![]const u8 {
         const generation = try self.requireWindow(window_id);
+        if (security_epoch == 0 or security_epoch != self.snapshot_security_epoch) {
+            std.crypto.secureZero(u8, self.snapshot.storage[0..self.snapshot.len]);
+            self.snapshot.invalidate();
+            self.snapshot_security_epoch = 0;
+            return error.StaleSnapshot;
+        }
         return self.snapshot.chunk(snapshot_id, generation, window_id, offset);
     }
 
@@ -248,10 +262,10 @@ test "product delivery owns connection retry and snapshot identity" {
     try std.testing.expectEqual(RevisionResult.retry_scheduled, try delivery.deliverRevision(4, 1, transport));
     try std.testing.expect(delivery.onTimer(retry_timer_id));
     try std.testing.expectEqual(RevisionResult.delivered, try delivery.deliverRevision(5, 2, transport));
-    const snapshot = try delivery.publishSnapshot(7, .{ .write_fn = Harness.write });
-    try std.testing.expectEqualStrings("{}", try delivery.snapshotChunk(7, snapshot.id, 0));
+    const snapshot = try delivery.publishSnapshot(7, 1, .{ .write_fn = Harness.write });
+    try std.testing.expectEqualStrings("{}", try delivery.snapshotChunk(7, 1, snapshot.id, 0));
     try delivery.disconnect(generation, 7, transport);
-    try std.testing.expectError(error.NoConnection, delivery.snapshotChunk(7, snapshot.id, 0));
+    try std.testing.expectError(error.NoConnection, delivery.snapshotChunk(7, 1, snapshot.id, 0));
 }
 
 test "product revision retry exhausts a bounded transport budget" {
@@ -316,13 +330,33 @@ test "Renderer reconnect invalidates snapshots from the previous generation" {
     var delivery = try Delivery.init(std.testing.allocator);
     defer delivery.deinitOwnedBuffers();
     const first_generation = try delivery.connect(9, transport);
-    const snapshot = try delivery.publishSnapshot(9, .{ .write_fn = Harness.write });
+    const snapshot = try delivery.publishSnapshot(9, 1, .{ .write_fn = Harness.write });
     const second_generation = try delivery.connect(9, transport);
 
     try std.testing.expectEqual(first_generation + 1, second_generation);
     try std.testing.expectError(
         error.StaleSnapshot,
-        delivery.snapshotChunk(9, snapshot.id, 0),
+        delivery.snapshotChunk(9, 1, snapshot.id, 0),
     );
     delivery.breakConnection(transport);
+}
+
+test "Product view security change revokes and clears an in-flight snapshot" {
+    const Writer = struct {
+        fn write(_: ?*anyopaque, output: []u8) anyerror![]const u8 {
+            @memcpy(output[0..4], "data");
+            return output[0..4];
+        }
+    };
+    var storage: [16]u8 = undefined;
+    var delivery = Delivery{ .generation = 1, .window_id = 9, .snapshot = .{ .storage = &storage } };
+    const before = try delivery.publishSnapshot(9, 7, .{ .write_fn = Writer.write });
+    try std.testing.expectEqualStrings("data", try delivery.snapshotChunk(9, 7, before.id, 0));
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(9, 8, before.id, 0));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, storage[0..4]);
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(9, 7, before.id, 0));
+    const after = try delivery.publishSnapshot(9, 8, .{ .write_fn = Writer.write });
+    try std.testing.expect(after.id != before.id);
+    try std.testing.expectEqualStrings("data", try delivery.snapshotChunk(9, 8, after.id, 0));
+    try std.testing.expectError(error.StaleSnapshot, delivery.publishSnapshot(9, 0, .{ .write_fn = Writer.write }));
 }

@@ -1,3 +1,4 @@
+import { decodeWorkbenchSnapshot } from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -16,7 +17,7 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
   const expected = JSON.parse(
     readFileSync(
       new URL(
-        "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+        "../frontend/src/bridge/__fixtures__/product-view.fixture",
         import.meta.url,
       ),
       "utf8",
@@ -38,7 +39,10 @@ test("Workbench snapshots are assembled from identity-checked chunks", async () 
     };
   };
 
-  assert.deepEqual(await fetchWorkbenchSnapshot(invoke), expected);
+  assert.deepEqual(
+    await fetchWorkbenchSnapshot(invoke, expected.scope),
+    decodeWorkbenchSnapshot(expected),
+  );
 });
 
 test("Workbench snapshot assembly rejects a stale chunk", async () => {
@@ -79,7 +83,7 @@ test("a malformed snapshot is a typed terminal contract failure", async () => {
 test("a valid snapshot larger than 8 MiB is assembled within the Host budget", async () => {
   const fixture = readFileSync(
     new URL(
-      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      "../frontend/src/bridge/__fixtures__/product-view.fixture",
       import.meta.url,
     ),
     "utf8",
@@ -106,8 +110,8 @@ test("a valid snapshot larger than 8 MiB is assembled within the Host budget", a
       bytes: part.length,
       data: encoded(part),
     };
-  });
-  assert.deepEqual(actual, JSON.parse(fixture));
+  }, JSON.parse(fixture).scope);
+  assert.deepEqual(actual, decodeWorkbenchSnapshot(JSON.parse(fixture)));
   assert.equal(chunks, 36);
 });
 

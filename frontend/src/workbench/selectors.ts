@@ -1,12 +1,15 @@
 import type {
   RunView,
   TaskView,
+  TaskSummary,
   WorkbenchSnapshot,
   WorkspaceView,
 } from "../bridge/contracts.ts";
 import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
 import { navigableTasks } from "./task-visibility.ts";
+
+type TaskNavigation = TaskView | TaskSummary;
 
 export function selectActiveTask(state: WorkbenchState): TaskView | null {
   return (
@@ -27,7 +30,11 @@ export function pendingInputContinuation(
     : null;
 }
 
-function activeCompact(task: TaskView) {
+function activeCompact(task: TaskNavigation) {
+  if (!("compacts" in task))
+    return task.activeCompactPhase === null
+      ? null
+      : { phase: task.activeCompactPhase };
   return task.activeOperation?.kind === "compact"
     ? (task.compacts.find(
         (compact) => compact.operationId === task.activeOperation?.id,
@@ -41,23 +48,23 @@ export type TaskSignals = {
   failed: boolean;
 };
 
-function permissionReviewInProgress(task: TaskView): boolean {
+function permissionReviewInProgress(task: TaskNavigation): boolean {
   return (
     task.currentRunPhase === "waiting_ui" &&
     task.permissionReviewState === "reviewing"
   );
 }
 
-export function orderedTasks(
-  tasks: TaskView[],
+export function orderedTasks<T extends TaskNavigation>(
+  tasks: T[],
   showArchived: boolean,
-): TaskView[] {
-  const byRecent = (left: TaskView, right: TaskView) => {
+): T[] {
+  const byRecent = (left: T, right: T) => {
     const leftOrder = BigInt(left.recentOrder);
     const rightOrder = BigInt(right.recentOrder);
     return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
   };
-  const priority = (task: TaskView) => {
+  const priority = (task: T) => {
     if (task.archived) return 4;
     if (
       task.currentRunPhase === "waiting_ui" &&
@@ -111,7 +118,7 @@ export function lastTerminalRun(task: TaskView): RunView | null {
   return null;
 }
 
-export function taskDisplayState(task: TaskView): TaskDisplayState {
+export function taskDisplayState(task: TaskNavigation): TaskDisplayState {
   if (permissionReviewInProgress(task)) return { kind: "permission_review" };
   if (task.currentRunPhase)
     return { kind: "phase", value: task.currentRunPhase };
@@ -126,15 +133,24 @@ export function taskDisplayState(task: TaskView): TaskDisplayState {
   if (task.lifecycle !== "open")
     return { kind: "lifecycle", value: task.lifecycle };
   if (task.archived) return { kind: "archived" };
-  const terminal = lastTerminalRun(task)?.terminal;
+  const terminal =
+    "runs" in task ? lastTerminalRun(task)?.terminal : task.latestTerminal;
   if (terminal) return { kind: "outcome", value: terminal.outcome };
   return { kind: "ready" };
 }
 
-export function taskSignals(task: TaskView): TaskSignals {
+export function taskSignals(task: TaskNavigation): TaskSignals {
   const compact = activeCompact(task);
-  const lastCompact = task.compacts.at(-1);
-  const terminal = lastTerminalRun(task)?.terminal ?? null;
+  const lastCompact =
+    "compacts" in task
+      ? task.compacts.at(-1)
+      : task.lastCompactPhase === null
+        ? null
+        : { phase: task.lastCompactPhase };
+  const terminal =
+    "runs" in task
+      ? (lastTerminalRun(task)?.terminal ?? null)
+      : task.latestTerminal;
   return {
     running:
       task.currentRunPhase === "queued" ||
@@ -203,20 +219,24 @@ export function searchWorkbench(
             ? workspace.displayName
             : workspace.canonicalRoot,
       });
-    for (const run of task.runs) {
+    for (const run of snapshot.searchIndex?.filter(
+      (run) => run.taskId === task.id,
+    ) ?? []) {
       const input = runInputDisplay(run.input);
-      const output = `${run.output.commentary.join("\n\n")}\n\n${run.output.response}`;
+      const output = run.output
+        ? `${run.output.commentary.join("\n\n")}\n\n${run.output.response}`
+        : "";
       if (matches(input))
         results.push({
-          key: `instruction:${task.id}:${run.id}`,
+          key: `instruction:${task.id}:${run.runId}`,
           kind: "instruction",
           taskId: task.id,
           title,
           detail: input,
         });
-      if (run.terminal?.outcome === "completed" && output && matches(output))
+      if (run.output !== null && output && matches(output))
         results.push({
-          key: `completion:${task.id}:${run.id}`,
+          key: `completion:${task.id}:${run.runId}`,
           kind: "completion",
           taskId: task.id,
           title,

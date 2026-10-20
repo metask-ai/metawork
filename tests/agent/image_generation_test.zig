@@ -1419,7 +1419,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     }
     try std.testing.expectEqual(@as(usize, if (cancelled) 0 else 1), files);
     var snapshot: [256 * 1024]u8 = undefined;
-    const encoded = try control.writeSnapshot(&snapshot);
+    const encoded = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-image-key") == null);
     if (large_read) {
         try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"model_image\""));
@@ -1595,6 +1595,6 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
     try std.testing.expect(capture.image_len > 0);
     var snapshot: [256 * 1024]u8 = undefined;
-    const json = try control.writeSnapshot(&snapshot);
+    const json = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);
 }

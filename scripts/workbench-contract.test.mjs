@@ -1,3 +1,4 @@
+import { decodeProductStateFixture as decodeWorkbenchSnapshot } from "./test-support/decode-product-state-fixture.mjs";
 import { decodeSendInputResult } from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -28,7 +29,6 @@ import {
   decodeAttachmentChooseResult,
   decodeAttachmentReleaseResult,
   decodeAutomaticWorkspaceRootMutationResult,
-  decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
 const fixture = JSON.parse(
@@ -1132,7 +1132,12 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
 });
 
 test("event size and queue capacity retain distinct Host fixture causes", () => {
-  const cases = JSON.parse(readFileSync(new URL("../src/product/control/event_failure.fixture", import.meta.url), "utf8"));
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("../src/product/control/event_failure.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
   for (const expected of cases) {
     const value = clone(fixture);
     const task = value.tasks[0];
@@ -1142,7 +1147,10 @@ test("event size and queue capacity retain distinct Host fixture causes", () => 
     task.runs[0].phase = "failed";
     task.runs[0].activity = null;
     task.runs[0].terminal = expected;
-    assert.deepEqual(decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal, expected);
+    assert.deepEqual(
+      decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal,
+      expected,
+    );
   }
 });
 
@@ -1584,7 +1592,7 @@ test("MCP management is capability-gated and identity checked", () => {
   hiddenCatalog.capabilities.mcpManagement = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(hiddenCatalog),
-    /disabled MCP management must use the unavailable view/,
+    /MCP secret byte limit must be positive when management is enabled and zero otherwise/,
   );
 
   const duplicateServer = clone(withMcp);
@@ -1615,7 +1623,7 @@ test("MCP management is capability-gated and identity checked", () => {
   unavailableLeak.mcp.availability = "unavailable";
   assert.throws(
     () => decodeWorkbenchSnapshot(unavailableLeak),
-    /disabled MCP management must use the unavailable view/,
+    /MCP secret byte limit must be positive when management is enabled and zero otherwise/,
   );
 
   const unknownDesired = clone(withMcp);
@@ -2033,7 +2041,7 @@ test("Task deletion exposes one product-level progress and retry fact", () => {
   unarchived.tasks[0].archived = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(unarchived),
-    /only an archived Task can have deletion state/,
+    /invalid deletion facts/,
   );
 });
 
@@ -2115,7 +2123,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   simultaneous.tasks[0].currentRunPhase = "running";
   assert.throws(
     () => decodeWorkbenchSnapshot(simultaneous),
-    /active Compact operation must be the only active Task work/,
+    /inconsistent active Run/,
   );
 
   const invalidCause = clone(compacted);
@@ -3318,7 +3326,7 @@ test("field mismatch locates missing schema fields without exposing input keys o
   assert.throws(
     () => decodeWorkbenchSnapshot(value),
     (error) => {
-      assert.match(error.message, /\$\.tasks\[0\]/);
+      assert.match(error.message, /\$\.taskPage\.task/);
       assert.match(
         error.message,
         /missing \(2\): inputReady, inputSubmissions/,
@@ -3479,6 +3487,11 @@ test("file preview admits only bounded ready PNG image variants", () => {
 });
 
 test("file image preview matches the Host shared fixture", () => {
-  const value = JSON.parse(readFileSync(new URL("../src/bridge/file_preview_image.fixture", import.meta.url), "utf8"));
+  const value = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/file_preview_image.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
   assert.deepEqual(decodeFilePreview(value), value);
 });

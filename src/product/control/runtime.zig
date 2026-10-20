@@ -50,6 +50,8 @@ pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 pub const SendInputResult = product_task.InputAcceptance;
 pub const SendInputReason = task_runtime.SendInputReason;
 pub const InputTarget = union(enum) { idle: ?u64, run: u64 };
+pub const ViewRequest = @import("view_request.zig").Request;
+pub const ViewReceiptQuery = @import("view_request.zig").ReceiptQuery;
 
 pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
@@ -1164,6 +1166,7 @@ pub const Runtime = struct {
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
+    projection_security_epoch: u64 = 1,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
@@ -6335,8 +6338,10 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn writeSnapshot(self: *Runtime, output: []u8) Error![]const u8 {
-        var writer = std.Io.Writer.fixed(output);
+    // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
+    pub const writeAggregateFixture = if (builtin.is_test) TestSupport.writeAggregateFixture else {};
+
+    fn writeLiveContextFields(self: *Runtime, writer: *std.Io.Writer) Error!void {
         const schedule_persistence_ready =
             self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
@@ -6386,45 +6391,77 @@ pub const Runtime = struct {
             @tagName(self.default_approval_mode.profile()),
             @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
-        try self.writeAccount(&writer);
+        try self.writeAccount(writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-        try self.writeModels(&writer);
+        try self.writeModels(writer);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
-        try self.writeNewTaskAdmission(&writer);
+        try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
-        try self.writeAutomaticWorkspaceRootConfiguration(&writer);
+        try self.writeAutomaticWorkspaceRootConfiguration(writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
-            &writer,
+            writer,
             self.skillTextProjection(),
             self.skill.personalCatalogProjection(),
         );
-        writer.writeAll(",\"skillManagement\":") catch
-            return error.SnapshotTooLarge;
-        try self.writeSkillManagement(&writer);
-        writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
-        try self.writeMcpProjection(&writer);
-        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
-        product_workspace.writeProjectionList(
-            &writer,
-            &self.workspace,
-            self.workspaceViewProvider(),
-        ) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
-        self.schedule.writeProjection(&writer, .{
-            .context = self,
-            .write_json_fn = writeScheduleViewJson,
-        }) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"tasks\":[") catch
-            return error.SnapshotTooLarge;
-        self.task_runtime.writeProjectionList(
-            &writer,
-            self.taskRuntimeProjectionEffects(),
-        ) catch |err| return @errorCast(err);
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})![]const u8 {
+        try request.validate();
+        if (self.projection_security_epoch == 0) return error.InvalidViewRequest;
+        for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
+        var writer = std.Io.Writer.fixed(output);
+        writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch }) catch return error.SnapshotTooLarge;
+        if (request.task_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"beforeRunId\":") catch return error.SnapshotTooLarge;
+        if (request.before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{},\"receipts\":", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        try self.writeViewReceipts(&writer, request.receipts, false);
+        writer.writeAll("},\"context\":") catch return error.SnapshotTooLarge;
+        try self.writeLiveContextFields(&writer);
+        writer.writeAll("},\"workspaces\":") catch return error.SnapshotTooLarge;
+        product_workspace.writeProjectionList(&writer, &self.workspace, self.workspaceViewProvider()) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"taskIndex\":[") catch return error.SnapshotTooLarge;
+        try self.task_runtime.writeSummaryList(&writer, self.taskRuntimeProjectionEffects().text);
+        writer.writeAll("],\"taskPage\":") catch return error.SnapshotTooLarge;
+        if (request.task_id) |id| {
+            try self.task_runtime.writeProjectionPage(&writer, self.taskRuntimeProjectionEffects(), id, null, request.run_limit);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"historyPage\":") catch return error.SnapshotTooLarge;
+        if (request.before_run_id) |cursor| {
+            try self.task_runtime.writeHistoryPage(&writer, self.taskRuntimeProjectionEffects(), request.task_id.?, cursor, request.run_limit);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"management\":{{\"kind\":\"{s}\",\"value\":", .{@tagName(request.management)}) catch return error.SnapshotTooLarge;
+        switch (request.management) {
+            .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
+            .skills => try self.writeSkillManagement(&writer),
+            .mcp => try self.writeMcpProjection(&writer),
+            .schedules => self.schedule.writeProjection(&writer, .{ .context = self, .write_json_fn = writeScheduleViewJson }) catch return error.SnapshotTooLarge,
+        }
+        writer.writeAll("},\"searchIndex\":") catch return error.SnapshotTooLarge;
+        if (request.search) {
+            writer.writeByte('[') catch return error.SnapshotTooLarge;
+            try self.task_runtime.writeSearchProjection(&writer, self.taskRuntimeProjectionEffects().text);
+            writer.writeByte(']') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
+        try self.writeViewReceipts(&writer, request.receipts, true);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
         return writer.buffered();
+    }
+
+    fn writeViewReceipts(self: *const Runtime, writer: *std.Io.Writer, queries: []const ViewReceiptQuery, results: bool) Error!void {
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        for (queries, 0..) |query, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{query.task_id}) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, query.operation_id);
+            if (results) writer.print(",\"observed\":{}", .{self.task_runtime.hasInputReceipt(query.task_id, query.operation_id)}) catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
     }
 
     fn writeAutomaticWorkspaceRootConfiguration(
@@ -8592,6 +8629,10 @@ pub const Runtime = struct {
         credential: []const u8,
     ) void {
         if (credential.len == 0) return;
+        // A newly learned or retiring credential changes the safety of every
+        // previously published byte, even if a block's content did not change.
+        if (self.projection_security_epoch != 0)
+            self.projection_security_epoch = std.math.add(u64, self.projection_security_epoch, 1) catch 0;
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
         _ = self.schedule.redactInMemoryNoFail(
@@ -9276,9 +9317,42 @@ pub const Runtime = struct {
     fn bumpRevision(self: *Runtime) void {
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
+
+    pub fn projectionSecurityEpoch(self: *const Runtime) u64 {
+        return self.projection_security_epoch;
+    }
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn writeAggregateFixture(self: *Runtime, output: []u8) Error![]const u8 {
+        var writer = std.Io.Writer.fixed(output);
+        try self.writeLiveContextFields(&writer);
+        writer.writeAll(",\"skillManagement\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeSkillManagement(&writer);
+        writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
+        try self.writeMcpProjection(&writer);
+        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
+        product_workspace.writeProjectionList(
+            &writer,
+            &self.workspace,
+            self.workspaceViewProvider(),
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
+        self.schedule.writeProjection(&writer, .{
+            .context = self,
+            .write_json_fn = Runtime.writeScheduleViewJson,
+        }) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tasks\":[") catch
+            return error.SnapshotTooLarge;
+        self.task_runtime.writeProjectionList(
+            &writer,
+            self.taskRuntimeProjectionEffects(),
+        ) catch |err| return @errorCast(err);
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        return writer.buffered();
+    }
+
     pub fn retryTaskSessionClose(control: *Runtime, task_id: u64) !bool {
         return control.task_runtime.beginDetach(task_id, control.taskRuntimeOperationEffects());
     }
@@ -11227,7 +11301,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
     try std.testing.expect(uncertain.canonical_root == null);
     try std.testing.expect(!control.automaticWorkspacesAvailable());
     var uncertain_snapshot_storage: [96 * 1024]u8 = undefined;
-    const uncertain_snapshot = try control.writeSnapshot(&uncertain_snapshot_storage);
+    const uncertain_snapshot = try control.writeAggregateFixture(&uncertain_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         uncertain_snapshot,
@@ -11601,7 +11675,7 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
     defer std.testing.allocator.free(expected);
     var storage: [8192]u8 = undefined;
-    try std.testing.expectEqualStrings(expected, try control.writeSnapshot(&storage));
+    try std.testing.expectEqualStrings(expected, try control.writeAggregateFixture(&storage));
 }
 
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
@@ -11621,13 +11695,17 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
         (try control.taskCatalog(3)).availability,
     );
     var storage: [8192]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     const fixture = std.mem.trimEnd(
         u8,
         contract_fixture.snapshot,
         "\r\n",
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
+    var view_storage: [16 * 1024]u8 = undefined;
+    const view = try control.writeSnapshot(&view_storage, .{ .task_id = 3, .management = .skills });
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.product_view, "\r\n"), view);
+
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
@@ -11648,7 +11726,7 @@ test "Product Control snapshot serializer keeps model intent independent of inst
         .model_id = "next-model",
     }, 9);
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const projected = parsed.value.object.get("tasks").?.array.items[0].object;
@@ -11717,7 +11795,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
         },
     });
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
@@ -11778,7 +11856,7 @@ test "Restore permission stats are projected as runtime health" {
         .invalidated_rules = 1,
     };
     var storage: [8192]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
     );
@@ -12152,7 +12230,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, 96 * 1024);
     defer std.testing.allocator.free(snapshot_storage);
-    const snapshot = try restored.writeSnapshot(snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"taskHistoryPersistence\":true") != null,
     );
@@ -12248,7 +12326,7 @@ test "one damaged Task record does not poison surviving history" {
     try std.testing.expect(restored.task_runtime.find(3) != null);
     try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -12307,7 +12385,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"automaticWorkspaces\":false") != null,
     );
@@ -12479,7 +12557,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     try std.testing.expectEqual(tracked_before_delete, control.projection_bytes);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -12714,7 +12792,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         control.limits.max_snapshot_bytes,
     );
     defer std.testing.allocator.free(storage);
-    const snapshot = try control.writeSnapshot(storage);
+    const snapshot = try control.writeAggregateFixture(storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"scheduledTasks\":[{") != null,
     );
@@ -13648,7 +13726,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     run.redaction_secret = &.{};
 
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
@@ -13708,7 +13786,7 @@ test "mutation admission rejects stale execution and binding facts" {
     );
 }
 
-test "Task metadata mutations preserve lifecycle guards and projection accounting" {
+test "Product view reads preserve Task deletion lifecycle guards and projection accounting" {
     var control = try testRuntime();
     defer control.deinit();
 
@@ -13743,6 +13821,8 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;
     _ = control.currentRevision();
+    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    control.syncLifecycle();
     try std.testing.expect(control.task_runtime.tasks[0] == null);
     try std.testing.expect(control.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownTask, control.renameTask(3, "gone"));
@@ -14013,7 +14093,7 @@ test "automation installs one ordinary Custom Provider without publishing its cr
     try std.testing.expect(control.executionGeneration() != 0);
 
     var snapshot_storage: [256 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, fixture.credential) == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "metask:automation-key") == null);
 
@@ -14476,7 +14556,7 @@ test "Product Control non-destructively recovers Models admission without touchi
         control.modelsView().persistence_health,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const recovery_snapshot = try control.writeSnapshot(&snapshot_storage);
+    const recovery_snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, recovery_snapshot, "\"persistenceHealth\":\"recovery_required\"") != null,
     );
@@ -14606,7 +14686,7 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expect(task.durable.model_intent != null);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
-    const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
+    const scrubbed_snapshot = try control.writeAggregateFixture(&scrubbed_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
     var workspace_storage: [2]WorkspaceProjection = undefined;
     const workspace_projection = try control.copyWorkspaceProjections(&workspace_storage);
@@ -14904,7 +14984,7 @@ test "Task model selection unknown commit resolves the original candidate before
         digest(control.approval_history_unknown.?, &retained_digest, .{});
         try std.testing.expectEqualSlices(u8, &original_digest, &retained_digest);
         var snapshot_bytes: [16 * 1024]u8 = undefined;
-        try std.testing.expect(std.mem.indexOf(u8, try control.writeSnapshot(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try control.writeAggregateFixture(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
         history.result = .committed;
         history.resolution_result = resolution;
         try std.testing.expectEqual(PersistenceRecoveryOutcome.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
@@ -15134,7 +15214,7 @@ test "released Task credential is permanently scrubbed from every product projec
     try std.testing.expect(compactTerminalPayload(compact).?.diagnostic_redacted);
     try std.testing.expect(task.durable.ui_history[0].?.redacted);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"diagnosticDisposition\":\"withheld\"") != null,
@@ -15193,7 +15273,7 @@ test "clearing the last default execution scrubs its credential before secure ze
 
     try std.testing.expectEqual(@as(usize, 0), control.execution_state.credential().len);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 }
 
@@ -15215,9 +15295,28 @@ test "known credential matching chooses the longest overlapping secret" {
         control.limits.max_task_title_bytes,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
+}
+
+test "Product view security epoch invalidates learned and retiring credentials" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const epoch = control.projectionSecurityEpoch();
+    control.redactAllProductProjectionsNoFail("future-credential");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    control.redactAllProductProjectionsNoFail("");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    var storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeSnapshot(&storage, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
+    control.projection_security_epoch = std.math.maxInt(u64);
+    control.redactAllProductProjectionsNoFail("retiring-credential");
+    try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
+    try std.testing.expectError(error.InvalidViewRequest, control.writeSnapshot(&storage, .{}));
 }
 
 test "opaque credential redaction preserves UTF-8 projection validity" {
@@ -15371,11 +15470,11 @@ test "Run elapsed projection samples an injected clock without publishing revisi
         run.active_phase = phase;
         try std.testing.expectEqual(@as(?u64, 250), task_test_state.runElapsedMs(run, now));
     }
-    const first = try control.writeSnapshot(&storage);
+    const first = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, first, "\"elapsedMs\":\"250\"") != null);
     const revision = control.revision;
     now = 135000;
-    const second = try control.writeSnapshot(&storage);
+    const second = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, second, "\"elapsedMs\":\"134000\"") != null);
     try std.testing.expectEqual(revision, control.revision);
     try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, 999));
@@ -15436,7 +15535,7 @@ test "thinking and assistant chunks update distinct safe projections" {
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-reasoning-marker") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "more-private-reasoning") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "public response") != null);
@@ -15486,7 +15585,7 @@ test "output segments commit commentary and a continued final while discarding r
     try std.testing.expectEqual(@as(u64, 5), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -15640,7 +15739,7 @@ test "partial output stays provisional until the segment is classified" {
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqualStrings("unfinished", run.output_segment.list.items);
     var provisional_storage: [96 * 1024]u8 = undefined;
-    const provisional_snapshot = try control.writeSnapshot(&provisional_storage);
+    const provisional_snapshot = try control.writeAggregateFixture(&provisional_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         provisional_snapshot,
@@ -15661,7 +15760,7 @@ test "partial output stays provisional until the segment is classified" {
     );
     try std.testing.expectEqual(@as(usize, 0), run.assistant_output_start.?);
     var classified_storage: [96 * 1024]u8 = undefined;
-    const classified_snapshot = try control.writeSnapshot(&classified_storage);
+    const classified_snapshot = try control.writeAggregateFixture(&classified_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         classified_snapshot,
@@ -15687,7 +15786,7 @@ test "provisional output exposes only credential-safe committed bytes" {
     defer prefix.deinit();
     try control.applyEvent(&prefix);
     var prefix_storage: [96 * 1024]u8 = undefined;
-    const prefix_snapshot = try control.writeSnapshot(&prefix_storage);
+    const prefix_snapshot = try control.writeAggregateFixture(&prefix_storage);
     try std.testing.expect(std.mem.indexOf(u8, prefix_snapshot, "SECRET-") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15699,7 +15798,7 @@ test "provisional output exposes only credential-safe committed bytes" {
     defer suffix.deinit();
     try control.applyEvent(&suffix);
     var redacted_storage: [96 * 1024]u8 = undefined;
-    const redacted_snapshot = try control.writeSnapshot(&redacted_storage);
+    const redacted_snapshot = try control.writeAggregateFixture(&redacted_storage);
     try std.testing.expect(std.mem.indexOf(u8, redacted_snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15734,7 +15833,7 @@ test "output partition redacts a known credential across commentary boundaries" 
     }
     try std.testing.expectEqualStrings("SECRET-KEYdone", run.assistant.list.items);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15769,7 +15868,7 @@ test "event projection preserves commentary groups split by its credential suffi
     try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqual(@as(?usize, 3), run.assistant_output_start);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15955,7 +16054,7 @@ test "Conversation context observation survives Runs and clears with attachment"
         run.observed_activity,
     );
     var context_storage: [96 * 1024]u8 = undefined;
-    const context_snapshot = try control.writeSnapshot(&context_storage);
+    const context_snapshot = try control.writeAggregateFixture(&context_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         context_snapshot,
@@ -16511,7 +16610,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
-    const snapshot = try control.writeSnapshot(snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(snapshot_storage);
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
@@ -16784,7 +16883,7 @@ test "default snapshot budget contains the maximum structural projection" {
 
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
-    const snapshot = try control.writeSnapshot(storage);
+    const snapshot = try control.writeAggregateFixture(storage);
     try std.testing.expect(snapshot.len <= worstCaseSnapshotBytes(limits).?);
     try std.testing.expect(snapshot.len <= limits.max_snapshot_bytes);
 
@@ -17061,7 +17160,7 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeSnapshot(&storage);
+        const snapshot = try control.writeAggregateFixture(&storage);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer parsed.deinit();
         const projected = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
@@ -17115,7 +17214,7 @@ test "built-in Tool presentation projects readable parameters and failures" {
     }
 
     var storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
@@ -17148,7 +17247,7 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
     }
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
@@ -17166,7 +17265,7 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
     try control.applyEvent(&envelope);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
@@ -17581,7 +17680,7 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     ) == null);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"diffAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 
@@ -17764,7 +17863,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     try std.testing.expect(std.mem.indexOf(u8, safe, "后缀") != null);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, late_credential) == null);
 }
 
@@ -17915,7 +18014,7 @@ test "completed terminal drain closes collecting file change observation" {
     try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
     try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -18055,7 +18154,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
@@ -18114,7 +18213,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     var pending_snapshot_storage: [96 * 1024]u8 = undefined;
-    const pending_snapshot = try control.writeSnapshot(&pending_snapshot_storage);
+    const pending_snapshot = try control.writeAggregateFixture(&pending_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
     try control.appendTrackedText(assistant, "KEY", control.limits.max_assistant_message_bytes);
@@ -18137,7 +18236,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     ));
     control.markTerminalRunsBeforeEventDrain();
     var terminal_pending_storage: [96 * 1024]u8 = undefined;
-    const terminal_pending = try control.writeSnapshot(&terminal_pending_storage);
+    const terminal_pending = try control.writeAggregateFixture(&terminal_pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -18168,7 +18267,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
     var terminal_snapshot_storage: [96 * 1024]u8 = undefined;
-    const terminal_snapshot = try control.writeSnapshot(&terminal_snapshot_storage);
+    const terminal_snapshot = try control.writeAggregateFixture(&terminal_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_snapshot, "tail SECRET-") != null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
@@ -18230,7 +18329,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     ));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
@@ -18249,7 +18348,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         control.finalizeMarkedTerminalRunsAfterEventDrain();
         detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeSnapshot(&storage);
+        const snapshot = try control.writeAggregateFixture(&storage);
         const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer decoded.deinit();
         const terminal = decoded.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object;
@@ -18281,7 +18380,7 @@ test "event drain barrier atomically publishes terminal product state" {
 
     try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
     var pending_storage: [96 * 1024]u8 = undefined;
-    const pending = try control.writeSnapshot(&pending_storage);
+    const pending = try control.writeAggregateFixture(&pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"phase\":\"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"terminal\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\"") == null);
@@ -18302,7 +18401,7 @@ test "event drain barrier atomically publishes terminal product state" {
     detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
-    const terminal = try control.writeSnapshot(&terminal_storage);
+    const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
@@ -18451,7 +18550,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     }
     try std.testing.expectEqual(control.limits.max_ui_history_per_task, view.durable.ui_history_count);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"1\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"10\"") != null);
@@ -18882,7 +18981,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const empty_snapshot = try control.writeSnapshot(&output);
+    const empty_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         empty_snapshot,
@@ -18905,7 +19004,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    const created_snapshot = try control.writeSnapshot(&output);
+    const created_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
@@ -18918,14 +19017,14 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     try control.beginMcpConnectionTest(server_id);
-    const testing_snapshot = try control.writeSnapshot(&output);
+    const testing_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         testing_snapshot,
         "\"connectionTest\":{\"status\":\"testing\",\"toolCount\":0,\"issueCount\":0}",
     ) != null);
     control.completeMcpConnectionTest(server_id, .connected, 3, 1);
-    const connected_snapshot = try control.writeSnapshot(&output);
+    const connected_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         connected_snapshot,
@@ -18935,7 +19034,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
     try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
-    const applying_snapshot = try control.writeSnapshot(&output);
+    const applying_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         applying_snapshot,
@@ -18946,7 +19045,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     control.failMcpConfigurationApply(1);
-    const failed_apply_snapshot = try control.writeSnapshot(&output);
+    const failed_apply_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         failed_apply_snapshot,
@@ -19201,7 +19300,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&output);
+    const snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -19349,7 +19448,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
 
-    const effective_snapshot = try control.writeSnapshot(&output);
+    const effective_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
@@ -19768,7 +19867,7 @@ test "Product Control snapshot serializer omits image formats when attachments a
     var control = try testRuntimeWithLimits(limits, .{});
     defer control.deinit();
     var storage: [8192]u8 = undefined;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeSnapshot(&storage), .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeAggregateFixture(&storage), .{});
     defer parsed.deinit();
     const capability = parsed.value.object.get("capabilities").?.object.get("attachments").?;
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, capability, .{});

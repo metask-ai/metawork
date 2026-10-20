@@ -283,7 +283,11 @@ test("Task and draft contexts do not recreate a global active Workspace", async 
   assert.doesNotMatch(app, /snapshot\.selectedWorkspaceId/);
   assert.match(
     app,
-    /const composerWorkspaceId =\s*activeTask\?\.workspaceId \|\| workbench\.draftWorkspaceId/,
+    /const composerWorkspaceId =\s*activeTask\?\.workspaceId \?\?\s*selectedTaskSummary\?\.workspaceId \?\?\s*workbench\.draftWorkspaceId/,
+  );
+  assert.match(
+    app,
+    /const selectedTaskSummary = snapshot\.taskIndex\.find\(\s*\(task\) => task\.id === workbench\.activeTaskId/,
   );
 });
 

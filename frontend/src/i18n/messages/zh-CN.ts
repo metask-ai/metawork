@@ -1,6 +1,7 @@
 import type { MessageId } from "./en-US.ts";
 
 export const zhCN: Record<MessageId, string> = {
+  "common.loading": "正在读取…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "账户与应用菜单",
   "app.toggle_sidebar": "切换任务侧栏",
@@ -759,6 +760,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_changes.diff.stats": "新增 {additions} 行，删除 {deletions} 行",
   "file_changes.diff.unchanged_lines": "{count} 行未修改",
   "task.jump_latest": "跳到最新内容",
+  "task.load_earlier": "加载更早的消息",
   "inspector.mcp_authority": "创建时 MCP",
   "inspector.mcp_selected": "已选择工具",
   "inspector.mcp_none": "可用 · 未选择工具",

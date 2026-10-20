@@ -1,3 +1,4 @@
+import { productStateFixture } from "./test-support/product-view-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -113,6 +114,15 @@ const { ApprovalPanel } = await vite.ssrLoadModule(
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
+
+// Complete asynchronous setup before registering tests so root cleanup cannot
+// dispose Vite/JSDOM while later tests are still being registered.
+const taskInformationModels = JSON.parse(
+  await readFile(
+    "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+    "utf8",
+  ),
+).models;
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -2437,6 +2447,29 @@ test("Task switches restore each Task reading position without cross-contaminati
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
 
+test("prepending a history page preserves the visible reading position", () => {
+  const current = task({ runs: [run({ id: "9" })] });
+  const view = render(taskContentElement(current));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let height = 1000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 100 },
+  });
+  fireEvent.scroll(viewport);
+  view.rerender(taskContentElement(current, "2"));
+  height = 1600;
+  view.rerender(
+    taskContentElement(
+      { ...current, runs: [run({ id: "1" }), ...current.runs] },
+      "3",
+    ),
+  );
+  assert.equal(viewport.scrollTop, 700);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
 test("Tool summary expands its exact inline details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const value = task({
@@ -2963,7 +2996,10 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const incompleteMarkup = renderToStaticMarkup(
     taskContentElement(incomplete, "1", { fileChangesEnabled: true }),
   );
-  assert.match(incompleteMarkup, /File changes for this run could not be fully verified/);
+  assert.match(
+    incompleteMarkup,
+    /File changes for this run could not be fully verified/,
+  );
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
@@ -4765,13 +4801,6 @@ test("Run statistics remain data, not conversation content or empty disclosures"
   assert.deepEqual(value, original);
 });
 
-const taskInformationModels = JSON.parse(
-  await readFile(
-    "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
-    "utf8",
-  ),
-).models;
-
 test("task information uses a keyboard-accessible icon and retains creation MCP and readonly permission", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   for (const [mcpAuthority, expected] of [
@@ -5066,6 +5095,11 @@ async function findRecentTaskButton(name) {
   return waitFor(() => recentTaskButton(name));
 }
 
+async function selectRecentTask(pattern) {
+  const button = await findRecentTaskButton(pattern);
+  await act(async () => fireEvent.click(button));
+}
+
 async function renderAppFixture(
   ctx,
   width = 1440,
@@ -5156,9 +5190,9 @@ async function renderAppFixture(
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => {
+    fetchSnapshot: async (scope) => {
       if (snapshotFailure) throw new Error("fixture synchronization failure");
-      return structuredClone(snapshot);
+      return productStateFixture(snapshot, scope);
     },
     previewFile: (...ids) =>
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
@@ -5190,7 +5224,7 @@ test("App marks retained Run state unsynchronized and disables stop until refres
       activity: { kind: "waiting_model" },
     },
   );
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   setSnapshotFailure(true);
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
@@ -5233,7 +5267,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
       rejectStop = reject;
     });
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.deepEqual(calls, [["3"]]);
   assert.ok(screen.getByText("Requesting stop…"));
@@ -5241,7 +5275,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
     screen.getByRole("button", { name: "Stop task" }).disabled,
     true,
   );
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.ok(screen.queryByText("Requesting stop…") === null);
   assert.equal(
     screen.getByRole("button", { name: "Stop task" }).disabled,
@@ -5249,7 +5283,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
   await act(async () => rejectStop(new Error("fixture stop failure")));
   assert.ok(screen.queryByText(/stop request could not be confirmed/) === null);
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.ok(
     screen.getAllByText(/stop request could not be confirmed/).length > 0,
   );
@@ -5396,7 +5430,7 @@ test("App switches the current Task only after Host commits and preserves its dr
     });
   source.availableApprovalModes = ["manual", "auto_review", "full_access"];
   await publishAppFixture(fixture);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const composer = screen.getByRole("combobox", { name: "" });
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(composer);
@@ -5455,6 +5489,62 @@ function filePreviewOpener(path) {
   return screen.getByRole("button", { name: `Preview ${path}` });
 }
 
+test("App pages through all retained history while keeping the current Run live", async (ctx) => {
+  const fixture = await renderAppFixture(ctx);
+  const source = fixture.snapshot.tasks[0];
+  const template = structuredClone(source.runs[0]);
+  source.runs = Array.from({ length: 16 }, (_, index) => ({
+    ...structuredClone(template),
+    id: String(index + 1),
+    input: {
+      kind: "text",
+      text: `History input ${index + 1}`,
+      redacted: false,
+    },
+    output: {
+      ...structuredClone(template.output),
+      commentary: [],
+      response: `History response ${index + 1}`,
+    },
+  }));
+  const current = source.runs.at(-1);
+  current.phase = "running";
+  current.terminal = null;
+  source.currentRunId = "16";
+  source.currentRunPhase = "running";
+  await selectRecentTask(/First task/);
+  assert.ok(screen.getByText("History input 16"));
+  assert.equal(screen.queryByText("History input 1"), null);
+  for (const first of [9, 5, 1]) {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load earlier messages" }),
+    );
+    await screen.findByText(`History input ${first}`);
+    assert.ok(screen.getByText("History input 16"));
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    );
+  }
+  assert.equal(
+    screen.queryByRole("button", { name: "Load earlier messages" }),
+    null,
+  );
+  current.output.commentary = ["Current Run still receives live output"];
+  await publishAppFixture(fixture);
+  await screen.findByText("Current Run still receives live output");
+  assert.ok(screen.getByText("History input 1"));
+  fixture.snapshot.securityEpoch = "2";
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(screen.queryByText("History input 9") === null, true),
+  );
+  await screen.findByRole("button", { name: "Load earlier messages" });
+  assert.ok(screen.getByText("History input 16"));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
+  assert.equal(screen.queryByText("History input 1"), null);
+});
+
 function fileChangesOpener() {
   return screen
     .getAllByRole("button")
@@ -5481,7 +5571,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   assert.ok(
     screen.getByText("Open a file or review changes from the conversation."),
   );
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   const panel = () => within(document.querySelector("#task-panel"));
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
   assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
@@ -5606,7 +5696,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
 
 test("layout visibility and share survive Task changes, invalidation, and non-Task pages", async (ctx) => {
   const { snapshot, previews, publish } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   const shell = document.querySelector(".app-window");
   const resize = screen.getByRole("separator", { name: "Resize side panel" });
@@ -5632,7 +5722,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   );
   assert.ok(screen.queryByText("invalidated file") === null);
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   assert.equal(shell.style.getPropertyValue("--right-panel-width"), rightWidth);
   assert.equal(
@@ -5653,7 +5743,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   assert.ok(
     !screen.getAllByRole("button", { name: "Hide side panel" })[0].disabled,
   );
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   snapshot.tasks.splice(1, 1);
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -5674,7 +5764,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
     null,
   );
   fireEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
   assert.equal(
     dom.window.localStorage.getItem("metawork.panel.task.share"),
@@ -5820,7 +5910,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
     }),
   );
   assert.equal(previews.length, 2);
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   await act(async () => previews[1].resolve(ready("late after switch")));
   assert.equal(screen.queryByText("late after switch"), null);
   assert.ok(document.querySelector("#task-panel") !== null);
@@ -5831,7 +5921,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
       .getByRole("heading", { name: "Side panel" })
       .classList.contains("sr-only"),
   );
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.ok(document.querySelector("#task-panel") !== null);
   assert.ok(screen.queryByText("late after switch") === null);
   cleanup();
@@ -5848,7 +5938,7 @@ test("conversation file links preview directly without expanding tools and retur
       provisionalRedacted: false,
     },
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   assert.equal(
     document.querySelector(".run-process-header").getAttribute("aria-expanded"),
     "false",
@@ -5912,7 +6002,7 @@ test("Markdown preview mode is isolated per tab and inactive content is unmounte
       }),
     ],
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const ready = (content) => ({
     state: "ready",
     content,
@@ -5962,7 +6052,7 @@ test("Markdown preview mode is isolated per tab and inactive content is unmounte
 
 test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {
   const { previews } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const openers = [filePreviewOpener("a.txt"), filePreviewOpener("b.txt")];
   fireEvent.click(openers[0]);
   fireEvent.click(openers[1]);
@@ -6025,7 +6115,7 @@ test("App attention only locates the original approval in docked and overlay lay
       fireEvent.click(
         screen.getByRole("button", { name: "Toggle task sidebar" }),
       );
-    fireEvent.click(await findRecentTaskButton(/First task/));
+    await selectRecentTask(/First task/);
     const info = await screen.findByRole("button", {
       name: "Task information",
     });
@@ -6136,7 +6226,7 @@ test("App attention only locates the original approval in docked and overlay lay
 
 test("App Escape returns to the opener, or the permanent toggle when that opener disappears", async (ctx) => {
   const { previews } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const opener = filePreviewOpener("a.txt");
   fireEvent.click(opener);
   await act(
@@ -6274,7 +6364,7 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
     390,
   );
   fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
   const draft = screen.getByRole("combobox", { name: "" });
   fireEvent.change(draft, { target: { value: "Keep this local draft" } });
@@ -6295,9 +6385,9 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
   ctx.mock.method(
     BridgeClient.prototype,
     "fetchSnapshot",
-    () =>
+    (scope) =>
       new Promise((resolve) => {
-        release = resolve;
+        release = (state) => resolve(productStateFixture(state, scope));
       }),
   );
   retry.focus();
@@ -6437,9 +6527,9 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
         if (++connects === 1) throw new Error("bootstrap unavailable");
         return "2";
       },
-      fetchSnapshot: () =>
+      fetchSnapshot: (scope) =>
         new Promise((resolve) => {
-          release = resolve;
+          release = (state) => resolve(productStateFixture(state, scope));
         }),
     },
   );
@@ -6450,7 +6540,7 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
   await waitFor(() => assert.ok(release));
   assert.ok(document.querySelector(".connection-failure-screen"));
   assert.equal(document.querySelector(".app-window"), null);
-  await act(async () => release(structuredClone(f.snapshot)));
+  await act(async () => release(f.snapshot));
   await waitFor(() => assert.ok(document.querySelector(".app-window")));
   assert.equal(document.querySelector(".connection-failure-screen"), null);
 });
@@ -6466,7 +6556,7 @@ for (const outcome of ["committed", "timeout"]) {
     const sidebar = screen.getByRole("button", { name: "Toggle task sidebar" });
     if (sidebar.getAttribute("aria-expanded") === "false")
       fireEvent.click(sidebar);
-    fireEvent.click(await findRecentTaskButton(/First task/));
+    await selectRecentTask(/First task/);
     // An empty draft exposes Stop; a retained draft exposes Send instead.
     fireEvent.change(screen.getByRole("combobox", { name: "" }), {
       target: { value: "" },
@@ -6504,8 +6594,8 @@ for (const outcome of ["committed", "timeout"]) {
           ),
     );
     assert.equal(reads, 5);
-    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () =>
-      structuredClone(f.snapshot),
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) =>
+      productStateFixture(f.snapshot, scope),
     );
     fireEvent.click(document.querySelector(".commandbar-alert > summary"));
     fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
@@ -6566,7 +6656,10 @@ test("generated image loads only its reference and opens the existing preview", 
   );
   assert.deepEqual(calls, [["17", "23", "host-image-1"]]);
   assert.equal(view.container.textContent, "");
-  assert.match(view.container.querySelector("button").getAttribute("aria-label"), /generated-images\/ocean\.jpg/);
+  assert.match(
+    view.container.querySelector("button").getAttribute("aria-label"),
+    /generated-images\/ocean\.jpg/,
+  );
   assert.equal(
     view.container.querySelector("img").getAttribute("src"),
     `data:image/png;base64,${generatedPng}`,

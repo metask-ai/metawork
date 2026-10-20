@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
 import { RendererBridgeContractError } from "../frontend/src/bridge/client.ts";
+import { initialViewScope } from "../frontend/src/bridge/contracts.ts";
 import {
   connectionFailurePresentation,
   connectionStatus,
@@ -945,4 +946,61 @@ test("contract failures are bootstrap failures only until a view has been truste
   assert.equal(f.statuses.at(-1).failure, "snapshot_contract_failed");
   assert.equal(f.statuses.at(-1).source, "snapshot");
   await f.connection.stop();
+});
+
+test("scope changes discard old reads and serialize a single merged follow-up", async () => {
+  const reads = [];
+  const published = [];
+  let active = 0;
+  let maximum = 0;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: async (scope) => {
+      maximum = Math.max(maximum, ++active);
+      if (reads.length === 0) {
+        reads.push({ scope });
+        active--;
+        return { ...snapshot("1"), scope };
+      }
+      return new Promise((resolve) =>
+        reads.push({
+          scope,
+          release: (revision) => {
+            active--;
+            resolve({ ...snapshot(revision), scope });
+          },
+        }),
+      );
+    },
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => published.push(view.scope),
+    onStatus: () => {},
+    onReady: () => {},
+    onViewSyncFailed: () => {},
+  });
+  await connection.start();
+  const a = connection.setScope({ ...initialViewScope, taskId: "3" });
+  const rejectedA = assert.rejects(a, /scope changed/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads.length, 2);
+  const b = connection.setScope({ ...initialViewScope, taskId: "4" });
+  await rejectedA;
+  assert.equal(reads.length, 2);
+  reads[1].release("2");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads.length, 3);
+  reads[2].release("2");
+  await b;
+  assert.deepEqual(
+    published.map((scope) => scope.taskId),
+    [null, "4"],
+  );
+  assert.equal(maximum, 1);
+  await connection.stop();
 });

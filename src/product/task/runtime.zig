@@ -4476,6 +4476,125 @@ pub const Runtime = struct {
         }
     }
 
+    pub fn writeSummaryList(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+        var count: usize = 0;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            try task_view.writeSummary(writer, task, text);
+        }
+    }
+
+    pub fn hasInputReceipt(self: *const Runtime, task_id: u64, operation_id: []const u8) bool {
+        const task = self.findConst(task_id) orelse return false;
+        for (task.input_submissions.items) |record| if (std.mem.eql(u8, operation_id, record.submission.operationId())) return true;
+        return task_state.submissionHasExecution(task, operation_id);
+    }
+
+    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+        var count: usize = 0;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            for (task.durable.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                count += 1;
+                try task_view.writeSearchRun(writer, task, run, text);
+            }
+        }
+    }
+
+    /// Missing Task is explicit null. A history cursor must name a retained
+    /// Run belonging to this Task; it cannot silently become another page.
+    const RunBounds = struct { start: usize, end: usize, older: bool };
+
+    fn runBounds(task: *const task_state.Task, before_run_id: ?u64, limit: u8) error{InvalidViewRequest}!RunBounds {
+        if (limit == 0 or limit > 4) return error.InvalidViewRequest;
+        var end: usize = 0;
+        for (task.durable.runs, 0..) |entry, index| if (entry != null) {
+            end = index + 1;
+        };
+        if (before_run_id) |id| {
+            end = for (task.durable.runs, 0..) |entry, index| {
+                if (entry != null and entry.?.id == id) break index;
+            } else return error.InvalidViewRequest;
+        }
+        var start = end;
+        var count: usize = 0;
+        while (start > 0 and count < limit) {
+            start -= 1;
+            if (task.durable.runs[start] != null) count += 1;
+        }
+        const older = for (task.durable.runs[0..start]) |entry| {
+            if (entry != null) break true;
+        } else false;
+        return .{ .start = start, .end = end, .older = older };
+    }
+
+    pub fn writeHistoryPage(self: *const Runtime, writer: *std.Io.Writer, effects: ProjectionEffects, task_id: u64, before_run_id: u64, limit: u8) (task_view.Error || error{InvalidViewRequest})!void {
+        const task = self.findConst(task_id) orelse {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        };
+        const bounds = try runBounds(task, before_run_id, limit);
+        writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
+        if (bounds.older) writer.print("\"{d}\"", .{task.durable.runs[bounds.start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
+        var count: usize = 0;
+        for (task.durable.runs[bounds.start..bounds.end]) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            try task_view.writeRun(writer, effects.text, run, task_state.runProjectionFacts(run), effects.now_ms);
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    pub fn writeProjectionPage(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+        effects: ProjectionEffects,
+        task_id: u64,
+        before_run_id: ?u64,
+        limit: u8,
+    ) (task_view.Error || error{InvalidViewRequest})!void {
+        if (limit == 0 or limit > 4) return error.InvalidViewRequest;
+        const task = self.findConst(task_id) orelse {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        };
+        const bounds = try runBounds(task, before_run_id, limit);
+        const start = bounds.start;
+        const end = bounds.end;
+        const older = bounds.older;
+        var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
+        const external = effects.authority(projectionAuthorityQuery(task));
+        var available_modes: [3]task_state.ApprovalMode = undefined;
+        writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
+        if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
+        if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
+        try task_view.writeRunManifest(writer, task);
+        writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
+        try task_view.writeProjection(writer, .{
+            .task = task,
+            .now_ms = effects.now_ms,
+            .recovery = self.recoveryProjectionWithAuthority(task, external),
+            .model_selection_availability = external.model_selection_availability,
+            .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
+            .shutting_down = external.shutting_down,
+            .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .text = effects.text,
+            .catalog = effects.catalog,
+            .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
+            .run_start = start,
+            .run_end = end,
+        });
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+
     pub fn recoveryStartFacts(
         self: *const Runtime,
         task_id: u64,

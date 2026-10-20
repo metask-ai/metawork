@@ -19,6 +19,29 @@ pub const RendererBridgeConnect = struct {
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
+pub const ProductViewRequest = struct {
+    taskId: ?[]const u8,
+    beforeRunId: ?[]const u8,
+    runLimit: u8,
+    management: @FieldType(product_control.ViewRequest, "management"),
+    search: bool,
+    receipts: []const struct { taskId: []const u8, operationId: []const u8 },
+
+    pub fn product(self: ProductViewRequest, storage: []product_control.ViewReceiptQuery) !product_control.ViewRequest {
+        if (self.receipts.len > 64 or self.receipts.len > storage.len) return error.InvalidViewRequest;
+        for (self.receipts, storage[0..self.receipts.len]) |query, *target| target.* = .{ .task_id = try parseWireId(query.taskId), .operation_id = query.operationId };
+        const request: product_control.ViewRequest = .{
+            .task_id = if (self.taskId) |id| try parseWireId(id) else null,
+            .before_run_id = if (self.beforeRunId) |id| try parseWireId(id) else null,
+            .run_limit = self.runLimit,
+            .management = self.management,
+            .search = self.search,
+            .receipts = storage[0..self.receipts.len],
+        };
+        try request.validate();
+        return request;
+    }
+};
 pub const Empty = struct {};
 pub const WindowChromeRefresh = struct { generation: []const u8 };
 pub const WindowChromeControl = struct {
@@ -1041,4 +1064,26 @@ test "complete model metadata incoming declarations retain capabilities and toke
     try std.testing.expectEqual(@as(?bool, true), parsed.value.capabilities.output.text);
     inline for (.{ "{\"limits\":{}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
         try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ModelMetadata, invalid));
+}
+
+test "Product view request is closed and validates stable history identity" {
+    var parsed = try parsePayload(ProductViewRequest,
+        \\{"taskId":"7","beforeRunId":"9","runLimit":4,"management":"skills","search":false,"receipts":[]}
+    );
+    defer parsed.deinit();
+    var query_storage: [64]product_control.ViewReceiptQuery = undefined;
+    const request = try parsed.value.product(&query_storage);
+    try std.testing.expectEqual(@as(?u64, 7), request.task_id);
+    try std.testing.expectEqual(@as(?u64, 9), request.before_run_id);
+    try std.testing.expectEqual(.skills, request.management);
+    const invalid = [_][]const u8{
+        \\{}
+        ,
+        \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"unknown"}
+        ,
+        \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"none","search":false,"receipts":[],"fields":["tasks"]}
+    };
+    for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductViewRequest, payload));
+    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = null, .beforeRunId = "2", .runLimit = 4, .management = .none, .search = false, .receipts = &.{} }).product(&query_storage));
+    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = "0", .beforeRunId = null, .runLimit = 4, .management = .none, .search = false, .receipts = &.{} }).product(&query_storage));
 }

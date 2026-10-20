@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
-import { skillSourceIds } from "../bridge/contracts.ts";
+import { initialViewScope } from "../bridge/contracts.ts";
 import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
@@ -31,6 +31,13 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
+    securityEpoch: "1",
+    scope: initialViewScope,
+    taskIndex: [],
+    receipts: [],
+    searchIndex: null,
+    taskPage: null,
+    historyPage: null,
     automaticWorkspaceRoot: {
       generation: "1",
       mode: null,
@@ -151,35 +158,10 @@ export const initialWorkbenchState: WorkbenchState = {
       skills: [],
       issues: [],
     },
-    skillManagement: {
-      availability: "unavailable",
-      enablementAvailability: "unavailable",
-      sourceSettings: {
-        revision: null,
-        health: "unavailable",
-        entries: skillSourceIds.map((sourceId) => ({
-          sourceId,
-          enabled: null,
-          canSetEnabled: false,
-        })),
-        recovery: { canReread: false, canReset: false, token: null },
-      },
-      personalSourceDiscovery: null,
-      assets: [],
-    },
-    mcp: {
-      availability: "unavailable",
-      managementHealth: "unavailable",
-      operation: "idle",
-      configurationApply: "idle",
-      authorizationOperation: { kind: "idle" },
-      desiredGeneration: null,
-      runtimeAlignment: "unknown",
-      redacted: false,
-      servers: [],
-    },
+    skillManagement: null,
+    mcp: null,
     workspaces: [],
-    scheduledTasks: [],
+    scheduledTasks: null,
     tasks: [],
   },
   connectionGeneration: "0",
@@ -236,11 +218,36 @@ export function workbenchReducer(
 
   const generation = action.generation ?? state.connectionGeneration;
   if (generation !== state.connectionGeneration) return state;
+  let snapshot = action.snapshot;
+  const page = snapshot.taskPage;
+  if (page) {
+    // Retain only explicitly fetched Runs of this Task. Current header and
+    // current Run always come from this commit, including during history reads.
+    const previous =
+      state.snapshot.securityEpoch === snapshot.securityEpoch
+        ? state.snapshot.tasks.find((task) => task.id === page.task.id)
+        : undefined;
+    const runs = new Map(previous?.runs.map((run) => [run.id, run]));
+    for (const run of snapshot.historyPage?.runs ?? []) runs.set(run.id, run);
+    for (const run of page.task.runs) runs.set(run.id, run);
+    snapshot = {
+      ...snapshot,
+      tasks: [
+        {
+          ...page.task,
+          runs: page.runManifest.flatMap((run) => {
+            const loaded = runs.get(run.id);
+            return loaded ? [loaded] : [];
+          }),
+        },
+      ],
+    };
+  }
 
   if (state.draftOpen)
     return {
       ...state,
-      snapshot: action.snapshot,
+      snapshot,
       snapshotReceivedAt: action.receivedAt,
       snapshotGeneration: generation,
       activeTaskId: null,
@@ -249,7 +256,7 @@ export function workbenchReducer(
       draftWorkspaceId: state.draftWorkspaceId,
     };
 
-  const availableTasks = navigableTasks(action.snapshot);
+  const availableTasks = navigableTasks(snapshot);
   const activeTaskStillExists = availableTasks.some(
     (task) => task.id === state.activeTaskId,
   );
@@ -259,7 +266,7 @@ export function workbenchReducer(
   // silently opening another historical conversation.
   const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
   return {
-    snapshot: action.snapshot,
+    snapshot,
     snapshotReceivedAt: action.receivedAt,
     connectionGeneration: state.connectionGeneration,
     snapshotGeneration: generation,

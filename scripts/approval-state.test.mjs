@@ -103,6 +103,7 @@ function snapshot(tasks) {
       },
     ],
     tasks,
+    taskIndex: tasks.map((task) => ({ id: task.id })),
   };
 }
 

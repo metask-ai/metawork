@@ -1,4 +1,5 @@
 export const enUS = {
+  "common.loading": "Loading…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "Account and application menu",
   "app.toggle_sidebar": "Toggle task sidebar",
@@ -825,7 +826,8 @@ export const enUS = {
   "file_changes.file_count.one": "{fileCount} file",
   "file_changes.file_count.other": "{fileCount} files",
   "file_changes.incomplete_label": "Record may be incomplete",
-  "file_changes.incomplete_empty": "File changes for this run could not be fully verified",
+  "file_changes.incomplete_empty":
+    "File changes for this run could not be fully verified",
   "file_changes.review": "Review changes",
   "file_changes.review_file": "Review changes to {path}",
   "file_changes.incomplete_notice":
@@ -856,6 +858,7 @@ export const enUS = {
     "{additions} added lines, {deletions} deleted lines",
   "file_changes.diff.unchanged_lines": "{count} unmodified lines",
   "task.jump_latest": "Jump to latest",
+  "task.load_earlier": "Load earlier messages",
   "inspector.mcp_authority": "MCP at creation",
   "inspector.mcp_selected": "Tools selected",
   "inspector.mcp_none": "Ready · no tools selected",
@@ -1325,8 +1328,10 @@ export const enUS = {
   "cause.session_close": "Session released",
   "cause.app_shutdown": "Workbench closed",
   "cause.event_pipeline_failure": "Activity delivery failed",
-  "cause.event_payload_too_large": "A single execution result exceeded the size limit; the task was interrupted",
-  "cause.queue_capacity_failure": "The execution queue had insufficient capacity to continue",
+  "cause.event_payload_too_large":
+    "A single execution result exceeded the size limit; the task was interrupted",
+  "cause.queue_capacity_failure":
+    "The execution queue had insufficient capacity to continue",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure": "Agent execution failed. Try again.",
   "cause.provider_failure": "Model service request failed",

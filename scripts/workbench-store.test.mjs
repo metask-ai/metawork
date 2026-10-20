@@ -48,6 +48,7 @@ function snapshot(revision, tasks, workspaceIds = null) {
     newTaskAdmission: initialWorkbenchState.snapshot.newTaskAdmission,
     workspaces: ids.map((id) => workspace(id)),
     tasks,
+    taskIndex: tasks,
   };
 }
 

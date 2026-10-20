@@ -779,9 +779,14 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(handlers.ProductViewRequest, invocation.request.payload, 16 * 1024);
+        defer parsed.deinit();
+        var receipt_queries: [64]product_control.ViewReceiptQuery = undefined;
+        var view = ViewWriteContext{ .control = try self.requireProductControl(), .request = try parsed.value.product(&receipt_queries) };
         const descriptor = self.delivery.publishSnapshot(
             invocation.source.window_id,
-            .{ .context = self, .write_fn = writeSnapshot },
+            view.control.projectionSecurityEpoch(),
+            .{ .context = &view, .write_fn = writeSnapshot },
         ) catch |err| {
             std.debug.assert(product_control.decideTransportFailure(.{
                 .stage = .snapshot_transport,
@@ -813,6 +818,7 @@ pub const Dispatcher = struct {
             return error.InvalidBridgePayload;
         const chunk = self.delivery.snapshotChunk(
             invocation.source.window_id,
+            (try self.requireProductControl()).projectionSecurityEpoch(),
             snapshot_id,
             offset,
         ) catch |err| switch (err) {
@@ -4922,9 +4928,14 @@ pub const Dispatcher = struct {
         return self.platform.cancel_timer_fn(self.platform.context, timer_id);
     }
 
+    const ViewWriteContext = struct {
+        control: *product_control.Runtime,
+        request: product_control.ViewRequest,
+    };
+
     fn writeSnapshot(context: ?*anyopaque, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context.?));
-        return (try self.requireProductControl()).writeSnapshot(output);
+        const view: *const ViewWriteContext = @ptrCast(@alignCast(context.?));
+        return view.control.writeSnapshot(output, view.request);
     }
 };
 
@@ -7028,7 +7039,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     }
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
     try std.testing.expect(std.mem.indexOf(
@@ -7467,7 +7478,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     try std.testing.expectEqualStrings("input-1", task.send_input_result.?.operationId());
     try std.testing.expectEqual(@as(?u32, 1), task.send_input_result.?.sequence);
     var snapshot_buffer: [64 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_buffer);
+    const snapshot = try control.writeAggregateFixture(&snapshot_buffer);
     var parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), snapshot, .{});
     defer parsed.deinit();
     const projected_task = parsed.value.object.get("tasks").?.array.items[0].object;

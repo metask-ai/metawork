@@ -9,6 +9,7 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  ViewScope,
   McpHttpConnectionInput,
   McpSecretSlot,
   McpStdioConnectionInput,
@@ -233,9 +234,10 @@ export class BridgeClient {
     );
   }
 
-  fetchSnapshot() {
-    return fetchWorkbenchSnapshot((command, payload) =>
-      this.invoke(command, payload),
+  fetchSnapshot(scope: ViewScope) {
+    return fetchWorkbenchSnapshot(
+      (command, payload) => this.invoke(command, payload),
+      scope,
     );
   }
 
