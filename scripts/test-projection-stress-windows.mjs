@@ -178,14 +178,32 @@ async function until(operation, label, timeout = 30000) {
   });
 }
 const tasks = [];
+let probeReadRetries = 0;
 try {
   webview = await connectTestWebView(port, { requestTimeoutMs: 15000 });
   const invoke = (command, payload) =>
     invokeWebViewBridge(webview, command, payload);
   // Typed probes are restricted to setup and settled observations. During the
   // pressure interval only the mounted Renderer reads the Product data plane.
-  const read = (scope = initialViewScope) =>
-    fetchWorkbenchSnapshot(invoke, scope);
+  const read = async (scope = initialViewScope) => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try {
+        return await fetchWorkbenchSnapshot(invoke, scope);
+      } catch (error) {
+        if (
+          error.bridgeResponseError?.code !== "handler_failed" ||
+          error.bridgeResponseError?.message !== "StaleSnapshot" ||
+          Date.now() >= deadline
+        )
+          throw error;
+        // Read-only setup/settled probes can race the mounted Renderer.
+        // A replacement invalidates the whole read; never retry product commands.
+        probeReadRetries += 1;
+        await delay(40);
+      }
+    }
+  };
   failureRead = read;
   const current = await until(async () => {
     const view = await read();
@@ -368,8 +386,16 @@ try {
     ).detached,
     true,
   );
-  await webview.evaluate(
-    `document.querySelector('.skill-header-actions button:not(:disabled)').click()`,
+  await until(
+    () =>
+      webview.evaluate(`(() => {
+      if (document.querySelector('.commandbar-alert:not([data-recovering="true"])')) return true;
+      const refresh = document.querySelector('.skill-header-actions button:not(:disabled)');
+      if (!refresh) return false;
+      refresh.click();
+      return true;
+    })()`),
+    "withdrawal observed or one explicit refresh demand submitted",
   );
   await until(
     () =>
@@ -434,6 +460,7 @@ try {
   const evidence = {
     peakLive,
     historicalRuns: 18,
+    probeReadRetries,
     stopMs,
     final,
     browser,
