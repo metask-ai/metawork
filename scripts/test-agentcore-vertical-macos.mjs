@@ -874,13 +874,22 @@ desktopVertical: try {
   let finalSnapshot = await poll(
     async () => {
       if (provider.error) throw provider.error;
-      const current = await snapshot();
+      const current = await snapshot({
+        observeTaskView({ revision, task }) {
+          if (task?.id !== taskId) return;
+          const run = task.runs.find((item) => item.id === runId);
+          if (run) observeRunRevision(observedRunRevisions, revision, run);
+        },
+      });
       const task = current.tasks.find((item) => item.id === taskId);
       const run = task?.runs.find((item) => item.id === runId);
       if (!task || !run) return null;
-      observeRunRevision(observedRunRevisions, current.revision, run);
       const pending = task.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
+        // Request delivery can precede the Agent's waiting activity fact.
+        // Observe that state before responding so the driver cannot erase
+        // the very preterminal transition this vertical is asserting.
+        if (run.activity?.kind !== "waiting_user") return null;
         if (!visualAttentionCaptured) {
           await captureVisual("attention", 1320, 812);
           if (process.platform === "win32")
@@ -2466,13 +2475,14 @@ async function expectBridgeFailure(command, payload, context) {
   throw new Error(`${context} was accepted`);
 }
 
-async function snapshot() {
+async function snapshot(options) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await readSnapshot();
+      return await readSnapshot(options);
     } catch (error) {
       const stale =
-        error?.bridgeCommand === "metawork.workbench.snapshot.chunk" &&
+        (error?.bridgeCommand === "metawork.workbench.snapshot" ||
+          error?.bridgeCommand === "metawork.workbench.snapshot.chunk") &&
         error?.bridgeResponseError?.code === "handler_failed" &&
         error?.bridgeResponseError?.message === "StaleSnapshot";
       if ((!stale && error?.retryableSnapshotRead !== true) || attempt >= 2)
@@ -2481,8 +2491,9 @@ async function snapshot() {
   }
 }
 
-async function readSnapshot() {
+async function readSnapshot(options) {
   return readProbeProductState(invokeBridge, {
+    ...options,
     forbidden: ["metawork-agentcore-vertical-fixture-key"],
   });
 }
@@ -2867,9 +2878,15 @@ async function sendInRenderer(taskId, text) {
       };
       document.querySelector('.composer-send').click();
     })()`);
-    assert.equal(
-      await webview.evaluate(`document.querySelector('.composer-stop')===null`),
-      true,
+    await poll(
+      () =>
+        webview.evaluate(`
+        document.querySelector('.composer-shell textarea')?.value === '' &&
+        document.querySelector('.composer-stop')?.disabled === false &&
+        document.querySelector('.composer-send') === null
+      `),
+      commandTimeoutMs,
+      "submitted draft clears while Task Stop remains available",
     );
     await webview.evaluate(
       `document.querySelector('.composer-shell textarea').focus();document.querySelector('.composer-shell textarea').select()`,
@@ -3021,12 +3038,21 @@ async function verifyActiveRendererDraft(taskId, text) {
       return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__activeInputCalls,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
     })()`);
     assert.deepEqual(observed, { text, focused: true, calls: 1, task: taskId });
-    const reading = await webview.evaluate(`(() => {
+    const reading = await poll(
+      async () => {
+        const current = await webview.evaluate(`(() => {
       const flow=document.querySelector('.run-reading-flow');
       const first=flow.querySelector('.additional-input .ai-message');
       const before=window.__activeReadingObservation;
       return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,copies:flow.querySelectorAll('.additional-input .input-copy-actions').length};
     })()`);
+        if (current.roles.join(",") === "user,assistant,user,assistant")
+          return current;
+        throw new Error(JSON.stringify(current));
+      },
+      commandTimeoutMs,
+      "adopted input and final response in the Renderer",
+    );
     assert.deepEqual(reading.roles, ["user", "assistant", "user", "assistant"]);
     assert.equal(reading.copies, 2);
     assert.equal(reading.same, true);
@@ -3061,15 +3087,14 @@ async function observeTransferredInput(taskId, targetRunId) {
       () =>
         webview.evaluate(`(() => {
       const row=[...document.querySelectorAll('.task-list-item')].find(node=>node.dataset.taskId===${JSON.stringify(taskId)});
-      if(!row) return false;
-      if(row.getAttribute('aria-current')!=='page') {row.click();return false;}
-      return document.querySelectorAll('.additional-input').length===2;
+      if(row && row.getAttribute('aria-current')!=='page') row.click();
+      return row?.getAttribute('aria-current')==='page' && document.querySelectorAll('.additional-input[data-input-id]').length===2;
     })()`),
       commandTimeoutMs,
       "transferred inputs in the real reading surface",
     );
     const inputCopies = await webview.evaluate(`(() => {
-      const source=[...document.querySelectorAll('.additional-input .task-input-copy')];
+      const source=[...document.querySelectorAll('.additional-input[data-input-id] .task-input-copy')];
       const copies=[...document.querySelectorAll('.ai-message[data-role="user"] .task-input-copy')];
       const target=document.querySelector('[data-run-id="${targetRunId}"]');
       return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .input-copy-actions')};
@@ -3096,7 +3121,7 @@ async function observeTransferredInput(taskId, targetRunId) {
         () =>
           webview.evaluate(`(() => {
         if(innerWidth>${width} || innerWidth<${width}-32) return false;
-        const messages=[...document.querySelectorAll('.additional-input')];
+        const messages=[...document.querySelectorAll('.additional-input[data-input-id]')];
         if(messages.length!==2) return false;
         if(document.querySelector('.additional-input-target, .additional-input-state, .additional-input-restore, .run-process-input')) throw new Error('Interjection-specific status or action is visible');
         for(const message of messages) {
@@ -3237,7 +3262,7 @@ async function verifyModelSwitch() {
   try {
     await runModelSwitchVertical({
       invoke: invokeBridge,
-      snapshot,
+      snapshot: ({ taskId = null } = {}) => snapshot({ taskId }),
       poll,
       provider,
       textSse,

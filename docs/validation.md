@@ -184,7 +184,7 @@ Windows x86_64 的已授权正式请求取得可完整解码的 JPEG。临时探
 
 2026-10-21，Windows x86_64 的 canonical `0.11.0-dev+9c2f68671198` 在标准 Native graph 中通过旧集合无 grant 的恢复回归：测试侧 ABI 输入重现旧版零 Host tool Runtime 与 allowlist，经真实 Core、一次 `Write` 的 `allow_once`、checkpoint export 与新集合 restore，得到官方 SDK 与 Host 接受的 `complete` report，无伪造失效或 issue。回归核对 Session identity、checkpoint generation、原 Run identity、report/describe 一致，并执行恢复后的 Write 与 GenerateImage，分别验证当次审批和无图片配置时的零图片请求。有 Session grant 的旧集合恢复仍验证原 grant 失效及合法 degraded report；相同新集合及只改变 GenerateImage schema 的恢复保留无关 Write grant，Host tool 仍须独立审批。
 
-这关闭该 Windows x86_64 fixture 下的矛盾 report 缺口，不证明 macOS、Windows arm64、正式图片服务或既有数据的完整图片迁移验收。相同升级另通过上一版 exact Core 导出的非空原始 checkpoint 恢复及后续实际 Run、SDK/Host 四协议 Provider probes 和权限 probe；原始日志与 checkpoint 保存在本地 `.zig-cache/agentcore-inspect-9c2f68671198/`。未使用本地 SDK patch、fallback、伪造 report 或重放产品命令；非法 report 继续由原 SDK/Host 校验拒绝。发布条件仍由 [AgentCore 集成契约](agentcore-integration.md#host-tools) 定义。
+这关闭该 Windows x86_64 fixture 下的矛盾 report 缺口，不证明 macOS、Windows arm64、正式图片服务或既有数据的完整图片迁移验收。相同升级另通过上一版 exact Core 导出的非空原始 checkpoint 恢复及后续实际 Run、SDK/Host 四协议 Provider probes 和权限 probe；原始日志与 checkpoint 保存在本地 `.zig-cache/agentcore-inspect-9c2f68671198/`。当前 Windows x86_64 完整 desktop 验收尚未闭合，历史执行与后续失败见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021)。未使用本地 SDK patch、fallback、伪造 report 或重放产品命令；非法 report 继续由原 SDK/Host 校验拒绝。发布条件仍由 [AgentCore 集成契约](agentcore-integration.md#host-tools) 定义。
 
 ## Storage 基础层验证
 
@@ -235,7 +235,7 @@ Account 凭据操作的返回与恢复语义由 [Account 架构](account-archite
 | ------------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | macOS arm64        | revision 15 图片附件输入的 desktop vertical 已验证（`E-AGENTCORE-R15-20260907`）         | DMG 首次启动、Keychain、可访问性与真实模型质量 |
 | macOS x86_64       | revision 15 图片附件输入的 Rosetta desktop vertical 已验证（`E-AGENTCORE-R15-20260907`） | Intel 真机与系统 picker                        |
-| Windows x86_64 MSVC | Debug/Release、真实 AgentCore permission/provider/Host 调用、旧 GNU checkpoint 恢复及未签名安装器已验证（[E-WIN-MSVC-20261017](#e-win-msvc-20261017)） | 原生输入探针稳定性、完整 desktop vertical、隔离 signed-out readiness、交互安装与 Windows 10/11 矩阵 |
+| Windows x86_64 MSVC | MSVC 构建、旧 GNU checkpoint 恢复及未签名安装器见 [E-WIN-MSVC-20261017](#e-win-msvc-20261017)；ABI revision 24 历史执行与后续失败见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021) | 当前完整 desktop vertical、原生输入跨环境稳定性、隔离 signed-out readiness、交互安装与 Windows 10/11 矩阵 |
 | Windows arm64 MSVC | exact bundle、Debug/Release 交叉构建及未签名安装器已验证（[E-WIN-MSVC-20261017](#e-win-msvc-20261017)） | ARM64 真机运行、AgentCore vertical、交互安装与签名 |
 | Linux              | 尚未实现                                                                                 | 构建、运行、分发和平台验收均未开始             |
 
@@ -353,6 +353,16 @@ x64 与 ARM64 的 Debug/Release 构建、release automation isolation 和正式 
 
 该轮绑定 revision `d637907a746ffa9c6c2d852bc17d7306705ea9b0` 加源码 diff SHA-256 `62c7228bbdc1390e573940b81b2d1253254d602261cbd58a459111729881ba2e`，automation Debug binary SHA-256 `bee432c00683065faaa1fa9e9b4e5752628f8e6f8177b8b1595d3f202aa9e970`。identity、driver/lock/新增 fixture hashes、源码 diff 和原始日志保存于 `.zig-cache/agentcore-r18/platform-identity.json`、`platform-source.diff` 与 `vertical-standard.log`。本证据限于该环境与 exact artifact；Windows 11、Windows arm64 真机、其他 DPI 环境和当前 revision macOS 仍须独立验收。窗口 Shell chrome/tray 的专用 Gate 继续按其原范围独立验证。
 
+### E-WIN-AGENTCORE-R24-20261021
+
+2026-10-21，Windows 10 build 19045 / x86_64 / Native SDK `0.11.0-fork.3` / WebView2 `155.0.4283.62`，canonical AgentCore `0.11.0-dev+9c2f68671198`（ABI revision 24）。以下是绑定历史源码的执行记录，**不代表当前工作树的完整 desktop 验收通过**。
+
+早期 `node scripts/run-agentcore-vertical-windows.mjs` 完整执行曾 exit 0，绑定 revision `2ce8fd950ada018ecf3684cf167283f2152df4c2` 加源码 diff SHA-256 `0023fb877c212033d494bbf650943302d983251cc98df3318d7df8a689aad8dc`，binary SHA-256 `5fd4b602f3064b953be2ed63e3fe87f08d645b2ff304e4cd7580ba7e45c06233`。identity、源码 diff、原始日志和恢复单次唤醒的 red/green 记录保留于 `.zig-cache/desktop-approval-investigation/`。该驱动包含目前已撤销的自动点击同步恢复逻辑，其成功不能直接作为当前驱动或无自动恢复条件下的验收依据。
+
+随后复验绑定同一 revision 加源码 diff SHA-256 `d1bfc7584bc4a7dcf6bcd3c7435cbcd906c8f9f0380e6fe13a371ba1b5a5f1d9`，binary SHA-256 同上；identity、源码 diff 与日志位于 `.zig-cache/agentcore-r24-cleanup/`。当时 typecheck、Node 853 passed / 8 skipped、正式 Native graph 218/218 steps（1316/1321 tests passed，5 skipped）及 permission probe（86 次请求）通过。**该轮完整 desktop vertical 失败**：审批段完成 12 次 Run、6 次 Core 模式变更和重启，随后 70 KiB 复制子进程超时；定向复验也未取得完整复制通过。
+
+上述结果只适用于各自绑定的源码。此后撤销了自动恢复、剪贴板等待与命中调整、复制按钮子元素样式和固定双帧等待；当前删减后的工作树未重新运行测试，完整桌面与复制验收仍未闭合。Provider 为隔离本地 fixture，不证明远端服务；附件路径注入不证明真实 OS picker/drop。Windows 11、Windows arm64 真机、macOS、混合 DPI、安装器和签名仍须独立验收，Windows Shell chrome/tray 专项 Gate 的范围不变。
+
 ### E-WIN-ATTACHMENT-BATCH-20261010
 
 2026-10-10，Windows 10 build 19045 / x86_64 / Native SDK 0.10.1，隔离 Debug automation artifact 验证了新的附件批次协议：同一批 PNG、JPEG、UTF-8 文本通过 picker 的 Host 路径适配与实际 WebView DOM File 分块接收，类型、格式、名字、顺序、原始大小及三份原件 SHA-256 一致。两批各含 200,000,777 bytes，PNG 和文本各命中单文件 100,000,000 bytes 边界；接收耗时分别约 11.7 秒和 13.8 秒。两种来源均完成整批取消，旧 token 随后不可释放。此记录只描述该环境与负载，不承诺固定耗时、即时取消或跨来源吞吐相等。
@@ -390,7 +400,7 @@ MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端�
 | PermissionProfile 其他平台 artifact 行为                                               | 双档产品能力已开放；当前 Windows x86_64 exact artifact probe 已通过；macOS 既有证据属于旧 revision，尚缺当前 artifact；Windows arm64 尚缺真机 probe                         | macOS 当前 revision exact artifact、probe 与 vertical；Windows arm64 exact artifact 真机 probe                                                                                                                                           | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md)                                                                            |
 | File Preview 真实桌面体验                                                              | 核心 wire、owner、bounded read、redaction 与 Task Panel Renderer 行为已自动化覆盖；人工验收待完成                                                          | Windows/macOS Task Panel 当前文件视觉、键盘、焦点、resize/overlay 和窄窗验收                                                                                                      | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
 | File Changes 真实桌面体验                                                              | typed owner、持久化/恢复、Bridge/Renderer 连续 Review 和 canonical AgentCore desktop vertical 已自动化覆盖；人工验收待完成                                 | Windows/macOS 右侧 Task Panel 连续 recorded diff 视觉、键盘、焦点、屏幕阅读器、停靠与窄窗 overlay 验收                                                                            | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
-| 回复双格式复制的其他 Windows 环境验收 | 当前 Windows 10 x86_64 exact artifact 已由真实 desktop vertical 验证，见 [E-WIN-AGENTCORE-R18-20261008](#e-win-agentcore-r18-20261008)；macOS packaged probe 为历史证据 | Windows 11 / Windows arm64 对相同 plain/HTML MIME、70 KiB 与 256 KiB 完整性、代码 plain-only 和失败行为的真实回复按钮验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[高层架构](architecture.md)                                                                  |
+| 回复双格式复制的其他 Windows 环境验收 | Windows 10 x86_64 的 ABI revision 24 最新完整复验在复制步骤失败，当前验收未闭合，见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021)；macOS packaged probe 为历史证据 | Windows 11 / Windows arm64 对相同 plain/HTML MIME、70 KiB 与 256 KiB 完整性、代码 plain-only 和失败行为的真实回复按钮验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[高层架构](architecture.md)                                                                  |
 | typed Output、plan/approval、custom UI                                                 | 尚未形成可开放产品能力                                                                                                                                     | 对应合同、owner、持久化、恢复、投影和 UI Gate                                                                                                                                     | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
 | Skill 固定兼容来源的平台验收 | 尚未登记完整的真实桌面与跨平台链接边界验收证据；确定性回归不能替代平台验收 | Windows/macOS 品牌开关、重启恢复、真实 Skill 执行及键盘/焦点/窄窗体验；Windows reparse point/junction 与 POSIX symlink 的固定来源根拒绝行为，因权限跳过的用例不能作为通过证据 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[Product 架构](product-architecture.md)、[AgentCore 集成契约](agentcore-integration.md) |
 | Skill Run 时间上下文 | 未开放；当前依赖边界见 [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文) | 官方支持后验证共享与隔离 Skill、恢复、上下文传递及原始参数完整性；当前 Host fixture 固定 Skill 执行与产品身份继承不被文本时间上下文破坏 | [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文) |
