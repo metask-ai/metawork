@@ -51,11 +51,13 @@ function DecodedPreviewImage({
     setAdmitted(false);
     setReady(false);
     setFailed(false);
-    if (!valid)
+    if (!valid) {
+      failure.current?.();
       return () => {
         controller.abort();
         finish();
       };
+    }
     void image.beginDecode(controller.signal).then(
       (release) => {
         if (controller.signal.aborted || !image.valid()) {

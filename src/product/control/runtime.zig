@@ -1880,7 +1880,7 @@ pub const Runtime = struct {
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
-            if (state == .ready and raw.image) {
+            if (state == .ready and raw.image_info != null) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
                         self.preview_lane.release(taken);

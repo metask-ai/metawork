@@ -10,7 +10,7 @@ test "container termination is a fact and trailing bytes do not repair truncatio
     try std.testing.expectEqual(Format.jpeg, info.format);
     try std.testing.expectEqual(@as(u32, 3), info.width);
     try std.testing.expectEqual(@as(u32, 2), info.height);
-    try std.testing.expectEqual(jpeg.len, info.primary_end);
+    try std.testing.expectEqual(jpeg.len, info.container_end);
     try std.testing.expectEqual(@as(usize, 20), info.trailingBytes(jpeg.len + 20));
     for (0..jpeg.len) |len| {
         if (inspect(jpeg[0..len])) |_| return error.TruncatedContainerAccepted else |_| {}
@@ -37,7 +37,6 @@ pub const Info = struct {
     width: u32,
     height: u32,
     animated: bool = false,
-    primary_end: usize,
     container_end: usize,
 
     pub fn pixels(self: Info) u64 {
@@ -82,7 +81,7 @@ fn inspectJpeg(bytes: []const u8) !Info {
         entropy = false;
         if (marker == 0xd9) {
             if (!frame or !scan or width == 0 or height == 0) return error.InvalidImage;
-            return .{ .format = .jpeg, .width = width, .height = height, .primary_end = offset, .container_end = offset };
+            return .{ .format = .jpeg, .width = width, .height = height, .container_end = offset };
         }
         if (marker == 0 or marker == 0xd8 or (marker >= 0xd0 and marker <= 0xd7)) return error.InvalidImage;
         if (marker == 0x01) continue;
@@ -159,7 +158,7 @@ fn inspectWebp(input: []const u8) !Info {
         height = canvas_height;
     }
     if (width == 0 or height == 0) return error.InvalidImage;
-    return .{ .format = .webp, .width = width, .height = height, .animated = animated, .primary_end = bytes.len, .container_end = bytes.len };
+    return .{ .format = .webp, .width = width, .height = height, .animated = animated, .container_end = bytes.len };
 }
 
 fn inspectPng(bytes: []const u8) !Info {
@@ -187,7 +186,7 @@ fn inspectPng(bytes: []const u8) !Info {
         offset += len + 12;
         if (std.mem.eql(u8, kind, "IEND")) {
             if (len != 0 or !saw_data) return error.InvalidImage;
-            return .{ .format = .png, .width = width, .height = height, .animated = animated, .primary_end = offset, .container_end = offset };
+            return .{ .format = .png, .width = width, .height = height, .animated = animated, .container_end = offset };
         }
     }
     return error.InvalidImage;

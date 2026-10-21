@@ -6784,6 +6784,7 @@ const generatedPng =
 test("generated image loads only its reference and opens the existing preview", async () => {
   const calls = [];
   const opened = [];
+  let released = 0;
   const image = previewImageFixture(generatedPng);
   const reference = {
     id: "host-image-1",
@@ -6800,12 +6801,17 @@ test("generated image loads only its reference and opens the existing preview", 
         enabled: true,
         load: async (...identity) => {
           calls.push(identity);
+          const loadedImage =
+            calls.length === 1 ? image : previewImageFixture(generatedPng);
           return {
             state: "ready",
             content: "",
             truncated: false,
             redacted: false,
-            image,
+            image: loadedImage,
+            release: () => {
+              released++;
+            },
           };
         },
         onOpen: (opener) => opened.push(opener),
@@ -6843,6 +6849,12 @@ test("generated image loads only its reference and opens the existing preview", 
   assert.equal(opened[0], view.container.querySelector("button"));
   await act(async () => image.dispose());
   assert.equal(view.container.querySelector("img"), null);
+  assert.equal(released, 1);
+  const retry = view.container.querySelector(".generated-image-retry");
+  assert.ok(retry);
+  await act(async () => fireEvent.click(retry));
+  await waitFor(() => assert.equal(calls.length, 2));
+  await waitFor(() => assert.ok(view.container.querySelector("img")));
 });
 
 test("generated image ignores late completion after reference replacement and unmount", async () => {

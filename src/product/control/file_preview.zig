@@ -49,7 +49,6 @@ pub const Completion = struct {
     relative_path: []const u8,
     state: State,
     content: []const u8,
-    image: bool = false,
     image_info: ?ImageInfo = null,
     truncated: bool,
 };
@@ -105,7 +104,6 @@ const Job = struct {
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
-    image: bool = false,
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
     cancelled: std.atomic.Value(bool) = .init(false),
@@ -267,7 +265,6 @@ const Job = struct {
                 return .completed;
             }
             self.image_info = info;
-            self.image = true;
             self.state = .ready;
             return .completed;
         }
@@ -293,7 +290,6 @@ const Job = struct {
         self.buffer = &.{};
         self.content = &.{};
         self.truncated = false;
-        self.image = false;
         self.image_info = null;
         if (self.reserved_image_bytes != 0) self.lane.releaseImage(self.reserved_image_bytes);
         self.reserved_image_bytes = 0;
@@ -449,7 +445,6 @@ pub const Lane = struct {
                 .relative_path = job.relative_path,
                 .state = job.state,
                 .content = job.content,
-                .image = job.image,
                 .image_info = job.image_info,
                 .truncated = job.truncated,
             },
@@ -718,7 +713,7 @@ test "file preview image source is bounded and malformed containers are not read
         defer lane.release(taken);
         if (index == 0) {
             try std.testing.expectEqual(State.unsupported, taken.completion.state);
-            try std.testing.expect(!taken.completion.image);
+            try std.testing.expect(taken.completion.image_info == null);
             try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
             try std.testing.expect(!taken.completion.truncated);
         } else {

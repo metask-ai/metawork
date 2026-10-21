@@ -38,7 +38,6 @@ class Slots {
   private used = 0;
   private waiting: {
     start: () => void;
-    signal: AbortSignal;
     abort: () => void;
     priority: boolean;
   }[] = [];
@@ -53,7 +52,7 @@ class Slots {
     if (this.waiting.length >= this.queueLimit)
       return Promise.reject(new Capacity());
     return new Promise((resolve, reject) => {
-      const entry = { signal, priority, abort: () => {}, start: () => {} };
+      const entry = { priority, abort: () => {}, start: () => {} };
       entry.abort = () => {
         this.waiting = this.waiting.filter((item) => item !== entry);
         reject(abortError());
