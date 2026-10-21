@@ -19,7 +19,8 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 8;
+const async_product_handler_count = 9;
+const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
@@ -178,14 +179,38 @@ pub const McpManagementHost = struct {
 };
 
 pub const Dispatcher = struct {
+    const PreviewRelease = struct {
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+        request_len: usize,
+    };
+    const PreviewGrant = struct {
+        token: [48]u8,
+        image: product_control.FilePreviewImage,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+        preview_id: u64,
+    };
+    const PreviewImage = struct { token: []const u8, image: product_control.FilePreviewImage };
     const PreviewInFlight = struct {
+        active: bool = false,
+        generation: u64 = 0,
+        window_id: native_sdk.platform.WindowId = 0,
+        preview_id: u64 = 0,
+        cancelled: bool = false,
+        release_waiter: ?PreviewRelease = null,
+        completion_id: u64 = 0,
+        responder: native_sdk.bridge.AsyncResponder = undefined,
+        request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+        request_id_len: usize = 0,
+    };
+    const DiffInFlight = struct {
         active: bool = false,
         completion_id: u64 = 0,
         responder: native_sdk.bridge.AsyncResponder = undefined,
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
-    const DiffInFlight = PreviewInFlight;
     const AttachmentInFlight = struct {
         batch_id: ?u64 = null,
         active: bool = false,
@@ -237,6 +262,9 @@ pub const Dispatcher = struct {
     registered_async_handlers: [async_product_handler_count]native_sdk.bridge.AsyncHandler = undefined,
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
+    preview_high_water: u64 = 0,
+    preview_grants: [2]?PreviewGrant = @splat(null),
+    preview_timer_armed: bool = false,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
     next_diff_completion_id: u64 = 1,
     attachment_in_flight: [max_attachment_in_flight]AttachmentInFlight = @splat(.{}),
@@ -266,6 +294,7 @@ pub const Dispatcher = struct {
     pub fn deinit(self: *Dispatcher) void {
         self.callbacks.stopIngress();
         self.callbacks.assertQuiescent();
+        self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
@@ -298,6 +327,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_refresh, .function = refreshWindowChrome },
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
+            .{ .name = commands.read_preview_image, .function = readPreviewImage },
             .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
@@ -411,6 +441,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[5] = .{ .name = commands.append_attachment_add, .context = self, .invoke_fn = appendAttachmentAdd };
         self.registered_async_handlers[6] = .{ .name = commands.finish_attachment_add, .context = self, .invoke_fn = finishAttachmentAdd };
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
+        self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -449,6 +480,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
@@ -493,6 +525,16 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
+        if (timer_id == preview_timer_id) {
+            if (self.control) |control| {
+                control.drainFilePreviewCompletions(self.filePreviewSink());
+                for (&self.preview_grants) |*entry| if (entry.*) |grant| {
+                    if (!control.hasFilePreviewImage(grant.image.id)) entry.* = null;
+                };
+            }
+            self.updatePreviewTimer();
+            return true;
+        }
         return self.delivery.onTimer(timer_id);
     }
 
@@ -600,7 +642,9 @@ pub const Dispatcher = struct {
             );
         }
         if (self.control) |control| control.cancelSnapshot();
+        self.cancelPreviewConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
+        self.preview_high_water = 0;
         self.grants.invalidate();
         self.skill_grants.invalidate();
         self.releaseAllAttachmentGrants();
@@ -864,198 +908,246 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
-    fn previewFile(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        responder: native_sdk.bridge.AsyncResponder,
-    ) anyerror!void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = self.callbacks.enter() catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        defer callback.deinit();
-        self.requireWindow(invocation.source.window_id) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        var parsed = handlers.parsePayload(
-            handlers.FilePreviewRequest,
-            invocation.request.payload,
-        ) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        defer parsed.deinit();
-        if (parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        }
-        const task_id = handlers.parseWireId(parsed.value.taskId) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        const run_id = handlers.parseWireId(parsed.value.runId) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        const workbench = self.requireProductControl() catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        const completion_id = self.reserveFilePreview(
-            responder,
-            invocation.request.id,
-        ) orelse {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, &.{});
-            return;
-        };
-        switch (workbench.beginFilePreview(
-            completion_id,
-            task_id,
-            run_id,
-            parsed.value.fileReferenceId,
-        )) {
-            .queued => {},
-            .immediate => |state| self.completeFilePreview(.{
-                .completion_id = completion_id,
-                .state = state,
-                .content = "",
-                .truncated = false,
-                .redacted = false,
-            }),
-        }
+    fn requirePreviewKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, preview_text: []const u8) !struct { generation: u64, preview_id: u64 } {
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        const generation = try handlers.parseWireId(generation_text);
+        const preview_id = try handlers.parseWireId(preview_text);
+        if (preview_id == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        return .{ .generation = generation, .preview_id = preview_id };
     }
 
-    fn reserveFilePreview(
-        self: *Dispatcher,
-        responder: native_sdk.bridge.AsyncResponder,
-        request_id: []const u8,
-    ) ?u64 {
+    fn previewFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginPreview(invocation, responder) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, null);
+        };
+    }
+    fn beginPreview(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        if (key.preview_id <= self.preview_high_water or parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) return error.InvalidBridgePayload;
+        self.preview_high_water = key.preview_id;
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        const control = try self.requireProductControl();
+        const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
+            respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
+            return;
+        };
+        for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.generation = key.generation;
+            slot.preview_id = key.preview_id;
+            slot.window_id = invocation.source.window_id;
+            break;
+        };
+        switch (control.beginFilePreview(id, task_id, run_id, parsed.value.fileReferenceId)) {
+            .queued => self.updatePreviewTimer(),
+            .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
+        }
+    }
+    fn reserveFilePreview(self: *Dispatcher, responder: native_sdk.bridge.AsyncResponder, request_id: []const u8) ?u64 {
         if (self.next_preview_completion_id == std.math.maxInt(u64)) return null;
         for (&self.preview_in_flight) |*slot| {
             if (slot.active) continue;
-            const completion_id = self.next_preview_completion_id;
+            const id = self.next_preview_completion_id;
             self.next_preview_completion_id += 1;
+            slot.* = .{ .active = true, .completion_id = id, .responder = responder, .request_id_len = request_id.len };
             @memcpy(slot.request_id_storage[0..request_id.len], request_id);
-            slot.active = true;
-            slot.completion_id = completion_id;
-            slot.responder = responder;
-            slot.request_id_len = request_id.len;
-            return completion_id;
+            return id;
         }
         return null;
     }
-
     pub fn filePreviewSink(self: *Dispatcher) product_control.FilePreviewSink {
         return .{ .context = self, .complete_fn = completeFilePreviewFromSink };
     }
-
-    fn completeFilePreviewFromSink(
-        context: *anyopaque,
-        result: product_control.FilePreviewResult,
-    ) void {
+    fn completeFilePreviewFromSink(context: *anyopaque, result: product_control.FilePreviewResult) void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         self.completeFilePreview(result);
     }
-
-    fn completeFilePreview(
-        self: *Dispatcher,
-        result: product_control.FilePreviewResult,
-    ) void {
+    fn completeFilePreview(self: *Dispatcher, result: product_control.FilePreviewResult) void {
         for (&self.preview_in_flight) |*slot| {
             if (!slot.active or slot.completion_id != result.completion_id) continue;
-            const responder = slot.responder;
-            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
-            @memcpy(
-                request_id_storage[0..slot.request_id_len],
-                slot.request_id_storage[0..slot.request_id_len],
-            );
-            const request_id = request_id_storage[0..slot.request_id_len];
+            const pending = slot.*;
             slot.* = .{};
-            respondFilePreview(
-                responder,
-                request_id,
-                result.state,
-                result.content,
-                result.truncated,
-                result.redacted,
-                result.image_png,
-            );
+            var state = result.state;
+            const connected = if (self.delivery.validateConnection(pending.generation, pending.window_id)) |_| true else |_| false;
+            if (pending.cancelled or !connected) state = .failed;
+            var descriptor: ?PreviewImage = null;
+            if (result.image) |image| {
+                if (state == .ready) {
+                    const vacant = for (&self.preview_grants) |*entry| {
+                        if (entry.* == null) break entry;
+                    } else null;
+                    var random: [24]u8 = undefined;
+                    if (vacant != null and self.platform.random_fn(self.platform.context, &random)) {
+                        vacant.?.* = .{ .token = std.fmt.bytesToHex(random, .lower), .image = image, .generation = pending.generation, .window_id = pending.window_id, .preview_id = pending.preview_id };
+                        descriptor = .{ .token = &vacant.?.*.?.token, .image = image };
+                    } else state = .failed;
+                }
+                if (descriptor == null) if (self.control) |control| {
+                    _ = control.releaseFilePreview(image.id);
+                };
+            }
+            respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.content, result.truncated, result.redacted, descriptor);
+            if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
+            self.updatePreviewTimer();
             return;
         }
+        if (result.image) |image| if (self.control) |control| {
+            _ = control.releaseFilePreview(image.id);
+        };
     }
-
+    fn respondPreviewRelease(responder: native_sdk.bridge.AsyncResponder, id: []const u8, generation: u64, preview_id: u64) void {
+        var buffer: [180]u8 = undefined;
+        const response = std.fmt.bufPrint(&buffer, "{{\"generation\":\"{d}\",\"previewId\":\"{d}\",\"released\":true}}", .{ generation, preview_id }) catch unreachable;
+        responder.success(id, response) catch {};
+    }
+    fn releasePreview(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.releasePreviewChecked(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Invalid preview release") catch {};
+        };
+    }
+    fn releasePreviewChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.FilePreviewKey, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        self.preview_high_water = @max(self.preview_high_water, key.preview_id);
+        for (&self.preview_in_flight) |*slot| {
+            if (!slot.active or slot.generation != key.generation or slot.preview_id != key.preview_id) continue;
+            if (slot.release_waiter != null) return error.InvalidBridgePayload;
+            slot.cancelled = true;
+            var waiter: PreviewRelease = .{ .responder = responder, .request_len = invocation.request.id.len };
+            @memcpy(waiter.request_id[0..waiter.request_len], invocation.request.id);
+            slot.release_waiter = waiter;
+            _ = (try self.requireProductControl()).releaseFilePreview(slot.completion_id);
+            return;
+        }
+        for (&self.preview_grants) |*entry| if (entry.*) |grant| {
+            if (grant.generation != key.generation or grant.preview_id != key.preview_id) continue;
+            _ = (try self.requireProductControl()).releaseFilePreview(grant.image.id);
+            entry.* = null;
+            break;
+        };
+        respondPreviewRelease(responder, invocation.request.id, key.generation, key.preview_id);
+        self.updatePreviewTimer();
+    }
+    fn readPreviewImage(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.FilePreviewChunkRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        const offset = std.math.cast(usize, try handlers.parseWireId(parsed.value.offset)) orelse return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        if (try handlers.parseWireId(parsed.value.securityEpoch) != control.projectionSecurityEpoch())
+            return std.fmt.bufPrint(output, "{{\"state\":\"stale_security\"}}", .{});
+        for (&self.preview_grants) |*entry| if (entry.*) |*grant| {
+            if (grant.generation != key.generation or grant.preview_id != key.preview_id or grant.window_id != invocation.source.window_id or !std.mem.eql(u8, &grant.token, parsed.value.token)) continue;
+            if (grant.image.security_epoch != control.projectionSecurityEpoch()) {
+                _ = control.releaseFilePreview(grant.image.id);
+                entry.* = null;
+                return std.fmt.bufPrint(output, "{{\"state\":\"stale_security\"}}", .{});
+            }
+            const bytes = control.readFilePreviewImage(grant.image.id, offset) catch |err| {
+                _ = control.releaseFilePreview(grant.image.id);
+                entry.* = null;
+                return std.fmt.bufPrint(output, "{{\"state\":\"{s}\"}}", .{switch (err) {
+                    error.StaleSecurityEpoch => "stale_security",
+                    error.RestrictedPreview => "restricted",
+                    error.MissingPreview => "expired",
+                    else => "error",
+                }});
+            };
+            var writer = std.Io.Writer.fixed(output);
+            try writer.print("{{\"state\":\"ready\",\"token\":\"{s}\",\"offset\":\"{d}\",\"bytes\":\"{d}\",\"dataBase64\":\"", .{ grant.token, offset, bytes.len });
+            const encoded = try writer.writableSlice(std.base64.standard.Encoder.calcSize(bytes.len));
+            _ = std.base64.standard.Encoder.encode(encoded, bytes);
+            try writer.writeAll("\"}");
+            return writer.buffered();
+        };
+        return std.fmt.bufPrint(output, "{{\"state\":\"expired\"}}", .{});
+    }
+    fn updatePreviewTimer(self: *Dispatcher) void {
+        const active = if (self.control) |control| control.hasFilePreviews() else false;
+        if (active and !self.preview_timer_armed) {
+            self.platform.start_timer_fn(self.platform.context, preview_timer_id, 250 * std.time.ns_per_ms, true) catch {
+                self.cancelPreviewConnection();
+                return;
+            };
+            self.preview_timer_armed = true;
+        } else if (!active and self.preview_timer_armed) {
+            self.platform.cancel_timer_fn(self.platform.context, preview_timer_id) catch {};
+            self.preview_timer_armed = false;
+        }
+    }
+    fn cancelPreviewConnection(self: *Dispatcher) void {
+        if (self.control) |control| {
+            for (&self.preview_in_flight) |*slot| if (slot.active) {
+                slot.cancelled = true;
+                _ = control.releaseFilePreview(slot.completion_id);
+            };
+            for (&self.preview_grants) |*entry| if (entry.*) |grant| {
+                _ = control.releaseFilePreview(grant.image.id);
+                entry.* = null;
+            };
+        }
+        if (self.preview_timer_armed) self.platform.cancel_timer_fn(self.platform.context, preview_timer_id) catch {};
+        self.preview_timer_armed = false;
+    }
     pub fn settleFilePreviewsForShutdown(self: *Dispatcher) void {
+        self.cancelPreviewConnection();
         for (&self.preview_in_flight) |*slot| {
             if (!slot.active) continue;
-            const responder = slot.responder;
-            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
-            @memcpy(
-                request_id_storage[0..slot.request_id_len],
-                slot.request_id_storage[0..slot.request_id_len],
-            );
-            const request_id = request_id_storage[0..slot.request_id_len];
+            const pending = slot.*;
             slot.* = .{};
-            respondFilePreview(responder, request_id, .failed, "", false, false, &.{});
+            respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], .failed, "", false, false, null);
+            if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
         }
     }
-
-    fn respondFilePreview(
-        responder: native_sdk.bridge.AsyncResponder,
-        request_id: []const u8,
-        state: product_control.FilePreviewState,
-        content: []const u8,
-        truncated: bool,
-        redacted: bool,
-        image_png: []const u8,
-    ) void {
-        var result_buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&result_buffer);
-        writer.writeAll("{\"state\":\"") catch {
-            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
-            return;
-        };
-        writer.writeAll(switch (state) {
+    fn respondFilePreview(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, content: []const u8, truncated: bool, redacted: bool, image: ?PreviewImage) void {
+        var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        writer.print("{{\"state\":\"{s}\",\"content\":", .{switch (state) {
             .ready => "ready",
+            .busy => "busy",
+            .stale_security => "stale_security",
             .missing => "missing",
             .restricted => "restricted",
-            .unsupported => "unsupported",
+            .unsupported, .image_limit, .animated_image => "unsupported",
             .changing => "changing",
             .failed => "error",
-        }) catch {
-            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
-            return;
-        };
-        writer.writeAll("\",\"content\":") catch {
-            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+        }}) catch {
+            responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
             return;
         };
         std.json.Stringify.value(if (state == .ready) content else "", .{}, &writer) catch {
-            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
             return;
         };
-        if (state == .ready and image_png.len != 0) {
-            writer.writeAll(",\"image\":{\"mediaType\":\"image/png\",\"dataBase64\":\"") catch {
-                responder.fail(request_id, .internal_error, "Image preview encoding failed") catch {};
-                return;
-            };
-            const encoded_len = std.base64.standard.Encoder.calcSize(image_png.len);
-            const encoded = writer.writableSlice(encoded_len) catch {
-                responder.fail(request_id, .internal_error, "Image preview exceeds Bridge limit") catch {};
-                return;
-            };
-            _ = std.base64.standard.Encoder.encode(encoded, image_png);
-            writer.writeAll("\"}") catch {
-                responder.fail(request_id, .internal_error, "Image preview encoding failed") catch {};
+        if (state == .image_limit or state == .animated_image) {
+            writer.print(",\"reason\":\"{s}\"", .{if (state == .image_limit) "image_limit" else "animated_image"}) catch {
+                responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
                 return;
             };
         }
-        writer.print(",\"truncated\":{},\"redacted\":{}}}", .{
-            state == .ready and truncated,
-            state == .ready and redacted,
-        }) catch {
-            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+        if (state == .ready) if (image) |descriptor| {
+            const info = descriptor.image;
+            writer.print(",\"image\":{{\"token\":\"{s}\",\"mediaType\":\"{s}\",\"sizeBytes\":\"{d}\",\"width\":{d},\"height\":{d},\"chunkBytes\":\"{d}\",\"securityEpoch\":\"{d}\"}}", .{ descriptor.token, info.media_type, info.size_bytes, info.width, info.height, product_control.file_preview_chunk_bytes, info.security_epoch }) catch {
+                responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
+                return;
+            };
+        };
+        writer.print(",\"truncated\":{},\"redacted\":{}}}", .{ state == .ready and truncated, state == .ready and redacted }) catch {
+            responder.fail(request_id, .internal_error, "Preview encoding failed") catch {};
             return;
         };
         responder.success(request_id, writer.buffered()) catch {};
@@ -5685,6 +5777,146 @@ test "permission command ingress accepts AgentCore Session choices" {
     }
 }
 
+test "file preview native grants bind authority and cancellation and expire without trapping capacity" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 7);
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        calls: usize = 0,
+        control: *product_control.Runtime,
+        released_check: bool = false,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.released_check and std.mem.indexOf(u8, bytes, "\"released\":true") != null)
+                try std.testing.expect(!self.control.hasFilePreviews());
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |bytes| std.testing.allocator.free(bytes);
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, command: []const u8, payload: []const u8) !void {
+            const handler = native.async_registry.find(command).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "preview-test", .command = command, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), boundary: *Dispatcher, count: usize) !void {
+            for (0..5000) |_| {
+                self.control.drainFilePreviewCompletions(boundary.filePreviewSink());
+                if (self.calls >= count) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.PreviewDidNotComplete;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bytes = try std.testing.allocator.alloc(u8, product_control.file_preview_chunk_bytes + 17);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'a');
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    @memcpy(bytes[0..jpeg.len], jpeg);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
+    var control = try product_control.TestSupport.filePreviewFixture(root);
+    defer control.deinit();
+    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer boundary.deinit();
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var opened: Capture = .{ .control = &control };
+    defer opened.deinit();
+    var released: Capture = .{ .control = &control, .released_check = true };
+    defer released.deinit();
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"error\"") != null);
+    try std.testing.expect(!control.hasFilePreviews());
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.wait(&boundary, 2);
+    var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, opened.response.?, .{});
+    defer descriptor.deinit();
+    const image = descriptor.value.object.get("result").?.object.get("image").?.object;
+    const payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"1\",\"previewId\":\"2\",\"token\":\"{s}\",\"offset\":\"0\",\"securityEpoch\":\"{s}\"}}", .{ image.get("token").?.string, image.get("securityEpoch").?.string });
+    defer std.testing.allocator.free(payload);
+    const output = try std.testing.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+    defer std.testing.allocator.free(output);
+    const reader = native.registry.find(commands.read_preview_image).?;
+    if (reader.invoke_fn(reader.context, .{ .request = .{ .id = "read", .command = commands.read_preview_image, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 4 } }, output)) |_| return error.ForeignWindowReadAllowed else |_| {}
+    const result = try reader.invoke_fn(reader.context, .{ .request = .{ .id = "read", .command = commands.read_preview_image, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, output);
+    var chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result, .{});
+    defer chunk.deinit();
+    const encoded = chunk.value.object.get("dataBase64").?.string;
+    const decoded = try std.testing.allocator.alloc(u8, product_control.file_preview_chunk_bytes);
+    defer std.testing.allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, encoded);
+    try std.testing.expectEqualSlices(u8, bytes[0..decoded.len], decoded);
+    try std.testing.expect(result.len < native_sdk.bridge.max_result_bytes);
+    product_control.TestSupport.invalidatePreviewSecurity(&control);
+    const stale = try reader.invoke_fn(reader.context, .{ .request = .{ .id = "read", .command = commands.read_preview_image, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, output);
+    try std.testing.expectEqualStrings("{\"state\":\"stale_security\"}", stale);
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"2\"}");
+    try std.testing.expect(!control.hasFilePreviews());
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"3\"}");
+    try opened.wait(&boundary, 3);
+    try std.testing.expectEqual(@as(usize, 3), released.calls);
+    try std.testing.expect(!control.hasFilePreviews());
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.wait(&boundary, 4);
+    product_control.TestSupport.expirePreview(&control, boundary.preview_grants[0].?.image.id);
+    try std.testing.expect(boundary.onTimer(preview_timer_id));
+    try std.testing.expect(!control.hasFilePreviews());
+    for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.wait(&boundary, 5);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
+    boundary.breakConnection();
+    try std.testing.expect(!control.hasFilePreviews());
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.wait(&boundary, 6);
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"7\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    control.beginShutdown();
+    boundary.stopIngress();
+    control.shutdownFilePreviewExecutor();
+    control.drainFilePreviewCompletions(boundary.filePreviewSink());
+    boundary.settleFilePreviewsForShutdown();
+    try std.testing.expectEqual(@as(usize, 7), opened.calls);
+    try std.testing.expect(!control.hasFilePreviews());
+    boundary.assertQuiescent();
+}
+
 test "file preview async response preserves the exact bounded wire shape" {
     const Capture = struct {
         allocator: std.mem.Allocator,
@@ -5723,7 +5955,7 @@ test "file preview async response preserves the exact bounded wire shape" {
         "line 1\nline 2",
         true,
         true,
-        &.{},
+        null,
     );
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     var ready = try std.json.parseFromSlice(
@@ -5753,7 +5985,7 @@ test "file preview async response preserves the exact bounded wire shape" {
         "must not cross the Bridge",
         true,
         true,
-        &.{},
+        null,
     );
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     var restricted = try std.json.parseFromSlice(
@@ -5774,29 +6006,28 @@ test "file preview async response preserves the exact bounded wire shape" {
     );
     try std.testing.expect(!restricted_result.get("truncated").?.bool);
     try std.testing.expect(!restricted_result.get("redacted").?.bool);
-    const fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("file_preview_image.fixture"), .{});
-    defer fixture.deinit();
-    const base64 = fixture.value.object.get("image").?.object.get("dataBase64").?.string;
-    var png: [256]u8 = undefined;
-    const png_len = try std.base64.standard.Decoder.calcSizeForSlice(base64);
-    try std.base64.standard.Decoder.decode(png[0..png_len], base64);
+    const descriptor: Dispatcher.PreviewImage = .{ .token = "000000000000000000000000000000000000000000000000", .image = .{ .id = 1, .size_bytes = 10 * 1024 * 1024, .width = 1600, .height = 1600, .media_type = "image/png", .security_epoch = 1 } };
     capture.reset();
-    Dispatcher.respondFilePreview(responder, "preview-image", .ready, "", false, false, png[0..png_len]);
+    Dispatcher.respondFilePreview(responder, "preview-image", .ready, "", false, false, descriptor);
     var image = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
     defer image.deinit();
-    const image_result = image.value.object.get("result").?.object;
-    try std.testing.expectEqualStrings(base64, image_result.get("image").?.object.get("dataBase64").?.string);
-    try std.testing.expectEqualStrings("image/png", image_result.get("image").?.object.get("mediaType").?.string);
-    try std.testing.expectEqualStrings("", image_result.get("content").?.string);
-    const maximum_png = try std.testing.allocator.alloc(u8, 384 * 1024);
-    defer std.testing.allocator.free(maximum_png);
-    @memset(maximum_png, 0);
-    capture.reset();
-    Dispatcher.respondFilePreview(responder, "preview-max", .ready, "", false, false, maximum_png);
+    const result = image.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("10485760", result.get("image").?.object.get("sizeBytes").?.string);
+    try std.testing.expectEqualStrings("image/png", result.get("image").?.object.get("mediaType").?.string);
+    try std.testing.expectEqualStrings("", result.get("content").?.string);
+    try std.testing.expect(result.get("image").?.object.get("dataBase64") == null);
+    const fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("file_preview_image.fixture"), .{});
+    defer fixture.deinit();
+    try std.testing.expectEqualStrings(fixture.value.object.get("image").?.object.get("token").?.string, result.get("image").?.object.get("token").?.string);
     try std.testing.expect(capture.response.?.len < native_sdk.bridge.max_result_bytes);
-    var maximum = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
-    defer maximum.deinit();
-    try std.testing.expectEqual(@as(usize, 524288), maximum.value.object.get("result").?.object.get("image").?.object.get("dataBase64").?.string.len);
+    capture.reset();
+    Dispatcher.respondFilePreview(responder, "preview-busy", .busy, "must not appear", true, true, descriptor);
+    var busy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer busy.deinit();
+    const busy_result = busy.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("busy", busy_result.get("state").?.string);
+    try std.testing.expect(busy_result.get("image") == null);
+    try std.testing.expectEqualStrings("", busy_result.get("content").?.string);
 }
 
 test "file change diff async response preserves the strict wire variants" {

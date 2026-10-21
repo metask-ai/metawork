@@ -972,12 +972,22 @@ fn absoluteReferenceRelativePath(
 }
 
 pub const FilePreviewState = file_preview.State;
+pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
+const file_preview_scan_bytes = 256 * 1024;
 
 /// Callback-scoped safe projection. `content` has already passed current
 /// authority and known-credential redaction and must not be retained by the
 /// sink after `complete_fn` returns.
+pub const FilePreviewImage = struct {
+    id: u64,
+    size_bytes: usize,
+    width: u32,
+    height: u32,
+    media_type: []const u8,
+    security_epoch: u64,
+};
 pub const FilePreviewResult = struct {
-    image_png: []const u8 = &.{},
+    image: ?FilePreviewImage = null,
     completion_id: u64,
     state: FilePreviewState,
     content: []const u8,
@@ -1216,6 +1226,17 @@ pub const Runtime = struct {
     attachment_io: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
     preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
+    preview_images: [file_preview.max_image_slots]?struct {
+        taken: file_preview.Taken,
+        security_epoch: u64,
+        overlap: usize,
+        scanned: usize = 0,
+        next_offset: usize = 0,
+        announced: bool = false,
+        cancelled: bool = false,
+        created_at: std.Io.Timestamp,
+        touched_at: std.Io.Timestamp,
+    } = @splat(null),
     file_change_store: ?*file_change_store.FileStore,
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
@@ -1832,61 +1853,57 @@ pub const Runtime = struct {
             .max_bytes = self.limits.max_file_preview_bytes,
             .max_lines = self.limits.max_file_preview_lines,
             .max_line_bytes = self.limits.max_file_preview_line_bytes,
-        }) catch return .{ .immediate = .failed };
+        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
         return .queued;
     }
 
-    /// Drains worker-owned raw completions on the main thread. Current Task,
-    /// Run, reference and Workspace authority are checked again before any
-    /// bytes are projected. Raw buffers remain inside Runtime and are
-    /// securely erased immediately after the callback returns.
-    pub fn drainFilePreviewCompletions(
-        self: *Runtime,
-        sink: FilePreviewSink,
-    ) void {
+    fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+        const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
+        if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
+            !std.mem.eql(u8, reference.workspace_root, raw.workspace_root) or !self.filePreviewWorkspaceAuthorized(reference)) return .restricted;
+        var relative_storage: [4096]u8 = undefined;
+        const relative = switch (reference.locator_kind) {
+            .workspace_path => reference.locator,
+            .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, &relative_storage) orelse return .restricted,
+            .uri => return .restricted,
+        };
+        if (!std.mem.eql(u8, relative, raw.relative_path)) return .restricted;
+        return .ready;
+    }
+
+    /// Complete raw reads on the main loop; image buffers stay in their Product
+    /// lane until scanning/transfer finishes. Bridge only sees sanitized data.
+    pub fn drainFilePreviewCompletions(self: *Runtime, sink: FilePreviewSink) void {
+        self.preview_lane.expireRequests();
         while (self.preview_lane.take()) |taken| {
-            defer self.preview_lane.release(taken);
             const raw = taken.completion;
-            var state = raw.state;
+            var state = self.filePreviewAuthority(raw);
+            if (state == .ready) state = raw.state;
+            if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
+            if (state == .ready and raw.image_info != null) {
+                if (self.projection_security_epoch == 0) state = .failed else {
+                    const overlap = self.filePreviewCredentialOverlap() catch {
+                        self.preview_lane.release(taken);
+                        sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .failed, .content = "", .truncated = false, .redacted = false });
+                        continue;
+                    };
+                    const vacant = for (&self.preview_images) |*slot| {
+                        if (slot.* == null) break slot;
+                    } else unreachable;
+                    const timestamp: std.Io.Timestamp = .now(self.io, .awake);
+                    vacant.* = .{ .taken = taken, .security_epoch = self.projection_security_epoch, .overlap = overlap, .created_at = timestamp, .touched_at = timestamp };
+                    continue;
+                }
+            }
             var truncated = false;
             var redacted = false;
             var safe_buffer: []u8 = &.{};
-            var image_png: []const u8 = &.{};
             var safe_content: []const u8 = &.{};
             defer if (safe_buffer.len != 0) {
                 std.crypto.secureZero(u8, safe_buffer);
                 self.allocator.free(safe_buffer);
             };
-
-            const reference = self.task_runtime.fileReference(
-                raw.task_id,
-                raw.run_id,
-                raw.reference_id,
-            );
-            if (reference == null) {
-                state = .missing;
-            } else if (reference.?.workspace_id != raw.workspace_id or
-                reference.?.workspace_epoch != raw.workspace_epoch or
-                !std.mem.eql(u8, reference.?.workspace_root, raw.workspace_root) or
-                !self.filePreviewWorkspaceAuthorized(reference.?))
-            {
-                state = .restricted;
-            } else if (state == .ready and raw.image) {
-                if (self.containsKnownCredential(raw.content)) {
-                    state = .restricted;
-                } else if (self.attachments.images.prepare_fn) |prepare| {
-                    if (prepare(self.attachments.images.context, self.allocator, raw.content, file_preview.max_image_preview_bytes)) |prepared| {
-                        safe_buffer = prepared;
-                        if (safe_buffer.len == 0 or safe_buffer.len > file_preview.max_image_preview_bytes) {
-                            state = .unsupported;
-                        } else if (self.containsKnownCredential(safe_buffer)) {
-                            state = .restricted;
-                        } else {
-                            image_png = safe_buffer;
-                        }
-                    } else |_| state = .failed;
-                } else state = .unsupported;
-            } else if (state == .ready) {
+            if (state == .ready) {
                 const cutoff = self.filePreviewCredentialSafeCutoff(
                     raw.content,
                     raw.truncated,
@@ -1896,6 +1913,7 @@ pub const Runtime = struct {
                 if (cutoff != 0) {
                     safe_buffer = self.allocator.alloc(u8, cutoff) catch {
                         state = .failed;
+                        self.preview_lane.release(taken);
                         sink.complete_fn(sink.context, .{
                             .completion_id = raw.completion_id,
                             .state = state,
@@ -1913,21 +1931,119 @@ pub const Runtime = struct {
                     redacted = projected.redacted or redacted;
                 }
             }
-
             if (state != .ready) {
                 safe_content = &.{};
                 truncated = false;
                 redacted = false;
             }
-            sink.complete_fn(sink.context, .{
-                .completion_id = raw.completion_id,
-                .state = state,
-                .content = safe_content,
-                .image_png = image_png,
-                .truncated = truncated,
-                .redacted = redacted,
-            });
+            self.preview_lane.release(taken);
+            sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = state, .content = safe_content, .truncated = truncated, .redacted = redacted });
         }
+        for (&self.preview_images) |*slot| {
+            const image = if (slot.*) |*value| value else continue;
+            const raw = image.taken.completion;
+            var failure = self.filePreviewAuthority(raw);
+            if (image.security_epoch != self.projection_security_epoch) failure = .stale_security;
+            if (image.cancelled or self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(image.taken)) failure = .failed;
+            const timestamp: std.Io.Timestamp = .now(self.io, .awake);
+            if (image.created_at.durationTo(timestamp).nanoseconds >= 30 * std.time.ns_per_s or image.touched_at.durationTo(timestamp).nanoseconds >= 15 * std.time.ns_per_s) failure = .failed;
+            if (failure != .ready) {
+                const announced = image.announced;
+                self.preview_lane.release(image.taken);
+                slot.* = null;
+                if (!announced) sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = failure, .content = "", .truncated = false, .redacted = false });
+                continue;
+            }
+            if (image.announced) continue;
+            // Bound each drain without paying one event-loop wake per 32 KiB.
+            const end = @min(raw.content.len, image.scanned + file_preview_scan_bytes);
+            const scan_end = end + @min(image.overlap, raw.content.len - end);
+            if (self.containsKnownCredential(raw.content[image.scanned..scan_end])) {
+                self.preview_lane.release(image.taken);
+                slot.* = null;
+                sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .restricted, .content = "", .truncated = false, .redacted = false });
+                continue;
+            }
+            image.scanned = end;
+            if (end != raw.content.len) {
+                _ = self.change_notifier.notify();
+                continue;
+            }
+            image.announced = true;
+            const info = raw.image_info.?;
+            sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = .ready, .content = "", .truncated = false, .redacted = false, .image = .{ .id = raw.completion_id, .size_bytes = raw.content.len, .width = info.width, .height = info.height, .media_type = info.mediaType(), .security_epoch = image.security_epoch } });
+        }
+    }
+
+    fn filePreviewCredentialOverlap(self: *Runtime) !usize {
+        const Max = struct {
+            length: usize = 0,
+            fn visit(context: *anyopaque, secret: []const u8) std.mem.Allocator.Error!void {
+                const value: *@This() = @ptrCast(@alignCast(context));
+                value.length = @max(value.length, secret.len);
+            }
+        };
+        var value: Max = .{ .length = self.execution_state.credential().len };
+        if (self.account_credentials) |source| try source.visit(&value, Max.visit);
+        try self.task_runtime.visitExecutionCredentials(&value, Max.visit);
+        if (value.length > projection_step_bytes) return error.CredentialCapacity;
+        return value.length -| 1;
+    }
+
+    /// true means no read/scan still owns bytes; false waits for its completion.
+    pub fn releaseFilePreview(self: *Runtime, id: u64) bool {
+        for (&self.preview_images) |*slot| if (slot.*) |*image| {
+            if (image.taken.completion.completion_id != id) continue;
+            if (image.announced) {
+                self.preview_lane.release(image.taken);
+                slot.* = null;
+                return true;
+            }
+            image.cancelled = true;
+            _ = self.change_notifier.notify();
+            return false;
+        };
+        const pending = self.preview_lane.cancelRequest(id);
+        if (pending) _ = self.change_notifier.notify();
+        return !pending;
+    }
+
+    pub fn readFilePreviewImage(self: *Runtime, id: u64, offset: usize) error{ MissingPreview, StaleSecurityEpoch, RestrictedPreview, InvalidOffset }![]const u8 {
+        for (&self.preview_images) |*slot| if (slot.*) |*image| {
+            if (image.taken.completion.completion_id != id) continue;
+            if (image.security_epoch != self.projection_security_epoch) {
+                _ = self.releaseFilePreview(id);
+                return error.StaleSecurityEpoch;
+            }
+            const timestamp: std.Io.Timestamp = .now(self.io, .awake);
+            if (image.created_at.durationTo(timestamp).nanoseconds >= 30 * std.time.ns_per_s or
+                image.touched_at.durationTo(timestamp).nanoseconds >= 15 * std.time.ns_per_s)
+            {
+                _ = self.releaseFilePreview(id);
+                return error.MissingPreview;
+            }
+            if (self.shutting_down or self.filePreviewAuthority(image.taken.completion) != .ready) {
+                _ = self.releaseFilePreview(id);
+                return error.RestrictedPreview;
+            }
+            if (!image.announced or image.cancelled or offset != image.next_offset or offset >= image.taken.completion.content.len) return error.InvalidOffset;
+            const end = offset + @min(file_preview.image_chunk_bytes, image.taken.completion.content.len - offset);
+            image.next_offset = end;
+            image.touched_at = .now(self.io, .awake);
+            return image.taken.completion.content[offset..end];
+        };
+        return error.MissingPreview;
+    }
+
+    pub fn hasFilePreviews(self: *Runtime) bool {
+        return self.preview_lane.hasActive();
+    }
+
+    pub fn hasFilePreviewImage(self: *const Runtime, id: u64) bool {
+        for (self.preview_images) |entry| if (entry) |image| {
+            if (image.announced and image.taken.completion.completion_id == id) return true;
+        };
+        return false;
     }
 
     fn enqueueFileChangeDiff(
@@ -7296,6 +7412,11 @@ pub const Runtime = struct {
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
         self.approval_executor.deinit();
+        for (&self.preview_images) |*slot| if (slot.*) |image| {
+            self.preview_lane.release(image.taken);
+            slot.* = null;
+        };
+        while (self.preview_lane.take()) |taken| self.preview_lane.release(taken);
         self.preview_lane.deinit();
         self.preview_executor.deinit();
         self.attachment_lane.deinit();
@@ -9867,6 +9988,17 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn filePreviewFixture(root: []const u8) !Runtime {
+        return testImagePreviewRuntime(root);
+    }
+    pub fn invalidatePreviewSecurity(control: *Runtime) void {
+        control.invalidateProjectionSecurity();
+    }
+    pub fn expirePreview(control: *Runtime, id: u64) void {
+        for (&control.preview_images) |*entry| if (entry.*) |*image| {
+            if (image.taken.completion.completion_id == id) image.touched_at = image.touched_at.subDuration(.fromMilliseconds(16000));
+        };
+    }
     pub const maximumFixture = maximumProjectionFixture;
     pub fn maximumToolFixture() !Runtime {
         return maximumProjectionFixtureWithTools(true, .{});
@@ -18752,6 +18884,106 @@ test "file preview redaction protects credentials that cross a truncation bounda
         "visible *** suffix",
         output[0..projected.len],
     );
+}
+
+fn testImagePreviewRuntime(root: []const u8) !Runtime {
+    var control = try testRuntime();
+    errdefer control.deinit();
+    product_workspace.testing.installOwned(&control.workspace, 1, .{
+        .id = 2,
+        .canonical_root = try control.copyBounded(root, control.limits.max_workspace_bytes),
+        .projected_root_storage = try control.copyBounded(root, control.limits.max_workspace_bytes),
+        .projected_root_len = root.len,
+        .display_name_storage = try control.copyBounded("preview", control.limits.max_workspace_bytes),
+        .display_name_len = 7,
+        .recent_order = 2,
+    });
+    const task = &control.task_runtime.tasks[0].?;
+    task.durable.workspace_id = 2;
+    try control.replaceTracked(&task.durable.workspace_root, root, control.limits.max_workspace_bytes);
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"preview-tool\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"image.jpg\"},\"title\":\"image\",\"kind\":\"text\"}]}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    return control;
+}
+
+const PreviewTestCapture = struct {
+    calls: usize = 0,
+    state: FilePreviewState = .failed,
+    image: ?FilePreviewImage = null,
+    fn receive(context: *anyopaque, result: FilePreviewResult) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.state = result.state;
+        self.image = result.image;
+        std.debug.assert(result.content.len == 0);
+    }
+    fn sink(self: *@This()) FilePreviewSink {
+        return .{ .context = self, .complete_fn = receive };
+    }
+};
+
+test "file preview scans all original bytes including a credential across the scan boundary in a trailer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bytes = try std.testing.allocator.alloc(u8, file_preview_scan_bytes * 2);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'a');
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    @memcpy(bytes[0..jpeg.len], jpeg);
+    @memcpy(bytes[file_preview_scan_bytes - 4 ..][0..10], "SECRET-KEY");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
+    var control = try testImagePreviewRuntime(root);
+    defer control.deinit();
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, 3, 7, "file-3-1-1-1"));
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try std.testing.expect(capture.image == null);
+    try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview immutable original transfer is sequential and revoked by security epoch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bytes = try std.testing.allocator.alloc(u8, file_preview_chunk_bytes + 17);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'a');
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    @memcpy(bytes[0..jpeg.len], jpeg);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
+    var control = try testImagePreviewRuntime(root);
+    defer control.deinit();
+    var capture: PreviewTestCapture = .{};
+    _ = control.beginFilePreview(72, 3, 7, "file-3-1-1-1");
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    const image = capture.image.?;
+    try std.testing.expectEqual(bytes.len, image.size_bytes);
+    try std.testing.expectEqualStrings("image/jpeg", image.media_type);
+    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewImage(image.id, 1));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = "replaced on disk" });
+    const first = try control.readFilePreviewImage(image.id, 0);
+    try std.testing.expectEqualSlices(u8, bytes[0..file_preview_chunk_bytes], first);
+    try std.testing.expectError(error.InvalidOffset, control.readFilePreviewImage(image.id, 0));
+    control.invalidateProjectionSecurity();
+    try std.testing.expectError(error.StaleSecurityEpoch, control.readFilePreviewImage(image.id, file_preview_chunk_bytes));
+    try std.testing.expect(!control.hasFilePreviews());
+    try std.testing.expect(control.releaseFilePreview(image.id));
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {

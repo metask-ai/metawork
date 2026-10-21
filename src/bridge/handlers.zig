@@ -426,7 +426,11 @@ pub const TaskCatalogRefresh = struct {
     expectedBindingEpoch: []const u8,
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
+pub const FilePreviewKey = struct { generation: []const u8, previewId: []const u8 };
+pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
 pub const FilePreviewRequest = struct {
+    generation: []const u8,
+    previewId: []const u8,
     taskId: []const u8,
     runId: []const u8,
     fileReferenceId: []const u8,
@@ -932,7 +936,7 @@ test "Custom Provider credential replacement requires the exact API key field" {
 
 test "file preview payload requires exact Task Run and reference identity" {
     var request = try parsePayload(FilePreviewRequest,
-        \\{"taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3"}
+        \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3"}
     );
     defer request.deinit();
     try std.testing.expectEqualStrings("1", request.value.taskId);
@@ -950,7 +954,7 @@ test "file preview payload requires exact Task Run and reference identity" {
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(FilePreviewRequest,
-            \\{"taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
+            \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
         ),
     );
 }

@@ -29,6 +29,7 @@
 | `src/storage.zig`、`src/storage/` | Storage | backend-independent SQL contract、backend 与 conformance |
 | `src/automation.zig`、`src/automation/` | Automation capability | compile-time authority selection，不形成产品 owner |
 | `src/oauth/` | OAuth shared leaf | 只提供 PKCE、secret lifetime、严格 callback 解析与 loopback byte-pump 合同；不拥有 callback path、issuer/resource 接受、limit policy、响应文案或领域错误映射 |
+| `src/image/` | Encoded image shared leaf | 只解析有界容器、编码尺寸、动画及主图/容器结束事实；不解码像素或执行平台 effect，格式准入、尺寸及尾部政策由 Agent/Product 各自拥有 |
 | `src/native_sdk_compat/` | Application | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层 |
 | `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Models/Account/MCP credential boundary，不形成领域 owner |
 

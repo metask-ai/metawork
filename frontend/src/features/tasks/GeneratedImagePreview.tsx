@@ -1,11 +1,17 @@
+import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useEffect, useRef, useState } from "react";
-import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
+import type {
+  FilePreview,
+  FileReferenceView,
+  FilePreviewLoadOptions,
+} from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
 
 export type FilePreviewLoader = (
   taskId: string,
   runId: string,
   referenceId: string,
+  options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
 
 export function GeneratedImagePreview({
@@ -36,18 +42,29 @@ export function GeneratedImagePreview({
 
   useEffect(() => {
     let current = true;
+    let owned: FilePreview | undefined;
+    let controller = new AbortController();
+    let version = 0;
     setResult(null);
     if (!enabled || !load) return;
     let started = false;
     function request() {
       if (started) return;
       started = true;
-      void load!(taskId, runId, reference.id).then(
+      controller = new AbortController();
+      const requestVersion = ++version;
+      void load!(taskId, runId, reference.id, {
+        signal: controller.signal,
+        priority: "prefetch",
+      }).then(
         (value) => {
-          if (current) setResult({ identity, value });
+          if (current && requestVersion === version) {
+            owned = value;
+            setResult({ identity, value });
+          } else value.release?.();
         },
         () => {
-          if (current)
+          if (current && requestVersion === version)
             setResult({
               identity,
               value: {
@@ -67,7 +84,13 @@ export function GeneratedImagePreview({
             (entries) => {
               if (entries.some((entry) => entry.isIntersecting)) {
                 request();
-                observer?.disconnect();
+              } else if (started) {
+                version++;
+                controller.abort();
+                owned?.release?.();
+                owned = undefined;
+                started = false;
+                setResult(null);
               }
             },
             { rootMargin: "240px" },
@@ -76,6 +99,8 @@ export function GeneratedImagePreview({
     else request();
     return () => {
       current = false;
+      controller.abort();
+      owned?.release?.();
       observer?.disconnect();
     };
   }, [taskId, runId, reference.id, identity, enabled, load, attempt]);
@@ -92,17 +117,31 @@ export function GeneratedImagePreview({
         onClick={(event) => onOpen(event.currentTarget)}
       >
         {image ? (
-          <img
-            src={`data:image/png;base64,${image.dataBase64}`}
+          <PreviewImageView
+            image={image}
             alt={reference.displayPath}
+            onFailure={() => {
+              preview?.release?.();
+              setResult({
+                identity,
+                value: {
+                  state: "error",
+                  content: "",
+                  truncated: false,
+                  redacted: false,
+                },
+              });
+            }}
           />
         ) : (
           <span className="generated-image-placeholder" aria-live="polite">
             {!enabled
               ? t("file_preview.state.error")
-              : state
-                ? t(`file_preview.state.${state}`)
-                : t("file_preview.loading")}
+              : preview?.reason
+                ? t(`file_preview.state.${preview.reason}`)
+                : state
+                  ? t(`file_preview.state.${state}`)
+                  : t("file_preview.loading")}
           </span>
         )}
       </button>

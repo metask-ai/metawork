@@ -1,5 +1,6 @@
 //! Bounded Images Generation codec and injected effects. No service discovery.
 const std = @import("std");
+const image_container = @import("image_container");
 const http = @import("agent_http_transport");
 
 pub const max_active_calls = 4;
@@ -311,141 +312,18 @@ pub fn decode(allocator: std.mem.Allocator, body: []const u8, limits: Limits) !D
 }
 
 pub fn validateImage(bytes: []const u8) !Format {
-    if (std.mem.startsWith(u8, bytes, "\x89PNG\r\n\x1a\n")) {
-        try validatePng(bytes);
-        return .png;
-    }
-    if (std.mem.startsWith(u8, bytes, "\xff\xd8")) {
-        try validateJpeg(bytes);
-        return .jpeg;
-    }
-    if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP")) {
-        try validateWebp(bytes);
-        return .webp;
-    }
-    return error.UnsupportedOutput;
-}
-
-fn validateDimensions(width: u32, height: u32) !void {
-    if (width == 0 or height == 0 or @as(u64, width) * height > 16_000_000) return error.InvalidResponse;
-}
-
-// Inspect bounded container structure and dimensions, without pixel decoding or
-// Native-loop work. Compressed image bytes remain unchanged through output.
-fn validateJpeg(bytes: []const u8) !void {
-    var offset: usize = 2;
-    var frame = false;
-    var scan = false;
-    var entropy = false;
-    while (offset < bytes.len) {
-        if (entropy) {
-            while (offset < bytes.len and bytes[offset] != 0xff) : (offset += 1) {}
-        }
-        if (offset >= bytes.len or bytes[offset] != 0xff) return error.InvalidResponse;
-        while (offset < bytes.len and bytes[offset] == 0xff) : (offset += 1) {}
-        if (offset >= bytes.len) return error.InvalidResponse;
-        const marker = bytes[offset];
-        offset += 1;
-        if (entropy and (marker == 0 or (marker >= 0xd0 and marker <= 0xd7))) continue;
-        entropy = false;
-        if (marker == 0xd9) {
-            if (!frame or !scan or offset != bytes.len) return error.InvalidResponse;
-            return;
-        }
-        if (marker == 0 or marker == 0xd8 or (marker >= 0xd0 and marker <= 0xd7)) return error.InvalidResponse;
-        if (marker == 0x01) continue;
-        if (bytes.len - offset < 2) return error.InvalidResponse;
-        const length: usize = std.mem.readInt(u16, bytes[offset..][0..2], .big);
-        if (length < 2 or length > bytes.len - offset) return error.InvalidResponse;
-        const segment = bytes[offset..][0..length];
-        const is_frame = marker >= 0xc0 and marker <= 0xcf and marker != 0xc4 and marker != 0xc8 and marker != 0xcc;
-        if (is_frame) {
-            if (frame or length < 8) return error.InvalidResponse;
-            const components: usize = segment[7];
-            if (components == 0 or components > 4 or length != 8 + 3 * components) return error.InvalidResponse;
-            try validateDimensions(std.mem.readInt(u16, segment[5..7], .big), std.mem.readInt(u16, segment[3..5], .big));
-            frame = true;
-        }
-        if (marker == 0xda) {
-            if (!frame or length < 6) return error.InvalidResponse;
-            const components: usize = segment[2];
-            if (components == 0 or components > 4 or length != 6 + 2 * components) return error.InvalidResponse;
-            scan = true;
-            entropy = true;
-        }
-        offset += length;
-    }
-    return error.InvalidResponse;
-}
-
-fn validateWebp(bytes: []const u8) !void {
-    if (std.mem.readInt(u32, bytes[4..8], .little) != bytes.len - 8) return error.InvalidResponse;
-    var offset: usize = 12;
-    var image = false;
-    var width: u32 = 0;
-    var height: u32 = 0;
-    var canvas_width: u32 = 0;
-    var canvas_height: u32 = 0;
-    while (bytes.len - offset >= 8) {
-        const kind = bytes[offset..][0..4];
-        const length: usize = std.mem.readInt(u32, bytes[offset + 4 ..][0..4], .little);
-        if (length > bytes.len - offset - 8) return error.InvalidResponse;
-        const data = bytes[offset + 8 ..][0..length];
-        if (std.mem.eql(u8, kind, "ANIM") or std.mem.eql(u8, kind, "ANMF")) return error.UnsupportedOutput;
-        if (std.mem.eql(u8, kind, "VP8X")) {
-            if (offset != 12 or length != 10) return error.InvalidResponse;
-            if (data[0] & 2 != 0) return error.UnsupportedOutput;
-            canvas_width = 1 + @as(u32, std.mem.readInt(u24, data[4..7], .little));
-            canvas_height = 1 + @as(u32, std.mem.readInt(u24, data[7..10], .little));
-            try validateDimensions(canvas_width, canvas_height);
-        } else if (std.mem.eql(u8, kind, "VP8 ")) {
-            if (image or length < 10 or data[0] & 1 != 0 or !std.mem.eql(u8, data[3..6], "\x9d\x01\x2a")) return error.InvalidResponse;
-            width = std.mem.readInt(u16, data[6..8], .little) & 0x3fff;
-            height = std.mem.readInt(u16, data[8..10], .little) & 0x3fff;
-            image = true;
-        } else if (std.mem.eql(u8, kind, "VP8L")) {
-            if (image or length < 5 or data[0] != 0x2f) return error.InvalidResponse;
-            const packed_size = std.mem.readInt(u32, data[1..5], .little);
-            if (packed_size >> 29 != 0) return error.InvalidResponse;
-            width = (packed_size & 0x3fff) + 1;
-            height = ((packed_size >> 14) & 0x3fff) + 1;
-            image = true;
-        }
-        offset += 8 + length;
-        if (length & 1 != 0) {
-            if (offset >= bytes.len) return error.InvalidResponse;
-            offset += 1;
-        }
-    }
-    if (!image or offset != bytes.len or (canvas_width != 0 and (canvas_width != width or canvas_height != height))) return error.InvalidResponse;
-    try validateDimensions(width, height);
-}
-
-fn validatePng(bytes: []const u8) !void {
-    if (bytes.len < 45 or !std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n")) return error.InvalidResponse;
-    var offset: usize = 8;
-    var saw_data = false;
-    while (bytes.len - offset >= 12) {
-        const len: usize = std.mem.readInt(u32, bytes[offset..][0..4], .big);
-        if (len > bytes.len - offset - 12) return error.InvalidResponse;
-        const kind = bytes[offset + 4 ..][0..4];
-        const payload = bytes[offset + 8 ..][0..len];
-        const crc = std.mem.readInt(u32, bytes[offset + 8 + len ..][0..4], .big);
-        if (std.hash.Crc32.hash(bytes[offset + 4 ..][0 .. len + 4]) != crc) return error.InvalidResponse;
-        if (offset == 8) {
-            if (!std.mem.eql(u8, kind, "IHDR") or len != 13) return error.InvalidResponse;
-            const w = std.mem.readInt(u32, payload[0..4], .big);
-            const h = std.mem.readInt(u32, payload[4..8], .big);
-            try validateDimensions(w, h);
-        } else if (std.mem.eql(u8, kind, "IHDR")) return error.InvalidResponse;
-        if (std.mem.eql(u8, kind, "IDAT")) saw_data = true;
-        offset += len + 12;
-        if (std.mem.eql(u8, kind, "IEND")) {
-            if (len != 0 or !saw_data or offset != bytes.len) return error.InvalidResponse;
-            return;
-        }
-    }
-    return error.InvalidResponse;
+    const info = image_container.inspect(bytes) catch |err| return switch (err) {
+        error.UnsupportedFormat => error.UnsupportedOutput,
+        error.InvalidImage => error.InvalidResponse,
+    };
+    // Generated provider output keeps its existing strict envelope and limits.
+    if (info.animated and info.format == .webp) return error.UnsupportedOutput;
+    if (info.container_end != bytes.len or info.pixels() > 16_000_000) return error.InvalidResponse;
+    return switch (info.format) {
+        .png => .png,
+        .jpeg => .jpeg,
+        .webp => .webp,
+    };
 }
 
 test "fixture targets cannot escape the loopback image endpoint" {
@@ -525,7 +403,7 @@ test "production image codec delivers a PNG beyond fixture byte limits through a
     @memcpy(png[offset + 8 ..][0..8], "Fixture\x00");
     std.mem.writeInt(u32, png[offset + 8 + text_len ..][0..4], std.hash.Crc32.hash(png[offset + 4 ..][0 .. text_len + 4]), .big);
     @memcpy(png[offset + text_len + 12 ..], small_png[offset..]);
-    try validatePng(png);
+    _ = try validateImage(png);
     const encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(png.len));
     defer allocator.free(encoded);
     _ = std.base64.standard.Encoder.encode(encoded, png);
@@ -603,8 +481,8 @@ test "image response decoding preserves PNG bytes and rejects malformed or redir
     var broken = try allocator.dupe(u8, png);
     defer allocator.free(broken);
     broken[20] ^= 1;
-    try std.testing.expectError(error.InvalidResponse, validatePng(broken));
-    try std.testing.expectError(error.InvalidResponse, validatePng(png[0 .. png.len - 1]));
+    try std.testing.expectError(error.InvalidResponse, validateImage(broken));
+    try std.testing.expectError(error.InvalidResponse, validateImage(png[0 .. png.len - 1]));
 }
 
 test "post-send cancellation reports unknown and preserves incomplete cleanup facts" {
@@ -687,6 +565,14 @@ test "image formats preserve encoded bytes without trusting provider MIME" {
         .{ Format.webp, @embedFile("testdata/generated-alpha.webp") },
     }) |entry| {
         try std.testing.expectEqual(entry[0], try validateImage(entry[1]));
+        const with_tail = try std.mem.concat(allocator, u8, &.{ entry[1], "appended-file-data" });
+        defer allocator.free(with_tail);
+        const facts = try image_container.inspect(with_tail);
+        try std.testing.expectEqual(entry[1].len, facts.container_end);
+        try std.testing.expectEqual(@as(usize, 18), facts.trailingBytes(with_tail.len));
+        // Preview can admit this complete container, but generated output keeps
+        // the existing exact-envelope policy.
+        try std.testing.expectError(error.InvalidResponse, validateImage(with_tail));
         const encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(entry[1].len));
         defer allocator.free(encoded);
         _ = std.base64.standard.Encoder.encode(encoded, entry[1]);
@@ -711,4 +597,20 @@ test "image formats preserve encoded bytes without trusting provider MIME" {
     var animated = @embedFile("testdata/generated-alpha.webp").*;
     animated[20] |= 2;
     try std.testing.expectError(error.UnsupportedOutput, validateImage(&animated));
+}
+
+test "PNG animation is a fact without changing generated PNG acceptance" {
+    const png = @embedFile("testdata/generated.png");
+    var apng: [png.len + 20]u8 = undefined;
+    @memcpy(apng[0..33], png[0..33]);
+    std.mem.writeInt(u32, apng[33..37], 8, .big);
+    @memcpy(apng[37..41], "acTL");
+    std.mem.writeInt(u32, apng[41..45], 1, .big);
+    std.mem.writeInt(u32, apng[45..49], 0, .big);
+    std.mem.writeInt(u32, apng[49..53], std.hash.Crc32.hash(apng[37..49]), .big);
+    @memcpy(apng[53..], png[33..]);
+    try std.testing.expect((try image_container.inspect(&apng)).animated);
+    try std.testing.expectEqual(Format.png, try validateImage(&apng));
+    apng[41] ^= 1;
+    try std.testing.expectError(error.InvalidImage, image_container.inspect(&apng));
 }

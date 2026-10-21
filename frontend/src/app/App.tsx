@@ -758,8 +758,12 @@ export default function App() {
     [taskPanel.session.tabs],
   );
   const loadFilePreview = useCallback(
-    (taskId: string, runId: string, referenceId: string) =>
-      client.previewFile(taskId, runId, referenceId),
+    (
+      taskId: string,
+      runId: string,
+      referenceId: string,
+      options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+    ) => client.previewFile(taskId, runId, referenceId, options),
     [client],
   );
   const filePreviewTabs = useFilePreviewTabs(

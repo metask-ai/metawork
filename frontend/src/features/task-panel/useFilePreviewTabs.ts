@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
+import type {
+  FilePreview,
+  FileReferenceView,
+  FilePreviewLoadOptions,
+} from "../../bridge/contracts.ts";
 import { createTaskPanelPreviewTab } from "./task-panel-state.ts";
 
 type FilePreviewIdentity = {
@@ -20,6 +24,7 @@ type FilePreviewLoader = (
   taskId: string,
   runId: string,
   referenceId: string,
+  options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
 
 export function useFilePreviewTabs(
@@ -32,6 +37,7 @@ export function useFilePreviewTabs(
   >({});
   const resourcesRef = useRef(resources);
   const generations = useRef(new Map<string, number>());
+  const controllers = useRef(new Map<string, AbortController>());
   const activeTaskIdRef = useRef(activeTaskId);
   activeTaskIdRef.current = activeTaskId;
 
@@ -40,14 +46,16 @@ export function useFilePreviewTabs(
       current: Record<string, FilePreviewTabState>,
     ) => Record<string, FilePreviewTabState>,
   ) {
-    setResourceState((current) => {
-      const next = update(current);
-      resourcesRef.current = next;
-      return next;
-    });
+    const next = update(resourcesRef.current);
+    resourcesRef.current = next;
+    setResourceState(next);
   }
 
   function invalidate(tabId: string) {
+    controllers.current.get(tabId)?.abort();
+    controllers.current.delete(tabId);
+    const resource = resourcesRef.current[tabId];
+    if (resource && "preview" in resource) resource.preview.release?.();
     generations.current.set(tabId, (generations.current.get(tabId) ?? 0) + 1);
   }
 
@@ -57,6 +65,9 @@ export function useFilePreviewTabs(
     reference: FileReferenceView,
   ) {
     const tab = createTaskPanelPreviewTab(taskId, runId, reference);
+    invalidate(tab.tabId);
+    const controller = new AbortController();
+    controllers.current.set(tab.tabId, controller);
     const requestGeneration = (generations.current.get(tab.tabId) ?? 0) + 1;
     generations.current.set(tab.tabId, requestGeneration);
     const identity: FilePreviewIdentity = {
@@ -70,13 +81,19 @@ export function useFilePreviewTabs(
       ...current,
       [tab.tabId]: { kind: "loading", ...identity },
     }));
-    void load(taskId, runId, reference.id)
+    void load(taskId, runId, reference.id, {
+      signal: controller.signal,
+      priority: "interactive",
+    })
       .then((preview) => {
         if (
+          controller.signal.aborted ||
           generations.current.get(tab.tabId) !== requestGeneration ||
           activeTaskIdRef.current !== taskId
-        )
+        ) {
+          preview.release?.();
           return;
+        }
         setResources((current) => {
           const resource = current[tab.tabId];
           if (
@@ -85,8 +102,10 @@ export function useFilePreviewTabs(
             resource.taskId !== taskId ||
             resource.runId !== runId ||
             resource.reference.id !== reference.id
-          )
+          ) {
+            preview.release?.();
             return current;
+          }
           return {
             ...current,
             [tab.tabId]:
@@ -98,6 +117,7 @@ export function useFilePreviewTabs(
       })
       .catch(() => {
         if (
+          controller.signal.aborted ||
           generations.current.get(tab.tabId) !== requestGeneration ||
           activeTaskIdRef.current !== taskId
         )
@@ -151,6 +171,8 @@ export function useFilePreviewTabs(
   }
 
   function clear() {
+    for (const controller of controllers.current.values()) controller.abort();
+    controllers.current.clear();
     for (const tabId of Object.keys(resourcesRef.current)) invalidate(tabId);
     setResources((current) =>
       Object.keys(current).length === 0 ? current : {},
@@ -159,6 +181,12 @@ export function useFilePreviewTabs(
 
   useEffect(() => {
     clear();
+    return () => {
+      for (const controller of controllers.current.values()) controller.abort();
+      controllers.current.clear();
+      for (const resource of Object.values(resourcesRef.current))
+        if ("preview" in resource) resource.preview.release?.();
+    };
   }, [activeTaskId]);
 
   useEffect(() => {

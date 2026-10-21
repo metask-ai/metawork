@@ -146,6 +146,8 @@ Bridge 与 Renderer 共同消费 active_input fixture，固定 Task 目标、acc
 
 回复复制的 Renderer 回归必须固定：只有已 terminal 的非空 final/partial response 具备入口；`text/plain` 与输入 Markdown byte-for-byte 等价；HTML 使用同一 GFM 语义且不含产品 UI、raw HTML、脚本、图片加载或内部文件导航；单一 `ClipboardItem` 同时承载 HTML 与 plain，首次按需加载 HTML renderer 时仍须在用户手势调用栈内启动 `write()`，只有明确能力缺失可以把完整 Markdown 交给 `writeText`，运行时拒绝或异步 HTML 转换失败不得二次写入或显示成功；代码块只提交显示正文；最新/历史/coarse pointer 显隐、键盘可达、重复反馈计时和卸载清理均由 Renderer 行为测试承担。回复末行完成时间还必须由 Product lifecycle 与 persistence 固定 terminal-only、一次写入、时钟不可用/旧历史保持 null 和 round trip，Bridge 固定范围与 active rejection，Renderer 固定复制图标左、相对时间右、本地化、绝对 accessible name、分钟级自然推进和缺失隐藏。超过 64 KiB 至产品上限的完整性和系统 pasteboard MIME 由目标平台 packaged probe 承担，HTML 只比较安全语义和标记完整性，不比较操作系统包装后的原始 bytes。
 
+File Preview 的定向入口为 `zig build test-file-preview` 与 `node --test scripts/file-preview-transfer.test.mjs scripts/workbench-contract.test.mjs scripts/task-panel.test.mjs`。必须覆盖容器事实与调用方策略、图片容量不阻塞文本、原件尾部凭据、连续分块身份与字节一致、实际解码前 loading、取消/过期/连接及安全代次回收。真实目标平台验证必须另测历史页、大小图、多个标签、反复开闭后的耗时和进程内存；逻辑额度不等于物理内存保证，合成尾部 fixture 不等于真实相机/手机样本兼容验收，独立 SDK probe 不等于最终 Product 验收。
+
 流式 Markdown 的 Renderer 回归必须固定：commentary、provisional 与 final/partial 位于同一 Assistant message，并由 `Run identity + output ordinal` 保持 part DOM 根；provisional 从首批字节支持 GFM 的强调、列表、表格与未闭合代码围栏，但 raw HTML、图片请求、链接、文件预览和复制保持惰性；classification 保留根节点，discard 立即清除且正文不建立 `aria-live`。closed part 必须跨 activity/Tool revision 保持根节点，并在结构化引用 alias 集晚到或失效时更新交互。目标平台真实 WebView 还必须以 256 KiB 混合 GFM 连续增长验证内容正确、跟随底部、上滚、文本选择和 Composer 焦点；若该门槛失败，必须登记独立增量 parser 评估，不能启用运行时 fallback。
 
 AgentCore runtime assets 的验证必须覆盖 manifest declaration、执行文件和许可证缺失/篡改、构建和 runtime package 部署，以及不依赖开发机外部 rg 的真实 Glob/Grep。source-free probe 显式绑定候选 bundle 自带的 rg；桌面 vertical 验证 Host 同目录部署，不能让环境中的 rg 掩盖漏包。

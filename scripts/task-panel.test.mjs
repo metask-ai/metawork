@@ -5301,7 +5301,14 @@ async function renderAppFixture(
       return productStateFixture(snapshot, scope);
     },
     previewFile: (...ids) =>
-      new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
+      new Promise((resolve, reject) =>
+        previews.push({
+          ids: ids.slice(0, 3),
+          options: ids[3],
+          resolve,
+          reject,
+        }),
+      ),
     fileChangeDiff: (...ids) =>
       new Promise((resolve, reject) => diffs.push({ ids, resolve, reject })),
     ...clientOverrides,
@@ -6747,12 +6754,38 @@ for (const outcome of ["committed", "timeout"]) {
   });
 }
 
+function previewImageFixture(data) {
+  let valid = true;
+  const listeners = new Set();
+  return {
+    id: "image-fixture",
+    mediaType: "image/png",
+    width: 1,
+    height: 1,
+    securityEpoch: "1",
+    get src() {
+      return valid ? `data:image/png;base64,${data}` : "";
+    },
+    valid: () => valid,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    beginDecode: async () => () => {},
+    dispose: () => {
+      valid = false;
+      for (const listener of listeners) listener();
+    },
+  };
+}
 const generatedPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8k8AAAAASUVORK5CYII=";
 
 test("generated image loads only its reference and opens the existing preview", async () => {
   const calls = [];
   const opened = [];
+  let released = 0;
+  const image = previewImageFixture(generatedPng);
   const reference = {
     id: "host-image-1",
     title: "",
@@ -6768,12 +6801,17 @@ test("generated image loads only its reference and opens the existing preview", 
         enabled: true,
         load: async (...identity) => {
           calls.push(identity);
+          const loadedImage =
+            calls.length === 1 ? image : previewImageFixture(generatedPng);
           return {
             state: "ready",
             content: "",
             truncated: false,
             redacted: false,
-            image: { mediaType: "image/png", dataBase64: generatedPng },
+            image: loadedImage,
+            release: () => {
+              released++;
+            },
           };
         },
         onOpen: (opener) => opened.push(opener),
@@ -6783,7 +6821,20 @@ test("generated image loads only its reference and opens the existing preview", 
   await waitFor(() =>
     assert.equal(view.container.querySelectorAll("img").length, 1),
   );
-  assert.deepEqual(calls, [["17", "23", "host-image-1"]]);
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 3)),
+    [["17", "23", "host-image-1"]],
+  );
+  assert.equal(calls[0][3].priority, "prefetch");
+  assert.match(view.container.textContent, /Loading preview/);
+  let finishDecode;
+  view.container.querySelector("img").decode = () =>
+    new Promise((resolve) => {
+      finishDecode = resolve;
+    });
+  await act(async () => fireEvent.load(view.container.querySelector("img")));
+  assert.match(view.container.textContent, /Loading preview/);
+  await act(async () => finishDecode());
   assert.equal(view.container.textContent, "");
   assert.match(
     view.container.querySelector("button").getAttribute("aria-label"),
@@ -6796,6 +6847,14 @@ test("generated image loads only its reference and opens the existing preview", 
   view.container.querySelector("button").click();
   assert.equal(opened.length, 1);
   assert.equal(opened[0], view.container.querySelector("button"));
+  await act(async () => image.dispose());
+  assert.equal(view.container.querySelector("img"), null);
+  assert.equal(released, 1);
+  const retry = view.container.querySelector(".generated-image-retry");
+  assert.ok(retry);
+  await act(async () => fireEvent.click(retry));
+  await waitFor(() => assert.equal(calls.length, 2));
+  await waitFor(() => assert.ok(view.container.querySelector("img")));
 });
 
 test("generated image ignores late completion after reference replacement and unmount", async () => {
@@ -6832,7 +6891,7 @@ test("generated image ignores late completion after reference replacement and un
       content: "",
       truncated: false,
       redacted: false,
-      image: { mediaType: "image/png", dataBase64: generatedPng },
+      image: previewImageFixture(generatedPng),
     }),
   );
   assert.equal(view.container.querySelector("img"), null);
@@ -6843,7 +6902,7 @@ test("generated image ignores late completion after reference replacement and un
       content: "",
       truncated: false,
       redacted: false,
-      image: { mediaType: "image/png", dataBase64: generatedPng },
+      image: previewImageFixture(generatedPng),
     }),
   );
 });
@@ -6860,7 +6919,7 @@ test("right file panel renders a PNG preview instead of source code", () => {
             content: "",
             truncated: false,
             redacted: false,
-            image: { mediaType: "image/png", dataBase64: generatedPng },
+            image: previewImageFixture(generatedPng),
           },
         },
         mode: "preview",

@@ -1,15 +1,25 @@
 const std = @import("std");
+const image_container = @import("image_container");
 
 pub const max_in_flight: usize = 8;
 pub const worker_count: usize = 2;
 pub const max_image_source_bytes = 10 * 1024 * 1024;
-pub const max_image_preview_bytes = 384 * 1024;
+pub const max_image_slots: usize = 2;
+pub const max_image_held_bytes: usize = max_image_slots * max_image_source_bytes;
+pub const max_image_pixels: u64 = 4096 * 4096;
+pub const max_image_side: u32 = 8192;
+pub const image_chunk_bytes: usize = 262143;
+pub const ImageInfo = image_container.Info;
 
 pub const State = enum {
     ready,
+    busy,
+    stale_security,
     missing,
     restricted,
     unsupported,
+    image_limit,
+    animated_image,
     changing,
     failed,
 };
@@ -36,9 +46,10 @@ pub const Completion = struct {
     workspace_epoch: u64,
     reference_id: []const u8,
     workspace_root: []const u8,
+    relative_path: []const u8,
     state: State,
     content: []const u8,
-    image: bool = false,
+    image_info: ?ImageInfo = null,
     truncated: bool,
 };
 
@@ -93,7 +104,10 @@ const Job = struct {
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
-    image: bool = false,
+    image_info: ?ImageInfo = null,
+    reserved_image_bytes: usize = 0,
+    cancelled: std.atomic.Value(bool) = .init(false),
+    created_at: std.Io.Timestamp,
     state: State = .failed,
     buffer: []u8 = &.{},
     content: []const u8 = &.{},
@@ -102,11 +116,16 @@ const Job = struct {
     fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
         self.readWithRetry();
+        if (self.cancelled.load(.acquire)) {
+            self.clearContent();
+            self.state = .failed;
+        }
         self.lane.publish(self);
     }
 
     fn cancel(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
+        self.cancelled.store(true, .release);
         self.state = .failed;
         self.lane.publish(self);
     }
@@ -132,6 +151,10 @@ const Job = struct {
     const ReadOutcome = enum { completed, changed };
 
     fn readOnce(self: *Job) ReadOutcome {
+        if (self.cancelled.load(.acquire)) {
+            self.state = .failed;
+            return .completed;
+        }
         var root = std.Io.Dir.openDirAbsolute(self.lane.io, self.workspace_root, .{
             .access_sub_paths = true,
             .follow_symlinks = false,
@@ -169,15 +192,22 @@ const Job = struct {
             return .completed;
         };
         if (header_read >= 21 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..16], "WEBPVP8X") and header[20] & 2 != 0) {
-            self.state = .unsupported;
+            self.state = .animated_image;
             return .completed;
         }
         const image = isImage(header[0..header_read]);
         if (image and before.size > max_image_source_bytes) {
-            self.state = .unsupported;
+            self.state = .image_limit;
             return .completed;
         }
         const wanted: usize = @intCast(if (image) before.size else @min(before.size, self.max_bytes));
+        if (image) {
+            if (!self.lane.reserveImage(wanted)) {
+                self.state = .busy;
+                return .completed;
+            }
+            self.reserved_image_bytes = wanted;
+        }
         if (wanted == 0) {
             const after = file.stat(self.lane.io) catch {
                 self.state = .failed;
@@ -195,11 +225,22 @@ const Job = struct {
         };
         self.buffer = bytes;
         self.content = bytes;
-        const read = file.readPositionalAll(self.lane.io, bytes, 0) catch {
-            self.clearContent();
-            self.state = .failed;
-            return .completed;
-        };
+        var read: usize = 0;
+        while (read < wanted) {
+            if (self.cancelled.load(.acquire)) {
+                self.clearContent();
+                self.state = .failed;
+                return .completed;
+            }
+            const amount = @min(wanted - read, 64 * 1024);
+            const count = file.readPositionalAll(self.lane.io, bytes[read..][0..amount], read) catch {
+                self.clearContent();
+                self.state = .failed;
+                return .completed;
+            };
+            read += count;
+            if (count != amount) break;
+        }
         const after = file.stat(self.lane.io) catch {
             self.clearContent();
             self.state = .failed;
@@ -208,7 +249,22 @@ const Job = struct {
         if (read != wanted or metadataChanged(before, after)) return .changed;
 
         if (image) {
-            self.image = true;
+            const info = image_container.inspect(bytes) catch {
+                self.clearContent();
+                self.state = .unsupported;
+                return .completed;
+            };
+            if (info.animated) {
+                self.clearContent();
+                self.state = .animated_image;
+                return .completed;
+            }
+            if (info.width > max_image_side or info.height > max_image_side or info.pixels() > max_image_pixels) {
+                self.clearContent();
+                self.state = .image_limit;
+                return .completed;
+            }
+            self.image_info = info;
             self.state = .ready;
             return .completed;
         }
@@ -234,7 +290,9 @@ const Job = struct {
         self.buffer = &.{};
         self.content = &.{};
         self.truncated = false;
-        self.image = false;
+        self.image_info = null;
+        if (self.reserved_image_bytes != 0) self.lane.releaseImage(self.reserved_image_bytes);
+        self.reserved_image_bytes = 0;
     }
 
     fn deinit(self: *Job) void {
@@ -261,6 +319,9 @@ pub const Lane = struct {
     completion_count: usize = 0,
     active_count: usize = 0,
     accepting: bool = true,
+    jobs: [max_in_flight]?*Job = @splat(null),
+    image_count: usize = 0,
+    image_bytes: usize = 0,
 
     pub fn create(
         io: std.Io,
@@ -308,6 +369,7 @@ pub const Lane = struct {
         job.* = .{
             .lane = self,
             .completion_id = input.completion_id,
+            .created_at = .now(self.io, .awake),
             .task_id = input.task_id,
             .run_id = input.run_id,
             .workspace_id = input.workspace_id,
@@ -319,6 +381,19 @@ pub const Lane = struct {
             .max_lines = input.max_lines,
             .max_line_bytes = input.max_line_bytes,
         };
+        self.lock();
+        const job_index = for (&self.jobs, 0..) |*slot, index| {
+            if (slot.* == null) {
+                slot.* = job;
+                break index;
+            }
+        } else unreachable;
+        self.unlock();
+        errdefer {
+            self.lock();
+            self.jobs[job_index] = null;
+            self.unlock();
+        }
         self.executor.enqueue(.{
             .identity = job,
             .context = job,
@@ -333,6 +408,7 @@ pub const Lane = struct {
     pub fn stopAdmission(self: *Lane) void {
         self.lock();
         self.accepting = false;
+        for (self.jobs) |entry| if (entry) |job| job.cancelled.store(true, .release);
         self.unlock();
     }
 
@@ -340,6 +416,7 @@ pub const Lane = struct {
         std.debug.assert(!self.accepting);
         std.debug.assert(self.active_count == 0);
         std.debug.assert(self.completion_count == 0);
+        std.debug.assert(self.image_count == 0 and self.image_bytes == 0);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -365,9 +442,10 @@ pub const Lane = struct {
                 .workspace_epoch = job.workspace_epoch,
                 .reference_id = job.reference_id,
                 .workspace_root = job.workspace_root,
+                .relative_path = job.relative_path,
                 .state = job.state,
                 .content = job.content,
-                .image = job.image,
+                .image_info = job.image_info,
                 .truncated = job.truncated,
             },
         };
@@ -375,11 +453,61 @@ pub const Lane = struct {
 
     pub fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
-        job.deinit();
         self.lock();
+        for (&self.jobs) |*entry| if (entry.* == job) {
+            entry.* = null;
+            break;
+        };
         std.debug.assert(self.active_count != 0);
         self.active_count -= 1;
         self.unlock();
+        job.deinit();
+    }
+
+    pub fn hasActive(self: *Lane) bool {
+        self.lock();
+        defer self.unlock();
+        return self.active_count != 0;
+    }
+    pub fn wasCancelled(_: *Lane, taken: Taken) bool {
+        const job: *Job = @ptrCast(@alignCast(taken.job));
+        return job.cancelled.load(.acquire);
+    }
+    pub fn expireRequests(self: *Lane) void {
+        const timestamp: std.Io.Timestamp = .now(self.io, .awake);
+        self.lock();
+        defer self.unlock();
+        for (self.jobs) |entry| if (entry) |job| {
+            if (job.created_at.durationTo(timestamp).nanoseconds >= 30 * std.time.ns_per_s)
+                job.cancelled.store(true, .release);
+        };
+    }
+    pub fn cancelRequest(self: *Lane, completion_id: u64) bool {
+        self.lock();
+        defer self.unlock();
+        for (self.jobs) |entry| if (entry) |job| {
+            if (job.completion_id == completion_id) {
+                job.cancelled.store(true, .release);
+                return true;
+            }
+        };
+        return false;
+    }
+
+    fn reserveImage(self: *Lane, bytes: usize) bool {
+        self.lock();
+        defer self.unlock();
+        if (!self.accepting or self.image_count == max_image_slots or bytes > max_image_held_bytes - self.image_bytes) return false;
+        self.image_count += 1;
+        self.image_bytes += bytes;
+        return true;
+    }
+    fn releaseImage(self: *Lane, bytes: usize) void {
+        self.lock();
+        defer self.unlock();
+        std.debug.assert(self.image_count > 0 and self.image_bytes >= bytes);
+        self.image_count -= 1;
+        self.image_bytes -= bytes;
     }
 
     fn publish(self: *Lane, job: *Job) void {
@@ -554,7 +682,7 @@ test "file preview text bounds stop before an over-limit line or codepoint" {
     try std.testing.expect(containsUnsafeControl("a\x00b"));
 }
 
-test "file preview image source is bounded before decode and retains binary only inside Host" {
+test "file preview image source is bounded and malformed containers are not ready" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "small.jpg", .data = "\xff\xd8\xffbinary-image" });
@@ -584,13 +712,87 @@ test "file preview image source is bounded before decode and retains binary only
         const taken = lane.take().?;
         defer lane.release(taken);
         if (index == 0) {
-            try std.testing.expectEqual(State.ready, taken.completion.state);
-            try std.testing.expect(taken.completion.image);
-            try std.testing.expectEqualStrings("\xff\xd8\xffbinary-image", taken.completion.content);
+            try std.testing.expectEqual(State.unsupported, taken.completion.state);
+            try std.testing.expect(taken.completion.image_info == null);
+            try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
             try std.testing.expect(!taken.completion.truncated);
         } else {
-            try std.testing.expectEqual(State.unsupported, taken.completion.state);
+            try std.testing.expectEqual(if (index == 1) State.image_limit else State.animated_image, taken.completion.state);
             try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
         }
     }
+}
+
+test "two retained image buffers do not take text capacity and busy retains no bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++
+        "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9tail";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = jpeg });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "text.txt", .data = "text remains available" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const Sync = struct {
+        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            job.execute_fn(job.context);
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = Sync.wake }, .{ .context = &context, .enqueue_fn = Sync.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    var held: [2]Taken = undefined;
+    for (0..4) |index| {
+        try lane.begin(.{ .completion_id = index + 1, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = root, .relative_path = if (index == 3) "text.txt" else "image.jpg", .max_bytes = 64, .max_lines = 10, .max_line_bytes = 64 });
+        const taken = lane.take().?;
+        if (index < 2) {
+            try std.testing.expectEqual(State.ready, taken.completion.state);
+            try std.testing.expect(taken.completion.image_info != null);
+            try std.testing.expectEqualSlices(u8, jpeg, taken.completion.content);
+            held[index] = taken;
+        } else {
+            try std.testing.expectEqual(if (index == 2) State.busy else State.ready, taken.completion.state);
+            try std.testing.expectEqualStrings(if (index == 2) "" else "text remains available", taken.completion.content);
+            lane.release(taken);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), lane.image_count);
+    try std.testing.expectEqual(@as(usize, jpeg.len * 2), lane.image_bytes);
+    for (held) |taken| lane.release(taken);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_count);
+    try std.testing.expectEqual(@as(usize, 0), lane.image_bytes);
+}
+
+test "cancelled queued reads publish once without opening or reserving an image" {
+    const Deferred = struct {
+        job: ?ExecutorJob = null,
+        fn enqueue(context: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.job = job;
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var context: Deferred = .{};
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = Deferred.wake }, .{ .context = &context, .enqueue_fn = Deferred.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    try lane.begin(.{ .completion_id = 17, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = "not-a-real-root", .relative_path = "not-opened.jpg", .max_bytes = 64, .max_lines = 10, .max_line_bytes = 64 });
+    try std.testing.expect(lane.cancelRequest(17));
+    const job = context.job.?;
+    job.execute_fn(job.context);
+    const taken = lane.take().?;
+    try std.testing.expectEqual(State.failed, taken.completion.state);
+    try std.testing.expectEqual(@as(usize, 0), taken.completion.content.len);
+    lane.release(taken);
+    try std.testing.expect(!lane.hasActive());
+    try std.testing.expect(lane.take() == null);
 }

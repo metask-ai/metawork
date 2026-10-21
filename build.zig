@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = bundle.link_libc,
     });
     image_unit.addImport("agent_http_transport", test_modules.agent_http_transport);
+    image_unit.addImport("image_container", test_modules.image_container);
     const image_tests = b.addTest(.{ .name = "metawork-generate-image-unit", .root_module = image_unit });
     const image_unit_run = b.addRunArtifact(image_tests);
     b.step("test-generate-image-unit", "Run GenerateImage codec and argument tests").dependOn(&image_unit_run.step);
@@ -87,6 +88,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = bundle.link_libc,
     });
     image_codec_unit.addImport("agent_http_transport", test_modules.agent_http_transport);
+    image_codec_unit.addImport("image_container", test_modules.image_container);
+    artifacts.tests.step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
     const image_codec_tests = b.addTest(.{ .name = "metawork-image-generation-unit", .root_module = image_codec_unit });
     const image_codec_run = b.addRunArtifact(image_codec_tests);
     b.step("test-image-generation-unit", "Run bounded Images Generation tests").dependOn(&image_codec_run.step);
@@ -279,6 +282,11 @@ pub fn build(b: *std.Build) void {
     artifacts.tests.step.dependOn(&projection_performance_tests.step);
     b.step("test-projection-performance", "Measure legal maximum scoped Product presentation budgets").dependOn(&b.addRunArtifact(projection_performance_tests).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
+    const file_preview_step = b.step("test-file-preview", "Run image container, preview lane and Product resource tests");
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.bridge, .filters = &.{"file preview"} })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_file_preview })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_runtime, .filters = &.{ "file preview", "File Preview" } })).step);
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_task_runtime, test_modules.product_control_runtime }) |module| {
         product_views_step.dependOn(&b.addRunArtifact(b.addTest(.{
             .root_module = module,
@@ -561,6 +569,7 @@ const WiredModules = struct {
     agent_model_binding: *std.Build.Module,
     agent_completion: *std.Build.Module,
     agent_http_transport: *std.Build.Module,
+    image_container: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -1081,6 +1090,11 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const image_container = b.createModule(.{
+        .root_source_file = b.path("src/image/container.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     agent_completion.addImport("agent_protocol", agent_protocol);
     agent_completion.addImport("agent_model_binding", agent_model_binding);
     agent_completion.addImport("agent_http_transport", agent_http_transport);
@@ -1171,6 +1185,7 @@ fn wireAgentCore(
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
     session.addImport("agent_http_transport", agent_http_transport);
+    session.addImport("image_container", image_container);
     session.addImport("event_pump", event_pump);
     session.addImport("agent_catalog", agent_catalog);
     session.addImport("agent_mcp_runtime", agent_mcp_runtime);
@@ -1422,6 +1437,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    file_preview.addImport("image_container", image_container);
     const product_workspace_automatic_root = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/automatic_root.zig"),
         .target = target,
@@ -2140,6 +2156,7 @@ fn wireAgentCore(
         .agent_model_binding = agent_model_binding,
         .agent_completion = agent_completion,
         .agent_http_transport = agent_http_transport,
+        .image_container = image_container,
         .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_catalog = agent_catalog,

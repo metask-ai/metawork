@@ -1,3 +1,4 @@
+import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useLayoutEffect, useRef } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
 import {
@@ -39,8 +40,9 @@ export function FilePreviewView({
   const markdown = /\.(?:md|markdown)$/i.test(state.selected.displayPath);
   const ready = state.phase === "settled" && state.preview?.state === "ready";
   const status = state.phase === "loading" ? "loading" : state.preview?.state;
-  const failureMessage =
-    status && status !== "loading" && status !== "ready"
+  const failureMessage = state.preview?.reason
+    ? (`file_preview.state.${state.preview.reason}` as const)
+    : status && status !== "loading" && status !== "ready"
       ? (`file_preview.state.${status}` as const)
       : "file_preview.state.error";
 
@@ -94,9 +96,10 @@ export function FilePreviewView({
             )}
             {state.preview.image ? (
               <div className="task-panel-preview-image">
-                <img
-                  src={`data:image/png;base64,${state.preview.image.dataBase64}`}
+                <PreviewImageView
+                  image={state.preview.image}
                   alt={state.selected.displayPath}
+                  onFailure={() => state.preview?.release?.()}
                 />
               </div>
             ) : markdown ? (

@@ -3460,33 +3460,69 @@ test("Models rejects retired image selection projection and execution authority"
   }
 });
 
-test("file preview admits only bounded ready PNG image variants", () => {
-  const value = {
-    state: "ready",
+test("file preview preserves explicit refusal reasons", () => {
+  const response = {
+    state: "unsupported",
     content: "",
     truncated: false,
     redacted: false,
-    image: { mediaType: "image/png", dataBase64: "iVBORw0KGgo=" },
   };
-  assert.deepEqual(decodeFilePreview(value), value);
+  for (const reason of ["image_limit", "animated_image"]) {
+    assert.deepEqual(decodeFilePreview({ ...response, reason }), {
+      ...response,
+      reason,
+    });
+    assert.throws(
+      () => decodeFilePreview({ ...response, state: "ready", reason }),
+      /Invalid Host contract/,
+    );
+  }
+  assert.throws(
+    () => decodeFilePreview({ ...response, reason: "unknown" }),
+    /Invalid Host contract/,
+  );
+});
+
+test("file preview admits only bounded ready original image descriptors", () => {
+  const value = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/file_preview_image.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const decoded = decodeFilePreview(value);
+  assert.equal(decoded.image.sizeBytes, 10485760);
+  assert.equal(decoded.image.chunkBytes, 262143);
   for (const invalid of [
     { ...value, state: "missing" },
+    { ...value, state: "busy" },
     { ...value, content: "binary must not become text" },
     { ...value, truncated: true },
-    { ...value, image: { ...value.image, mediaType: "image/svg+xml" } },
-    {
-      ...value,
-      image: { ...value.image, dataBase64: "https://example.test/a.png" },
-    },
-    {
-      ...value,
-      image: {
-        ...value.image,
-        dataBase64: "iVBORw0KGgo=" + "A".repeat(524288),
-      },
-    },
+    ...[
+      { mediaType: "image/svg+xml" },
+      { token: "file:///image.png" },
+      { sizeBytes: "10485761" },
+      { sizeBytes: "01" },
+      { width: 0 },
+      { height: 8193 },
+      { width: 4097, height: 4097 },
+      { width: 1.5 },
+      { chunkBytes: "262144" },
+      { securityEpoch: "0" },
+      { dataBase64: "iVBORw0KGgo=" },
+    ].map((change) => ({ ...value, image: { ...value.image, ...change } })),
   ])
     assert.throws(() => decodeFilePreview(invalid), /Invalid Host contract/);
+  for (const state of ["busy", "stale_security"])
+    assert.equal(
+      decodeFilePreview({
+        state,
+        content: "",
+        truncated: false,
+        redacted: false,
+      }).state,
+      state,
+    );
 });
 
 test("file image preview matches the Host shared fixture", () => {
@@ -3496,7 +3532,15 @@ test("file image preview matches the Host shared fixture", () => {
       "utf8",
     ),
   );
-  assert.deepEqual(decodeFilePreview(value), value);
+  const decoded = decodeFilePreview(value);
+  assert.deepEqual(decoded, {
+    ...value,
+    image: {
+      ...value.image,
+      sizeBytes: Number(value.image.sizeBytes),
+      chunkBytes: Number(value.image.chunkBytes),
+    },
+  });
 });
 
 test("visible Tasks reject deletion state before any unrelated lifecycle checks", () => {

@@ -306,13 +306,47 @@ export type FileReferenceView = {
   displayPath: string;
 };
 
+export type PreviewMediaType = "image/png" | "image/jpeg" | "image/webp";
+export type FilePreviewImage = {
+  readonly id: string;
+  readonly mediaType: PreviewMediaType;
+  readonly width: number;
+  readonly height: number;
+  readonly src: string;
+  readonly securityEpoch: string;
+  valid: () => boolean;
+  subscribe: (changed: () => void) => () => void;
+  beginDecode: (signal: AbortSignal) => Promise<() => void>;
+};
 export type FilePreview = {
-  image?: { mediaType: "image/png"; dataBase64: string };
+  image?: FilePreviewImage;
   state:
     "ready" | "missing" | "restricted" | "unsupported" | "changing" | "error";
   content: string;
   truncated: boolean;
   redacted: boolean;
+  reason?: "capacity" | "image_limit" | "animated_image";
+  release?: () => void;
+};
+export type FilePreviewResponse = Omit<
+  FilePreview,
+  "image" | "state" | "reason" | "release"
+> & {
+  state: FilePreview["state"] | "busy" | "stale_security";
+  reason?: "image_limit" | "animated_image";
+  image?: {
+    token: string;
+    mediaType: PreviewMediaType;
+    sizeBytes: number;
+    width: number;
+    height: number;
+    chunkBytes: number;
+    securityEpoch: string;
+  };
+};
+export type FilePreviewLoadOptions = {
+  signal?: AbortSignal;
+  priority?: "interactive" | "prefetch";
 };
 
 export type FileChangeView = {
