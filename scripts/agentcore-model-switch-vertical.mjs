@@ -149,9 +149,9 @@ export async function runModelSwitchVertical({
     await wait(
       () =>
         webview.evaluate(
-          `!document.querySelector('.task-information')?.getClientRects().length`,
+          `!document.querySelector('.task-information')?.getClientRects().length && /^(任务信息|Task information)$/.test(document.activeElement?.getAttribute('aria-label') ?? '')`,
         ),
-      "Task information closes",
+      "Task information closes and restores trigger focus",
     );
   };
   try {
@@ -184,7 +184,7 @@ export async function runModelSwitchVertical({
     accepted(created);
     const taskId = created.taskId;
     const readTask = async () =>
-      (await snapshot()).tasks.find((item) => item.id === taskId);
+      (await snapshot({ taskId })).tasks.find((item) => item.id === taskId);
     await invoke("metawork.tasks.rename", {
       taskId,
       title: "Model switch validation",

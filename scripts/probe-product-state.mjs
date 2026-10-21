@@ -10,7 +10,10 @@ import {
 function retryable(message) {
   return Object.assign(new Error(message), { retryableSnapshotRead: true });
 }
-export async function readProbeProductState(invoke, { forbidden = [] } = {}) {
+export async function readProbeProductState(
+  invoke,
+  { forbidden = [], observeTaskView, taskId } = {},
+) {
   async function read(scope) {
     const next = await fetchWorkbenchSnapshot(async (command, payload) => {
       const result = await invoke(command, payload);
@@ -26,6 +29,7 @@ export async function readProbeProductState(invoke, { forbidden = [] } = {}) {
   const index = await read(initialViewScope);
   const tasks = [];
   for (const summary of index.taskIndex) {
+    if (taskId !== undefined && summary.id !== taskId) continue;
     let retained;
     for (let attempt = 0; attempt < 3; attempt++) {
       let state = initialWorkbenchState;
@@ -41,6 +45,11 @@ export async function readProbeProductState(invoke, { forbidden = [] } = {}) {
           snapshot: view,
           receivedAt: performance.now(),
         });
+        if (view.taskPage)
+          observeTaskView?.({
+            revision: view.revision,
+            task: state.snapshot.tasks[0],
+          });
         if (!view.taskPage) break;
         cursor =
           view.historyPage?.nextBeforeRunId ??

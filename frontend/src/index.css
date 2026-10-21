@@ -7476,6 +7476,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 /* AI UI primitives ------------------------------------------------------- */
 
+.ai-markdown {
+  overflow-wrap: anywhere;
+}
+
 .ai-markdown > :first-child {
   margin-top: 0;
 }
@@ -9702,6 +9706,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .run-reading-flow {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   min-width: 0;
 }

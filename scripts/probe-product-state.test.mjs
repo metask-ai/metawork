@@ -70,6 +70,27 @@ test("desktop verification uses bounded scopes and current strict decoding", asy
       .map((scope) => scope.management),
     ["skills", "mcp", "schedules"],
   );
+  const selectedBridge = host(state);
+  const selected = await readProbeProductState(selectedBridge.invoke, {
+    taskId: second.id,
+  });
+  assert.deepEqual(
+    selected.tasks.map((task) => task.id),
+    [second.id],
+  );
+  assert.deepEqual(selected.taskIndex, result.taskIndex);
+  assert.ok(
+    selectedBridge.scopes.every(
+      (scope) => scope.taskId === null || scope.taskId === second.id,
+    ),
+  );
+  const rootBridge = host(state);
+  const rootOnly = await readProbeProductState(rootBridge.invoke, {
+    taskId: null,
+  });
+  assert.deepEqual(rootOnly.tasks, []);
+  assert.deepEqual(rootOnly.taskIndex, result.taskIndex);
+  assert.ok(rootBridge.scopes.every((scope) => scope.taskId === null));
 });
 test("desktop verification rejects credentials and unavailable transport instead of reading an old shape", async () => {
   const state = structuredClone(fixture);
@@ -83,4 +104,35 @@ test("desktop verification rejects credentials and unavailable transport instead
     readProbeProductState(async () => null),
     (error) => error.retryableSnapshotRead === true,
   );
+});
+
+test("Run observations retain the Task view revision when later scopes advance", async () => {
+  const state = structuredClone(fixture);
+  const bridge = host(state);
+  const observed = [];
+  const originalRevision = state.revision;
+  const originalTitle = state.tasks[0].title;
+  const result = await readProbeProductState(
+    async (command, payload) => {
+      if (
+        command === "metawork.workbench.snapshot" &&
+        payload.management === "skills"
+      ) {
+        state.revision = String(BigInt(originalRevision) + 1n);
+        state.tasks[0].title = "changed after the Task view";
+      }
+      return bridge.invoke(command, payload);
+    },
+    {
+      observeTaskView({ revision, task }) {
+        observed.push({ revision, title: task.title });
+      },
+    },
+  );
+  assert.equal(result.revision, state.revision);
+  assert.notEqual(result.revision, originalRevision);
+  assert.deepEqual(observed, [
+    { revision: originalRevision, title: originalTitle },
+  ]);
+  assert.equal(result.tasks[0].title, originalTitle);
 });
