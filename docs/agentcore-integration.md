@@ -190,7 +190,7 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 历史 revision 15 macOS canonical bundle 的 source-free probe 使用 realpath 后的同一 canonical Workspace，已证明以下外部事实：`accept_edits` 自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 和明确有副作用的 Bash 发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 same-profile checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。`auto` 对代表性 Write/Bash 仍请求，`dont_ask` 不请求但拒绝 effect。跨 `accept_edits ↔ full_access` restore 产生不可消费的 degraded report；MetaWork 必须销毁 candidate，不能据此实现 profile mutation。精确 artifact identity 只由对应 target lock 定义；替换 artifact 后必须重新取得行为证据。
 
-当前锁定 Windows x86_64 canonical bundle 已由同一 source-free probe 验证两档映射、显式规则优先级、callback unavailable、Session grant、same-profile restore 与跨 profile restore fail-closed。平台差异必须保留为证据：Windows 上 `full_access` 对 `.git/config` 使用普通 built-in classification 并直接执行，不产生 macOS 上的 core-protected callback；`SHELL_SANDBOXED` 在 Session create 时以 `UnsupportedOs` 明确拒绝。MetaWork 两档都使用 `SHELL_UNRESTRICTED`，且产品从不把 profile 描述成 Sandbox；这些差异不改变当前产品映射，也不得被 UI 隐藏为虚假的跨平台同构。
+PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 mode restore 能否成功，不授予 Product 另一条切换路径。source-free probe 必须独立验证 report、describe、policy generation 与恢复后的实际权限 effect，不把旧 artifact 的不可消费 report 固化为所有后续 artifact 的预期。平台差异必须保留为证据：Windows 上 `full_access` 对 `.git/config` 使用普通 built-in classification 并直接执行，不产生 macOS 上的 core-protected callback；`SHELL_SANDBOXED` 在 Session create 时以 `UnsupportedOs` 明确拒绝。MetaWork 两档都使用 `SHELL_UNRESTRICTED`，且产品从不把 profile 描述成 Sandbox；这些差异不改变当前产品映射，也不得被 UI 隐藏为虚假的跨平台同构。
 
 ### Host tools
 
@@ -201,7 +201,7 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
 
-当前启用用于内部测试，不代表正式服务和新包发布验收完成。旧工具集合 checkpoint 的已知恢复缺口必须保持 fail-closed；修复版 canonical bundle 的迁移验收、真实服务与目标平台证据属于发布前条件，见[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)。不以 SDK patch、checkpoint 改写或另一套旧工具 Runtime 绕过缺口。
+当前启用用于内部测试，不代表正式服务和新包发布验收完成。旧工具集合 checkpoint 必须通过 canonical bundle 的迁移验收；不合法的 report 继续 fail-closed，不以 SDK patch、checkpoint 改写或另一套旧工具 Runtime 绕过。迁移、真实服务与目标平台证据属于发布前条件，状态只由[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)维护。
 
 图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。
 

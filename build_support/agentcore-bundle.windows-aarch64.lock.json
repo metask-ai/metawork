@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.11.0-dev+68ac95c2d42b",
+  "version": "0.11.0-dev+9c2f68671198",
   "source": {
-    "commit": "68ac95c2d42b30e8fee831ea052808b5e9a7002f",
+    "commit": "9c2f686711982b9c618310413e18e45053a15a5d",
     "dirty": false
   },
   "toolchain": {
@@ -67,11 +67,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "4763b39bcd172dc9e3ef73be3465b7cd8d0e292d2d6510abe0066153b0ca864b"
+      "sha256": "b8e899f8c48c65b39661d5bacc3cde42f938fe26ebf919a11955b4b857b38f87"
     },
     {
       "path": "lib/metask_agentcore.dll",
-      "sha256": "95ea9cefd95b78fa738a550d2d6d5f1e7f715933717f92d70dc38f5fefc6eb41"
+      "sha256": "da99b1130b8552d5fcd948de19ac42fd8db9b20534d75d51f654aa1ee116f630"
     },
     {
       "path": "bin/rg.exe",
@@ -91,7 +91,7 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "089dfd243a3a68c3d286933c6dc97f636e704cb0f8bfe0a9468adb2dd962eb91"
+      "sha256": "603b40826cf3e91d5f5d451f6a4aa89a0969c1895c06f51bcecdb73cd9a08ebf"
     },
     {
       "path": "bindings/zig/src/root.zig",
@@ -107,11 +107,11 @@
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "6da11975d51631606aa0d7519db6f6767b932295834c344c46db39d9081b91b0"
+      "sha256": "3c1ece110fb4a3bc91e3d2d9fde81e8289d1bad20ae8e44bc57fb3599d673992"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "9466aaeccdef727b40314c8de2ee6692429ab3ff834a6b04ebc81c11efe02b17"
+      "sha256": "a469a7e100aba11599cd003e5f71b7130b2d545ac82c3409a39d423dedf03d70"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -123,7 +123,7 @@
     },
     {
       "path": "bindings/rust/src/lib.rs",
-      "sha256": "891e50e3437a036a09911ad95e45f64066f30d0a55e3108bb7a967cc6707fae3"
+      "sha256": "319dabd4106a2488c60c5bf8fdc81afeae86367b9972e0cbf8fd888871e47d4a"
     },
     {
       "path": "bindings/rust/src/raw.rs",
@@ -135,7 +135,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "5a68eff04b99efa95f4cf152c14d689d9ad844277c599fe216095d3edea25e35"
+      "sha256": "d6ae6eb18db9321606bc095c42d070bfd550daeab4dc39b95e87e92ed31545b9"
     }
   ]
 }

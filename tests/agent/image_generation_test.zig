@@ -412,7 +412,7 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
     var probe: CoreProbe = undefined;
     try probe.init(changed_schema);
     h.runtime = try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
-    const restored = h.runtime.restoreSessionRoute(.{
+    const restored = try h.runtime.restoreSessionRoute(.{
         .session = .{
             .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = h.fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
             .permission_mode = .default,
@@ -424,39 +424,17 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
         .checkpoint_limits = limits,
         .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
         .expectation = .{ .logical_session_id = checkpoint.description.session_id, .checkpoint_generation = checkpoint.checkpoint.generation, .last_run_id = last_run_id, .last_compact_id = 0, .model = "claude-sonnet-4-20250514" },
-    }) catch |err| {
-        if (old_image or grant or changed_schema) return err;
-        // ABI rev 24 emits degraded with no invalidations and no issue when
-        // the tool set changes but there are no persisted rules. Its own SDK
-        // rejects that contradiction. Preserve this fail-closed behavior;
-        // this regression is evidence of an OPEN B0 gate, not recovery support.
-        try std.testing.expectEqual(error.RestoreContractFailed, err);
-        try std.testing.expectError(error.InvalidPayload, sdk.decodeRestoreReport(std.testing.allocator, probe.report[0..probe.report_len]));
-        const raw = try std.json.parseFromSlice(sdk.protocol.RestoreReport, std.testing.allocator, probe.report[0..probe.report_len], .{});
-        defer raw.deinit();
-        try std.testing.expectEqual(sdk.protocol.RestoreHealth.degraded, raw.value.health);
-        try std.testing.expectEqual(@as(u32, 0), raw.value.permission.invalidated_rules);
-        try std.testing.expectEqual(@as(u32, 0), raw.value.skill.invalidated);
-        try std.testing.expectEqual(@as(u32, 0), raw.value.mcp.invalidated_bindings);
-        try std.testing.expectEqual(@as(usize, 0), raw.value.issues.len);
-        try std.testing.expectEqual(@as(usize, 0), probe.description_len);
-        for (h.runtime.sessions, h.runtime.session_reservations) |entry, reserved| {
-            try std.testing.expect(entry == null);
-            try std.testing.expect(!reserved);
-        }
-        try h.evidence(0, 0, "");
-        return;
-    };
+    });
     var report = try sdk.decodeRestoreReport(std.testing.allocator, probe.report[0..probe.report_len]);
     defer report.deinit();
     var described = try sdk.decodeSessionDescription(std.testing.allocator, probe.description[0..probe.description_len]);
     defer described.deinit();
     // Changing only GenerateImage's schema does not invalidate an unrelated
     // built-in Write grant. Host tools cannot have persisted Session grants.
-    const changed = !old_image;
+    const changed = !old_image and grant;
     try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
     try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
-    try std.testing.expectEqual(@as(u32, if (changed) 0 else 1), restored.report.restored_permission_rules);
+    try std.testing.expectEqual(@as(u32, if (grant and !changed) 1 else 0), restored.report.restored_permission_rules);
     try std.testing.expectEqual(@as(usize, if (changed) 1 else 0), report.value.issues.len);
     if (changed) {
         try std.testing.expectEqual(sdk.protocol.AuthorityIssueReason.policy_changed, report.value.issues[0].reason);
@@ -464,8 +442,11 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
     }
     try std.testing.expectEqual(report.value.health, described.value.restore.health);
     try std.testing.expectEqual(report.value.permission.invalidated_rules, described.value.restore.invalidated_permission_rules);
+    try std.testing.expectEqualStrings(checkpoint.description.session_id, described.value.session_id);
+    try std.testing.expectEqual(checkpoint.checkpoint.generation, report.value.checkpoint_generation);
+    try std.testing.expectEqual(last_run_id, described.value.last_run_id);
     const answers = try permissionRunText(h.runtime, restored.session, "Write the checkpoint fixture.", .allow_once, false);
-    try std.testing.expectEqual(@as(usize, if (changed) 1 else 0), answers);
+    try std.testing.expectEqual(@as(usize, if (!grant or changed) 1 else 0), answers);
     // Host authorization must still be requested independently of any Write grant.
     try std.testing.expectEqual(@as(usize, 1), try permissionRunText(h.runtime, restored.session, "Generate the fixture image.", .allow_once, true));
     try h.evidence(0, 0, "unavailable");
@@ -482,7 +463,7 @@ test "GenerateImage canonical checkpoint invalidates changed tool authority and 
     try checkpointTools(true, true, true);
 }
 
-test "GenerateImage legacy checkpoint without grants keeps the upstream restore release gap fail closed" {
+test "GenerateImage legacy checkpoint without grants restores complete and requires fresh approval" {
     try checkpointTools(false, false, false);
 }
 
@@ -1449,8 +1430,8 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
     try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
     // Restart Product from its real history and opaque canonical checkpoint.
-    // The same fixed isolated tool set makes this a legal restore; B0.2's
-    // old-tool-set migration report is not altered or bypassed here.
+    // This exercises the same fixed tool set; legacy tool-set migration is
+    // covered separately by the canonical checkpoint tests above.
     control.setImageRunPreparation(null);
     coordinator.shutdown();
     coordinator.drain();

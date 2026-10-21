@@ -650,13 +650,14 @@ fn runRestore(
     );
 }
 
-fn expectModeChangeRestoreUnsupported(
+fn runModeChangeRestore(
     api: agentcore.Api,
     runtime: *wire.RuntimeHandle,
     allowed_tools: *const [4]wire.BytesViewV1,
     seed_permission_mode: u32,
     restored_permission_mode: u32,
     seed_scenario: []const u8,
+    after_scenario: []const u8,
     seed_behavior: UiBehavior,
     expected_seed_ui: u32,
     expected_seed_source: agentcore.protocol.PermissionDecisionSource,
@@ -672,6 +673,8 @@ fn expectModeChangeRestoreUnsupported(
     const storage = try std.heap.c_allocator.alloc(u8, checkpoint_capacity);
     defer std.heap.c_allocator.free(storage);
     const checkpoint = try exportCheckpoint(api, first, storage, &diagnostic);
+    var before = try describeSession(api, first);
+    defer before.deinit();
     try expectOk(api, "mode_seed_destroy", api.session().destroy()(first, &diagnostic), &diagnostic);
 
     const restored_host = makeHost(restored_permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
@@ -702,17 +705,33 @@ fn expectModeChangeRestoreUnsupported(
     const restored = candidate orelse return error.MissingRestoredSession;
     defer _ = api.session().destroy()(restored, null);
     const report_bytes = try agentcore.borrowedBytes(.{ .ptr = report.ptr, .len = report.len });
-    if (agentcore.decodeRestoreReport(std.heap.c_allocator, report_bytes)) |parsed_report| {
-        var parsed = parsed_report;
-        parsed.deinit();
-        return error.ModeChangeRestoreUnexpectedlySupported;
-    } else |err| {
-        if (err != error.InvalidPayload) return err;
-    }
-    if (std.mem.indexOf(u8, report_bytes, "\"health\":\"degraded\"") == null or
-        std.mem.indexOf(u8, report_bytes, "\"issues\":[]") == null)
+    var parsed = try agentcore.decodeRestoreReport(std.heap.c_allocator, report_bytes);
+    defer parsed.deinit();
+    const value = parsed.value;
+    // Neither seed acquires authority that restore must invalidate. A mode
+    // change alone must not fabricate degradation or permission rules.
+    if (value.health != .complete or value.issues.len != 0 or
+        value.permission.restored_rules != 0 or value.permission.invalidated_rules != 0 or
+        !std.mem.eql(u8, value.session_id, before.value.session_id) or
+        value.checkpoint_generation != before.value.checkpoint_generation or
+        value.policy_generation != before.value.policy_generation + 1)
         return error.UnexpectedModeChangeRestoreReport;
-    std.debug.print("scenario=restore_mode_change seed={s} result=unsupported_invalid_report\n", .{seed_scenario});
+    var after = try describeSession(api, restored);
+    defer after.deinit();
+    const expected_mode: agentcore.protocol.PermissionMode = if (restored_permission_mode == wire.PERMISSION_FULL_ACCESS) .full_access else .accept_edits;
+    if (after.value.permission_mode != expected_mode or
+        !std.mem.eql(u8, after.value.session_id, before.value.session_id) or
+        !std.mem.eql(u8, after.value.model, before.value.model) or
+        after.value.last_run_id != before.value.last_run_id or
+        after.value.checkpoint_generation != value.checkpoint_generation or
+        after.value.policy_generation != value.policy_generation or
+        after.value.restore.health != .complete)
+        return error.ModeChangeRestoreLostState;
+    const stop = try run(api, restored, 2, after_scenario, &diagnostic);
+    if (stop != .end_turn and stop != .tool_error) return error.UnexpectedStopReason;
+    const needs_approval = restored_permission_mode == wire.PERMISSION_ACCEPT_EDITS;
+    try expectProbe(&restored_probe, .unavailable, if (needs_approval) 1 else 0, 1, if (needs_approval) .callback else .builtin_classification);
+    std.debug.print("scenario=restore_mode_change seed={s} health=complete mode={s} ui_after={d}\n", .{ seed_scenario, @tagName(after.value.permission_mode), restored_probe.ui_calls });
 }
 
 pub fn main() !void {
@@ -774,6 +793,6 @@ pub fn main() !void {
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant_changed", .allow_session, 1, 1, .unavailable, 0, .callback, .session_allow);
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_deny_seed", "restore_deny_changed", .deny_session, 1, 1, .unavailable, 0, .callback, .session_deny);
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0, .unavailable, 0, .builtin_classification, .builtin_classification);
-    try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS, "restore_full_to_accept_seed", .unavailable, 0, .builtin_classification);
-    try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_FULL_ACCESS, "restore_accept_to_full_seed", .unavailable, 0, .builtin_classification);
+    try runModeChangeRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS, "restore_full_to_accept_seed", "restore_full_to_accept_after", .unavailable, 0, .builtin_classification);
+    try runModeChangeRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_FULL_ACCESS, "restore_accept_to_full_seed", "restore_accept_to_full_after", .unavailable, 0, .builtin_classification);
 }

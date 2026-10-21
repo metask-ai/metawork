@@ -337,11 +337,27 @@ const effects = {
       content: "seed",
     },
   },
+  restore_full_to_accept_after: {
+    tool: "Bash",
+    arguments: {
+      command: createFileCommand(
+        path.join(workspace, "restore-full-to-accept-after.txt"),
+      ),
+    },
+  },
   restore_accept_to_full_seed: {
     tool: "Write",
     arguments: {
       file_path: path.join(workspace, "restore-accept-to-full-seed.txt"),
       content: "seed",
+    },
+  },
+  restore_accept_to_full_after: {
+    tool: "Bash",
+    arguments: {
+      command: createFileCommand(
+        path.join(workspace, "restore-accept-to-full-after.txt"),
+      ),
     },
   },
 };
@@ -572,8 +588,8 @@ pub fn build(b: *std.Build) void {
     { cwd: consumerRoot, label: "isolated AgentCore permission probe" },
   );
   if (requestError) throw requestError;
-  // Four additional Runs plus a Read before the restored Write exercise scope and tool admission.
-  const expectedRequestCount = process.platform === "win32" ? 82 : 86;
+  // Restored Runs verify scope, tool admission and both requested permission modes.
+  const expectedRequestCount = process.platform === "win32" ? 86 : 90;
   if (requestCount !== expectedRequestCount)
     throw new Error(
       `permission probe observed ${requestCount} provider requests instead of ${expectedRequestCount}`,
@@ -610,6 +626,7 @@ pub fn build(b: *std.Build) void {
     path.join(workspace, "restore-full-after.txt"),
     path.join(workspace, "restore-full-to-accept-seed.txt"),
     path.join(workspace, "restore-accept-to-full-seed.txt"),
+    path.join(workspace, "restore-accept-to-full-after.txt"),
     path.join(workspace, "auto-write.txt"),
     path.join(workspace, "auto-bash.txt"),
   ];
@@ -630,6 +647,7 @@ pub fn build(b: *std.Build) void {
     path.join(outside, "sandbox-outside.txt"),
     path.join(workspace, "dont-ask-write.txt"),
     path.join(workspace, "dont-ask-bash.txt"),
+    path.join(workspace, "restore-full-to-accept-after.txt"),
   ];
   for (const file of expectedPresent) {
     if (!(await exists(file)))
