@@ -5629,6 +5629,10 @@ pub const Runtime = struct {
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
+        // A completed history writer can confirm a restore candidate. Consume
+        // it before Task reconciliation so this wake also installs/rejects the
+        // candidate; snapshot reads never supply another lifecycle turn.
+        changed = self.syncApprovalChanges() or changed;
         const task_sync = self.task_runtime.reconcileLifecycle(.{
             .max_title_bytes = self.limits.max_task_title_bytes,
             .text = self.taskRuntimeTextProjection(),
@@ -5642,6 +5646,7 @@ pub const Runtime = struct {
         });
         changed = task_sync.changed or changed;
         changed = self.syncInitialAutomaticCatalogsNoFail() or changed;
+        // Reconciled Task facts can in turn unblock an approval transition.
         changed = self.syncApprovalChanges() or changed;
         var durable_changed = task_sync.durable_changed;
         if (self.finalizeWorkspaceRemovalsNoFail()) {

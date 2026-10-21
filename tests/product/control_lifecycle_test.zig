@@ -8932,8 +8932,8 @@ test "recovery binding confirmation retains candidates and never writes on the m
             return true;
         }
     };
-    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false, reject_model: bool = false, cancel_candidate: bool = false }{
-        .{ .result = .committed },
+    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false, reject_model: bool = false, cancel_candidate: bool = false, single_wake: bool = false }{
+        .{ .result = .committed, .single_wake = true },
         .{ .result = .committed, .reject_model = true },
         .{ .result = .committed, .cancel_candidate = true },
         .{ .result = .committed, .cancel_binding = true },
@@ -9123,6 +9123,25 @@ test "recovery binding confirmation retains candidates and never writes on the m
         try std.testing.expectEqual(main_commits, history.main_commits);
         if (case.close_failure) fake_core.failNextSessionDestroy();
         history.released.store(true, .release);
+        if (case.single_wake) {
+            const writer = pending: {
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
+                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                return error.TestUnexpectedResult;
+            };
+            for (0..2000) |_| {
+                if (writer.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(writer.completionReady());
+            // Application consumes the writer's one completion wake. No
+            // Renderer read or extra lifecycle poll may be needed to install.
+            try control.drainAgentEvents();
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(task.runtime.hasAttachedSession());
+            try std.testing.expectEqual(@as(u64, 2), task.durable.binding_epoch);
+            try std.testing.expectEqual(.none, task.runtime.active_operation);
+        }
         if (case.hold_close) {
             for (0..2000) |_| {
                 control.syncLifecycle();
