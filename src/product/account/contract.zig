@@ -6,6 +6,22 @@
 
 const std = @import("std");
 
+/// Host projection inspection only. Account retains ownership; visitors may
+/// make bounded read-preparation copies, never retain a borrowed token.
+pub const AccessTokenProjection = struct {
+    context: *anyopaque,
+    generation_fn: *const fn (*anyopaque) u64,
+    visit_fn: *const fn (*anyopaque, *anyopaque, *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void,
+
+    pub fn generation(self: AccessTokenProjection) u64 {
+        return self.generation_fn(self.context);
+    }
+
+    pub fn visit(self: AccessTokenProjection, context: *anyopaque, visitor: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+        return self.visit_fn(self.context, context, visitor);
+    }
+};
+
 pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;

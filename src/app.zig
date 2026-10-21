@@ -227,6 +227,7 @@ const App = struct {
             @panic("Models coordinator is not composed");
         // run() only reserves Product storage; Runtime.init above must finish
         // before installing capabilities that initialization would overwrite.
+        control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
@@ -708,6 +709,7 @@ pub fn run(init: std.process.Init) !void {
     defer {
         app.models_coordinator = null;
         app.account_coordinator = null;
+        if (app.control_initialized) control.clearAccountProjectionCredentials();
         account_runtime.deinit();
     }
 

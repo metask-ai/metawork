@@ -10585,35 +10585,46 @@ test "image Run follow-up resolves the next configuration and admission rollback
 }
 
 test "image Run duplicate bearer ownership does not revoke the Renderer on admission completion or rejection" {
-    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
-    defer scenario.deinit();
-    fake_core.releaseControlled();
-    try settleInputScenario(scenario);
-    var image: ImageAdmissionProbe = .{ .secret = "fixture-secret" };
-    scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
-    defer scenario.control.setImageRunPreparation(null);
-    const epoch = scenario.control.projectionSecurityEpoch();
-    for (0..2) |index| {
-        fake_core.rearmControlled();
-        _ = try scenario.control.runTask(scenario.task_id, .{ .text = "ordinary message with image capability" });
-        try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
-        try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+    for ([_]bool{ false, true }) |account_owned| {
+        const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+        defer scenario.deinit();
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
-        // Product terminal may precede the last worker lease (for example the
-        // automatic title). Observe the actual image-owner release boundary.
-        for (0..5000) |_| {
-            try scenario.control.drainAgentEvents();
-            if (image.released == index + 1) break;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        const Account = struct {
+            fn generation(_: *anyopaque) u64 {
+                return 1;
+            }
+            fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+                try callback(context, "account-image-token");
+            }
+        };
+        var image: ImageAdmissionProbe = .{ .secret = if (account_owned) "account-image-token" else "fixture-secret" };
+        if (account_owned) scenario.control.setAccountProjectionCredentials(.{ .context = &image, .generation_fn = Account.generation, .visit_fn = Account.visit });
+        scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+        defer scenario.control.setImageRunPreparation(null);
+        const epoch = scenario.control.projectionSecurityEpoch();
+        for (0..2) |index| {
+            fake_core.rearmControlled();
+            _ = try scenario.control.runTask(scenario.task_id, .{ .text = "ordinary message with image capability" });
+            try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+            try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+            fake_core.releaseControlled();
+            try settleInputScenario(scenario);
+            // Product terminal may precede the last worker lease (for example the
+            // automatic title). Observe the actual image-owner release boundary.
+            for (0..5000) |_| {
+                try scenario.control.drainAgentEvents();
+                if (image.released == index + 1) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(index + 1, image.released);
+            try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
         }
-        try std.testing.expectEqual(index + 1, image.released);
+        try std.testing.expectEqual(@as(usize, 2), image.released);
+        try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
         try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+        image.secret = "new-image-bearer";
+        try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
+        try std.testing.expectEqual(epoch + 1, scenario.control.projectionSecurityEpoch());
     }
-    try std.testing.expectEqual(@as(usize, 2), image.released);
-    try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
-    try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
-    image.secret = "new-image-bearer";
-    try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
-    try std.testing.expectEqual(epoch + 1, scenario.control.projectionSecurityEpoch());
 }

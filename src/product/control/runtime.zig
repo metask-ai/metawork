@@ -1237,6 +1237,8 @@ pub const Runtime = struct {
     view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize } = @splat(null),
     projection_history_epoch: u64 = 1,
     view_credentials: ?[]const []const u8 = null,
+    account_credentials: ?account_contract.AccessTokenProjection = null,
+    account_credential_generation: u64 = 0,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
@@ -2147,6 +2149,7 @@ pub const Runtime = struct {
             return true;
         const codepoint_len = utf8CodepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
+            if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
                 value[codepoint_start + offset ..],
             )) return true;
@@ -2610,6 +2613,7 @@ pub const Runtime = struct {
         self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
+        self.syncAccountProjectionCredentialNoFail();
         self.account_projection.commitNoFail(fact);
     }
 
@@ -6512,6 +6516,7 @@ pub const Runtime = struct {
         defer self.capture_view = null;
         self.view_preparation.credentials = .{ .allocator = self.allocator };
         const credentials = &self.view_preparation.credentials.?;
+        if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
         try credentials.add(self.execution_state.credential());
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         self.view_credentials = credentials.values.items;
@@ -8961,10 +8966,74 @@ pub const Runtime = struct {
         self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
+    pub fn setAccountProjectionCredentials(self: *Runtime, source: account_contract.AccessTokenProjection) void {
+        std.debug.assert(self.account_credentials == null);
+        self.account_credentials = source;
+        self.syncAccountProjectionCredentialNoFail();
+    }
+
+    pub fn clearAccountProjectionCredentials(self: *Runtime) void {
+        const source = self.account_credentials orelse return;
+        source.visit(self, scrubAccountCredential) catch unreachable;
+        self.account_credentials = null;
+        self.account_credential_generation = 0;
+        self.invalidateProjectionSecurity();
+    }
+
+    fn syncAccountProjectionCredentialNoFail(self: *Runtime) void {
+        const source = self.account_credentials orelse return;
+        const generation = source.generation();
+        if (generation == self.account_credential_generation) return;
+        self.account_credential_generation = generation;
+        self.invalidateProjectionSecurity();
+        source.visit(self, scrubAccountCredential) catch unreachable;
+    }
+
+    fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    const AccountCredentialQuery = struct {
+        value: []const u8,
+        releasing: ?[*]const u8 = null,
+        kind: enum { retained, contains, prefix, continuation },
+        matched: usize = 0,
+
+        fn visit(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (credential.len == 0) return;
+            const matches = switch (self.kind) {
+                .retained => (self.releasing == null or self.releasing.? != credential.ptr) and std.mem.eql(u8, self.value, credential),
+                .contains => std.mem.indexOf(u8, self.value, credential) != null,
+                .prefix => std.mem.startsWith(u8, self.value, credential),
+                .continuation => self.value.len < credential.len and std.mem.startsWith(u8, credential, self.value),
+            };
+            if (matches) self.matched = @max(self.matched, credential.len);
+        }
+    };
+
+    fn accountCredentialQuery(self: *const Runtime, query: AccountCredentialQuery) AccountCredentialQuery {
+        var result = query;
+        if (self.account_credentials) |source| source.visit(&result, AccountCredentialQuery.visit) catch unreachable;
+        return result;
+    }
+
+    const AccountCredentialRedaction = struct {
+        value: []u8,
+        changed: bool = false,
+
+        fn visit(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.changed = redactFixedWidthNoFail(self.value, credential) or self.changed;
+        }
+    };
+
     fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
         if (credential.len == 0) return false;
         const installed = self.execution_state.credential();
         if ((releasing == null or installed.ptr != releasing.?) and std.mem.eql(u8, installed, credential)) return true;
+        if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
         return self.task_runtime.retainsCredential(credential, releasing);
     }
 
@@ -9341,6 +9410,7 @@ pub const Runtime = struct {
         }
         const current = self.execution_state.credential();
         if (containsKnownSecret(value, current)) return true;
+        if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
@@ -9356,7 +9426,9 @@ pub const Runtime = struct {
             value,
             redactFixedWidthNoFail,
         ) or changed;
-        return changed;
+        var account_redaction: AccountCredentialRedaction = .{ .value = value };
+        if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
+        return account_redaction.changed or changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -9373,6 +9445,7 @@ pub const Runtime = struct {
         const current = self.execution_state.credential();
         if (current.len != 0 and std.mem.startsWith(u8, value, current))
             longest = current.len;
+        longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
@@ -20637,4 +20710,77 @@ test "Product view failed formatter stage releases partially prepared source and
     try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
     try std.testing.expect(control.view_preparation.credentials == null);
     try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+}
+
+test "Account image token protects Custom Provider views between Runs and rotation revokes reads" {
+    const Account = struct {
+        token: []const u8 = "account-image-token",
+        epoch: u64 = 1,
+        fn generation(context: *anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.epoch;
+        }
+        fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try callback(visitor_context, self.token);
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var execution = try models_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .custom_provider,
+        .openai_chat_completions,
+        try std.testing.allocator.dupe(u8, "custom-model"),
+        try std.testing.allocator.dupe(u8, "https://custom.example/v1/chat/completions"),
+        2,
+        try std.testing.allocator.dupe(u8, "custom-api-key"),
+        "fixture-provider",
+    );
+    errdefer execution.deinit();
+    var binding = try control.prepareCustomProviderBinding("provider-1", "custom-model");
+    try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionInstall(execution.input());
+    control.installCustomProviderExecutionNoFail(&execution, &binding);
+    control.endExecutionReplacementNoFail();
+    try std.testing.expectEqual(models_contract.Source.custom_provider, control.execution_state.activeSource().?);
+    var account: Account = .{};
+    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    try std.testing.expect(!std.mem.eql(u8, account.token, control.execution_state.credential()));
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"account-tool\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo account\\\\u002dimage-token\\\"}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    const epoch = control.projectionSecurityEpoch();
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const len = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, &output, offset, len);
+        offset += len;
+    }
+    const projected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+    defer projected.deinit();
+    const tool = projected.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+    try std.testing.expectEqualStrings("echo ***", tool.object.get("bash").?.object.get("command").?.string);
+    const duplicate = try control.allocator.dupe(u8, account.token);
+    defer control.allocator.free(duplicate);
+    control.learnProjectionCredential(duplicate);
+    control.retireProjectionCredential(duplicate);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expect(control.containsKnownCredential("prefix account-image-token suffix"));
+    var raw = "account-image-token".*;
+    try std.testing.expect(control.redactWithKnownCredentialsNoFail(&raw));
+    var writer = std.Io.Writer.fixed(&output);
+    try control.projectedJsonValueWithKnownCredentials(&writer, "account-image-token");
+    try std.testing.expectEqualStrings("\"***\"", writer.buffered());
+    account.token = "rotated-account-image-token";
+    account.epoch += 1;
+    control.syncAccountProjectionCredentialNoFail();
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
+    control.syncAccountProjectionCredentialNoFail();
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
 }
