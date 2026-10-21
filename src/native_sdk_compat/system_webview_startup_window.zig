@@ -29,3 +29,12 @@ const Platform = switch (builtin.os.tag) {
 
 pub const Binding = Platform.Binding;
 pub const Capture = Platform.Capture;
+
+pub const TestSupport = if (builtin.is_test) struct {
+    pub const Window = if (builtin.os.tag == .windows) Platform.TestSupport.Window else struct {
+        pub fn init() !@This() {
+            return .{};
+        }
+        pub fn deinit(_: @This()) void {}
+    };
+} else struct {};

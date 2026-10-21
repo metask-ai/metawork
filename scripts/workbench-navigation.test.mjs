@@ -1,3 +1,4 @@
+import { productStateFixture } from "./test-support/product-view-fixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -478,6 +479,17 @@ test("global search finds product content and deliberately excludes raw tool out
       task({ id: "9", workspaceId: "9", title: "Automatic report" }),
     ],
   };
+  Object.assign(
+    snapshot,
+    productStateFixture(snapshot, {
+      taskId: null,
+      beforeRunId: null,
+      runLimit: 4,
+      management: "none",
+      search: true,
+      receipts: [],
+    }),
+  );
   assert.deepEqual(searchWorkbench(snapshot, "alpha"), []);
   assert.equal(searchWorkbench(snapshot, "audit")[0].kind, "task");
   assert.equal(searchWorkbench(snapshot, "readiness")[0].kind, "instruction");

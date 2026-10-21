@@ -1,0 +1,80 @@
+{
+  "id": "E-WIN-PROJECTION-BRANCH-CLOSEOUT-20261021",
+  "date": "2026-10-21T10:58:17+08:00",
+  "branch": "feat/scoped-product-projection",
+  "reviewed_head": "4e6f90f1fa0f705b748eaea3c53832117200df31",
+  "implementation_head": "19a4b14317d5cec65acf91f8969009d7370dd663",
+  "verdict": "APPROVE",
+  "verdict_scope": "Code review closeout only. No directly evidenced P0/P1 correctness finding remains. Original performance acceptance is still unclosed and merge is not approved or performed.",
+  "review_method": "Codex cumulative self-review: verify prior findings and prior review, inspect the subsequent three-file cache ownership diff and relevant lifecycle/Plan code, and bind the recorded verification to unchanged source hashes. No independent reviewer or fresh full-branch review run is claimed.",
+  "blocking_code_findings": [],
+  "resolved_findings": [
+    "Account-owned image bearer remains known under Custom Provider; real image Run admission/release preserves security epoch.",
+    "Equal execution authority reinstall preserves views; actual authority changes still revoke.",
+    "History pages remain contiguous with Run content versions; loaded panel identities and reading anchors survive scoped replacement.",
+    "Wire scalars reject coercions; withdrawn transport reads cancel the exact Product plan.",
+    "Committed-command refresh follows the installed consumer scope without command replay.",
+    "Warm cache payload ownership moves into frozen Product reads; cold publication copies only newly encoded quantum intersections.",
+    "Evidence archives preserve failed samples and exact source/artifact identities."
+  ],
+  "responsibility_boundaries": {
+    "execution": "Product lifecycle owns event consumption, queue advancement, permissions and Run terminal progression independently of Renderer reads.",
+    "projection": "Product owns sanitization, immutable scoped read plans, versions, bounded preparation/encoding, cache and cancellation.",
+    "transport": "Bridge validates typed requests and carries read identity/state/bytes; it does not advance business execution.",
+    "rendering": "Renderer owns consumer scopes, rendering and ephemeral reading/panel state; Host remains the history and execution authority."
+  },
+  "scope_conclusion": "No demonstrated over-expansion requiring removal. No new worker, second transport, SDK patch, persisted-format change, event-pump relaxation or performance Gate relaxation.",
+  "evidence": [
+    {
+      "path": "docs/evidence/projection-review-followup-code-review-20261021.json",
+      "sha256": "fc80a73a7fe6af7b2503afc49d190cd73eb685c2674ee9f4d10451e4765a911a"
+    },
+    {
+      "path": "docs/evidence/projection-review-followup-windows-20261021.json",
+      "sha256": "525bde8d8a919e5b9f24e3019e7d9ec2eda8715c9c9618c150cddd6bb9d09967"
+    },
+    {
+      "path": "docs/evidence/projection-cache-ownership-windows-20261021.json",
+      "sha256": "92a02e2a05b5ead540e7970049a25a53c657eabc309f7a8df33072e3ccb6aefd"
+    }
+  ],
+  "source_identity_check": {
+    "records": 18,
+    "mismatches": 0
+  },
+  "verification_summary": {
+    "latest_native": {
+      "passed": 1305,
+      "skipped": 5,
+      "failed": 0
+    },
+    "latest_image_product": {
+      "passed": 6,
+      "failed": 0
+    },
+    "latest_wire_client": {
+      "passed": 10,
+      "failed": 0
+    },
+    "unchanged_renderer": {
+      "passed": 850,
+      "skipped": 8,
+      "failed": 0,
+      "typecheck": "passed",
+      "source": "prior measurement, with source identities rechecked"
+    },
+    "latest_windows_stress": "passed: four live streams, 18 historical Runs, stop/disconnect/recovery/quit",
+    "this_closeout": "Evidence/source hashes and raw archive checked. Only this closeout record is added; runtime tests and timing experiments are not repeated."
+  },
+  "remaining_acceptance": {
+    "status": "not_closed_original_wall_gate",
+    "debug_failed_cases": 2,
+    "release_fast_failed_cases": 1,
+    "diagnosis": "deferred by user; exact cause of remaining long wall steps is unproven",
+    "thresholds_and_samples": "unchanged and retained",
+    "dag": "7966 and parent 7943 remain open; dependent final acceptance 7944 and root 7939 remain open. This code review does not bypass those dependencies.",
+    "goal": "paused; no completion claim",
+    "continuation": "Resume only the original performance acceptance work when requested, rather than reopening resolved code findings without a concrete regression."
+  },
+  "delivery": "Code changes and evidence committed on the existing branch. No merge, push, PR or branch deletion."
+}

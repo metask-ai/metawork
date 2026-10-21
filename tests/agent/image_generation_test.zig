@@ -1280,27 +1280,31 @@ const image_product = struct {
 };
 
 test "GenerateImage canonical Product Run freezes authorization and restores without image authority" {
-    try expectCanonicalImageProduct("success", false);
+    try expectCanonicalImageProduct("success", false, true);
 }
 
 test "GenerateImage canonical Product preserves JPEG and WebP files and receipts" {
-    try expectCanonicalImageProduct("jpeg", false);
-    try expectCanonicalImageProduct("webp", false);
+    try expectCanonicalImageProduct("jpeg", false, true);
+    try expectCanonicalImageProduct("webp", false, true);
 }
 
 test "GenerateImage canonical Product reads a full-size image through Core and restores its receipt without Base64 history" {
-    try expectCanonicalImageProduct("read-large", false);
+    try expectCanonicalImageProduct("read-large", false, true);
 }
 
 test "GenerateImage canonical Product stop joins image HTTP and releases its owned preparation" {
-    try expectCanonicalImageProduct("hold", false);
+    try expectCanonicalImageProduct("hold", false, true);
 }
 
 test "GenerateImage canonical Product sends the eligible fallback model when the default is absent" {
-    try expectCanonicalImageProduct("success", true);
+    try expectCanonicalImageProduct("success", true, true);
 }
 
-fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
+test "GenerateImage canonical Product keeps projection authority stable with Custom Provider and logged-in Metask" {
+    try expectCanonicalImageProduct("success", false, false);
+}
+
+fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_admission: bool) !void {
     var h: Harness = undefined;
     try h.init(mode, .{ .timeout_ms = 10000 });
     defer h.deinit();
@@ -1332,6 +1336,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     var control_live = true;
     defer if (control_live) control.deinit();
+    control.setAccountProjectionCredentials(account.accessTokenProjection());
     try control.startCustomProviders(h.root, effects.vault());
     const large_read = std.mem.eql(u8, mode, "read-large");
     try image_product.configureDialogue(&control, h.fixture.provider_endpoint, large_read);
@@ -1367,18 +1372,24 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
         defer access.deinit();
         try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
+    try std.testing.expectEqual(.custom_provider, control.execution_state.activeSource().?);
+    const projection_epoch = control.projectionSecurityEpoch();
     const first_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
+    if (!logout_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     const task = control.task_runtime.find(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
     // The Core cannot send the image request before manual once approval.
     try std.testing.expectEqual(@as(usize, 0), effects.image_calls.load(.acquire));
-    control.custom_providers.setMetaskAuthorizationUnavailable();
-    var logout = image_product.account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
-    defer logout.deinit();
-    account.commit(&logout);
-    coordinator.authorizationChanged();
+    if (logout_after_admission) {
+        control.custom_providers.setMetaskAuthorizationUnavailable();
+        var logout = image_product.account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
+        defer logout.deinit();
+        account.commit(&logout);
+        coordinator.authorizationChanged();
+    }
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
+    if (!logout_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     try std.testing.expect(task.durable.checkpoint != null);
     if (!cancelled) try expectProductGeneratedImagePreview(&control, task_id, first_id);
     try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));
@@ -1419,7 +1430,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     }
     try std.testing.expectEqual(@as(usize, if (cancelled) 0 else 1), files);
     var snapshot: [256 * 1024]u8 = undefined;
-    const encoded = try control.writeSnapshot(&snapshot);
+    const encoded = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "synthetic-image-key") == null);
     if (large_read) {
         try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"model_image\""));
@@ -1455,6 +1466,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool) !void {
     configuration.task_persistence.restored_bytes = restored;
     control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     control_live = true;
+    control.setAccountProjectionCredentials(account.accessTokenProjection());
     try control.startCustomProviders(h.root, effects.vault());
     coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(effects.imageTransport());
@@ -1595,6 +1607,6 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
     try std.testing.expect(capture.image_len > 0);
     var snapshot: [256 * 1024]u8 = undefined;
-    const json = try control.writeSnapshot(&snapshot);
+    const json = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);
 }

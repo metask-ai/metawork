@@ -7,6 +7,7 @@ import {
 } from "./wire-codec.ts";
 export const maxSnapshotBytes = 67108864;
 export const maxSnapshotChunkBytes = 262144;
+export const maxSnapshotPreparationSteps = 2048;
 export const approvalFailureReasons = [
   "cancelled",
   "busy",
@@ -18,6 +19,20 @@ export const approvalFailureReasons = [
   "recovery_failed",
   "dependency_contract",
 ] as const;
+export type SnapshotPreparing = {
+  snapshotId: string;
+  phase: "preparing";
+};
+export function decodeSnapshotPreparing(
+  value: unknown,
+  path: string,
+): SnapshotPreparing {
+  const item = object(value, path, ["snapshotId", "phase"]);
+  return {
+    snapshotId: positiveWireId(item.snapshotId, path + ".snapshotId"),
+    phase: enumValue(item.phase, path + ".phase", ["preparing"] as const),
+  };
+}
 export type SnapshotDescriptor = {
   snapshotId: string;
   bytes: number;

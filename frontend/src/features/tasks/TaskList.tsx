@@ -1,6 +1,6 @@
 import { useRef, useState, type MouseEvent } from "react";
 
-import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
+import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
@@ -22,14 +22,14 @@ export function TaskList({
   synchronized = true,
   retainedTaskCount = 0,
 }: {
-  tasks: TaskView[];
+  tasks: TaskSummary[];
   workspaces: WorkspaceView[];
   activeTaskId: string | null;
   suppressedCompletionTaskId?: string | null;
   showArchived: boolean;
   onSelectTask: (id: string) => void;
   onToggleArchived: () => void;
-  onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
+  onTaskAction: (task: TaskSummary, action: TaskMenuAction) => void;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
   retainedTaskCount?: number;
@@ -52,8 +52,7 @@ export function TaskList({
     menuTaskId === null
       ? null
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
-  const menuTaskReadOnly =
-    menuTask?.continuationUnavailableReason === "history_read_only";
+  const menuTaskReadOnly = menuTask?.historyReadOnly === true;
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
@@ -61,7 +60,7 @@ export function TaskList({
     setMenuTaskId(taskId);
   }
 
-  function renderTask(task: TaskView) {
+  function renderTask(task: TaskSummary) {
     return (
       <button
         key={task.id}
@@ -233,7 +232,7 @@ export function TaskSignals({
   showCompleted = true,
   synchronized = true,
 }: {
-  task: TaskView;
+  task: TaskSummary;
   completionSuppressed?: boolean;
   showCompleted?: boolean;
   synchronized?: boolean;

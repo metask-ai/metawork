@@ -9,6 +9,7 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  ViewScope,
   McpHttpConnectionInput,
   McpSecretSlot,
   McpStdioConnectionInput,
@@ -77,6 +78,7 @@ import {
   decodeExternalLinkOpenResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
+import { ViewCache } from "./snapshot/view-cache.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 import { AttachmentAddOperation } from "./attachment-receive.ts";
 
@@ -107,6 +109,7 @@ export type BridgeClientOptions = {
 };
 
 export class BridgeClient {
+  private readonly viewCache = new ViewCache();
   private readonly bridgeOverride?: NativeBridge;
   private readonly commandTimeoutMs: number;
   private attachmentConnection:
@@ -164,12 +167,16 @@ export class BridgeClient {
   }
 
   onWorkbenchRevision(
-    consume: (revision: string) => void,
+    consume: (revision: string, securityEpoch: string) => void,
     reject: (error: unknown) => void,
   ) {
     return this.bridge().on<unknown>(events.workbench, (value) => {
       try {
-        consume(decodeRevisionNotification(value));
+        const notification = decodeRevisionNotification(value);
+        if (notification.generation !== this.attachmentConnection?.generation)
+          return;
+        this.viewCache.observeSecurityEpoch(notification.securityEpoch);
+        consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
       }
@@ -190,6 +197,7 @@ export class BridgeClient {
   }
 
   async connect() {
+    this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
       contractId: RENDERER_BRIDGE_CONTRACT_ID,
       contractRevision: RENDERER_BRIDGE_CONTRACT_REVISION,
@@ -225,6 +233,7 @@ export class BridgeClient {
   }
 
   async disconnect(generation: string) {
+    this.viewCache.clear();
     if (this.attachmentConnection?.generation === generation)
       this.attachmentConnection = undefined;
     assertDisconnected(
@@ -233,9 +242,11 @@ export class BridgeClient {
     );
   }
 
-  fetchSnapshot() {
-    return fetchWorkbenchSnapshot((command, payload) =>
-      this.invoke(command, payload),
+  fetchSnapshot(scope: ViewScope) {
+    return fetchWorkbenchSnapshot(
+      (command, payload) => this.invoke(command, payload),
+      scope,
+      this.viewCache,
     );
   }
 

@@ -1,4 +1,8 @@
-import type { FileReferenceView, TaskView } from "../../bridge/contracts.ts";
+import type {
+  FileReferenceView,
+  TaskView,
+  RunManifest,
+} from "../../bridge/contracts.ts";
 import { findRunFileReference } from "../../workbench/run-file-references.ts";
 
 type RunTarget = { taskId: string; runId: string };
@@ -89,10 +93,13 @@ function resolveTaskPanelTab(
   tab: TaskPanelTab,
   task: TaskView | null,
   typedFileChanges: boolean,
+  manifest?: readonly RunManifest[],
 ): TaskPanelTab | null {
   if (!task || tab.taskId !== task.id) return null;
   const run = task.runs.find((candidate) => candidate.id === tab.runId);
-  if (!run) return null;
+  if (tab.kind === "review" && !typedFileChanges) return null;
+  if (!run)
+    return manifest?.some((entry) => entry.id === tab.runId) ? tab : null;
   if (tab.kind === "preview") {
     const reference = findRunFileReference(run, tab.referenceId);
     return reference
@@ -122,12 +129,13 @@ export function reconcileTaskPanelSession(
   session: TaskPanelSession,
   task: TaskView | null,
   typedFileChanges: boolean,
+  manifest?: readonly RunManifest[],
 ): TaskPanelSession {
   if (!task || session.taskId !== task.id) return emptyTaskPanelSession;
 
   const resolved = new Map<string, TaskPanelTab>();
   for (const tab of session.tabs) {
-    const next = resolveTaskPanelTab(tab, task, typedFileChanges);
+    const next = resolveTaskPanelTab(tab, task, typedFileChanges, manifest);
     if (next) resolved.set(tab.tabId, next);
   }
   const tabs = session.tabs.flatMap((tab) => {
@@ -167,13 +175,14 @@ export function openTaskPanelTab(
   next: TaskPanelTab,
   task: TaskView | null,
   typedFileChanges: boolean,
+  manifest?: readonly RunManifest[],
 ): TaskPanelSession {
   const resolved = resolveTaskPanelTab(next, task, typedFileChanges);
   if (!resolved)
-    return reconcileTaskPanelSession(session, task, typedFileChanges);
+    return reconcileTaskPanelSession(session, task, typedFileChanges, manifest);
   const current =
     session.taskId === resolved.taskId
-      ? reconcileTaskPanelSession(session, task, typedFileChanges)
+      ? reconcileTaskPanelSession(session, task, typedFileChanges, manifest)
       : { taskId: resolved.taskId, tabs: [], activeTabId: null };
   const existingIndex =
     resolved.kind === "review"

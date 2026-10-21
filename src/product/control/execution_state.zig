@@ -435,6 +435,16 @@ pub const State = struct {
         };
     }
 
+    /// Execution/model generations may advance on catalog refresh without
+    /// changing the secret or its source/target security boundary.
+    pub fn projectionAuthorityMatches(self: *const State, input: models_contract.ConfigInput, source: models_contract.Source, custom_provider_id: ?[]const u8) bool {
+        if (self.activeSource() != source or self.execution.protocol != input.target.protocol) return false;
+        if (custom_provider_id) |id| if (!std.mem.eql(u8, self.selectedCustomProviderId(), id)) return false;
+        return std.mem.eql(u8, self.execution.credential(), input.api_key) and
+            std.mem.eql(u8, self.execution.providerId(), input.target.provider_id) and
+            std.mem.eql(u8, self.execution.baseUrl(), input.target.base_url);
+    }
+
     pub fn credential(self: *const State) []const u8 {
         return self.execution.credential();
     }

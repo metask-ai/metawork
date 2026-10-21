@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
+import {
+  WorkbenchConnection,
+  WorkbenchScopeSupersededError,
+} from "../frontend/src/bridge/connection.ts";
 import { RendererBridgeContractError } from "../frontend/src/bridge/client.ts";
+import { initialViewScope } from "../frontend/src/bridge/contracts.ts";
 import {
   connectionFailurePresentation,
   connectionStatus,
@@ -16,6 +20,7 @@ globalThis.window ??= {
 function snapshot(revision, tasks = []) {
   return {
     revision,
+    securityEpoch: "1",
     account: {
       state: "signed_out",
       catalogState: "unavailable",
@@ -517,7 +522,11 @@ function fixture(fetchSnapshot = async () => snapshot("1")) {
     },
     fetchSnapshot: () => {
       reads++;
-      return fetchSnapshot({ reads, generation, notify });
+      return fetchSnapshot({
+        reads,
+        generation,
+        notify: (value, epoch = "1") => notify(value, epoch),
+      });
     },
     ping: async () => {
       pings++;
@@ -542,7 +551,7 @@ function fixture(fetchSnapshot = async () => snapshot("1")) {
     failures,
     generations,
     disconnected,
-    notify: (value) => notify(value),
+    notify: (value, epoch = "1") => notify(value, epoch),
     rejectNotification: (value) => rejectNotification(value),
     signal: (value) => signal(value),
     reads: () => reads,
@@ -570,7 +579,7 @@ test("moving notification targets do not fail successful reads or delay first co
   let remaining = 12;
   const gates = [];
   const f = fixture(({ reads, notify }) => {
-    if (remaining-- > 0) notify(String(reads + 1));
+    if (remaining-- > 0) notify(String(reads + 1), "1");
     const gate = deferred();
     gates.push(gate);
     return gate.promise.then(() => snapshot(String(reads)));
@@ -945,4 +954,248 @@ test("contract failures are bootstrap failures only until a view has been truste
   assert.equal(f.statuses.at(-1).failure, "snapshot_contract_failed");
   assert.equal(f.statuses.at(-1).source, "snapshot");
   await f.connection.stop();
+});
+
+test("scope changes discard old reads and serialize a single merged follow-up", async () => {
+  const reads = [];
+  const published = [];
+  let active = 0;
+  let maximum = 0;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: async (scope) => {
+      maximum = Math.max(maximum, ++active);
+      if (reads.length === 0) {
+        reads.push({ scope });
+        active--;
+        return { ...snapshot("1"), scope };
+      }
+      return new Promise((resolve) =>
+        reads.push({
+          scope,
+          release: (revision) => {
+            active--;
+            resolve({ ...snapshot(revision), scope });
+          },
+        }),
+      );
+    },
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => published.push(view.scope),
+    onStatus: () => {},
+    onReady: () => {},
+    onViewSyncFailed: () => {},
+  });
+  await connection.start();
+  const a = connection.setScope({ ...initialViewScope, taskId: "3" });
+  const rejectedA = assert.rejects(a, WorkbenchScopeSupersededError);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads.length, 2);
+  const b = connection.setScope({ ...initialViewScope, taskId: "4" });
+  await rejectedA;
+  assert.equal(reads.length, 2);
+  reads[1].release("2");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads.length, 3);
+  reads[2].release("2");
+  await b;
+  assert.deepEqual(
+    published.map((scope) => scope.taskId),
+    [null, "4"],
+  );
+  assert.equal(maximum, 1);
+  await connection.stop();
+});
+
+test("security notifications clear published state immediately and discard an old in-flight candidate", async () => {
+  const old = deferred();
+  let notify;
+  let reads = 0;
+  const observed = [],
+    invalidated = [],
+    ready = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: (consume) => {
+      notify = consume;
+      return () => {};
+    },
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: () =>
+      ++reads === 1
+        ? Promise.resolve(snapshot("1"))
+        : reads === 2
+          ? old.promise
+          : Promise.resolve({ ...snapshot("2"), securityEpoch: "2" }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => observed.push([view.revision, view.securityEpoch]),
+    onSecurityInvalidated: (epoch) => invalidated.push(epoch),
+    onReady: (value) => ready.push(value),
+    onStatus: () => {},
+    onViewSyncFailed: () => {},
+  });
+  await connection.start();
+  const refreshing = connection.refresh();
+  await flush();
+  assert.equal(reads, 2);
+  notify("2", "2");
+  assert.equal(invalidated.at(-1), "2");
+  assert.equal(ready.at(-1), false);
+  old.resolve(snapshot("2"));
+  await refreshing;
+  assert.deepEqual(observed, [
+    ["1", "1"],
+    ["2", "2"],
+  ]);
+  assert.equal(reads, 3);
+  assert.equal(ready.at(-1), true);
+  await connection.stop();
+});
+
+test("navigation during bootstrap follows the current scope without converting cancellation into connection failure", async () => {
+  const reads = [],
+    published = [],
+    statuses = [],
+    ready = [];
+  let active = 0,
+    maximum = 0,
+    pings = 0;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {
+      pings++;
+    },
+    fetchSnapshot: (scope) =>
+      new Promise((resolve) => {
+        maximum = Math.max(maximum, ++active);
+        reads.push({
+          scope,
+          release: () => {
+            active--;
+            resolve({ ...snapshot("1"), scope });
+          },
+        });
+      }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => published.push(view.scope.management),
+    onStatus: (status) => statuses.push(status),
+    onReady: (value) => ready.push(value),
+    onViewSyncFailed: () => {},
+  });
+  const startup = connection.start();
+  await flush();
+  assert.equal(reads.length, 1);
+  const oldRefresh = connection.refresh();
+  let refreshed = false;
+  void oldRefresh.then(() => {
+    refreshed = true;
+  });
+  const navigation = connection.setScope({
+    ...initialViewScope,
+    management: "skills",
+  });
+  assert.equal(refreshed, false);
+  reads[0].release();
+  await flush();
+  assert.equal(reads.length, 2);
+  assert.equal(pings, 0);
+  assert.equal(reads[1].scope.management, "skills");
+  reads[1].release();
+  await Promise.all([startup, navigation, oldRefresh]);
+  assert.equal(refreshed, true);
+  assert.deepEqual(published, ["skills"]);
+  assert.equal(statuses.at(-1).kind, "connected");
+  assert.equal(ready.at(-1), true);
+  assert.equal(pings, 1);
+  assert.equal(maximum, 1);
+  await connection.stop();
+});
+
+test("committed model refresh follows history refills and completes the second CAS from the installed context", async () => {
+  const reads = [],
+    committed = [],
+    published = [];
+  let current,
+    finished = false;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: (scope) =>
+      new Promise((resolve) => reads.push({ scope, resolve })),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => {
+      current = view;
+      published.push(view);
+    },
+    onStatus: () => {},
+    onReady: () => {},
+    onViewSyncFailed: () => {},
+  });
+  const start = connection.start();
+  await flush();
+  reads[0].resolve({
+    ...snapshot("1"),
+    scope: reads[0].scope,
+    selectionRevision: "1",
+  });
+  await start;
+  const command = (async () => {
+    committed.push("configure");
+    await connection.refresh();
+    committed.push(["selectDefault", current.selectionRevision]);
+    finished = true;
+  })();
+  await flush();
+  const first = connection.setScope({
+    ...initialViewScope,
+    taskId: "3",
+    beforeRunId: "9",
+  });
+  const cancelled = assert.rejects(first, WorkbenchScopeSupersededError);
+  const refill = connection.setScope({
+    ...initialViewScope,
+    taskId: "3",
+    beforeRunId: "5",
+  });
+  await cancelled;
+  reads[1].resolve({
+    ...snapshot("2"),
+    scope: reads[1].scope,
+    selectionRevision: "2",
+  });
+  await flush();
+  assert.equal(finished, false);
+  assert.equal(reads.length, 3);
+  reads[2].resolve({
+    ...snapshot("3"),
+    scope: reads[2].scope,
+    selectionRevision: "3",
+  });
+  await Promise.all([command, refill]);
+  assert.deepEqual(committed, ["configure", ["selectDefault", "3"]]);
+  assert.deepEqual(
+    published.map((view) => view.revision),
+    ["1", "3"],
+  );
+  await connection.stop();
 });

@@ -255,7 +255,7 @@ export function ScheduledTasksPage({
   onRecover,
   onOpenTask,
 }: {
-  snapshot: WorkbenchSnapshot;
+  snapshot: WorkbenchSnapshot & { scheduledTasks: ScheduledTaskView[] };
   disabled: boolean;
   recoveryDisabled: boolean;
   onCreate: (input: ScheduledTaskMutation) => Promise<unknown>;

@@ -1,3 +1,4 @@
+import { productStateFixture } from "./test-support/product-view-fixture.mjs";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
@@ -198,7 +199,7 @@ async function renderSubmissionApp(
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => structuredClone(snapshot),
+    fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
     createTask: () => {
       creations += 1;
       return new Promise((resolve) => createResolvers.push(resolve));
@@ -252,6 +253,10 @@ async function renderSubmissionApp(
       await screen.findAllByRole("button", { name: /Submission task/ })
     )[0];
     fireEvent.click(button);
+    await screen.findByRole("button", {
+      name: "Task information",
+      exact: true,
+    });
   }
   const textarea = document.querySelector(".composer-bar textarea");
   return {
@@ -265,7 +270,9 @@ async function renderSubmissionApp(
     creations: () => creations,
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      await act(async () => revision(snapshot.revision));
+      await act(async () =>
+        revision(snapshot.revision, snapshot.securityEpoch ?? "1"),
+      );
     },
     created: async (createdTask = task, index = 0) =>
       act(async () =>
@@ -966,10 +973,10 @@ test("App keeps the current Run draft editable through a transient snapshot fail
   const recovered = new Promise((resolve) => {
     releaseRead = resolve;
   });
-  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
     if (++reads === 1) throw new Error("snapshot temporarily unavailable");
     await recovered;
-    return structuredClone(fixture.snapshot);
+    return productStateFixture(fixture.snapshot, scope);
   });
   try {
     await fixture.publish();
@@ -1255,6 +1262,7 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
   fireEvent.click(
     (await screen.findAllByRole("button", { name: /Second task/ }))[0],
   );
+  await screen.findByRole("button", { name: "Task information", exact: true });
   for (let i = 0; i < 32; i++) await sendUnknown(`second-unknown-${i}`);
 
   await sendUnknown("draft kept at capacity");

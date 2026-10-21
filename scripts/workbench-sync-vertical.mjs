@@ -195,7 +195,7 @@ export async function probeWorkbenchSyncRecovery(port, evidenceDir) {
     await mkdir(evidenceDir, { recursive: true });
     const observation = await webview
       .evaluate(
-        `({ focused: document.hasFocus(), active: document.activeElement?.outerHTML, notices: [...document.querySelectorAll(".commandbar-alert")].map(e => ({ open: e.open, html: e.outerHTML })), probe: window.__syncProbe })`,
+        `({ focused: document.hasFocus(), failure: document.querySelector(".connection-failure-content")?.textContent, active: document.activeElement?.outerHTML, notices: [...document.querySelectorAll(".commandbar-alert")].map(e => ({ open: e.open, html: e.outerHTML })), probe: window.__syncProbe })`,
       )
       .catch(() => null);
     await writeFile(

@@ -268,7 +268,8 @@ fn shutdownProduct(workbench_value: *product_control.Runtime, runtime: *agent.Ru
 fn waitForMcpSnapshot(workbench_value: *product_control.Runtime, expected: []const u8) !void {
     var storage: [512 * 1024]u8 = undefined;
     for (0..400) |_| {
-        const snapshot = try workbench_value.writeSnapshot(&storage);
+        try workbench_value.drainAgentEvents();
+        const snapshot = try workbench_value.writeAggregateFixture(&storage);
         if (std.mem.indexOf(u8, snapshot, expected) != null) return;
         std.Io.Timeout.sleep(.{ .duration = .{
             .raw = std.Io.Duration.fromMilliseconds(5),
@@ -1262,7 +1263,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     );
     try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     var snapshot_storage: [512 * 1024]u8 = undefined;
-    const snapshot = try restarted_workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try restarted_workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -1487,6 +1488,7 @@ fn configureTaskSwitchProvider(control: *product_control.Runtime, endpoint: []co
 
 fn waitTaskSwitchCatalog(control: *product_control.Runtime, workspace: u64, skill_count: usize) !product_control.CatalogProjection {
     for (0..2000) |_| {
+        try control.drainAgentEvents();
         const catalog = try control.workspaceCatalog(workspace);
         if ((catalog.availability == .ready or catalog.availability == .degraded) and catalog.skills.len == skill_count) return catalog;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -1690,7 +1692,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     // consumed by Renderer, because this Task owns the slot it will release.
     try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
     var snapshot_bytes: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_bytes);
+    const snapshot = try control.writeAggregateFixture(&snapshot_bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const projected = parsed.value.object.get("tasks").?.array.items[0].object;

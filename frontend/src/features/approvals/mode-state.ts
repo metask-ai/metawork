@@ -108,6 +108,8 @@ export class TaskApprovalRequests {
       )
         continue;
       const task = snapshot.tasks.find((entry) => entry.id === taskId);
+      if (!task && snapshot.taskIndex.some((entry) => entry.id === taskId))
+        continue;
       const { intent } = request;
       let result: ApprovalObservation | null = null;
       if (!task) result = { taskId, outcome: "missing" };

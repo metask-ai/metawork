@@ -1,3 +1,8 @@
+import {
+  historyProgress,
+  earlierHistoryGoal,
+  type HistoryGoal,
+} from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
 import { newComposerOperationId } from "../features/composer/drafts.ts";
 import {
@@ -92,7 +97,10 @@ import {
   NewTaskApprovalModeMenu,
   TaskWorkspace,
 } from "../features/tasks/NewTaskView.tsx";
-import { TaskContent } from "../features/tasks/TaskContent.tsx";
+import {
+  TaskContent,
+  createTaskReadingMemory,
+} from "../features/tasks/TaskContent.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -152,6 +160,7 @@ import type {
   TaskModelSelectionAvailability,
   ModelRef,
   TaskView,
+  TaskSummary,
   FileReferenceView,
   FileChangeDiffResult,
   FileChangeView,
@@ -390,8 +399,45 @@ export default function App() {
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
+  const [taskReadingMemory] = useState(createTaskReadingMemory);
+  useEffect(() => {
+    // Reclaim after TaskContent's unmount cleanup has saved its last position.
+    taskReadingMemory.prune(
+      new Set(snapshot.taskIndex.map((task) => task.id)),
+      snapshot.taskPage?.task
+        ? {
+            taskId: snapshot.taskPage.task.id,
+            runIds: new Set(snapshot.taskPage.runManifest.map((run) => run.id)),
+          }
+        : undefined,
+    );
+  }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
+  function retainHistoryForPanel(taskId: string, runId: string) {
+    setHistoryRequests((goals) => {
+      const previous = goals[taskId];
+      return previous && BigInt(previous.oldestRunId) <= BigInt(runId)
+        ? goals
+        : { ...goals, [taskId]: { taskId, oldestRunId: runId } };
+    });
+  }
+
+  const [historyRequests, setHistoryRequests] = useState<
+    Record<string, HistoryGoal>
+  >({});
+  const history = historyProgress(
+    snapshot,
+    workbench.activeTaskId,
+    historyRequests[workbench.activeTaskId ?? ""] ?? null,
+  );
+  const historyCursor = history.beforeRunId;
+  const historyLoading =
+    history.loading || snapshot.scope.taskId !== workbench.activeTaskId;
+  const nextHistoryCursor = history.nextBeforeRunId;
+  const selectedTaskSummary = snapshot.taskIndex.find(
+    (task) => task.id === workbench.activeTaskId,
+  );
   const activeTaskIdRef = useRef<string | null>(null);
-  activeTaskIdRef.current = activeTask?.id ?? null;
+  activeTaskIdRef.current = workbench.activeTaskId;
 
   function focusTaskPanelTab(tabId: string) {
     window.requestAnimationFrame(() => {
@@ -420,6 +466,7 @@ export default function App() {
     const tab = createTaskPanelPreviewTab(taskId, runId, selected);
     setRightPanelOpen(true);
     taskPanelOpeners.current.set(tab.tabId, opener);
+    retainHistoryForPanel(taskId, runId);
     taskPanel.openPreview(taskId, runId, selected);
     filePreviewTabs.open(taskId, runId, selected);
     focusTaskPanelTab(tab.tabId);
@@ -570,6 +617,7 @@ export default function App() {
       (tab) => tab.kind === "review",
     );
     if (existingReview?.runId !== runId) taskPanelViews.reset(tab.tabId);
+    retainHistoryForPanel(taskId, runId);
     taskPanel.openReview(taskId, runId);
     if (focus)
       taskPanelViews.setFileExpanded(tab.tabId, focus.displayPath, true);
@@ -644,7 +692,7 @@ export default function App() {
 
   useEffect(() => {
     clearFileChanges();
-  }, [activeTask?.id]);
+  }, [workbench.activeTaskId]);
 
   useEffect(() => {
     setFileChanges((current) => {
@@ -652,9 +700,22 @@ export default function App() {
       const task = snapshot.tasks.find(
         (candidate) => candidate.id === current.taskId,
       );
+      if (
+        !task &&
+        snapshot.taskIndex.some((entry) => entry.id === current.taskId)
+      )
+        return current;
       const run = task?.runs.find(
         (candidate) => candidate.id === current.runId,
       );
+      if (
+        !run &&
+        snapshot.taskPage?.task.id === current.taskId &&
+        snapshot.taskPage.runManifest.some(
+          (entry) => entry.id === current.runId,
+        )
+      )
+        return current;
       const recorded = run?.fileChanges;
       if (!task || !run || !recorded || recorded.changes.length === 0) {
         fileChangesGeneration.current += 1;
@@ -675,12 +736,13 @@ export default function App() {
         diffs,
       };
     });
-  }, [snapshot.revision, snapshot.tasks]);
+  }, [snapshot.revision, snapshot.tasks, snapshot.taskIndex]);
 
   const panelTask = route === "workbench" ? activeTask : null;
   const taskPanel = useTaskPanelTarget(
     panelTask,
     snapshot.capabilities.typedFileChanges,
+    snapshot.taskPage?.runManifest,
   );
   const previewTabIds = useMemo(
     () =>
@@ -701,7 +763,7 @@ export default function App() {
     [client],
   );
   const filePreviewTabs = useFilePreviewTabs(
-    panelTask?.id ?? null,
+    route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
   );
@@ -734,8 +796,9 @@ export default function App() {
     () => searchWorkbench(snapshot, searchQuery),
     [searchQuery, snapshot],
   );
-  const taskDrafts = useTaskDrafts(activeTask?.id ?? null);
-  const newTaskDraftActive = workbench.draftOpen || activeTask === null;
+  const taskDrafts = useTaskDrafts(workbench.activeTaskId);
+  const newTaskDraftActive =
+    workbench.draftOpen || workbench.activeTaskId === null;
   const newTaskDraftId = newTaskDraftStorageId(
     newTaskDraftActive,
     workbench.draftWorkspaceId,
@@ -751,7 +814,7 @@ export default function App() {
   composerDraftRef.current = composerDraft;
   const composerDraftScope = newTaskDraftActive
     ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstance.current}`
-    : `task:${activeTask?.id ?? "missing"}`;
+    : `task:${workbench.activeTaskId ?? "missing"}`;
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
   const attachmentAudience = useRef({
@@ -891,7 +954,9 @@ export default function App() {
     activeTask?.inputSubmissions.some((input) => input.state === "waiting"),
   );
   const composerWorkspaceId =
-    activeTask?.workspaceId || workbench.draftWorkspaceId;
+    activeTask?.workspaceId ??
+    selectedTaskSummary?.workspaceId ??
+    workbench.draftWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
     (workspace) => workspace.id === composerWorkspaceId,
   );
@@ -1030,6 +1095,11 @@ export default function App() {
       onSnapshot: (next, generation) => {
         if (!cancelled) {
           observeUiResponseSnapshot(next);
+          if (
+            latestSnapshotRef.current &&
+            latestSnapshotRef.current.securityEpoch !== next.securityEpoch
+          )
+            setHistoryRequests({});
           latestSnapshotRef.current = next;
           publishApprovalObservations(
             approvalRequestsRef.current.observe(next, generation),
@@ -1038,13 +1108,28 @@ export default function App() {
           setLocalSubmissions((entries) =>
             entries.filter(
               (entry) =>
+                !next.receipts.some(
+                  (receipt) =>
+                    receipt.taskId === entry.taskId &&
+                    receipt.operationId === entry.operationId &&
+                    receipt.observed,
+                ) &&
                 !taskHasSubmission(
                   next.tasks.find((task) => task.id === entry.taskId),
                   entry.operationId,
                 ),
             ),
           );
-          const projectedTaskIds = next.tasks.map((task) => task.id);
+          const projectedTaskIds = next.taskIndex.map((task) => task.id);
+          setHistoryRequests((goals) => {
+            if (Object.keys(goals).every((id) => projectedTaskIds.includes(id)))
+              return goals;
+            return Object.fromEntries(
+              Object.entries(goals).filter(([id]) =>
+                projectedTaskIds.includes(id),
+              ),
+            );
+          });
           const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
             ...pendingTaskDraftRetention.current,
@@ -1064,7 +1149,7 @@ export default function App() {
           const pendingTaskId = pendingTaskSelection.current;
           if (
             pendingTaskId &&
-            next.tasks.some((task) => task.id === pendingTaskId)
+            next.taskIndex.some((task) => task.id === pendingTaskId)
           ) {
             const source = pendingTaskDraftSource.current;
             if (source?.taskId === pendingTaskId) {
@@ -1098,8 +1183,29 @@ export default function App() {
       onReady: (ready) => {
         if (!cancelled) setBridgeReady(ready);
       },
+      onSecurityInvalidated: (securityEpoch, generation) => {
+        if (cancelled) return;
+        latestSnapshotRef.current = null;
+        setHistoryRequests({});
+        taskReadingMemory.reading.clear();
+        taskReadingMemory.processDisclosure.clear();
+        taskReadingMemory.toolDisclosure.clear();
+        filePreviewTabs.clear();
+        clearFileChanges();
+        approvalRequestsRef.current.reset(generation);
+        setApprovalRequests({});
+        dispatchWorkbench({
+          type: "security.invalidated",
+          securityEpoch,
+          generation,
+        });
+      },
       onGeneration: (generation) => {
         if (!cancelled) {
+          setHistoryRequests({});
+          taskReadingMemory.reading.clear();
+          taskReadingMemory.processDisclosure.clear();
+          taskReadingMemory.toolDisclosure.clear();
           setLocalSubmissions((entries) =>
             entries.map((entry) =>
               entry.state === "submitting" || entry.state === "accepted"
@@ -1144,6 +1250,41 @@ export default function App() {
   }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
 
   useEffect(() => {
+    const management =
+      route === "skills"
+        ? "skills"
+        : route === "mcp"
+          ? "mcp"
+          : route === "scheduled-tasks"
+            ? "schedules"
+            : "none";
+    void connection.current
+      ?.setScope({
+        taskId: route === "workbench" ? workbench.activeTaskId : null,
+        beforeRunId: route === "workbench" ? historyCursor : null,
+        runLimit: 4,
+        management,
+        search: searchOpen,
+        receipts: localSubmissions.flatMap((entry) =>
+          entry.taskId &&
+          (entry.state === "submitting" ||
+            entry.state === "accepted" ||
+            entry.state === "unknown")
+            ? [{ taskId: entry.taskId, operationId: entry.operationId }]
+            : [],
+        ),
+      })
+      .catch(() => undefined);
+  }, [
+    route,
+    workbench.activeTaskId,
+    bridgeGeneration,
+    searchOpen,
+    localSubmissions,
+    historyCursor,
+  ]);
+
+  useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
       const key = event.key.toLowerCase();
@@ -1174,12 +1315,12 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     taskPanelOpeners.current.clear();
-  }, [activeTask?.id]);
+  }, [workbench.activeTaskId]);
 
   useEffect(() => {
     if (
       !snapshot.newTaskAdmission.available ||
-      activeTask !== null ||
+      workbench.activeTaskId !== null ||
       workbench.draftOpen
     )
       return;
@@ -1188,7 +1329,11 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [activeTask, snapshot.newTaskAdmission.available, workbench.draftOpen]);
+  }, [
+    workbench.activeTaskId,
+    snapshot.newTaskAdmission.available,
+    workbench.draftOpen,
+  ]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -1602,9 +1747,10 @@ export default function App() {
       }),
     );
     if (!configured) return;
-    // `runExecutionCommand` refreshes the rendered snapshot asynchronously;
-    // do not reuse the pre-configuration revisions for the second CAS.
-    const current = await client.fetchSnapshot();
+    // The connection installs the committed view before resolving its refresh.
+    // Use that view for the second CAS through the same serialized read owner.
+    const current = latestSnapshotRef.current;
+    if (!current) return;
     const currentProvider = current.models.providers.find(
       (candidate) => candidate.id === "metask",
     );
@@ -2473,7 +2619,10 @@ export default function App() {
     }
   }
 
-  async function setArchived(archived: boolean, task = activeTask) {
+  async function setArchived(
+    archived: boolean,
+    task: TaskSummary | TaskView | null = activeTask,
+  ) {
     if (
       !task ||
       workbenchMutationDisabled ||
@@ -2571,7 +2720,7 @@ export default function App() {
     setSearchQuery("");
   }
 
-  function handleTaskAction(task: TaskView, action: TaskMenuAction) {
+  function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
     openTask(task.id);
     if (action === "rename") {
       setTitleDraft(task.title);
@@ -2787,7 +2936,8 @@ export default function App() {
                   : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
-    : t(newTaskDraftActive ? "task.new" : "task.open");
+    : selectedTaskSummary?.title ||
+      t(newTaskDraftActive ? "task.new" : "task.open");
   const slashCommands: SlashCommandState[] = resolveSlashCommandStates({
     newTaskDraftActive,
     bridgeUnavailable,
@@ -2812,7 +2962,7 @@ export default function App() {
     (entry) =>
       (newTaskDraftActive
         ? entry.scope === composerDraftScope
-        : entry.taskId === activeTask?.id) &&
+        : entry.taskId === workbench.activeTaskId) &&
       !taskHasSubmission(activeTask ?? undefined, entry.operationId),
   );
   const pendingMessages =
@@ -2930,8 +3080,9 @@ export default function App() {
         skillCatalog={skillCatalog}
         slashCommands={slashCommands}
         composeDisabled={Boolean(
-          !newTaskDraftActive &&
-          (activeTask?.archived || activeTask?.deletionStatus !== "idle"),
+          selectedTaskSummary &&
+          (selectedTaskSummary.archived ||
+            selectedTaskSummary.deletionStatus !== "idle"),
         )}
         attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
@@ -3364,9 +3515,7 @@ export default function App() {
                 tasks={navigableTaskItems}
                 workspaces={snapshot.workspaces}
                 activeTaskId={
-                  route === "workbench" && activeTask !== null
-                    ? activeTask.id
-                    : null
+                  route === "workbench" ? workbench.activeTaskId : null
                 }
                 suppressedCompletionTaskId={suppressedCompletionTaskId}
                 showArchived={showArchived}
@@ -3409,6 +3558,7 @@ export default function App() {
             activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
             actions={
+              !taskPanel.waitingForRun &&
               panelTarget.kind === "preview" &&
               previewMatchesTarget &&
               filePreviewViewState ? (
@@ -3422,7 +3572,11 @@ export default function App() {
             onCloseTab={closeTaskPanelTab}
             onClose={dismissTaskPanel}
           >
-            {panelTarget.kind === "empty" ? (
+            {taskPanel.waitingForRun ? (
+              <p role="status" aria-busy="true">
+                {t("common.loading")}
+              </p>
+            ) : panelTarget.kind === "empty" ? (
               <p className="task-panel-empty">{t("task_panel.empty")}</p>
             ) : panelTarget.kind === "preview" &&
               previewMatchesTarget &&
@@ -3642,141 +3796,167 @@ export default function App() {
       }
     >
       {route === "skills" ? (
-        <SkillsPage
-          management={snapshot.skillManagement}
-          personalCatalog={snapshot.skillCatalog}
-          workspaces={snapshot.workspaces}
-          query={skillsQuery}
-          refreshRequests={skillRefreshRequests}
-          sourceBusy={sourceMutationBusy}
-          sourceError={sourceMutationError}
-          onSetSourceEnabled={(id, enabled, revision) =>
-            void commitSkillSourceMutation(() =>
-              client.setSkillSourceEnabled(id, enabled, revision),
-            )
-          }
-          onRecoverSources={(action, token) =>
-            void commitSkillSourceMutation(() =>
-              client.recoverSkillSourceSettings(action, token),
-            )
-          }
-          disabled={bridgeUnavailable}
-          onQuery={setSkillsQuery}
-          onRefresh={(target) => void refreshSkillsPageCatalog(target)}
-          onSetEnabled={setSkillEnabled}
-          onChooseImport={(kind) => client.chooseSkillImport(kind)}
-          onInstall={(previewId, scope, allowReplace) =>
-            commitSkillMutation(() =>
-              client.installSkill(previewId, scope, allowReplace),
-            )
-          }
-          onReimport={(installId, previewId) =>
-            commitSkillMutation(() =>
-              client.reimportSkill(installId, previewId),
-            )
-          }
-          onUninstall={(installId) =>
-            commitSkillMutation(() => client.uninstallSkill(installId))
-          }
-          onRetry={(installId) =>
-            commitSkillMutation(() => client.retrySkillVerification(installId))
-          }
-          onExport={(installId) => client.exportSkill(installId)}
-          onDetail={(installId) => client.skillDetail(installId)}
-        />
+        snapshot.skillManagement ? (
+          <SkillsPage
+            management={snapshot.skillManagement}
+            personalCatalog={snapshot.skillCatalog}
+            workspaces={snapshot.workspaces}
+            query={skillsQuery}
+            refreshRequests={skillRefreshRequests}
+            sourceBusy={sourceMutationBusy}
+            sourceError={sourceMutationError}
+            onSetSourceEnabled={(id, enabled, revision) =>
+              void commitSkillSourceMutation(() =>
+                client.setSkillSourceEnabled(id, enabled, revision),
+              )
+            }
+            onRecoverSources={(action, token) =>
+              void commitSkillSourceMutation(() =>
+                client.recoverSkillSourceSettings(action, token),
+              )
+            }
+            disabled={bridgeUnavailable}
+            onQuery={setSkillsQuery}
+            onRefresh={(target) => void refreshSkillsPageCatalog(target)}
+            onSetEnabled={setSkillEnabled}
+            onChooseImport={(kind) => client.chooseSkillImport(kind)}
+            onInstall={(previewId, scope, allowReplace) =>
+              commitSkillMutation(() =>
+                client.installSkill(previewId, scope, allowReplace),
+              )
+            }
+            onReimport={(installId, previewId) =>
+              commitSkillMutation(() =>
+                client.reimportSkill(installId, previewId),
+              )
+            }
+            onUninstall={(installId) =>
+              commitSkillMutation(() => client.uninstallSkill(installId))
+            }
+            onRetry={(installId) =>
+              commitSkillMutation(() =>
+                client.retrySkillVerification(installId),
+              )
+            }
+            onExport={(installId) => client.exportSkill(installId)}
+            onDetail={(installId) => client.skillDetail(installId)}
+          />
+        ) : (
+          <p role="status" aria-busy="true">
+            {t("common.loading")}
+          </p>
+        )
       ) : route === "mcp" ? (
-        <McpPage
-          management={snapshot.mcp}
-          capabilities={{
-            connectionApproval: snapshot.capabilities.mcpConnectionApproval,
-            secretCapture: snapshot.capabilities.mcpSecretCapture,
-            secretMaxBytes: snapshot.capabilities.mcpSecretMaxBytes,
-            oauth: snapshot.capabilities.mcpOAuth,
-          }}
-          query={mcpQuery}
-          disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
-          onQuery={setMcpQuery}
-          onCreateStdio={(generation, input) =>
-            commitMcpMutation(() =>
-              client.createMcpStdioServer(generation, input),
-            )
-          }
-          onCreateHttp={(generation, input) =>
-            commitMcpMutation(() =>
-              client.createMcpHttpServer(generation, input),
-            )
-          }
-          onUpdateStdio={(generation, serverId, input) =>
-            commitMcpMutation(() =>
-              client.updateMcpStdioConnection(generation, serverId, input),
-            )
-          }
-          onUpdateHttp={(generation, serverId, input) =>
-            commitMcpMutation(() =>
-              client.updateMcpHttpConnection(generation, serverId, input),
-            )
-          }
-          onRename={(generation, serverId, displayName) =>
-            commitMcpMutation(() =>
-              client.renameMcpServer(generation, serverId, displayName),
-            )
-          }
-          onApprove={(generation, serverId) =>
-            commitMcpMutation(() =>
-              client.approveMcpConnection(generation, serverId),
-            )
-          }
-          onCaptureSecret={(generation, serverId, slot, secret) =>
-            commitMcpMutation(() =>
-              client.captureMcpSecret(generation, serverId, slot, secret),
-            )
-          }
-          onAuthorize={(generation, serverId) =>
-            client.authorizeMcpOAuth(generation, serverId)
-          }
-          onCancelAuthorization={(operationId) =>
-            client.cancelMcpAuthorization(operationId)
-          }
-          onSetEnabled={(generation, serverId, enabled) =>
-            commitMcpMutation(() =>
-              client.setMcpServerEnabled(generation, serverId, enabled),
-            )
-          }
-          onSetAllowedTools={(generation, serverId, toolNames) =>
-            commitMcpMutation(() =>
-              client.setMcpAllowedTools(generation, serverId, toolNames),
-            )
-          }
-          onRemove={(generation, serverId) =>
-            commitMcpMutation(() =>
-              client.removeMcpServer(generation, serverId),
-            )
-          }
-          onTest={testMcpConnection}
-          onApply={applyMcpConfiguration}
-          onRefresh={refreshMcpCatalog}
-        />
+        snapshot.mcp ? (
+          <McpPage
+            management={snapshot.mcp}
+            capabilities={{
+              connectionApproval: snapshot.capabilities.mcpConnectionApproval,
+              secretCapture: snapshot.capabilities.mcpSecretCapture,
+              secretMaxBytes: snapshot.capabilities.mcpSecretMaxBytes,
+              oauth: snapshot.capabilities.mcpOAuth,
+            }}
+            query={mcpQuery}
+            disabled={bridgeUnavailable || !snapshot.capabilities.mcpManagement}
+            onQuery={setMcpQuery}
+            onCreateStdio={(generation, input) =>
+              commitMcpMutation(() =>
+                client.createMcpStdioServer(generation, input),
+              )
+            }
+            onCreateHttp={(generation, input) =>
+              commitMcpMutation(() =>
+                client.createMcpHttpServer(generation, input),
+              )
+            }
+            onUpdateStdio={(generation, serverId, input) =>
+              commitMcpMutation(() =>
+                client.updateMcpStdioConnection(generation, serverId, input),
+              )
+            }
+            onUpdateHttp={(generation, serverId, input) =>
+              commitMcpMutation(() =>
+                client.updateMcpHttpConnection(generation, serverId, input),
+              )
+            }
+            onRename={(generation, serverId, displayName) =>
+              commitMcpMutation(() =>
+                client.renameMcpServer(generation, serverId, displayName),
+              )
+            }
+            onApprove={(generation, serverId) =>
+              commitMcpMutation(() =>
+                client.approveMcpConnection(generation, serverId),
+              )
+            }
+            onCaptureSecret={(generation, serverId, slot, secret) =>
+              commitMcpMutation(() =>
+                client.captureMcpSecret(generation, serverId, slot, secret),
+              )
+            }
+            onAuthorize={(generation, serverId) =>
+              client.authorizeMcpOAuth(generation, serverId)
+            }
+            onCancelAuthorization={(operationId) =>
+              client.cancelMcpAuthorization(operationId)
+            }
+            onSetEnabled={(generation, serverId, enabled) =>
+              commitMcpMutation(() =>
+                client.setMcpServerEnabled(generation, serverId, enabled),
+              )
+            }
+            onSetAllowedTools={(generation, serverId, toolNames) =>
+              commitMcpMutation(() =>
+                client.setMcpAllowedTools(generation, serverId, toolNames),
+              )
+            }
+            onRemove={(generation, serverId) =>
+              commitMcpMutation(() =>
+                client.removeMcpServer(generation, serverId),
+              )
+            }
+            onTest={testMcpConnection}
+            onApply={applyMcpConfiguration}
+            onRefresh={refreshMcpCatalog}
+          />
+        ) : (
+          <p role="status" aria-busy="true">
+            {t("common.loading")}
+          </p>
+        )
       ) : route === "scheduled-tasks" ? (
-        <ScheduledTasksPage
-          snapshot={snapshot}
-          disabled={bridgeUnavailable || !snapshot.capabilities.scheduledTasks}
-          recoveryDisabled={bridgeUnavailable}
-          onCreate={(input) => client.createScheduledTask(input)}
-          onUpdate={(id, epoch, input) =>
-            client.updateScheduledTask(id, epoch, input)
-          }
-          onSetEnabled={(id, epoch, enabled) =>
-            client.setScheduledTaskEnabled(id, epoch, enabled)
-          }
-          onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
-          onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
-          onRecover={() => client.recoverScheduledTaskStore(snapshot.revision)}
-          onOpenTask={(taskId) => {
-            const task = snapshot.tasks.find((item) => item.id === taskId);
-            if (!task) return;
-            openTask(taskId);
-          }}
-        />
+        snapshot.scheduledTasks ? (
+          <ScheduledTasksPage
+            snapshot={{ ...snapshot, scheduledTasks: snapshot.scheduledTasks }}
+            disabled={
+              bridgeUnavailable || !snapshot.capabilities.scheduledTasks
+            }
+            recoveryDisabled={bridgeUnavailable}
+            onCreate={(input) => client.createScheduledTask(input)}
+            onUpdate={(id, epoch, input) =>
+              client.updateScheduledTask(id, epoch, input)
+            }
+            onSetEnabled={(id, epoch, enabled) =>
+              client.setScheduledTaskEnabled(id, epoch, enabled)
+            }
+            onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
+            onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+            onRecover={() =>
+              client.recoverScheduledTaskStore(snapshot.revision)
+            }
+            onOpenTask={(taskId) => {
+              const task = snapshot.taskIndex.find(
+                (item) => item.id === taskId,
+              );
+              if (!task) return;
+              openTask(taskId);
+            }}
+          />
+        ) : (
+          <p role="status" aria-busy="true">
+            {t("common.loading")}
+          </p>
+        )
       ) : (
         <div
           className="workbench-view"
@@ -3829,6 +4009,25 @@ export default function App() {
             taskContent={
               <TaskContent
                 task={activeTask}
+                memory={taskReadingMemory}
+                history={{
+                  available: Boolean(nextHistoryCursor),
+                  loading: historyLoading,
+                  onLoad: () => {
+                    if (nextHistoryCursor && workbench.activeTaskId) {
+                      const goal = earlierHistoryGoal(
+                        snapshot,
+                        workbench.activeTaskId,
+                        nextHistoryCursor,
+                      );
+                      if (goal)
+                        setHistoryRequests((current) => ({
+                          ...current,
+                          [goal.taskId]: goal,
+                        }));
+                    }
+                  },
+                }}
                 localSubmissions={pendingMessages}
                 webLink={markdownWebLink}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}

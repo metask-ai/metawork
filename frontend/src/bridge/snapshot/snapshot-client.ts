@@ -1,11 +1,20 @@
 import {
   decodeSnapshotDescriptor,
+  decodeSnapshotPreparing,
   maxSnapshotBytes,
+  maxSnapshotPreparationSteps,
   maxSnapshotChunkBytes,
 } from "../generated-wire.ts";
+import { ViewCache } from "./view-cache.ts";
 import { commands } from "../commands.ts";
 import { RendererBridgeContractError } from "../contract-error.ts";
-import type { WorkbenchSnapshot } from "../contracts.ts";
+import {
+  initialViewScope,
+  cloneViewScope,
+  sameViewScope,
+  type ViewScope,
+  type WorkbenchSnapshot,
+} from "../contracts.ts";
 import { decodeWorkbenchSnapshot } from "../decode-contracts.ts";
 
 type SnapshotJson =
@@ -88,8 +97,41 @@ function decodeBase64(value: string) {
 
 export async function fetchWorkbenchSnapshot(
   invoke: SnapshotInvoke,
+  scope: ViewScope = initialViewScope,
+  cache: ViewCache = new ViewCache(),
 ): Promise<WorkbenchSnapshot> {
-  const current = descriptor(await invoke(commands.snapshot, {}));
+  const requested = cloneViewScope(scope);
+  const captured = cache.capture(requested);
+  let response = await invoke(commands.snapshot, {
+    ...requested,
+    known: captured.known,
+  });
+  let preparingId: string | null = null;
+  let steps = 0;
+  while (
+    typeof response === "object" &&
+    response !== null &&
+    "phase" in response
+  ) {
+    let pending;
+    try {
+      pending = decodeSnapshotPreparing(response, "$snapshotPreparing");
+    } catch {
+      invalidSnapshot("Invalid Workbench snapshot preparation");
+    }
+    if (
+      ++steps > maxSnapshotPreparationSteps ||
+      (preparingId !== null && pending.snapshotId !== preparingId)
+    )
+      invalidSnapshot("Workbench snapshot preparation identity or step limit");
+    preparingId = pending.snapshotId;
+    response = await invoke(commands.snapshot, {
+      preparingSnapshotId: preparingId,
+    });
+  }
+  const current = descriptor(response);
+  if (preparingId !== null && current.snapshotId !== preparingId)
+    invalidSnapshot("Workbench snapshot preparation identity mismatch");
   if (
     current.bytes > maxSnapshotBytes ||
     current.chunkBytes > maxSnapshotChunkBytes
@@ -130,7 +172,12 @@ export async function fetchWorkbenchSnapshot(
     invalidSnapshot("Workbench snapshot is not valid JSON");
   }
   try {
-    return decodeWorkbenchSnapshot(parsed);
+    const candidate = cache.materialize(parsed, requested, captured);
+    const next = decodeWorkbenchSnapshot(candidate.wire);
+    if (!sameViewScope(next.scope, requested))
+      invalidSnapshot("Product view scope mismatch");
+    candidate.install(next);
+    return next;
   } catch (error) {
     if (error instanceof RendererBridgeContractError) throw error;
     invalidSnapshot(error instanceof Error ? error.message : String(error));

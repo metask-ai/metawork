@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import type { FileReferenceView, TaskView } from "../../bridge/contracts.ts";
+import type {
+  FileReferenceView,
+  TaskView,
+  RunManifest,
+} from "../../bridge/contracts.ts";
 import {
   activeTaskPanelTab,
   closeTaskPanelTab,
@@ -18,26 +22,35 @@ import {
 export function useTaskPanelTarget(
   task: TaskView | null,
   typedFileChanges: boolean,
+  manifest?: readonly RunManifest[],
 ) {
   const [stored, setSession] = useState(emptyTaskPanelSession);
-  const session = reconcileTaskPanelSession(stored, task, typedFileChanges);
+  const session = reconcileTaskPanelSession(
+    stored,
+    task,
+    typedFileChanges,
+    manifest,
+  );
   const activeTab = activeTaskPanelTab(session);
   useEffect(() => {
     setSession((current) =>
-      reconcileTaskPanelSession(current, task, typedFileChanges),
+      reconcileTaskPanelSession(current, task, typedFileChanges, manifest),
     );
-  }, [task, typedFileChanges]);
+  }, [task, typedFileChanges, manifest]);
 
   function openTab(next: TaskPanelTab | null) {
     if (!next) return;
     setSession((current) =>
-      openTaskPanelTab(current, next, task, typedFileChanges),
+      openTaskPanelTab(current, next, task, typedFileChanges, manifest),
     );
   }
 
   return {
     session,
     activeTab,
+    waitingForRun: Boolean(
+      activeTab && !task?.runs.some((run) => run.id === activeTab.runId),
+    ),
     target: activeTab ?? emptyTaskPanelTarget,
     openPreview(taskId: string, runId: string, reference: FileReferenceView) {
       openTab(createTaskPanelPreviewTab(taskId, runId, reference));

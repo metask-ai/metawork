@@ -1,11 +1,9 @@
+import { decodeProductStateFixture as decodeWorkbenchSnapshot } from "./test-support/decode-product-state-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { TaskApprovalRequests } from "../frontend/src/features/approvals/mode-state.ts";
-import {
-  decodeTaskApprovalModeResult,
-  decodeWorkbenchSnapshot,
-} from "../frontend/src/bridge/decode-contracts.ts";
+import { decodeTaskApprovalModeResult } from "../frontend/src/bridge/decode-contracts.ts";
 import { BridgeClient } from "../frontend/src/bridge/client.ts";
 const fixture = JSON.parse(
   readFileSync(
@@ -24,7 +22,12 @@ function task(overrides = {}) {
   };
 }
 function snapshot(task, revision = "2") {
-  return { ...structuredClone(fixture), revision, tasks: task ? [task] : [] };
+  return {
+    ...structuredClone(fixture),
+    revision,
+    tasks: task ? [task] : [],
+    taskIndex: task ? [{ id: task.id }] : [],
+  };
 }
 function requests() {
   const state = new TaskApprovalRequests();

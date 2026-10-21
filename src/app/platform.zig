@@ -494,6 +494,9 @@ test "main-loop wake publishes Native startup to the live activation listener" {
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try app_window.TestSupport.Window.init();
+    defer startup_window.deinit();
     const identity = T.activation.Identity.init("wake-test", "/isolated");
     var queue = T.activation.ActivationQueue.init(std.testing.io, identity);
     var storage: [T.activation.max_frame_bytes]u8 = undefined;
@@ -539,6 +542,10 @@ test "SDK consumption MCP Host handoff preserves deny policy and exact target" {
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.open_external_url_fn = T.open;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try app_window.TestSupport.Window.init();
+    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     try std.testing.expectError(error.NavigationDenied, harness.runtime.openExternalUrl(T.url));
@@ -584,6 +591,10 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     harness.runtime.options.platform.services.start_timer_fn = Spy.start;
     harness.runtime.options.platform.services.cancel_timer_fn = Spy.cancel;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try app_window.TestSupport.Window.init();
+    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     const port = adapter.dispatcherPlatform();
@@ -644,6 +655,10 @@ test "SDK consumption file picker keeps multi-selection cancel and Runtime valid
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.show_open_dialog_fn = Spy.open;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try app_window.TestSupport.Window.init();
+    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     const port = adapter.dispatcherPlatform();

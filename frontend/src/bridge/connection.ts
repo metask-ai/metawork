@@ -1,9 +1,23 @@
-import type { WorkbenchSnapshot } from "./contracts.ts";
+import {
+  initialViewScope,
+  cloneViewScope,
+  sameViewScope,
+  sameViewPageScope,
+  type ViewScope,
+  type WorkbenchSnapshot,
+} from "./contracts.ts";
 import { BridgeClient } from "./client.ts";
 import {
   RendererBridgeContractError,
   type RendererBridgeContractErrorCode,
 } from "./contract-error.ts";
+
+export class WorkbenchScopeSupersededError extends Error {
+  constructor() {
+    super("Product consumer scope changed");
+    this.name = "WorkbenchScopeSupersededError";
+  }
+}
 
 export type WorkbenchConnectionCallbacks = {
   onSnapshot: (snapshot: WorkbenchSnapshot, generation: string) => void;
@@ -11,6 +25,7 @@ export type WorkbenchConnectionCallbacks = {
   onReady: (ready: boolean) => void;
   onViewSyncFailed: (failed: boolean) => void;
   onGeneration?: (generation: string) => void;
+  onSecurityInvalidated?: (securityEpoch: string, generation: string) => void;
 };
 
 export type WorkbenchConnectionFailure =
@@ -53,6 +68,7 @@ function errorText(error: unknown) {
 }
 
 type RefreshWaiter = {
+  scopeBound: boolean;
   afterAttempt: number;
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -73,6 +89,8 @@ type ConnectionReadState = {
 const retryDelays = [100, 250, 500, 1000];
 
 export class WorkbenchConnection {
+  private scope: ViewScope = { ...initialViewScope };
+  private scopeGeneration = 0;
   private state: ConnectionReadState | null = null;
   private reading: Promise<void> | null = null;
   private recovery: Promise<void> | null = null;
@@ -82,6 +100,7 @@ export class WorkbenchConnection {
   private trusted = false;
   private contractFault: RendererBridgeContractError | null = null;
   private pendingRevision = 0n;
+  private securityEpoch = 0n;
   private removeWorkbench: (() => void) | null = null;
   private removeHostSignal: (() => void) | null = null;
 
@@ -93,6 +112,22 @@ export class WorkbenchConnection {
     this.callbacks = callbacks;
   }
 
+  setScope(scope: ViewScope): Promise<void> {
+    if (sameViewScope(this.scope, scope)) return Promise.resolve();
+    const pageChanged = !sameViewPageScope(this.scope, scope);
+    this.scope = cloneViewScope(scope);
+    this.scopeGeneration++;
+    if (!this.state) return Promise.resolve();
+    if (pageChanged) {
+      for (const waiter of this.state.waiters) {
+        if (!waiter.scopeBound) continue;
+        waiter.reject(new WorkbenchScopeSupersededError());
+        this.state.waiters.delete(waiter);
+      }
+    }
+    return this.refreshView(true);
+  }
+
   async start() {
     if (this.stopped) throw new Error("Workbench connection is stopped");
     if (!this.client.available()) {
@@ -101,7 +136,7 @@ export class WorkbenchConnection {
       throw error;
     }
     this.removeWorkbench ??= this.client.onWorkbenchRevision(
-      (revision) => this.notify(revision),
+      (revision, securityEpoch) => this.notify(revision, securityEpoch),
       (error) => this.failContract("revision", error),
     );
     this.removeHostSignal ??= this.client.onHostSignal(
@@ -128,7 +163,13 @@ export class WorkbenchConnection {
     return this.recover(true, options.replaceConnection ?? false);
   }
 
+  // Command reconciliation waits for a fresh installed view of the current
+  // consumer scope. Paging/navigation may replace that scope while it waits.
   refresh(): Promise<void> {
+    return this.refreshView(false);
+  }
+
+  private refreshView(scopeBound: boolean): Promise<void> {
     if (this.stopped)
       return Promise.reject(new Error("Workbench connection is stopped"));
     if (this.contractFault) return Promise.reject(this.contractFault);
@@ -136,8 +177,20 @@ export class WorkbenchConnection {
     if (!state)
       return Promise.reject(new Error("Workbench connection is disconnected"));
     if (state.fault) return Promise.reject(state.fault);
+    return this.requestView(state, scopeBound);
+  }
+
+  private requestView(
+    state: ConnectionReadState,
+    scopeBound: boolean,
+  ): Promise<void> {
     const pending = new Promise<void>((resolve, reject) => {
-      state.waiters.add({ afterAttempt: state.attempt, resolve, reject });
+      state.waiters.add({
+        scopeBound,
+        afterAttempt: state.attempt,
+        resolve,
+        reject,
+      });
     });
     // An explicit refresh can skip notification coalescing, but shares backoff.
     if (state.timer && !state.timer.retry) this.clearTimer(state);
@@ -164,8 +217,21 @@ export class WorkbenchConnection {
     );
   }
 
-  private notify(revision: string) {
+  private notify(revision: string, securityEpoch: string) {
     if (this.stopped || this.contractFault) return;
+    const epoch = BigInt(securityEpoch);
+    if (epoch < this.securityEpoch) return;
+    if (epoch > this.securityEpoch) {
+      this.securityEpoch = epoch;
+      if (this.state) {
+        this.state.latest = -1n;
+        this.callbacks.onReady(false);
+        this.callbacks.onSecurityInvalidated?.(
+          String(epoch),
+          this.state.generation,
+        );
+      }
+    }
     const value = BigInt(revision);
     if (value > this.pendingRevision) this.pendingRevision = value;
     const state = this.state;
@@ -210,17 +276,34 @@ export class WorkbenchConnection {
   private async read(state: ConnectionReadState) {
     if (!this.active(state)) return;
     const target = state.requested;
+    const scopeGeneration = this.scopeGeneration;
+    const securityAtStart = this.securityEpoch;
+    const scope = cloneViewScope(this.scope);
     const attempt = ++state.attempt;
     try {
-      const next = await this.client.fetchSnapshot();
-      if (!this.active(state)) return;
+      const next = await this.client.fetchSnapshot(scope);
+      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+        return;
+      {
+        const epoch = BigInt(next.securityEpoch);
+        if (epoch < this.securityEpoch)
+          throw new Error("Host returned a revoked Product security epoch");
+        if (epoch > this.securityEpoch) {
+          this.securityEpoch = epoch;
+          this.callbacks.onSecurityInvalidated?.(
+            next.securityEpoch,
+            state.generation,
+          );
+        }
+      }
       const revision = BigInt(next.revision);
       if (revision < state.latest || revision < target)
         throw new Error("Host returned a stale Workbench revision");
       state.latest = revision;
       state.failures = 0;
       this.callbacks.onSnapshot(next, state.generation);
-      if (!this.active(state)) return;
+      if (!this.active(state) || scopeGeneration !== this.scopeGeneration)
+        return;
       for (const waiter of state.waiters) {
         if (waiter.afterAttempt < attempt) {
           state.waiters.delete(waiter);
@@ -232,7 +315,12 @@ export class WorkbenchConnection {
         this.callbacks.onReady(true);
       }
     } catch (error) {
-      if (!this.active(state)) return;
+      if (
+        !this.active(state) ||
+        scopeGeneration !== this.scopeGeneration ||
+        securityAtStart !== this.securityEpoch
+      )
+        return;
       this.callbacks.onReady(false);
       if (error instanceof RendererBridgeContractError) {
         this.failContract("snapshot", error);
@@ -272,7 +360,7 @@ export class WorkbenchConnection {
         state.fault = null;
         state.failures = 0;
         try {
-          await this.refresh();
+          await this.requestView(state, false);
           this.checkOperation(operation);
           // A retained generation is already confirmed; an unconfirmed one needs ping.
           if (!state.confirmed) await this.confirm(state, operation, recovered);
@@ -293,6 +381,7 @@ export class WorkbenchConnection {
       this.checkOperation(operation);
       this.contractFault = null;
       let generation: string;
+      this.securityEpoch = 0n;
       try {
         generation = await this.client.connect();
       } catch (error) {
@@ -325,7 +414,7 @@ export class WorkbenchConnection {
       this.state = state;
       this.callbacks.onGeneration?.(generation);
       try {
-        await this.refresh();
+        await this.requestView(state, false);
         await this.confirm(state, operation, recovered);
       } catch (error) {
         if (operation !== this.operation || this.stopped) throw error;

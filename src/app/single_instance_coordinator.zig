@@ -379,8 +379,18 @@ const WakeTransportTest = struct {
 
     fn forward(root: []const u8, request: []const u8) !protocol.Status {
         var response: [compat.max_transport_response_bytes]u8 = undefined;
-        const length = try compat.forward(std.heap.c_allocator, root, request, &response);
-        return protocol.decodeResponse(response[0..length]);
+        // Like the real handoff caller, wait only for an unconnected endpoint.
+        // A previous response can arrive before the listener has rearmed its
+        // next accept. Connected transport or protocol failures are final.
+        for (0..handoff_attempts) |attempt| {
+            const length = compat.forward(std.heap.c_allocator, root, request, &response) catch |err| {
+                if (err != error.EndpointUnavailable or attempt + 1 == handoff_attempts) return err;
+                try std.testing.io.sleep(.fromMilliseconds(handoff_retry_interval_ms), .awake);
+                continue;
+            };
+            return protocol.decodeResponse(response[0..length]);
+        }
+        unreachable;
     }
 
     const Forward = struct {
@@ -418,6 +428,9 @@ test "single-instance coordinator reports SDK wake failure over real transport a
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
     defer adapter.deinit();
+    try adapter.prepareStartup();
+    const startup_window = try @import("window.zig").TestSupport.Window.init();
+    defer startup_window.deinit();
     var coordinator: Coordinator = undefined;
     try std.testing.expectEqual(Disposition.primary, try coordinator.init(std.testing.io, std.testing.allocator, .{ .vector = &.{} }, root, "wake-test", false, false));
     // Declare platform cleanup first: ingress must join before services clear.
@@ -459,6 +472,12 @@ test "single-instance coordinator reports SDK wake failure over real transport a
                 coordinator.queue.mutex.unlock(std.testing.io);
                 if (stopping) break;
                 std.Thread.yield() catch {};
+            }
+            // Queue.stop precedes transport cancellation. Keep the callback
+            // held until stop has reached join, so this test observes callback
+            // lifetime rather than racing cancellation against response I/O.
+            if (@import("builtin").os.tag == .windows) {
+                while (!coordinator.server.joiningForTest()) std.Thread.yield() catch {};
             }
             try std.testing.expect(!stop.completed.load(.acquire));
             try std.testing.expect(adapter.services() != null);

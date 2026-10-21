@@ -15,7 +15,11 @@ import {
   nonNegativeNumber,
   enumValue,
 } from "./wire-codec.ts";
-import { compactPhases } from "./contracts.ts";
+import {
+  viewBlockNames,
+  type ViewVersions,
+  compactPhases,
+} from "./contracts.ts";
 import {
   sendInputReasons,
   type SendInputResult,
@@ -55,6 +59,9 @@ import {
   type RunInputView,
   type RunActivity,
   type RunView,
+  type RunManifest,
+  type TaskSummary,
+  type ViewScope,
   type AttachmentChooseResult,
   type AttachmentAddResult,
   type AttachmentAddAcceptance,
@@ -2387,6 +2394,65 @@ function decodeBashPresentation(
   };
 }
 
+function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
+  return value === null
+    ? null
+    : (() => {
+        const terminalItem = object(value, `${path}`, [
+          "outcome",
+          "cause",
+          "diagnosticDisposition",
+        ]);
+        return {
+          outcome: enumValue(
+            terminalItem.outcome,
+            `${path}.outcome`,
+            runOutcomes,
+          ),
+          cause: nullableEnum(terminalItem.cause, `${path}.cause`, runCauses),
+          diagnosticDisposition: enumValue(
+            terminalItem.diagnosticDisposition,
+            `${path}.diagnosticDisposition`,
+            ["absent", "withheld"] as const,
+          ),
+        };
+      })();
+}
+
+function decodeRunOutput(value: unknown, path: string): RunView["output"] {
+  const outputItem = object(value, path, [
+    "commentary",
+    "response",
+    "responseKind",
+    "provisional",
+    "redacted",
+    "provisionalRedacted",
+  ]);
+  const commentary = arrayValue(
+    outputItem.commentary,
+    `${path}.commentary`,
+    stringValue,
+  );
+  if (commentary.length > maxCommentarySegmentsPerRun)
+    fail(`${path}.commentary`, "too many commentary segments");
+  const output = {
+    commentary,
+    response: stringValue(outputItem.response, `${path}.response`),
+    responseKind: nullableEnum(
+      outputItem.responseKind,
+      `${path}.responseKind`,
+      ["final", "partial"] as const,
+    ),
+    provisional: stringValue(outputItem.provisional, `${path}.provisional`),
+    redacted: booleanValue(outputItem.redacted, `${path}.redacted`),
+    provisionalRedacted: booleanValue(
+      outputItem.provisionalRedacted,
+      `${path}.provisionalRedacted`,
+    ),
+  };
+  return output;
+}
+
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
@@ -2432,69 +2498,11 @@ function decodeRun(value: unknown, path: string): RunView {
     "cacheCreation",
   ]);
   const phase = enumValue(item.phase, `${path}.phase`, runPhases);
-  const terminal =
-    item.terminal === null
-      ? null
-      : (() => {
-          const terminalItem = object(item.terminal, `${path}.terminal`, [
-            "outcome",
-            "cause",
-            "diagnosticDisposition",
-          ]);
-          return {
-            outcome: enumValue(
-              terminalItem.outcome,
-              `${path}.terminal.outcome`,
-              runOutcomes,
-            ),
-            cause: nullableEnum(
-              terminalItem.cause,
-              `${path}.terminal.cause`,
-              runCauses,
-            ),
-            diagnosticDisposition: enumValue(
-              terminalItem.diagnosticDisposition,
-              `${path}.terminal.diagnosticDisposition`,
-              ["absent", "withheld"] as const,
-            ),
-          };
-        })();
+  const terminal = decodeRunTerminal(item.terminal, `${path}.terminal`);
   validateRunTerminalState(phase, terminal, path);
   if (terminal?.cause === "provider_failure" && terminal.outcome !== "failed")
     fail(`${path}.terminal`, "provider failure must describe a failed Run");
-  const outputItem = object(item.output, `${path}.output`, [
-    "commentary",
-    "response",
-    "responseKind",
-    "provisional",
-    "redacted",
-    "provisionalRedacted",
-  ]);
-  const commentary = arrayValue(
-    outputItem.commentary,
-    `${path}.output.commentary`,
-    stringValue,
-  );
-  if (commentary.length > maxCommentarySegmentsPerRun)
-    fail(`${path}.output.commentary`, "too many commentary segments");
-  const output = {
-    commentary,
-    response: stringValue(outputItem.response, `${path}.output.response`),
-    responseKind: nullableEnum(
-      outputItem.responseKind,
-      `${path}.output.responseKind`,
-      ["final", "partial"] as const,
-    ),
-    provisional: stringValue(
-      outputItem.provisional,
-      `${path}.output.provisional`,
-    ),
-    redacted: booleanValue(outputItem.redacted, `${path}.output.redacted`),
-    provisionalRedacted: booleanValue(
-      outputItem.provisionalRedacted,
-      `${path}.output.provisionalRedacted`,
-    ),
-  };
+  const output = decodeRunOutput(item.output, `${path}.output`);
   const activity = decodeRunActivity(item.activity, `${path}.activity`);
   const elapsedMs =
     item.elapsedMs === null
@@ -3186,7 +3194,11 @@ function inputOperationId(value: unknown, path: string): string {
   return id;
 }
 
-function decodeTask(value: unknown, path: string): TaskView {
+function decodeTask(
+  value: unknown,
+  path: string,
+  manifest: RunManifest[],
+): TaskView {
   const item = object(value, path, [
     "inputReady",
     "inputAcceptance",
@@ -3302,12 +3314,26 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.mcpAuthority`,
   );
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  if (new Set(runs.map((run) => run.id)).size !== runs.length)
+    fail(path, "duplicate loaded Run");
+  for (const run of runs) {
+    const fact = manifest.find((entry) => entry.id === run.id);
+    if (
+      !fact ||
+      fact.phase !== run.phase ||
+      fact.permissionProfile !== run.permissionProfile ||
+      fact.permissionInteraction !== run.permissionInteraction ||
+      JSON.stringify(fact.terminal) !== JSON.stringify(run.terminal)
+    )
+      fail(path, "Run page disagrees with its manifest");
+  }
+
   for (const run of runs) {
     for (const input of run.additionalInputs) {
       if (
         input.transferredToRunId !== null &&
         (BigInt(input.transferredToRunId) <= BigInt(run.id) ||
-          !runs.some((target) => target.id === input.transferredToRunId))
+          !manifest.some((target) => target.id === input.transferredToRunId))
       )
         fail(path, "input transfer must target a later Run in the same Task");
       if (
@@ -3435,8 +3461,8 @@ function decodeTask(value: unknown, path: string): TaskView {
           `${path}.unreadCompletionRunId`,
         );
   if (unreadCompletionRunId !== null) {
-    let latestTerminal: RunView | null = null;
-    for (const run of runs) {
+    let latestTerminal: RunManifest | null = null;
+    for (const run of manifest) {
       if (
         run.terminal !== null &&
         (latestTerminal === null || BigInt(run.id) > BigInt(latestTerminal.id))
@@ -3508,12 +3534,12 @@ function decodeTask(value: unknown, path: string): TaskView {
   if ((currentRunId === "0") !== (currentRunPhase === null))
     fail(path, "current Run identity and phase must both be present or absent");
   if (currentRunPhase !== null) {
-    const current = runs.find((run) => run.id === currentRunId);
+    const current = manifest.find((run) => run.id === currentRunId);
     if (!current || current.phase !== currentRunPhase)
       fail(path, "current Run must reference a matching projected Run");
     if (archived) fail(path, "an archived Task cannot have a current Run");
   }
-  const activeRuns = runs.filter((run) =>
+  const activeRuns = manifest.filter((run) =>
     nonTerminalRunPhases.includes(run.phase as never),
   );
   if (
@@ -3579,7 +3605,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     },
   );
   if (inputSubmissions.length > 64) fail(path, "too many input submissions");
-  const runIds = new Set(runs.map((run) => run.id));
+  const runIds = new Set(manifest.map((run) => run.id));
   if (
     (context.pressure !== null && !runIds.has(context.pressure.sourceRunId)) ||
     (context.lastAutoCompact !== null &&
@@ -3595,7 +3621,7 @@ function decodeTask(value: unknown, path: string): TaskView {
   if (compactIds.size !== compacts.length)
     fail(path, "Compact operation identities must be unique");
   for (const compact of compacts) {
-    const afterRun = runs.find((run) => run.id === compact.afterRunId);
+    const afterRun = manifest.find((run) => run.id === compact.afterRunId);
     if (!afterRun || nonTerminalRunPhases.includes(afterRun.phase as never))
       fail(path, "Compact history must follow a terminal projected Run");
   }
@@ -3629,8 +3655,10 @@ function decodeTask(value: unknown, path: string): TaskView {
   }
   const requestIds = new Set<string>();
   const activityOrders = new Map(
-    runs.map((run) => [run.id, new Set(run.tools.map((tool) => tool.order))]),
+    manifest.map((run) => [run.id, new Set<string>()]),
   );
+  for (const run of runs)
+    activityOrders.set(run.id, new Set(run.tools.map((tool) => tool.order)));
   for (const run of runs) {
     if (new Set(run.tools.map((tool) => tool.id)).size !== run.tools.length)
       fail(path, "tool product identities must be unique within a Run");
@@ -3642,10 +3670,10 @@ function decodeTask(value: unknown, path: string): TaskView {
       fail(path, "UI history must reference a projected Run");
     if (
       record.answeredBy === "reviewer" &&
-      (runs.find((run) => run.id === record.runId)?.permissionProfile !==
+      (manifest.find((run) => run.id === record.runId)?.permissionProfile !==
         "approval_required" ||
-        runs.find((run) => run.id === record.runId)?.permissionInteraction !==
-          "interactive")
+        manifest.find((run) => run.id === record.runId)
+          ?.permissionInteraction !== "interactive")
     )
       fail(path, "reviewer decisions require an interactive approval session");
     if (requestIds.has(record.requestId))
@@ -4506,9 +4534,251 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
   };
 }
 
+export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
+  const item = object(value, path, [
+    "taskId",
+    "beforeRunId",
+    "runLimit",
+    "management",
+    "search",
+    "receipts",
+  ]);
+  const taskId =
+    item.taskId === null ? null : positiveWireId(item.taskId, `${path}.taskId`);
+  const beforeRunId =
+    item.beforeRunId === null
+      ? null
+      : positiveWireId(item.beforeRunId, `${path}.beforeRunId`);
+  const runLimit = positiveNumber(item.runLimit, `${path}.runLimit`);
+  if (
+    !Number.isInteger(runLimit) ||
+    runLimit > 4 ||
+    (beforeRunId !== null && taskId === null)
+  )
+    fail(path, "invalid history scope");
+  const receipts = arrayValue(item.receipts, `${path}.receipts`, (value, p) => {
+    const query = object(value, p, ["taskId", "operationId"]);
+    const operationId = stringValue(query.operationId, `${p}.operationId`);
+    if (!/^[\x21-\x7e]{1,64}$/.test(operationId))
+      fail(p, "invalid operation identity");
+    return { taskId: positiveWireId(query.taskId, `${p}.taskId`), operationId };
+  });
+  if (
+    receipts.length > 64 ||
+    new Set(receipts.map((query) => `${query.taskId}:${query.operationId}`))
+      .size !== receipts.length
+  )
+    fail(path, "invalid receipt query bounds");
+  return {
+    receipts,
+    taskId,
+    beforeRunId,
+    runLimit,
+    search: booleanValue(item.search, `${path}.search`),
+    management: enumValue(item.management, `${path}.management`, [
+      "none",
+      "skills",
+      "mcp",
+      "schedules",
+    ] as const),
+  };
+}
+
+function decodeRunManifest(value: unknown, path: string): RunManifest {
+  const item = object(value, path, [
+    "id",
+    "contentVersion",
+    "phase",
+    "permissionProfile",
+    "permissionInteraction",
+    "terminal",
+  ]);
+  const phase = enumValue(item.phase, `${path}.phase`, runPhases);
+  const terminal = decodeRunTerminal(item.terminal, `${path}.terminal`);
+  validateRunTerminalState(phase, terminal, path);
+  return {
+    contentVersion: positiveU64WireId(
+      item.contentVersion,
+      `${path}.contentVersion`,
+    ),
+    id: positiveWireId(item.id, `${path}.id`),
+    phase,
+    terminal,
+    permissionProfile: enumValue(
+      item.permissionProfile,
+      `${path}.permissionProfile`,
+      permissionProfiles,
+    ),
+    permissionInteraction: enumValue(
+      item.permissionInteraction,
+      `${path}.permissionInteraction`,
+      ["interactive", "noninteractive"] as const,
+    ),
+  };
+}
+
+function decodeTaskSummary(value: unknown, path: string): TaskSummary {
+  const item = object(value, path, [
+    "id",
+    "recentOrder",
+    "title",
+    "workspaceId",
+    "archived",
+    "lifecycle",
+    "deletionStatus",
+    "historyReadOnly",
+    "permissionReviewState",
+    "currentRunPhase",
+    "activeOperation",
+    "activeCompactPhase",
+    "lastCompactPhase",
+    "latestTerminal",
+    "unreadCompletionRunId",
+  ]);
+  const operation =
+    item.activeOperation === null
+      ? null
+      : object(item.activeOperation, `${path}.activeOperation`, ["kind", "id"]);
+  const terminal =
+    item.latestTerminal === null
+      ? null
+      : object(item.latestTerminal, `${path}.latestTerminal`, [
+          "outcome",
+          "cause",
+        ]);
+  const summary: TaskSummary = {
+    id: positiveWireId(item.id, `${path}.id`),
+    recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
+    title: stringValue(item.title, `${path}.title`),
+    workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    archived: booleanValue(item.archived, `${path}.archived`),
+    lifecycle: enumValue(item.lifecycle, `${path}.lifecycle`, taskLifecycles),
+    deletionStatus: enumValue(item.deletionStatus, `${path}.deletionStatus`, [
+      "idle",
+      "deleting",
+      "failed",
+    ] as const),
+    historyReadOnly: booleanValue(
+      item.historyReadOnly,
+      `${path}.historyReadOnly`,
+    ),
+    permissionReviewState: enumValue(
+      item.permissionReviewState,
+      `${path}.permissionReviewState`,
+      ["idle", "reviewing", "needs_user"] as const,
+    ),
+    currentRunPhase: nullableEnum(
+      item.currentRunPhase,
+      `${path}.currentRunPhase`,
+      nonTerminalRunPhases,
+    ),
+    activeOperation:
+      operation === null
+        ? null
+        : {
+            kind: enumValue(operation.kind, `${path}.activeOperation.kind`, [
+              "run",
+              "compact",
+              "restore",
+            ] as const),
+            id: positiveWireId(operation.id, `${path}.activeOperation.id`),
+          },
+    activeCompactPhase: nullableEnum(
+      item.activeCompactPhase,
+      `${path}.activeCompactPhase`,
+      compactPhases,
+    ),
+    lastCompactPhase: nullableEnum(
+      item.lastCompactPhase,
+      `${path}.lastCompactPhase`,
+      compactPhases,
+    ),
+    latestTerminal:
+      terminal === null
+        ? null
+        : {
+            outcome: enumValue(
+              terminal.outcome,
+              `${path}.latestTerminal.outcome`,
+              runOutcomes,
+            ),
+            cause: nullableEnum(
+              terminal.cause,
+              `${path}.latestTerminal.cause`,
+              runCauses,
+            ),
+          },
+    unreadCompletionRunId:
+      item.unreadCompletionRunId === null
+        ? null
+        : positiveWireId(
+            item.unreadCompletionRunId,
+            `${path}.unreadCompletionRunId`,
+          ),
+  };
+  if (
+    (!summary.archived && summary.deletionStatus !== "idle") ||
+    (summary.deletionStatus === "deleting" && summary.lifecycle !== "closing")
+  )
+    fail(path, "invalid deletion facts");
+  if (
+    summary.unreadCompletionRunId !== null &&
+    (summary.archived || summary.latestTerminal?.outcome !== "completed")
+  )
+    fail(path, "invalid completion receipt");
+  if (
+    (summary.activeOperation?.kind === "run") !==
+    (summary.currentRunPhase !== null)
+  )
+    fail(path, "inconsistent active Run");
+  if (
+    (summary.activeOperation?.kind === "compact") !==
+    (summary.activeCompactPhase !== null)
+  )
+    fail(path, "inconsistent active Compact");
+  return summary;
+}
+
+export function decodeViewVersions(value: unknown): ViewVersions {
+  const item = object(value, "$.blockVersions", viewBlockNames);
+  return Object.fromEntries(
+    viewBlockNames.map((name) => [
+      name,
+      positiveU64WireId(item[name], `$.blockVersions.${name}`),
+    ]),
+  ) as ViewVersions;
+}
+
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
-  const root = object(value, "$", [
+  const view = object(value, "$", [
     "revision",
+    "securityEpoch",
+    "historyEpoch",
+    "blockVersions",
+    "reusedBlocks",
+    "scope",
+    "context",
+    "workspaces",
+    "taskIndex",
+    "taskPage",
+    "historyPage",
+    "management",
+    "searchIndex",
+    "receipts",
+  ]);
+  const blockVersions = decodeViewVersions(view.blockVersions);
+  if (
+    arrayValue(view.reusedBlocks, "$.reusedBlocks", (item) => item).length !== 0
+  )
+    fail("$.reusedBlocks", "blocks must be materialized before decode");
+  const scope = decodeViewScope(view.scope, "$.scope");
+  const revision = wireId(view.revision, "$.revision");
+  const securityEpoch = positiveU64WireId(
+    view.securityEpoch,
+    "$.securityEpoch",
+  );
+  const historyEpoch = positiveU64WireId(view.historyEpoch, "$.historyEpoch");
+  const root = object(view.context, "$.context", [
     "capabilities",
     "permissions",
     "account",
@@ -4516,12 +4786,13 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "newTaskAdmission",
     "automaticWorkspaceRoot",
     "skillCatalog",
-    "skillManagement",
-    "mcp",
-    "workspaces",
-    "scheduledTasks",
-    "tasks",
   ]);
+  const management = object(view.management, "$.management", ["kind", "value"]);
+  if (
+    management.kind !== scope.management ||
+    (management.kind === "none" && management.value !== null)
+  )
+    fail("$.management", "unexpected management scope");
   const automaticRootItem = object(
     root.automaticWorkspaceRoot,
     "$.automaticWorkspaceRoot",
@@ -4915,33 +5186,224 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   )
     fail("$.permissions", "approval modes and execution profiles must agree");
   const workspaces = arrayValue(
-    root.workspaces,
+    view.workspaces,
     "$.workspaces",
     decodeWorkspace,
   );
-  const tasks = arrayValue(root.tasks, "$.tasks", decodeTask);
-  const skillManagement = decodeSkillManagement(
-    root.skillManagement,
-    "$.skillManagement",
+  const taskIndex = arrayValue(
+    view.taskIndex,
+    "$.taskIndex",
+    decodeTaskSummary,
   );
-  assertSourceDiscoverySettings(
-    skillManagement.personalSourceDiscovery,
-    skillManagement.sourceSettings,
-    "$.skillManagement.personalSourceDiscovery",
-  );
-  for (const workspace of workspaces)
-    assertSourceDiscoverySettings(
-      workspace.skillSourceDiscovery,
-      skillManagement.sourceSettings,
-      "$.workspaces.skillSourceDiscovery",
+  let taskPage: WorkbenchSnapshot["taskPage"] = null;
+  if (view.taskPage !== null) {
+    const page = object(view.taskPage, "$.taskPage", [
+      "beforeRunId",
+      "nextBeforeRunId",
+      "runManifest",
+      "task",
+    ]);
+    const beforeRunId =
+      page.beforeRunId === null
+        ? null
+        : positiveWireId(page.beforeRunId, "$.taskPage.beforeRunId");
+    const nextBeforeRunId =
+      page.nextBeforeRunId === null
+        ? null
+        : positiveWireId(page.nextBeforeRunId, "$.taskPage.nextBeforeRunId");
+    const runManifest = arrayValue(
+      page.runManifest,
+      "$.taskPage.runManifest",
+      decodeRunManifest,
     );
-  const scheduledTasks = arrayValue(
-    root.scheduledTasks,
-    "$.scheduledTasks",
-    decodeScheduledTask,
-  );
-  const mcp = decodeMcpManagement(root.mcp, "$.mcp");
-  if (!capabilities.mcpManagement) {
+    if (new Set(runManifest.map((run) => run.id)).size !== runManifest.length)
+      fail("$.taskPage.runManifest", "duplicate Run identity");
+    for (let i = 1; i < runManifest.length; i++)
+      if (BigInt(runManifest[i - 1]!.id) >= BigInt(runManifest[i]!.id))
+        fail("$.taskPage.runManifest", "invalid Run order");
+    const task = decodeTask(page.task, "$.taskPage.task", runManifest);
+    if (task.id !== scope.taskId || beforeRunId !== null)
+      fail("$.taskPage", "page identity mismatch");
+    const expectedRuns = runManifest.slice(-scope.runLimit);
+    if (
+      task.runs.length !== expectedRuns.length ||
+      task.runs.some((run, index) => run.id !== expectedRuns[index]!.id) ||
+      nextBeforeRunId !==
+        (runManifest.length > scope.runLimit ? expectedRuns[0]!.id : null)
+    )
+      fail("$.taskPage", "missing or unexpected current Run page");
+    if (
+      task.runs.length > scope.runLimit ||
+      task.runs.some(
+        (run) => beforeRunId !== null && BigInt(run.id) >= BigInt(beforeRunId),
+      )
+    )
+      fail("$.taskPage", "invalid page bounds");
+    if (
+      nextBeforeRunId !== null &&
+      (task.runs[0]?.id !== nextBeforeRunId ||
+        !runManifest.some((run) => BigInt(run.id) < BigInt(nextBeforeRunId)))
+    )
+      fail("$.taskPage", "invalid next cursor");
+    taskPage = { beforeRunId, nextBeforeRunId, runManifest, task };
+  }
+  if (scope.taskId === null && taskPage !== null)
+    fail("$.taskPage", "unsolicited Task page");
+  let historyPage: WorkbenchSnapshot["historyPage"] = null;
+  if (view.historyPage !== null) {
+    if (!taskPage || scope.beforeRunId === null)
+      fail("$.historyPage", "unsolicited history page");
+    const page = object(view.historyPage, "$.historyPage", [
+      "beforeRunId",
+      "nextBeforeRunId",
+      "runs",
+    ]);
+    const beforeRunId = positiveWireId(
+      page.beforeRunId,
+      "$.historyPage.beforeRunId",
+    );
+    const nextBeforeRunId =
+      page.nextBeforeRunId === null
+        ? null
+        : positiveWireId(page.nextBeforeRunId, "$.historyPage.nextBeforeRunId");
+    if (
+      beforeRunId !== scope.beforeRunId ||
+      !taskPage.runManifest.some((run) => run.id === beforeRunId)
+    )
+      fail("$.historyPage", "history cursor association mismatch");
+    const runs = arrayValue(page.runs, "$.historyPage.runs", decodeRun);
+    const eligible = taskPage.runManifest.filter(
+      (run) => BigInt(run.id) < BigInt(beforeRunId),
+    );
+    const expected = eligible.slice(-scope.runLimit);
+    if (
+      runs.length !== expected.length ||
+      runs.some(
+        (run, index) =>
+          run.id !== expected[index]!.id ||
+          run.phase !== expected[index]!.phase ||
+          run.permissionProfile !== expected[index]!.permissionProfile ||
+          run.permissionInteraction !==
+            expected[index]!.permissionInteraction ||
+          JSON.stringify(run.terminal) !==
+            JSON.stringify(expected[index]!.terminal),
+      )
+    )
+      fail("$.historyPage", "history Run manifest mismatch");
+    if (
+      nextBeforeRunId !== (eligible.length > runs.length ? runs[0]!.id : null)
+    )
+      fail("$.historyPage", "invalid history continuation");
+    historyPage = { beforeRunId, nextBeforeRunId, runs };
+  }
+  if (scope.beforeRunId !== null && taskPage !== null && historyPage === null)
+    fail("$.historyPage", "missing requested history page");
+  const tasks = taskPage === null ? [] : [taskPage.task];
+  const receipts = arrayValue(view.receipts, "$.receipts", (value, path) => {
+    const item = object(value, path, ["taskId", "operationId", "observed"]);
+    return {
+      taskId: positiveWireId(item.taskId, `${path}.taskId`),
+      operationId: stringValue(item.operationId, `${path}.operationId`),
+      observed: booleanValue(item.observed, `${path}.observed`),
+    };
+  });
+  if (
+    receipts.length !== scope.receipts.length ||
+    receipts.some(
+      (receipt, index) =>
+        receipt.taskId !== scope.receipts[index]!.taskId ||
+        receipt.operationId !== scope.receipts[index]!.operationId ||
+        (receipt.observed &&
+          !taskIndex.some((task) => task.id === receipt.taskId)),
+    )
+  )
+    fail("$.receipts", "receipt identity mismatch");
+
+  if ((view.searchIndex !== null) !== scope.search)
+    fail("$.searchIndex", "search scope mismatch");
+  const searchIndex =
+    view.searchIndex === null
+      ? null
+      : arrayValue(view.searchIndex, "$.searchIndex", (value, path) => {
+          const item = object(value, path, [
+            "taskId",
+            "runId",
+            "input",
+            "output",
+          ]);
+          const taskId = positiveWireId(item.taskId, `${path}.taskId`);
+          if (!taskIndex.some((task) => task.id === taskId))
+            fail(path, "unknown search Task");
+          const output =
+            item.output === null
+              ? null
+              : decodeRunOutput(item.output, `${path}.output`);
+          if (
+            output &&
+            (output.provisional !== "" ||
+              (output.responseKind === null && output.response !== ""))
+          )
+            fail(path, "search output must be classified and terminal");
+          return {
+            taskId,
+            runId: positiveWireId(item.runId, `${path}.runId`),
+            input: decodeRunInput(item.input, `${path}.input`),
+            output,
+          };
+        });
+  if (
+    searchIndex &&
+    new Set(searchIndex.map((run) => `${run.taskId}:${run.runId}`)).size !==
+      searchIndex.length
+  )
+    fail("$.searchIndex", "duplicate search Run");
+
+  const summary = taskIndex.find((task) => task.id === scope.taskId);
+  if ((summary !== undefined) !== (taskPage !== null))
+    fail("$.taskPage", "Task presence disagrees with index");
+  if (summary && taskPage) {
+    for (const key of [
+      "id",
+      "recentOrder",
+      "title",
+      "workspaceId",
+      "archived",
+      "lifecycle",
+      "deletionStatus",
+      "currentRunPhase",
+      "permissionReviewState",
+      "unreadCompletionRunId",
+      "activeOperation",
+    ] as const)
+      if (JSON.stringify(summary[key]) !== JSON.stringify(taskPage.task[key]))
+        fail("$.taskPage", "Task header disagrees with index");
+  }
+  const skillManagement =
+    scope.management === "skills"
+      ? decodeSkillManagement(management.value, "$.management.value")
+      : null;
+  if (skillManagement) {
+    assertSourceDiscoverySettings(
+      skillManagement.personalSourceDiscovery,
+      skillManagement.sourceSettings,
+      "$.management.value.personalSourceDiscovery",
+    );
+    for (const workspace of workspaces)
+      assertSourceDiscoverySettings(
+        workspace.skillSourceDiscovery,
+        skillManagement.sourceSettings,
+        "$.workspaces.skillSourceDiscovery",
+      );
+  }
+  const scheduledTasks =
+    scope.management === "schedules"
+      ? arrayValue(management.value, "$.management.value", decodeScheduledTask)
+      : null;
+  const mcp =
+    scope.management === "mcp"
+      ? decodeMcpManagement(management.value, "$.management.value")
+      : null;
+  if (mcp && !capabilities.mcpManagement) {
     if (
       mcp.availability !== "unavailable" ||
       mcp.managementHealth !== "unavailable" ||
@@ -4963,7 +5425,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "$.capabilities",
         "disabled MCP management cannot expose Host MCP effects",
       );
-  } else if (mcp.managementHealth === "unavailable") {
+  } else if (mcp?.managementHealth === "unavailable") {
     fail("$.mcp.managementHealth", "enabled MCP management requires its owner");
   }
   if (capabilities.mcpManagement !== capabilities.mcpSecretMaxBytes > 0)
@@ -4977,32 +5439,34 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   )
     fail("$.workspaces", "Workspace identities must be unique");
   const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
-  if (new Set(tasks.map((task) => task.id)).size !== tasks.length)
+  if (new Set(taskIndex.map((task) => task.id)).size !== taskIndex.length)
     fail("$.tasks", "Task identities must be unique");
   if (
+    scheduledTasks &&
     new Set(scheduledTasks.map((task) => task.id)).size !==
-    scheduledTasks.length
+      scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
-  for (const schedule of scheduledTasks) {
-    for (const occurrence of schedule.occurrences) {
-      if (occurrence.taskId === null) continue;
-      const occurrenceTask = tasksById.get(occurrence.taskId);
-      if (!occurrenceTask) continue;
-      if (
-        occurrenceTask.runs.some(
-          (run) => run.permissionInteraction !== "noninteractive",
+  if (scheduledTasks)
+    for (const schedule of scheduledTasks) {
+      for (const occurrence of schedule.occurrences) {
+        if (occurrence.taskId === null) continue;
+        const occurrenceTask = tasksById.get(occurrence.taskId);
+        if (!occurrenceTask) continue;
+        if (
+          occurrenceTask.runs.some(
+            (run) => run.permissionInteraction !== "noninteractive",
+          )
         )
-      )
-        fail(
-          "$.scheduledTasks",
-          "scheduled occurrence Runs must be noninteractive",
-        );
+          fail(
+            "$.scheduledTasks",
+            "scheduled occurrence Runs must be noninteractive",
+          );
+      }
     }
-  }
   for (const workspace of workspaces) {
-    const taskCount = tasks.filter(
+    const taskCount = taskIndex.filter(
       (task) => task.workspaceId === workspace.id,
     ).length;
     if (workspace.kind === "automatic" && taskCount !== 1)
@@ -5012,7 +5476,16 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       );
   }
   return {
-    revision: wireId(root.revision, "$.revision"),
+    revision,
+    blockVersions,
+    securityEpoch,
+    historyEpoch,
+    scope,
+    taskIndex,
+    receipts,
+    searchIndex,
+    taskPage,
+    historyPage,
     automaticWorkspaceRoot,
     capabilities,
     permissions,
@@ -5122,8 +5595,12 @@ export function decodeRendererBridgeConnect(value: unknown) {
 }
 
 export function decodeRevisionNotification(value: unknown) {
-  const item = object(value, "$", ["revision"]);
-  return wireId(item.revision, "$.revision");
+  const item = object(value, "$", ["generation", "revision", "securityEpoch"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    revision: wireId(item.revision, "$.revision"),
+    securityEpoch: positiveU64WireId(item.securityEpoch, "$.securityEpoch"),
+  };
 }
 
 function decodeSignal(value: unknown, keys: readonly string[]): HostSignal {

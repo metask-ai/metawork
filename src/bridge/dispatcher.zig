@@ -434,6 +434,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn detachProductControl(self: *Dispatcher) void {
+        if (self.control) |control| control.cancelSnapshot();
         self.mcp_management_host = null;
         self.control = null;
     }
@@ -448,6 +449,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
@@ -499,6 +501,7 @@ pub const Dispatcher = struct {
         const revision = workbench.currentRevision();
         _ = self.delivery.deliverRevision(
             revision,
+            workbench.projectionSecurityEpoch(),
             self.now(),
             self.transport(),
         ) catch |err| switch (err) {
@@ -596,6 +599,7 @@ pub const Dispatcher = struct {
                 .{ commands.contract_id, commands.contract_revision },
             );
         }
+        if (self.control) |control| control.cancelSnapshot();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
@@ -779,26 +783,56 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
+        if (invocation.request.payload.len > 16 * 1024) return error.InvalidPayload;
+        var envelope = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, invocation.request.payload, .{});
+        defer envelope.deinit();
+        if (envelope.value == .object and envelope.value.object.contains("preparingSnapshotId")) {
+            var continuation = try handlers.parsePayload(handlers.ProductSnapshotContinue, invocation.request.payload);
+            defer continuation.deinit();
+            const control = try self.requireProductControl();
+            const descriptor = try self.delivery.prepareSnapshot(invocation.source.window_id, control.projectionSecurityEpoch(), continuation.value.preparingSnapshotId.value, .{ .context = control, .prepare_fn = continueSnapshot });
+            return encodeSnapshotDescriptor(output, descriptor);
+        }
+        var parsed = try handlers.parsePayloadWithLimit(handlers.ProductViewRequest, invocation.request.payload, 16 * 1024);
+        defer parsed.deinit();
+        var receipt_queries: [64]product_control.ViewReceiptQuery = undefined;
+        var view = ViewWriteContext{ .control = try self.requireProductControl(), .request = try parsed.value.product(&receipt_queries) };
         const descriptor = self.delivery.publishSnapshot(
             invocation.source.window_id,
-            .{ .context = self, .write_fn = writeSnapshot },
+            view.control.projectionSecurityEpoch(),
+            .{ .context = &view, .write_fn = writeSnapshot, .cancellation = .{ .context = view.control, .cancel_fn = cancelSnapshotRead } },
         ) catch |err| {
             std.debug.assert(product_control.decideTransportFailure(.{
                 .stage = .snapshot_transport,
             }) == .retry);
             return err;
         };
+        return encodeSnapshotDescriptor(output, descriptor);
+    }
+
+    fn cancelSnapshotRead(context: *anyopaque, read_id: u64) void {
+        const control: *product_control.Runtime = @ptrCast(@alignCast(context));
+        control.cancelSnapshotRead(read_id);
+    }
+
+    fn encodeSnapshotDescriptor(output: []u8, descriptor: product_delivery.SnapshotDescriptor) ![]const u8 {
         var writer = std.Io.Writer.fixed(output);
-        const wire = @import("snapshot_contract.zig").SnapshotDescriptor{
-            .snapshotId = .{ .value = descriptor.id },
-            .bytes = .{ .value = descriptor.bytes },
-            .chunkBytes = .{ .value = product_delivery.snapshot_chunk_bytes },
-        };
-        try std.json.Stringify.value(wire, .{}, &writer);
+        if (descriptor.bytes == 0) {
+            try std.json.Stringify.value(@import("snapshot_contract.zig").SnapshotPreparing{ .snapshotId = .{ .value = descriptor.id } }, .{}, &writer);
+        } else {
+            try std.json.Stringify.value(@import("snapshot_contract.zig").SnapshotDescriptor{
+                .snapshotId = .{ .value = descriptor.id },
+                .bytes = .{ .value = descriptor.bytes },
+                .chunkBytes = .{ .value = product_delivery.snapshot_chunk_bytes },
+            }, .{}, &writer);
+        }
         return writer.buffered();
     }
 
     fn fetchSnapshotChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        comptime {
+            if (product_delivery.snapshot_chunk_bytes > product_control.projection_step_bytes) @compileError("Snapshot transport chunk exceeds the Product encoding step budget");
+        }
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
@@ -808,13 +842,14 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        const snapshot_id = try handlers.parseWireId(parsed.value.snapshotId);
-        const offset = std.fmt.parseInt(usize, parsed.value.offset, 10) catch
-            return error.InvalidBridgePayload;
+        const snapshot_id = parsed.value.snapshotId.value;
+        const offset = std.math.cast(usize, parsed.value.offset.value) orelse return error.InvalidBridgePayload;
         const chunk = self.delivery.snapshotChunk(
             invocation.source.window_id,
+            (try self.requireProductControl()).projectionSecurityEpoch(),
             snapshot_id,
             offset,
+            .{ .context = try self.requireProductControl(), .write_fn = materializeSnapshot },
         ) catch |err| switch (err) {
             error.InvalidOffset => return error.InvalidBridgePayload,
             else => return err,
@@ -4922,9 +4957,24 @@ pub const Dispatcher = struct {
         return self.platform.cancel_timer_fn(self.platform.context, timer_id);
     }
 
-    fn writeSnapshot(context: ?*anyopaque, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context.?));
-        return (try self.requireProductControl()).writeSnapshot(output);
+    const ViewWriteContext = struct {
+        control: *product_control.Runtime,
+        request: product_control.ViewRequest,
+    };
+
+    fn writeSnapshot(context: ?*anyopaque, output: []u8) anyerror!product_delivery.SnapshotStart {
+        const view: *const ViewWriteContext = @ptrCast(@alignCast(context.?));
+        const read = try view.control.writeSnapshot(output, view.request);
+        return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
+    }
+    fn continueSnapshot(context: ?*anyopaque, read_id: u64, output: []u8) anyerror!product_delivery.SnapshotStart {
+        const control: *product_control.Runtime = @ptrCast(@alignCast(context.?));
+        const read = try control.continueSnapshot(read_id, output);
+        return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
+    }
+    fn materializeSnapshot(context: ?*anyopaque, read_id: u64, output: []u8, offset: usize, length: usize) anyerror!void {
+        const control: *product_control.Runtime = @ptrCast(@alignCast(context.?));
+        try control.writeSnapshotRange(read_id, output, offset, length);
     }
 };
 
@@ -7028,7 +7078,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     }
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
     try std.testing.expect(std.mem.indexOf(
@@ -7467,7 +7517,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     try std.testing.expectEqualStrings("input-1", task.send_input_result.?.operationId());
     try std.testing.expectEqual(@as(?u32, 1), task.send_input_result.?.sequence);
     var snapshot_buffer: [64 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_buffer);
+    const snapshot = try control.writeAggregateFixture(&snapshot_buffer);
     var parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), snapshot, .{});
     defer parsed.deinit();
     const projected_task = parsed.value.object.get("tasks").?.array.items[0].object;
@@ -7490,4 +7540,95 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         try std.testing.expectEqual(@as(?u32, @intCast(index + 1)), run.additional_inputs[index].?.sequence);
     }
     try std.testing.expect(task.durable.runs[1] == null);
+}
+
+test "Product view Dispatcher freezes and transports a complete multi-chunk snapshot through the native registry" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+    };
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try product_control.TestSupport.maximumFixture();
+    defer control.deinit();
+    var dispatcher = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer dispatcher.deinit();
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    const response = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(response);
+    const connected = native.dispatch("{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, response);
+    try std.testing.expect(std.mem.indexOf(u8, connected, "\"accepted\":true") != null);
+    const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
+    var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(begin, source, response), .{});
+    defer descriptor.deinit();
+    var result = descriptor.value.object.get("result").?.object;
+    const id = try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10);
+    var preparation_request: [256]u8 = undefined;
+    var preparation_steps: usize = 0;
+    while (result.contains("phase")) {
+        try std.testing.expect(preparation_steps < @import("snapshot_contract.zig").max_preparation_steps);
+        preparation_steps += 1;
+        const request = try std.fmt.bufPrint(&preparation_request, "{{\"id\":\"prepare\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{{\"preparingSnapshotId\":\"{d}\"}}}}", .{id});
+        descriptor.deinit();
+        descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(request, source, response), .{});
+        result = descriptor.value.object.get("result").?.object;
+        try std.testing.expectEqual(id, try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10));
+    }
+    const bytes: usize = @intCast(result.get("bytes").?.integer);
+    try std.testing.expect(bytes > product_delivery.snapshot_chunk_bytes);
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+    const assembled = try std.testing.allocator.alloc(u8, bytes);
+    defer std.testing.allocator.free(assembled);
+    var request_storage: [256]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < bytes) : (offset += product_delivery.snapshot_chunk_bytes) {
+        const request = try std.fmt.bufPrint(&request_storage, "{{\"id\":\"chunk\",\"command\":\"metawork.workbench.snapshot.chunk\",\"payload\":{{\"snapshotId\":\"{d}\",\"offset\":\"{d}\"}}}}", .{ id, offset });
+        if (offset == 0) {
+            const rejected = native.dispatch(request, .{ .origin = source.origin, .window_id = 99 }, response);
+            try std.testing.expect(std.mem.indexOf(u8, rejected, "\"handler_failed\"") != null);
+            try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+        }
+        var chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(request, source, response), .{});
+        defer chunk.deinit();
+        const fields = chunk.value.object.get("result").?.object;
+        const data = fields.get("data").?.string;
+        const length = @min(product_delivery.snapshot_chunk_bytes, bytes - offset);
+        try std.testing.expectEqual(length, try std.base64.standard.Decoder.calcSizeForSlice(data));
+        try std.base64.standard.Decoder.decode(assembled[offset..][0..length], data);
+    }
+    try std.testing.expect(std.unicode.utf8ValidateSlice(assembled));
+    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, assembled, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 4), decoded.value.object.get("historyPage").?.object.get("runs").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 50), decoded.value.object.get("taskIndex").?.array.items.len);
+    try std.testing.expectEqual(bytes, control.view_read.produced);
+    dispatcher.breakConnection();
+    try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
 }

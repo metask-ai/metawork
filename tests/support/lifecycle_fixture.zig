@@ -3163,7 +3163,7 @@ pub fn waitProductControlSnapshot(
     var output: [512 * 1024]u8 = undefined;
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
-        const snapshot = try workbench.writeSnapshot(&output);
+        const snapshot = try workbench.writeAggregateFixture(&output);
         if (std.mem.indexOf(u8, snapshot, needle) != null) return;
         std.Thread.yield() catch {};
     }

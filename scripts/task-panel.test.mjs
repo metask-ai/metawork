@@ -1,3 +1,4 @@
+import { productStateFixture } from "./test-support/product-view-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -80,7 +81,7 @@ const { useTaskPanelTarget } = await vite.ssrLoadModule(
 const { useFilePreviewTabs } = await vite.ssrLoadModule(
   "/src/features/task-panel/useFilePreviewTabs.ts",
 );
-const { TaskContent } = await vite.ssrLoadModule(
+const { TaskContent, createTaskReadingMemory } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
 const { GeneratedImagePreview } = await vite.ssrLoadModule(
@@ -113,6 +114,15 @@ const { ApprovalPanel } = await vite.ssrLoadModule(
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
+
+// Complete asynchronous setup before registering tests so root cleanup cannot
+// dispose Vite/JSDOM while later tests are still being registered.
+const taskInformationModels = JSON.parse(
+  await readFile(
+    "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+    "utf8",
+  ),
+).models;
 
 test.afterEach(() => cleanup());
 test.after(async () => {
@@ -2437,6 +2447,135 @@ test("Task switches restore each Task reading position without cross-contaminati
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
 
+test("reading memory survives unloaded bodies and remount, and restores after history refill", () => {
+  const memory = createTaskReadingMemory();
+  const value = task({
+    id: "task-a",
+    runs: [
+      run({
+        id: "1",
+        tools: [
+          technicalTool({
+            id: "tool-preserved",
+            content: "preserved tool output",
+          }),
+        ],
+      }),
+      run({ id: "9" }),
+    ],
+  });
+  const view = render(taskContentElement(value, "1", { memory }));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+  fireEvent.click(document.querySelector(".run-process-header"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Show or hide details for Read" }),
+  );
+  assert.ok(screen.getByText("preserved tool output"));
+  view.rerender(taskContentElement(null, "2", { memory }));
+  view.unmount();
+  const history = { available: true, loading: true, onLoad() {} };
+  const remounted = render(
+    taskContentElement({ ...value, runs: [run({ id: "9" })] }, "3", {
+      memory,
+      history,
+    }),
+  );
+  const nextViewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(nextViewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 40 },
+  });
+  fireEvent.scroll(nextViewport);
+  assert.equal(memory.reading.get("task-a").scrollTop, 180);
+  remounted.rerender(
+    taskContentElement(value, "4", {
+      memory,
+      history: { ...history, loading: false },
+    }),
+  );
+  assert.equal(nextViewport.scrollTop, 180);
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByText("preserved tool output"));
+});
+
+test("panel tabs distinguish a manifest-confirmed unloaded Run from deleted evidence", () => {
+  const reference = { id: "file-1", title: "a.txt", displayPath: "a.txt" };
+  const selected = task({
+    runs: [
+      run({
+        tools: [technicalTool({ fileRefs: [reference] })],
+        fileChanges: { observation: "complete", changes: [fileChange()] },
+      }),
+    ],
+  });
+  const selectedRun = selected.runs[0];
+  const tab = createTaskPanelPreviewTab(selected.id, selectedRun.id, reference);
+  const opened = openTaskPanelTab(emptyTaskPanelSession, tab, selected, true);
+  const unloaded = { ...selected, runs: [] };
+  const manifest = [{ id: selectedRun.id, contentVersion: "2" }];
+  const withReview = openTaskPanelTab(
+    opened,
+    createTaskPanelReviewTab(selected.id, selectedRun.id),
+    selected,
+    true,
+  );
+  const retained = reconcileTaskPanelSession(
+    withReview,
+    unloaded,
+    true,
+    manifest,
+  );
+  assert.equal(retained.tabs.length, 2);
+  assert.deepEqual(retained.tabs[0], tab);
+  assert.equal(
+    reconcileTaskPanelSession(retained, unloaded, true, []).tabs.length,
+    0,
+  );
+  const removedReference = {
+    ...selected,
+    runs: [{ ...selectedRun, tools: [] }],
+  };
+  assert.deepEqual(
+    reconcileTaskPanelSession(
+      retained,
+      removedReference,
+      true,
+      manifest,
+    ).tabs.map((entry) => entry.kind),
+    ["review"],
+  );
+});
+
+test("prepending a history page preserves the visible reading position", () => {
+  const current = task({ runs: [run({ id: "9" })] });
+  const view = render(taskContentElement(current));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let height = 1000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 100 },
+  });
+  fireEvent.scroll(viewport);
+  view.rerender(taskContentElement(current, "2"));
+  height = 1600;
+  view.rerender(
+    taskContentElement(
+      { ...current, runs: [run({ id: "1" }), ...current.runs] },
+      "3",
+    ),
+  );
+  assert.equal(viewport.scrollTop, 700);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
 test("Tool summary expands its exact inline details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const value = task({
@@ -2963,7 +3102,10 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const incompleteMarkup = renderToStaticMarkup(
     taskContentElement(incomplete, "1", { fileChangesEnabled: true }),
   );
-  assert.match(incompleteMarkup, /File changes for this run could not be fully verified/);
+  assert.match(
+    incompleteMarkup,
+    /File changes for this run could not be fully verified/,
+  );
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
@@ -4765,13 +4907,6 @@ test("Run statistics remain data, not conversation content or empty disclosures"
   assert.deepEqual(value, original);
 });
 
-const taskInformationModels = JSON.parse(
-  await readFile(
-    "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
-    "utf8",
-  ),
-).models;
-
 test("task information uses a keyboard-accessible icon and retains creation MCP and readonly permission", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   for (const [mcpAuthority, expected] of [
@@ -5066,6 +5201,11 @@ async function findRecentTaskButton(name) {
   return waitFor(() => recentTaskButton(name));
 }
 
+async function selectRecentTask(pattern) {
+  const button = await findRecentTaskButton(pattern);
+  await act(async () => fireEvent.click(button));
+}
+
 async function renderAppFixture(
   ctx,
   width = 1440,
@@ -5156,9 +5296,9 @@ async function renderAppFixture(
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => {
+    fetchSnapshot: async (scope) => {
       if (snapshotFailure) throw new Error("fixture synchronization failure");
-      return structuredClone(snapshot);
+      return productStateFixture(snapshot, scope);
     },
     previewFile: (...ids) =>
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
@@ -5172,7 +5312,7 @@ async function renderAppFixture(
     snapshot,
     previews,
     diffs,
-    publish: () => onRevision(snapshot.revision),
+    publish: () => onRevision(snapshot.revision, snapshot.securityEpoch ?? "1"),
     setSnapshotFailure: (value) => {
       snapshotFailure = value;
     },
@@ -5190,7 +5330,7 @@ test("App marks retained Run state unsynchronized and disables stop until refres
       activity: { kind: "waiting_model" },
     },
   );
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   setSnapshotFailure(true);
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
@@ -5233,7 +5373,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
       rejectStop = reject;
     });
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.deepEqual(calls, [["3"]]);
   assert.ok(screen.getByText("Requesting stop…"));
@@ -5241,7 +5381,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
     screen.getByRole("button", { name: "Stop task" }).disabled,
     true,
   );
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.ok(screen.queryByText("Requesting stop…") === null);
   assert.equal(
     screen.getByRole("button", { name: "Stop task" }).disabled,
@@ -5249,7 +5389,7 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
   await act(async () => rejectStop(new Error("fixture stop failure")));
   assert.ok(screen.queryByText(/stop request could not be confirmed/) === null);
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.ok(
     screen.getAllByText(/stop request could not be confirmed/).length > 0,
   );
@@ -5396,7 +5536,7 @@ test("App switches the current Task only after Host commits and preserves its dr
     });
   source.availableApprovalModes = ["manual", "auto_review", "full_access"];
   await publishAppFixture(fixture);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const composer = screen.getByRole("combobox", { name: "" });
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(composer);
@@ -5455,6 +5595,85 @@ function filePreviewOpener(path) {
   return screen.getByRole("button", { name: `Preview ${path}` });
 }
 
+test("App pages through all retained history while keeping the current Run live", async (ctx) => {
+  const fixture = await renderAppFixture(ctx);
+  const source = fixture.snapshot.tasks[0];
+  const template = structuredClone(source.runs[0]);
+  source.runs = Array.from({ length: 16 }, (_, index) => ({
+    ...structuredClone(template),
+    id: String(index + 1),
+    input: {
+      kind: "text",
+      text: `History input ${index + 1}`,
+      redacted: false,
+    },
+    output: {
+      ...structuredClone(template.output),
+      commentary: [],
+      response: `History response ${index + 1}`,
+    },
+  }));
+  const current = source.runs.at(-1);
+  current.phase = "running";
+  current.terminal = null;
+  source.currentRunId = "16";
+  source.currentRunPhase = "running";
+  await selectRecentTask(/First task/);
+  assert.ok(screen.getByText("History input 16"));
+  assert.equal(screen.queryByText("History input 1"), null);
+  for (const first of [9, 5, 1]) {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load earlier messages" }),
+    );
+    await screen.findByText(`History input ${first}`);
+    assert.ok(screen.getByText("History input 16"));
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    );
+  }
+  assert.equal(
+    screen.queryByRole("button", { name: "Load earlier messages" }),
+    null,
+  );
+  current.output.commentary = ["Current Run still receives live output"];
+  await publishAppFixture(fixture);
+  await screen.findByText("Current Run still receives live output");
+  assert.ok(screen.getByText("History input 1"));
+  fixture.snapshot.historyEpoch = "2";
+  await publishAppFixture(fixture);
+  for (const id of [1, 5, 9, 16])
+    await screen.findByText(`History input ${id}`);
+  source.runs[5].contentVersion = "2";
+  source.runs[5].input.text = "Updated historical Run 6";
+  await publishAppFixture(fixture);
+  await screen.findByText("Updated historical Run 6");
+  for (const id of [1, 5, 9, 16])
+    assert.ok(screen.getByText(`History input ${id}`));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 2000 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
+  for (const id of [1, 5, 9, 16])
+    await screen.findByText(`History input ${id}`);
+  assert.equal(document.querySelector(".ai-conversation-viewport"), viewport);
+  assert.equal(viewport.scrollTop, 180);
+  fixture.snapshot.securityEpoch = "2";
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(screen.queryByText("History input 9") === null, true),
+  );
+  await screen.findByRole("button", { name: "Load earlier messages" });
+  assert.ok(screen.getByText("History input 16"));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
+  assert.equal(screen.queryByText("History input 1"), null);
+});
+
 function fileChangesOpener() {
   return screen
     .getAllByRole("button")
@@ -5481,7 +5700,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   assert.ok(
     screen.getByText("Open a file or review changes from the conversation."),
   );
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   const panel = () => within(document.querySelector("#task-panel"));
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
   assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
@@ -5606,7 +5825,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
 
 test("layout visibility and share survive Task changes, invalidation, and non-Task pages", async (ctx) => {
   const { snapshot, previews, publish } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   const shell = document.querySelector(".app-window");
   const resize = screen.getByRole("separator", { name: "Resize side panel" });
@@ -5632,7 +5851,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   );
   assert.ok(screen.queryByText("invalidated file") === null);
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   assert.equal(shell.style.getPropertyValue("--right-panel-width"), rightWidth);
   assert.equal(
@@ -5653,7 +5872,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   assert.ok(
     !screen.getAllByRole("button", { name: "Hide side panel" })[0].disabled,
   );
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   snapshot.tasks.splice(1, 1);
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -5674,7 +5893,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
     null,
   );
   fireEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
   assert.equal(
     dom.window.localStorage.getItem("metawork.panel.task.share"),
@@ -5820,7 +6039,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
     }),
   );
   assert.equal(previews.length, 2);
-  fireEvent.click(recentTaskButton(/Second task/));
+  await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   await act(async () => previews[1].resolve(ready("late after switch")));
   assert.equal(screen.queryByText("late after switch"), null);
   assert.ok(document.querySelector("#task-panel") !== null);
@@ -5831,7 +6050,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
       .getByRole("heading", { name: "Side panel" })
       .classList.contains("sr-only"),
   );
-  fireEvent.click(recentTaskButton(/First task/));
+  await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   assert.ok(document.querySelector("#task-panel") !== null);
   assert.ok(screen.queryByText("late after switch") === null);
   cleanup();
@@ -5848,7 +6067,7 @@ test("conversation file links preview directly without expanding tools and retur
       provisionalRedacted: false,
     },
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   assert.equal(
     document.querySelector(".run-process-header").getAttribute("aria-expanded"),
     "false",
@@ -5912,7 +6131,7 @@ test("Markdown preview mode is isolated per tab and inactive content is unmounte
       }),
     ],
   });
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const ready = (content) => ({
     state: "ready",
     content,
@@ -5962,7 +6181,7 @@ test("Markdown preview mode is isolated per tab and inactive content is unmounte
 
 test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {
   const { previews } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const openers = [filePreviewOpener("a.txt"), filePreviewOpener("b.txt")];
   fireEvent.click(openers[0]);
   fireEvent.click(openers[1]);
@@ -6025,7 +6244,7 @@ test("App attention only locates the original approval in docked and overlay lay
       fireEvent.click(
         screen.getByRole("button", { name: "Toggle task sidebar" }),
       );
-    fireEvent.click(await findRecentTaskButton(/First task/));
+    await selectRecentTask(/First task/);
     const info = await screen.findByRole("button", {
       name: "Task information",
     });
@@ -6136,7 +6355,7 @@ test("App attention only locates the original approval in docked and overlay lay
 
 test("App Escape returns to the opener, or the permanent toggle when that opener disappears", async (ctx) => {
   const { previews } = await renderAppFixture(ctx);
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   const opener = filePreviewOpener("a.txt");
   fireEvent.click(opener);
   await act(
@@ -6274,7 +6493,7 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
     390,
   );
   fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
-  fireEvent.click(await findRecentTaskButton(/First task/));
+  await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
   const draft = screen.getByRole("combobox", { name: "" });
   fireEvent.change(draft, { target: { value: "Keep this local draft" } });
@@ -6295,9 +6514,9 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
   ctx.mock.method(
     BridgeClient.prototype,
     "fetchSnapshot",
-    () =>
+    (scope) =>
       new Promise((resolve) => {
-        release = resolve;
+        release = (state) => resolve(productStateFixture(state, scope));
       }),
   );
   retry.focus();
@@ -6437,9 +6656,9 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
         if (++connects === 1) throw new Error("bootstrap unavailable");
         return "2";
       },
-      fetchSnapshot: () =>
+      fetchSnapshot: (scope) =>
         new Promise((resolve) => {
-          release = resolve;
+          release = (state) => resolve(productStateFixture(state, scope));
         }),
     },
   );
@@ -6450,7 +6669,7 @@ test("bootstrap retry retains the root failure screen until fresh data and ping 
   await waitFor(() => assert.ok(release));
   assert.ok(document.querySelector(".connection-failure-screen"));
   assert.equal(document.querySelector(".app-window"), null);
-  await act(async () => release(structuredClone(f.snapshot)));
+  await act(async () => release(f.snapshot));
   await waitFor(() => assert.ok(document.querySelector(".app-window")));
   assert.equal(document.querySelector(".connection-failure-screen"), null);
 });
@@ -6466,7 +6685,7 @@ for (const outcome of ["committed", "timeout"]) {
     const sidebar = screen.getByRole("button", { name: "Toggle task sidebar" });
     if (sidebar.getAttribute("aria-expanded") === "false")
       fireEvent.click(sidebar);
-    fireEvent.click(await findRecentTaskButton(/First task/));
+    await selectRecentTask(/First task/);
     // An empty draft exposes Stop; a retained draft exposes Send instead.
     fireEvent.change(screen.getByRole("combobox", { name: "" }), {
       target: { value: "" },
@@ -6504,8 +6723,8 @@ for (const outcome of ["committed", "timeout"]) {
           ),
     );
     assert.equal(reads, 5);
-    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () =>
-      structuredClone(f.snapshot),
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) =>
+      productStateFixture(f.snapshot, scope),
     );
     fireEvent.click(document.querySelector(".commandbar-alert > summary"));
     fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
@@ -6566,7 +6785,10 @@ test("generated image loads only its reference and opens the existing preview", 
   );
   assert.deepEqual(calls, [["17", "23", "host-image-1"]]);
   assert.equal(view.container.textContent, "");
-  assert.match(view.container.querySelector("button").getAttribute("aria-label"), /generated-images\/ocean\.jpg/);
+  assert.match(
+    view.container.querySelector("button").getAttribute("aria-label"),
+    /generated-images\/ocean\.jpg/,
+  );
   assert.equal(
     view.container.querySelector("img").getAttribute("src"),
     `data:image/png;base64,${generatedPng}`,
@@ -6654,4 +6876,187 @@ test("right file panel renders a PNG preview instead of source code", () => {
     view.container.querySelector(".task-panel-preview-source"),
     null,
   );
+});
+
+test("App removes revoked Host conversation before replacement snapshot can succeed", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+  );
+  await selectRecentTask(/First task/);
+  assert.ok(document.querySelector("[data-run-id]"));
+  setSnapshotFailure(true);
+  snapshot.securityEpoch = "2";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.equal(document.querySelector("[data-run-id]") === null, true);
+  assert.equal(
+    document.querySelector(".task-panel-preview-source") === null,
+    true,
+  );
+  setSnapshotFailure(false);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector("[data-run-id]")));
+});
+
+test("App keeps a preview through a missing history page and closes it only after reference removal", async (ctx) => {
+  const fixture = await renderAppFixture(ctx);
+  await selectRecentTask(/First task/);
+  fireEvent.click(filePreviewOpener("a.txt"));
+  await act(async () =>
+    fixture.previews[0].resolve({
+      state: "ready",
+      content: "retained preview body",
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  await screen.findByText("retained preview body");
+  const source = fixture.snapshot.tasks[0];
+  const older = source.runs[0];
+  older.phase = "completed";
+  older.activity = null;
+  older.terminal = terminal();
+  older.contentVersion = "2";
+  source.runs = [
+    older,
+    ...Array.from({ length: 4 }, (_, index) => ({
+      ...structuredClone(older),
+      id: String(Number(older.id) + index + 1),
+      tools: [],
+      fileChanges: { observation: "complete", changes: [] },
+    })),
+  ];
+  source.currentRunId = source.runs.at(-1).id;
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(
+      Boolean(
+        document.querySelector('[data-run-id="11"]') &&
+        document.querySelector('[data-run-id="7"]'),
+      ),
+      true,
+    ),
+  );
+  await screen.findByText("retained preview body");
+  assert.equal(fixture.previews.length, 1);
+  older.tools = [];
+  older.contentVersion = "3";
+  await publishAppFixture(fixture);
+  await waitFor(() =>
+    assert.equal(screen.queryByText("retained preview body") === null, true),
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelectorAll('#task-panel [role="tab"]').length,
+      0,
+    ),
+  );
+  assert.equal(screen.queryByText("retained preview body") === null, true);
+});
+
+test("reading memory prunes confirmed deletions while preserving unloaded scopes", () => {
+  const memory = createTaskReadingMemory();
+  for (const taskId of ["1", "2"]) {
+    memory.reading.set(taskId, { scrollTop: 180, followingLatest: false });
+    for (const runId of ["1", "2"]) {
+      memory.processDisclosure.set(`${taskId}:${runId}`, {});
+      memory.toolDisclosure.set(`${taskId}:${runId}`, new Set(["tool"]));
+    }
+  }
+  memory.prune(new Set(["1", "2"]));
+  assert.equal(memory.processDisclosure.size, 4);
+  assert.equal(memory.toolDisclosure.size, 4);
+  memory.prune(new Set(["1", "2"]), { taskId: "1", runIds: new Set(["2"]) });
+  assert.equal(memory.processDisclosure.has("1:1"), false);
+  assert.equal(memory.toolDisclosure.has("1:2"), true);
+  assert.equal(memory.processDisclosure.has("2:1"), true);
+  memory.prune(new Set(["2"]));
+  assert.equal(memory.reading.has("1"), false);
+  assert.equal(memory.processDisclosure.has("1:2"), false);
+  assert.equal(memory.toolDisclosure.has("1:2"), false);
+  assert.equal(memory.reading.get("2").scrollTop, 180);
+});
+
+test("same Task history refill restores the visible Run anchor despite changed earlier heights", () => {
+  const memory = createTaskReadingMemory();
+  const value = task({
+    id: "task-a",
+    runs: [
+      run({ id: "1" }),
+      run({ id: "2" }),
+      run({ id: "3" }),
+      run({ id: "4" }),
+    ],
+  });
+  const history = { available: true, loading: false, onLoad() {} };
+  const view = render(taskContentElement(value, "1", { memory, history }));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let earlierHeight = 400,
+    totalHeight = 1600,
+    position = 450;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => totalHeight },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: {
+      configurable: true,
+      get: () => position,
+      set: (value) => {
+        position = value;
+      },
+    },
+  });
+  viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 });
+  function installRunBounds() {
+    for (const node of viewport.querySelectorAll("[data-run-id]")) {
+      node.getBoundingClientRect = () => {
+        const id = Number(node.dataset.runId);
+        const top =
+          100 + (id === 1 ? 0 : earlierHeight + (id - 2) * 400) - position;
+        return { top, bottom: top + (id === 1 ? earlierHeight : 400) };
+      };
+    }
+  }
+  installRunBounds();
+  fireEvent.scroll(viewport);
+  assert.deepEqual(memory.reading.get("task-a").anchor, {
+    runId: "2",
+    offset: -50,
+  });
+  totalHeight = 400;
+  position = 0; // Browser clamps scrollTop after the continuous suffix shrinks.
+  view.rerender(
+    taskContentElement({ ...value, runs: [value.runs[3]] }, "2", {
+      memory,
+      history: { ...history, loading: true },
+    }),
+  );
+  fireEvent.scroll(viewport);
+  assert.equal(memory.reading.get("task-a").scrollTop, 450);
+  earlierHeight = 700;
+  totalHeight = 1900;
+  // Populate/refine DOM geometry before layout effects read the restored interval.
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (!this.dataset.runId) return original.call(this);
+    const id = Number(this.dataset.runId);
+    const top =
+      100 + (id === 1 ? 0 : earlierHeight + (id - 2) * 400) - position;
+    return { top, bottom: top + (id === 1 ? earlierHeight : 400) };
+  };
+  try {
+    view.rerender(taskContentElement(value, "3", { memory, history }));
+    assert.equal(viewport.scrollTop, 750);
+    assert.equal(
+      viewport.querySelector('[data-run-id="2"]').getBoundingClientRect().top,
+      50,
+    );
+    fireEvent.scroll(viewport);
+    assert.equal(memory.reading.get("task-a").anchor.runId, "2");
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
 });

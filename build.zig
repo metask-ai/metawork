@@ -262,6 +262,29 @@ pub fn build(b: *std.Build) void {
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
+    const projection_performance_module = b.createModule(.{
+        .root_source_file = b.path("tests/product/projection_performance_test.zig"),
+        .target = modules.product_control.resolved_target.?,
+        .optimize = modules.product_control.optimize.?,
+    });
+    projection_performance_module.addImport("metawork_product_control", modules.product_control);
+    projection_performance_module.addImport("metawork_bridge", modules.bridge);
+    projection_performance_module.link_libc = bundle.link_libc;
+    const projection_performance_tests = b.addTest(.{
+        .root_module = projection_performance_module,
+        .filters = &.{"Product projection legal maximum performance"},
+    });
+    // Compile the acceptance surface in the normal graph; measure it separately
+    // so unrelated parallel suites cannot distort the latency samples.
+    artifacts.tests.step.dependOn(&projection_performance_tests.step);
+    b.step("test-projection-performance", "Measure legal maximum scoped Product presentation budgets").dependOn(&b.addRunArtifact(projection_performance_tests).step);
+    const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
+    for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_task_runtime, test_modules.product_control_runtime }) |module| {
+        product_views_step.dependOn(&b.addRunArtifact(b.addTest(.{
+            .root_module = module,
+            .filters = &.{ "Product view", "Product Control snapshot serializer matches" },
+        })).step);
+    }
     const image_preparation_step = b.step("test-image-run-preparation", "Run image authorization, ownership and projection tests");
     for ([_]*std.Build.Module{ test_modules.models_coordinator, test_modules.product_task_runtime, test_modules.product_task_execution }) |module| {
         image_preparation_step.dependOn(&b.addRunArtifact(b.addTest(.{
@@ -1924,6 +1947,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));
     product_control_contract_fixture.addOption(

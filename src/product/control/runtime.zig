@@ -44,14 +44,20 @@ const mcp_runtime = product_mcp;
 const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
+const view_cache = @import("view_cache.zig");
+const view_plan = @import("view_plan.zig");
+pub const projection_step_bytes = view_plan.max_step_bytes;
+pub const SnapshotRead = struct { id: u64, bytes: usize, scratch_bytes: usize = 0 };
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
 pub const SendInputResult = product_task.InputAcceptance;
 pub const SendInputReason = task_runtime.SendInputReason;
 pub const InputTarget = union(enum) { idle: ?u64, run: u64 };
+pub const ViewRequest = @import("view_request.zig").Request;
+pub const ViewReceiptQuery = @import("view_request.zig").ReceiptQuery;
 
-pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -1118,6 +1124,63 @@ const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struc
 pub const PreparedCustomProviderBinding =
     execution_state.PreparedCustomProviderBinding;
 
+// Exists only for one Host read preparation. No credential or borrowed
+// execution pointer enters encoded caches, Bridge storage or worker work items.
+const ProjectionCredentials = struct {
+    allocator: std.mem.Allocator,
+    values: std.ArrayList([]const u8) = .empty,
+
+    fn add(self: *ProjectionCredentials, value: []const u8) std.mem.Allocator.Error!void {
+        if (value.len == 0) return;
+        for (self.values.items) |known| if (std.mem.eql(u8, known, value)) return;
+        const owned = try self.allocator.dupe(u8, value);
+        errdefer {
+            std.crypto.secureZero(u8, owned);
+            self.allocator.free(owned);
+        }
+        try self.values.append(self.allocator, owned);
+    }
+
+    fn visit(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
+        const self: *ProjectionCredentials = @ptrCast(@alignCast(context));
+        try self.add(value);
+    }
+
+    fn deinit(self: *ProjectionCredentials) void {
+        for (self.values.items) |value| {
+            std.crypto.secureZero(u8, @constCast(value));
+            self.allocator.free(value);
+        }
+        self.values.deinit(self.allocator);
+    }
+};
+
+const ViewPreparation = struct {
+    const Block = struct { key: view_cache.Key, start: usize, end: usize, known: u64, version: u64 = 0, current: bool = true };
+    const Tool = struct { source: ?product_task.OwnedToolProjection, child: *view_plan.Plan, state: product_task.OwnedToolProjection.State = .{} };
+    credentials: ?ProjectionCredentials = null,
+    tools: std.ArrayList(Tool) = .empty,
+    raw_bytes: usize = 0,
+    tool_limit: usize = 0,
+    next_tool: usize = 0,
+    blocks: [7]Block = undefined,
+    next_block: usize = 0,
+    versions: view_cache.Versions = .{},
+    reused: [7]bool = @splat(false),
+    known_epoch: u64 = 0,
+    scratch_bytes: usize = 0,
+    tail: view_plan.Plan = .{},
+    ready: bool = false,
+
+    fn clear(self: *ViewPreparation, allocator: std.mem.Allocator) void {
+        for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
+        self.tools.deinit(allocator);
+        if (self.credentials) |*credentials| credentials.deinit();
+        self.tail.clear(allocator);
+        self.* = .{};
+    }
+};
+
 pub const Runtime = struct {
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
@@ -1164,6 +1227,19 @@ pub const Runtime = struct {
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
+    projection_security_epoch: u64 = 1,
+    encoded_views: view_cache.Cache = .{},
+    view_read: view_plan.Plan = .{},
+    view_preparation: ViewPreparation = .{},
+    capture_view: ?*view_plan.Plan = null,
+    view_step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
+    next_view_read_id: u64 = 0,
+    view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize, encoding: ?[]u8 = null } = @splat(null),
+    view_cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
+    projection_history_epoch: u64 = 1,
+    view_credentials: ?[]const []const u8 = null,
+    account_credentials: ?account_contract.AccessTokenProjection = null,
+    account_credential_generation: u64 = 0,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
@@ -2074,6 +2150,7 @@ pub const Runtime = struct {
             return true;
         const codepoint_len = utf8CodepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
+            if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
                 value[codepoint_start + offset ..],
             )) return true;
@@ -2537,6 +2614,7 @@ pub const Runtime = struct {
         self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
+        self.syncAccountProjectionCredentialNoFail();
         self.account_projection.commitNoFail(fact);
     }
 
@@ -2553,6 +2631,7 @@ pub const Runtime = struct {
         self: *Runtime,
         execution: *models_contract.OwnedConfig,
     ) void {
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .metask, null)) self.invalidateProjectionSecurity();
         self.execution_state.installMetaskNoFail(
             execution,
             execution.input().execution_generation,
@@ -2581,6 +2660,7 @@ pub const Runtime = struct {
         execution: *models_contract.OwnedConfig,
         prepared_binding: *PreparedCustomProviderBinding,
     ) void {
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .custom_provider, prepared_binding.provider_id)) self.invalidateProjectionSecurity();
         self.execution_state.installCustomProviderNoFail(
             execution,
             prepared_binding,
@@ -2589,6 +2669,7 @@ pub const Runtime = struct {
     }
 
     pub fn clearExecutionNoFail(self: *Runtime) void {
+        self.invalidateProjectionSecurity();
         self.execution_state.clearNoFail(self.executionProjectionRedaction());
     }
 
@@ -2985,6 +3066,7 @@ pub const Runtime = struct {
             self.execution_state.rejectReplacementNoFail(metaskStageError(err));
             return;
         };
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), desired.source, if (prepared_binding) |binding| binding.provider_id else null)) self.invalidateProjectionSecurity();
         switch (desired.source) {
             .metask => self.execution_state.installMetaskNoFail(
                 &execution,
@@ -3334,17 +3416,15 @@ pub const Runtime = struct {
     }
 
     pub fn workspaceCatalog(
-        self: *Runtime,
+        self: *const Runtime,
         workspace_id: u64,
     ) Error!CatalogProjection {
-        self.syncLifecycle();
         const workspace = self.workspace.binding(workspace_id) orelse
             return error.UnknownWorkspace;
         return self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch);
     }
 
-    pub fn skillCatalog(self: *Runtime) CatalogProjection {
-        self.syncLifecycle();
+    pub fn skillCatalog(self: *const Runtime) CatalogProjection {
         return self.skill.personalCatalogProjection();
     }
 
@@ -3427,10 +3507,9 @@ pub const Runtime = struct {
     }
 
     pub fn taskCatalog(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!CatalogProjection {
-        self.syncLifecycle();
         return self.task_runtime.catalogProjection(task_id) orelse error.UnknownTask;
     }
 
@@ -3511,38 +3590,33 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    pub fn workspaceEpoch(self: *Runtime, workspace_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.epoch;
     }
 
     pub fn workspaceKind(
-        self: *Runtime,
+        self: *const Runtime,
         workspace_id: u64,
     ) Error!WorkspaceKind {
-        self.syncLifecycle();
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.kind;
     }
 
-    pub fn taskWorkspaceId(self: *Runtime, task_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn taskWorkspaceId(self: *const Runtime, task_id: u64) Error!u64 {
         return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
 
-    pub fn taskPermissionProfile(self: *Runtime, task_id: u64) Error!PermissionProfile {
-        self.syncLifecycle();
+    pub fn taskPermissionProfile(self: *const Runtime, task_id: u64) Error!PermissionProfile {
         return self.task_runtime.taskPermissionProfile(task_id) orelse error.UnknownTask;
     }
 
     pub fn taskPermissionInteraction(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!PermissionInteraction {
-        self.syncLifecycle();
         return self.task_runtime.taskPermissionInteraction(task_id) orelse error.UnknownTask;
     }
 
@@ -3552,10 +3626,9 @@ pub const Runtime = struct {
     /// their Task routes remain addressable. Aggregate signals are computed
     /// from canonical Task state.
     pub fn copyWorkspaceProjections(
-        self: *Runtime,
+        self: *const Runtime,
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
-        self.syncLifecycle();
         return product_workspace.copyProjections(
             &self.workspace,
             output,
@@ -4097,7 +4170,7 @@ pub const Runtime = struct {
         const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
         const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        self.redactAllProductProjectionsNoFail(target.input().api_key);
+        self.learnProjectionCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (attached) {
@@ -4669,16 +4742,14 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
-        self.syncLifecycle();
+    pub fn taskBindingEpoch(self: *const Runtime, task_id: u64) Error!u64 {
         return self.task_runtime.taskBindingEpoch(task_id) orelse error.UnknownTask;
     }
 
     pub fn taskMcpAuthority(
-        self: *Runtime,
+        self: *const Runtime,
         task_id: u64,
     ) Error!product_task.McpAuthorityAtCreation {
-        self.syncLifecycle();
         return self.task_runtime.taskMcpAuthority(task_id) orelse error.UnknownTask;
     }
 
@@ -4759,6 +4830,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
             _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
@@ -5188,7 +5260,6 @@ pub const Runtime = struct {
         self: *Runtime,
         id: u64,
     ) Error!u64 {
-        self.syncLifecycle();
         return self.schedule.epoch(id);
     }
 
@@ -5268,8 +5339,7 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn currentRevision(self: *Runtime) u64 {
-        self.syncLifecycle();
+    pub fn currentRevision(self: *const Runtime) u64 {
         return self.revision;
     }
 
@@ -5813,7 +5883,20 @@ pub const Runtime = struct {
             },
             .applied => |application| {
                 if (application.durable_boundary) self.commitTaskStateNoFail();
-                self.bumpRevision();
+                self.encoded_views.invalidateEvent(application.task_id, envelope.run_id);
+                if (!self.view_preparation.ready and self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
+                    switch (block.key.kind) {
+                        .workspaces, .taskIndex => block.current = false,
+                        .taskPage => if (block.key.task_id == application.task_id) {
+                            block.current = false;
+                        },
+                        .historyPage => if (block.key.task_id == application.task_id and envelope.run_id < block.key.cursor) {
+                            block.current = false;
+                        },
+                        else => {},
+                    }
+                };
+                if (self.revision != std.math.maxInt(u64)) self.revision += 1;
             },
         }
     }
@@ -6348,9 +6431,11 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn writeSnapshot(self: *Runtime, output: []u8) Error![]const u8 {
-        self.syncLifecycle();
-        var writer = std.Io.Writer.fixed(output);
+    // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
+    pub const writeAggregateFixture = if (builtin.is_test) TestSupport.writeAggregateFixture else {};
+    pub const writeViewFixture = if (builtin.is_test) TestSupport.writeViewFixture else {};
+
+    fn writeLiveContextFields(self: *Runtime, writer: *std.Io.Writer, include_revision: bool) Error!void {
         const schedule_persistence_ready =
             self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
@@ -6360,8 +6445,9 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
-            self.revision,
+        writer.writeByte('{') catch return error.SnapshotTooLarge;
+        if (include_revision) writer.print("\"revision\":\"{d}\",", .{self.revision}) catch return error.SnapshotTooLarge;
+        writer.print("\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             task_persistence_ready,
             @tagName(self.task_persistence_health),
             self.taskHistoryRecoveryAvailable(),
@@ -6400,45 +6486,363 @@ pub const Runtime = struct {
             @tagName(self.default_approval_mode.profile()),
             @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
-        try self.writeAccount(&writer);
+        try self.writeAccount(writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
-        try self.writeModels(&writer);
+        try self.writeModels(writer);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
-        try self.writeNewTaskAdmission(&writer);
+        try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
-        try self.writeAutomaticWorkspaceRootConfiguration(&writer);
+        try self.writeAutomaticWorkspaceRootConfiguration(writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
-            &writer,
+            writer,
             self.skillTextProjection(),
             self.skill.personalCatalogProjection(),
         );
-        writer.writeAll(",\"skillManagement\":") catch
-            return error.SnapshotTooLarge;
-        try self.writeSkillManagement(&writer);
-        writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
-        try self.writeMcpProjection(&writer);
-        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
-        product_workspace.writeProjectionList(
-            &writer,
-            &self.workspace,
-            self.workspaceViewProvider(),
-        ) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
-        self.schedule.writeProjection(&writer, .{
-            .context = self,
-            .write_json_fn = writeScheduleViewJson,
-        }) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"tasks\":[") catch
-            return error.SnapshotTooLarge;
-        self.task_runtime.writeProjectionList(
-            &writer,
-            self.taskRuntimeProjectionEffects(),
-        ) catch |err| return @errorCast(err);
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
-        return writer.buffered();
+    }
+
+    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
+        if (builtin.is_test) self.view_step_timing = .{};
+        self.cancelSnapshot();
+        errdefer self.cancelSnapshot();
+        try request.validate();
+        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0) return error.InvalidViewRequest;
+        std.debug.assert(self.view_credentials == null and self.capture_view == null);
+        self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
+        self.view_read.id = self.next_view_read_id;
+        self.view_read.security_epoch = self.projection_security_epoch;
+        self.capture_view = &self.view_read;
+        defer self.capture_view = null;
+        self.view_preparation.credentials = .{ .allocator = self.allocator };
+        const credentials = &self.view_preparation.credentials.?;
+        if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
+        try credentials.add(self.execution_state.credential());
+        try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
+        self.view_credentials = credentials.values.items;
+        defer self.view_credentials = null;
+        self.view_preparation.known_epoch = request.known_epoch;
+        self.view_preparation.tool_limit = self.limits.max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
+        for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
+        var writer = std.Io.Writer.fixed(output);
+        writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"historyEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch, self.projection_history_epoch }) catch return error.SnapshotTooLarge;
+        if (request.task_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"beforeRunId\":") catch return error.SnapshotTooLarge;
+        if (request.before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{},\"receipts\":", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        try self.writeViewReceipts(&writer, request.receipts, false);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        // Time-dependent execution fields are sampled even without a new CoreEvent.
+        if (request.task_id) |id| if (self.task_runtime.taskHasActiveOperation(id)) {
+            self.encoded_views.invalidate(.taskPage);
+        };
+        inline for (std.meta.fields(view_cache.Kind)) |field| {
+            const kind: view_cache.Kind = @enumFromInt(field.value);
+            const key = viewKey(request, kind);
+            writer.writeAll(",\"" ++ field.name ++ "\":") catch return error.SnapshotTooLarge;
+            const start = writer.end;
+            var version: u64 = 0;
+            if (self.encoded_views.get(key)) |entry| {
+                version = entry.version;
+                if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
+                    writer.writeAll("null") catch return error.SnapshotTooLarge;
+                    self.view_preparation.reused[field.value] = true;
+                } else {
+                    const child = try self.view_read.appendChild(self.allocator, &writer);
+                    try self.takeCachedViewBlock(field.value, key, version, child);
+                }
+            } else try self.writeViewBlock(&writer, request, kind);
+            self.view_preparation.blocks[field.value] = .{ .key = key, .start = start, .end = writer.end, .known = @field(request.known_versions, field.name), .version = version };
+            @field(self.view_preparation.versions, field.name) = version;
+        }
+        try self.view_read.capture(self.allocator, writer.buffered());
+        self.view_preparation.scratch_bytes = writer.end;
+        // Freeze receipt observations now too; only version/reuse metadata is
+        // appended later, without consulting mutable Product facts again.
+        var tail_storage: [16 * 1024]u8 = undefined;
+        var tail_writer = std.Io.Writer.fixed(&tail_storage);
+        self.view_preparation.tail.id = self.view_read.id;
+        self.view_preparation.tail.security_epoch = self.projection_security_epoch;
+        self.capture_view = &self.view_preparation.tail;
+        tail_writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
+        try self.writeViewReceipts(&tail_writer, request.receipts, true);
+        tail_writer.writeByte('}') catch return error.SnapshotTooLarge;
+        try self.view_preparation.tail.seal(self.allocator, self.limits.max_snapshot_bytes, tail_writer.buffered());
+        // Pure cache hits have no preparation work and preserve the fast path.
+        const all_cached = for (self.view_preparation.blocks) |block| {
+            if (block.version == 0) break false;
+        } else true;
+        if (all_cached) {
+            try self.finishSnapshotPreparation();
+        }
+        return self.snapshotReadStatus();
+    }
+
+    fn snapshotReadStatus(self: *const Runtime) SnapshotRead {
+        return .{ .id = self.view_read.id, .bytes = if (self.view_preparation.ready) self.view_read.total else 0, .scratch_bytes = self.view_preparation.scratch_bytes };
+    }
+
+    /// Each continuation performs bounded formatter stages, one block comparison,
+    /// or final metadata assembly. It never advances execution or samples new facts.
+    pub fn continueSnapshot(self: *Runtime, read_id: u64, output: []u8) Error!SnapshotRead {
+        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
+        if (self.view_preparation.ready) return self.snapshotReadStatus();
+        errdefer self.cancelSnapshot();
+        std.debug.assert(self.capture_view == null and self.view_credentials == null);
+        self.view_credentials = self.view_preparation.credentials.?.values.items;
+        defer self.view_credentials = null;
+        if (self.view_preparation.next_tool < self.view_preparation.tools.items.len) {
+            var stages: usize = 0;
+            var charged: usize = 0;
+            var finished: usize = 0;
+            while (self.view_preparation.next_tool < self.view_preparation.tools.items.len and finished < 4) {
+                const work = &self.view_preparation.tools.items[self.view_preparation.next_tool];
+                self.capture_view = work.child;
+                defer self.capture_view = null;
+                const size = work.source.?.ownedBytes();
+                if (stages != 0 and size > 32 * 1024 -| charged) break;
+                const first_string = work.child.strings.items.len;
+                var writer = std.Io.Writer.fixed(output);
+                try work.source.?.writeStage(&writer, self.taskTextProjection(), &work.state);
+                for (work.child.strings.items[first_string..]) |*item| item.at += work.child.skeleton.len;
+                try work.child.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
+                self.view_preparation.scratch_bytes = @max(self.view_preparation.scratch_bytes, writer.end);
+                if (work.state.stage == .done) {
+                    try work.child.finalize(self.limits.max_snapshot_bytes);
+                    work.source.?.deinit(self.allocator);
+                    work.source = null;
+                    self.view_preparation.raw_bytes -= size;
+                    self.view_preparation.next_tool += 1;
+                    finished += 1;
+                }
+                stages += 1;
+                charged += size;
+            }
+            return self.snapshotReadStatus();
+        }
+        // Cached metadata is already frozen. Skip these constant-size slots;
+        // each invoke is reserved for actual preparation rather than empty turns.
+        while (self.view_preparation.next_block < self.view_preparation.blocks.len and self.view_preparation.blocks[self.view_preparation.next_block].version != 0) self.view_preparation.next_block += 1;
+        if (self.view_preparation.next_block < self.view_preparation.blocks.len) {
+            const index = self.view_preparation.next_block;
+            const block = &self.view_preparation.blocks[index];
+            if (block.version == 0) {
+                const source = try self.view_read.sourceRange(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end);
+                defer {
+                    std.crypto.secureZero(u8, source);
+                    self.allocator.free(source);
+                }
+                block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
+                var replacement: ?[]const u8 = null;
+                var cached = false;
+                if (self.view_preparation.known_epoch == self.projection_security_epoch and block.known == block.version) {
+                    replacement = "null";
+                    self.view_preparation.reused[index] = true;
+                } else if (self.encoded_views.get(block.key)) |entry| {
+                    if (entry.version == block.version) {
+                        replacement = "[]";
+                        cached = true;
+                    }
+                }
+                if (replacement) |value| {
+                    const delta = try self.view_read.replaceSpan(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end, value);
+                    block.end = block.start + value.len;
+                    if (cached) {
+                        const child = try self.view_read.insertChild(self.allocator, block.start);
+                        try self.takeCachedViewBlock(index, block.key, block.version, child);
+                    }
+                    for (self.view_preparation.blocks[index + 1 ..]) |*later| {
+                        later.start = @intCast(@as(isize, @intCast(later.start)) + delta);
+                        later.end = @intCast(@as(isize, @intCast(later.end)) + delta);
+                    }
+                } else if (block.current) {
+                    self.view_blocks[index] = .{ .key = block.key, .version = block.version, .start = try self.view_read.encodedPosition(block.start), .end = try self.view_read.encodedPosition(block.end) };
+                }
+            }
+            inline for (std.meta.fields(view_cache.Kind)) |field| if (index == field.value) {
+                @field(self.view_preparation.versions, field.name) = block.version;
+            };
+            self.view_preparation.next_block += 1;
+            return self.snapshotReadStatus();
+        }
+        try self.finishSnapshotPreparation();
+        return self.snapshotReadStatus();
+    }
+
+    fn finishSnapshotPreparation(self: *Runtime) Error!void {
+        var metadata: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&metadata);
+        writer.writeAll(",\"blockVersions\":{") catch return error.SnapshotTooLarge;
+        inline for (std.meta.fields(view_cache.Versions), 0..) |field, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.print("\"" ++ field.name ++ "\":\"{d}\"", .{@field(self.view_preparation.versions, field.name)}) catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("},\"reusedBlocks\":[") catch return error.SnapshotTooLarge;
+        var first = true;
+        inline for (std.meta.fields(view_cache.Kind)) |field| if (self.view_preparation.reused[field.value]) {
+            if (!first) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("\"" ++ field.name ++ "\"") catch return error.SnapshotTooLarge;
+            first = false;
+        };
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
+        const child = try self.view_read.appendChild(self.allocator, &writer);
+        self.view_read.strings.items[self.view_read.strings.items.len - 1].at += self.view_read.skeleton.len;
+        child.* = self.view_preparation.tail;
+        self.view_preparation.tail = .{};
+        try self.view_read.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
+        try self.view_read.finalize(self.limits.max_snapshot_bytes);
+        if (self.view_preparation.credentials) |*credentials| credentials.deinit();
+        self.view_preparation.credentials = null;
+        self.view_preparation.tools.deinit(self.allocator);
+        self.view_preparation.tools = .empty;
+        self.view_preparation.ready = true;
+    }
+
+    fn captureToolProjection(context: *const anyopaque, writer: *std.Io.Writer, tool: *const product_task.ToolProjection) product_task.ProjectionError!void {
+        const self: *Runtime = @ptrCast(@alignCast(@constCast(context)));
+        if (self.view_preparation.tools.items.len >= self.view_preparation.tool_limit) return error.SnapshotTooLarge;
+        const owned = self.view_read.ownedBytes() + self.view_preparation.raw_bytes;
+        var source = try product_task.OwnedToolProjection.capture(self.allocator, tool, self.limits.max_snapshot_bytes -| owned);
+        errdefer source.deinit(self.allocator);
+        const child = self.view_read.appendChild(self.allocator, writer) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.SnapshotTooLarge,
+        };
+        const size = source.ownedBytes();
+        try self.view_preparation.tools.append(self.allocator, .{ .source = source, .child = child });
+        self.view_preparation.raw_bytes += size;
+    }
+
+    fn takeCachedViewBlock(self: *Runtime, index: usize, key: view_cache.Key, version: u64, child: *view_plan.Plan) Error!void {
+        const owned = self.encoded_views.takeEncoded(key, version) orelse return error.StaleSnapshot;
+        child.adoptEncoded(owned);
+        self.view_cached_blocks[index] = .{ .key = key, .version = version, .child = child };
+    }
+
+    fn returnCachedViewBlocks(self: *Runtime) void {
+        for (&self.view_cached_blocks) |*slot| if (slot.*) |block| {
+            const owned = block.child.takeEncoded();
+            slot.* = null;
+            self.encoded_views.returnEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
+        };
+    }
+
+    pub fn cancelSnapshotRead(self: *Runtime, read_id: u64) void {
+        if (read_id != 0 and self.view_read.id == read_id) self.cancelSnapshot();
+    }
+
+    pub fn cancelSnapshot(self: *Runtime) void {
+        self.returnCachedViewBlocks();
+        self.view_preparation.clear(self.allocator);
+        self.view_read.clear(self.allocator);
+        for (&self.view_blocks) |*slot| if (slot.*) |block| {
+            if (block.encoding) |owned| {
+                std.crypto.secureZero(u8, owned);
+                self.allocator.free(owned);
+            }
+            slot.* = null;
+        };
+    }
+
+    pub fn writeSnapshotRange(self: *Runtime, read_id: u64, output: []u8, offset: usize, length: usize) Error!void {
+        if (read_id == 0 or read_id != self.view_read.id or self.view_read.security_epoch != self.projection_security_epoch or @intFromPtr(output.ptr) != self.view_read.storage_identity) return error.StaleSnapshot;
+        if (!self.view_preparation.ready or length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
+        errdefer self.cancelSnapshot();
+        const encode_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
+        const before = self.view_read.produced;
+        const end = offset + length;
+        if (end > self.view_read.produced) _ = try self.view_read.writeNext(output[self.view_read.produced..end]);
+        const cache_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
+        if (builtin.is_test) self.view_step_timing.encode_ns = encode_start.durationTo(cache_start).nanoseconds;
+        for (&self.view_blocks) |*maybe| if (maybe.*) |*block| {
+            if (!self.encoded_views.needsEncoded(self.limits.max_snapshot_bytes, block.key, block.version, block.end - block.start)) {
+                if (block.encoding) |owned| {
+                    std.crypto.secureZero(u8, owned);
+                    self.allocator.free(owned);
+                }
+                maybe.* = null;
+                continue;
+            }
+            const first = @max(before, block.start);
+            const last = @min(self.view_read.produced, block.end);
+            if (last <= first) continue;
+            if (block.encoding == null) block.encoding = try self.allocator.alloc(u8, block.end - block.start);
+            // The disjoint block intersections total at most this encoding
+            // quantum. Partial bytes are owned by this read, never cache hits.
+            @memcpy(block.encoding.?[first - block.start .. last - block.start], output[first..last]);
+            if (last == block.end) {
+                const owned = block.encoding.?;
+                block.encoding = null;
+                try self.encoded_views.installOwnedEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
+                maybe.* = null;
+            }
+        };
+        if (self.view_read.produced == self.view_read.total and self.view_read.skeleton.len != 0) {
+            self.returnCachedViewBlocks();
+            self.view_read.releasePayload(self.allocator);
+        }
+        if (builtin.is_test) self.view_step_timing.cache_copy_ns = cache_start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
+    }
+
+    fn viewKey(request: ViewRequest, kind: view_cache.Kind) view_cache.Key {
+        return switch (kind) {
+            .taskPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .limit = request.run_limit },
+            .historyPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .cursor = request.before_run_id orelse 0, .limit = request.run_limit },
+            .management => .{ .kind = kind, .management = @intFromEnum(request.management) },
+            .searchIndex => .{ .kind = kind, .limit = @intFromBool(request.search) },
+            else => .{ .kind = kind },
+        };
+    }
+
+    fn writeViewBlock(self: *Runtime, writer: *std.Io.Writer, request: ViewRequest, kind: view_cache.Kind) (Error || error{InvalidViewRequest})!void {
+        switch (kind) {
+            .context => {
+                try self.writeLiveContextFields(writer, false);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            },
+            .workspaces => product_workspace.writeProjectionList(writer, &self.workspace, self.workspaceViewProvider()) catch return error.SnapshotTooLarge,
+            .taskIndex => {
+                writer.writeByte('[') catch return error.SnapshotTooLarge;
+                try self.task_runtime.writeSummaryList(writer, self.taskRuntimeProjectionEffects().text);
+                writer.writeByte(']') catch return error.SnapshotTooLarge;
+            },
+            .taskPage => {
+                if (request.task_id) |id| try self.task_runtime.writeProjectionPage(writer, self.taskRuntimeProjectionEffects(), id, null, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            },
+            .historyPage => {
+                if (request.before_run_id) |cursor| try self.task_runtime.writeHistoryPage(writer, self.taskRuntimeProjectionEffects(), request.task_id.?, cursor, request.run_limit) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            },
+            .management => {
+                writer.print("{{\"kind\":\"{s}\",\"value\":", .{@tagName(request.management)}) catch return error.SnapshotTooLarge;
+                switch (request.management) {
+                    .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
+                    .skills => try self.writeSkillManagement(writer),
+                    .mcp => try self.writeMcpProjection(writer),
+                    .schedules => self.schedule.writeProjection(writer, .{ .context = self, .write_json_fn = writeScheduleViewJson }) catch return error.SnapshotTooLarge,
+                }
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            },
+            .searchIndex => {
+                if (request.search) {
+                    writer.writeByte('[') catch return error.SnapshotTooLarge;
+                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text);
+                    writer.writeByte(']') catch return error.SnapshotTooLarge;
+                } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            },
+        }
+    }
+
+    fn writeViewReceipts(self: *const Runtime, writer: *std.Io.Writer, queries: []const ViewReceiptQuery, results: bool) Error!void {
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        for (queries, 0..) |query, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{query.task_id}) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValueWithKnownCredentials(writer, query.operation_id);
+            if (results) writer.print(",\"observed\":{}", .{self.task_runtime.hasInputReceipt(query.task_id, query.operation_id)}) catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
     }
 
     fn writeAutomaticWorkspaceRootConfiguration(
@@ -6859,6 +7263,8 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
+        self.cancelSnapshot();
+        self.encoded_views.clear(self.allocator);
         if (self.pending_model_intent) |*intent| intent.rollback();
         self.pending_model_intent = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
@@ -7032,6 +7438,22 @@ pub const Runtime = struct {
         commentary_ends: []const u64,
     ) product_task.ProjectionError!bool {
         const self: *const Runtime = @ptrCast(@alignCast(context));
+        // A clean output already is the sanitized source. Preserve its segment
+        // boundaries directly instead of allocating and copying the whole Run.
+        if (!self.containsKnownCredential(value)) {
+            writer.writeByte('[') catch return error.SnapshotTooLarge;
+            var previous: usize = 0;
+            for (commentary_ends, 0..) |raw, index| {
+                const boundary = std.math.cast(usize, raw) orelse return error.SnapshotTooLarge;
+                if (boundary < previous or boundary > value.len or (boundary < value.len and (value[boundary] & 0xc0) == 0x80)) return error.SnapshotTooLarge;
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                self.projectedJsonValueWithKnownCredentials(writer, value[previous..boundary]) catch return error.SnapshotTooLarge;
+                previous = boundary;
+            }
+            writer.writeAll("],\"response\":") catch return error.SnapshotTooLarge;
+            self.projectedJsonValueWithKnownCredentials(writer, value[previous..]) catch return error.SnapshotTooLarge;
+            return false;
+        }
         const projected = self.allocator.alloc(u8, value.len) catch
             return error.OutOfMemory;
         defer {
@@ -7110,6 +7532,7 @@ pub const Runtime = struct {
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
             .write_json_output_fn = writeTaskViewJsonOutput,
+            .capture_tool_fn = if (self.capture_view == &self.view_read) captureToolProjection else null,
             .write_json_parts_fn = writeTaskViewJsonParts,
         };
     }
@@ -7865,6 +8288,9 @@ pub const Runtime = struct {
     }
 
     fn clearRestoredTaskStateNoFail(self: *Runtime) void {
+        // A replacement of history objects can reuse persisted identities and
+        // fresh runtime content versions. Ordinary commands never change this.
+        self.projection_history_epoch = std.math.add(u64, self.projection_history_epoch, 1) catch 0;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
@@ -8216,7 +8642,7 @@ pub const Runtime = struct {
 
     fn redactTaskRuntimeProducts(context: *anyopaque, credential: []const u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+        self.retireProjectionCredential(credential);
     }
 
     fn releaseTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
@@ -8532,7 +8958,6 @@ pub const Runtime = struct {
         scope: skill_runtime.ManagementScope,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
         switch (scope) {
             .personal => if (self.canonical_user_home == null)
                 return error.WorkspaceUnavailable,
@@ -8599,13 +9024,104 @@ pub const Runtime = struct {
         self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
-    /// A credential may become known after older product facts were stored,
-    /// or may be about to leave the set scanned by snapshot serialization.
-    /// Permanently scrub every Renderer-facing projection before either edge.
-    fn redactAllProductProjectionsNoFail(
-        self: *Runtime,
-        credential: []const u8,
-    ) void {
+    pub fn setAccountProjectionCredentials(self: *Runtime, source: account_contract.AccessTokenProjection) void {
+        std.debug.assert(self.account_credentials == null);
+        self.account_credentials = source;
+        self.syncAccountProjectionCredentialNoFail();
+    }
+
+    pub fn clearAccountProjectionCredentials(self: *Runtime) void {
+        const source = self.account_credentials orelse return;
+        source.visit(self, scrubAccountCredential) catch unreachable;
+        self.account_credentials = null;
+        self.account_credential_generation = 0;
+        self.invalidateProjectionSecurity();
+    }
+
+    fn syncAccountProjectionCredentialNoFail(self: *Runtime) void {
+        const source = self.account_credentials orelse return;
+        const generation = source.generation();
+        if (generation == self.account_credential_generation) return;
+        self.account_credential_generation = generation;
+        self.invalidateProjectionSecurity();
+        source.visit(self, scrubAccountCredential) catch unreachable;
+    }
+
+    fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    const AccountCredentialQuery = struct {
+        value: []const u8,
+        releasing: ?[*]const u8 = null,
+        kind: enum { retained, contains, prefix, continuation },
+        matched: usize = 0,
+
+        fn visit(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (credential.len == 0) return;
+            const matches = switch (self.kind) {
+                .retained => (self.releasing == null or self.releasing.? != credential.ptr) and std.mem.eql(u8, self.value, credential),
+                .contains => std.mem.indexOf(u8, self.value, credential) != null,
+                .prefix => std.mem.startsWith(u8, self.value, credential),
+                .continuation => self.value.len < credential.len and std.mem.startsWith(u8, credential, self.value),
+            };
+            if (matches) self.matched = @max(self.matched, credential.len);
+        }
+    };
+
+    fn accountCredentialQuery(self: *const Runtime, query: AccountCredentialQuery) AccountCredentialQuery {
+        var result = query;
+        if (self.account_credentials) |source| source.visit(&result, AccountCredentialQuery.visit) catch unreachable;
+        return result;
+    }
+
+    const AccountCredentialRedaction = struct {
+        value: []u8,
+        changed: bool = false,
+
+        fn visit(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.changed = redactFixedWidthNoFail(self.value, credential) or self.changed;
+        }
+    };
+
+    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
+        if (credential.len == 0) return false;
+        const installed = self.execution_state.credential();
+        if ((releasing == null or installed.ptr != releasing.?) and std.mem.eql(u8, installed, credential)) return true;
+        if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
+        return self.task_runtime.retainsCredential(credential, releasing);
+    }
+
+    fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
+        if (credential.len == 0) return;
+        if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
+        if (credential.len == 0) return;
+        // All aliases into the retiring owner disappear together. Other owned
+        // copies of the exact value still protect the same projection boundary.
+        if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    fn invalidateProjectionSecurity(self: *Runtime) void {
+        self.cancelSnapshot();
+        self.encoded_views.clear(self.allocator);
+        if (self.projection_security_epoch != 0)
+            self.projection_security_epoch = std.math.add(u64, self.projection_security_epoch, 1) catch 0;
+        // Security revocation must be published even if the surrounding command
+        // subsequently rejects without a normal product revision or completion.
+        _ = self.change_notifier.notify();
+    }
+
+    /// Scrubbing is required at every acquisition/release; it is not itself a
+    /// change of security authority and must not revoke unrelated UI state.
+    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
@@ -8946,8 +9462,13 @@ pub const Runtime = struct {
     }
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
+        if (self.view_credentials) |credentials| {
+            for (credentials) |known| if (std.mem.indexOf(u8, value, known) != null) return true;
+            return false;
+        }
         const current = self.execution_state.credential();
         if (containsKnownSecret(value, current)) return true;
+        if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
@@ -8963,7 +9484,9 @@ pub const Runtime = struct {
             value,
             redactFixedWidthNoFail,
         ) or changed;
-        return changed;
+        var account_redaction: AccountCredentialRedaction = .{ .value = value };
+        if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
+        return account_redaction.changed or changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -8971,9 +9494,16 @@ pub const Runtime = struct {
         value: []const u8,
     ) usize {
         var longest: usize = 0;
+        if (self.view_credentials) |credentials| {
+            for (credentials) |known| if (known.len > longest and std.mem.startsWith(u8, value, known)) {
+                longest = known.len;
+            };
+            return longest;
+        }
         const current = self.execution_state.credential();
         if (current.len != 0 and std.mem.startsWith(u8, value, current))
             longest = current.len;
+        longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
@@ -8983,6 +9513,36 @@ pub const Runtime = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) Error!void {
+        if (self.capture_view) |plan| {
+            const start = plan.text.items.len;
+            const contains = for (self.view_credentials.?) |known| {
+                if (std.mem.indexOf(u8, value, known) != null) break true;
+            } else false;
+            if (!contains) try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value) else {
+                var index: usize = 0;
+                var copied: usize = 0;
+                while (index < value.len) {
+                    if (self.knownCredentialEndAtCodepoint(value, index)) |end| {
+                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..index]);
+                        try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, "***"[0..@min(end - index, 3)]);
+                        index = end;
+                        copied = end;
+                    } else index += utf8CodepointLen(value, index);
+                }
+                try plan.appendText(self.allocator, self.limits.max_snapshot_bytes, value[copied..]);
+            }
+            try plan.commitString(self.allocator, writer, start);
+            return;
+        }
+        if (self.view_credentials) |credentials| {
+            const contains = for (credentials) |known| {
+                if (std.mem.indexOf(u8, value, known) != null) break true;
+            } else false;
+            if (!contains) {
+                std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+                return;
+            }
+        }
         const hex = "0123456789abcdef";
         writer.writeByte('"') catch return error.SnapshotTooLarge;
         var index: usize = 0;
@@ -9206,7 +9766,7 @@ pub const Runtime = struct {
         const preparation = self.image_run_preparation orelse return null;
         const image = preparation.prepare(workspace) orelse return null;
         // Scrub facts written before this newly acquired credential was known.
-        self.redactAllProductProjectionsNoFail(image.candidate.input().bearer);
+        self.learnProjectionCredential(image.candidate.input().bearer);
         return image;
     }
 
@@ -9289,11 +9849,122 @@ pub const Runtime = struct {
     }
 
     fn bumpRevision(self: *Runtime) void {
+        self.encoded_views.invalidateAll();
+        if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
+            block.current = false;
+        };
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
+    }
+
+    pub fn projectionSecurityEpoch(self: *const Runtime) u64 {
+        return self.projection_security_epoch;
     }
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const maximumFixture = maximumProjectionFixture;
+    pub fn maximumToolFixture() !Runtime {
+        return maximumProjectionFixtureWithTools(true, .{});
+    }
+    pub fn maximumSmallFixture() !Runtime {
+        return maximumProjectionFixtureWithTools(true, .{ .max_tasks = 1, .max_runs_per_task = 1 });
+    }
+    pub fn installResultFixture(control: *Runtime, sparse: bool) !void {
+        const first = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        control.projection_bytes -= first.assistant.list.capacity;
+        first.assistant.list.deinit(control.allocator);
+        first.assistant = .{};
+        first.commentary_count = 0;
+        try control.replaceTracked(&first.tools[0].?.content, "", control.limits.max_tool_field_bytes);
+        const stdout = try control.allocator.alloc(u8, if (sparse) 65_000 else 640);
+        defer control.allocator.free(stdout);
+        @memset(stdout, '\n');
+        const result = try std.json.Stringify.valueAlloc(control.allocator, .{
+            .schema_version = "metacodes.bash-result.v2",
+            .stdout = stdout,
+            .stdout_encoding = "utf-8",
+            .stdout_capture_complete = true,
+            .stdout_truncated = false,
+            .stderr = "",
+            .stderr_encoding = "utf-8",
+            .stderr_capture_complete = true,
+            .stderr_truncated = false,
+            .exit_code = @as(i32, 0),
+        }, .{});
+        defer control.allocator.free(result);
+        const large_input = if (sparse) try std.json.Stringify.valueAlloc(control.allocator, .{ .command = stdout }, .{}) else null;
+        defer if (large_input) |value| control.allocator.free(value);
+        for (control.task_runtime.tasks[0].?.durable.runs) |*entry| if (entry.*) |*run| {
+            if (!sparse and run.id > 4 and run.id < 13) continue;
+            for (run.tools, 0..) |*tool_entry, index| {
+                if (sparse and index >= 5) break;
+                if (tool_entry.*) |*tool| {
+                    try control.replaceTracked(&tool.content, result, control.limits.max_tool_field_bytes);
+                    if (large_input) |value| {
+                        try control.replaceTracked(&tool.input, value, control.limits.max_tool_field_bytes);
+                        tool.state = .failed;
+                        tool.is_error = true;
+                    }
+                }
+            }
+        };
+        const remaining = control.limits.max_projection_bytes - control.projection_bytes;
+        const padding = try control.allocator.alloc(u8, remaining);
+        defer control.allocator.free(padding);
+        @memset(padding, 1);
+        // Fill the shared budget while respecting each individual field cap.
+        const assistant_bytes = @min(remaining, control.limits.max_assistant_message_bytes);
+        first.assistant.list = .{ .items = try control.allocTrackedCapacity(assistant_bytes), .capacity = assistant_bytes };
+        @memcpy(first.assistant.list.items, padding[0..assistant_bytes]);
+        first.assistant.committed_len = assistant_bytes;
+        first.commentary_count = @intFromBool(assistant_bytes != 0);
+        if (assistant_bytes != 0) first.commentary_ends[0] = assistant_bytes;
+        if (remaining > assistant_bytes) try control.replaceTracked(&first.tools[0].?.progress, padding[assistant_bytes..], control.limits.max_tool_field_bytes);
+        try std.testing.expectEqual(control.limits.max_projection_bytes, control.projection_bytes);
+    }
+    pub fn validatePersistedFixture(control: *Runtime) !void {
+        var state = try control.buildTaskStateWire();
+        defer state.deinit();
+        const output = try control.allocator.alloc(u8, task_persistence.max_store_bytes);
+        defer control.allocator.free(output);
+        _ = try task_persistence.encode(output, state.state, control.taskPersistenceLimits());
+    }
+    pub fn writeViewFixture(self: *Runtime, output: []u8, request: ViewRequest) ![]const u8 {
+        var read = try self.writeSnapshot(output, request);
+        while (read.bytes == 0) read = try self.continueSnapshot(read.id, output);
+        var offset: usize = 0;
+        while (offset < read.bytes) : (offset += projection_step_bytes) try self.writeSnapshotRange(read.id, output, offset, @min(projection_step_bytes, read.bytes - offset));
+        return output[0..read.bytes];
+    }
+    pub fn writeAggregateFixture(self: *Runtime, output: []u8) Error![]const u8 {
+        var writer = std.Io.Writer.fixed(output);
+        try self.writeLiveContextFields(&writer, true);
+        writer.writeAll(",\"skillManagement\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeSkillManagement(&writer);
+        writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
+        try self.writeMcpProjection(&writer);
+        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
+        product_workspace.writeProjectionList(
+            &writer,
+            &self.workspace,
+            self.workspaceViewProvider(),
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
+        self.schedule.writeProjection(&writer, .{
+            .context = self,
+            .write_json_fn = Runtime.writeScheduleViewJson,
+        }) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tasks\":[") catch
+            return error.SnapshotTooLarge;
+        self.task_runtime.writeProjectionList(
+            &writer,
+            self.taskRuntimeProjectionEffects(),
+        ) catch |err| return @errorCast(err);
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        return writer.buffered();
+    }
+
     pub fn retryTaskSessionClose(control: *Runtime, task_id: u64) !bool {
         return control.task_runtime.beginDetach(task_id, control.taskRuntimeOperationEffects());
     }
@@ -11242,7 +11913,7 @@ test "automatic Workspace root configuration swaps only future allocations and f
     try std.testing.expect(uncertain.canonical_root == null);
     try std.testing.expect(!control.automaticWorkspacesAvailable());
     var uncertain_snapshot_storage: [96 * 1024]u8 = undefined;
-    const uncertain_snapshot = try control.writeSnapshot(&uncertain_snapshot_storage);
+    const uncertain_snapshot = try control.writeAggregateFixture(&uncertain_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         uncertain_snapshot,
@@ -11616,7 +12287,7 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
     defer std.testing.allocator.free(expected);
     var storage: [8192]u8 = undefined;
-    try std.testing.expectEqualStrings(expected, try control.writeSnapshot(&storage));
+    try std.testing.expectEqualStrings(expected, try control.writeAggregateFixture(&storage));
 }
 
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
@@ -11636,13 +12307,17 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
         (try control.taskCatalog(3)).availability,
     );
     var storage: [8192]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     const fixture = std.mem.trimEnd(
         u8,
         contract_fixture.snapshot,
         "\r\n",
     );
     try std.testing.expectEqualStrings(fixture, snapshot);
+    var view_storage: [16 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&view_storage, .{ .task_id = 3, .management = .skills });
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.product_view, "\r\n"), view);
+
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
@@ -11663,7 +12338,7 @@ test "Product Control snapshot serializer keeps model intent independent of inst
         .model_id = "next-model",
     }, 9);
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const projected = parsed.value.object.get("tasks").?.array.items[0].object;
@@ -11732,7 +12407,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
         },
     });
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
@@ -11793,7 +12468,7 @@ test "Restore permission stats are projected as runtime health" {
         .invalidated_rules = 1,
     };
     var storage: [8192]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
     );
@@ -11961,7 +12636,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var terminal_restore = try Runtime.init(
+        const terminal_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(terminal_restore);
+        terminal_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12015,7 +12692,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var failed_restore = try Runtime.init(
+        const failed_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(failed_restore);
+        failed_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12044,7 +12723,9 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_state.value,
             source.taskPersistenceLimits(),
         );
-        var interrupted_compact_restore = try Runtime.init(
+        const interrupted_compact_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(interrupted_compact_restore);
+        interrupted_compact_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12095,7 +12776,9 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
         legacy_state.value.tasks[0].runs[0].file_change_observation = previous_observation;
         legacy_state.value.tasks[0].runs[0].file_changes = previous_changes;
-        var legacy_restore = try Runtime.init(
+        const legacy_restore = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(legacy_restore);
+        legacy_restore.* = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -12111,7 +12794,9 @@ test "Task state round trip restores product history without fabricating a Sessi
         for (legacy_run.file_changes) |change| try std.testing.expect(change == null);
     }
 
-    var restored = try Runtime.init(
+    const restored = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(restored);
+    restored.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -12167,7 +12852,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, 96 * 1024);
     defer std.testing.allocator.free(snapshot_storage);
-    const snapshot = try restored.writeSnapshot(snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"taskHistoryPersistence\":true") != null,
     );
@@ -12263,7 +12948,7 @@ test "one damaged Task record does not poison surviving history" {
     try std.testing.expect(restored.task_runtime.find(3) != null);
     try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -12322,7 +13007,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    const snapshot = try restored.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"automaticWorkspaces\":false") != null,
     );
@@ -12494,7 +13179,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     try std.testing.expectEqual(tracked_before_delete, control.projection_bytes);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -12729,7 +13414,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         control.limits.max_snapshot_bytes,
     );
     defer std.testing.allocator.free(storage);
-    const snapshot = try control.writeSnapshot(storage);
+    const snapshot = try control.writeAggregateFixture(storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"scheduledTasks\":[{") != null,
     );
@@ -13663,7 +14348,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     run.redaction_secret = &.{};
 
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
@@ -13723,7 +14408,7 @@ test "mutation admission rejects stale execution and binding facts" {
     );
 }
 
-test "Task metadata mutations preserve lifecycle guards and projection accounting" {
+test "Product view reads preserve Task deletion lifecycle guards and projection accounting" {
     var control = try testRuntime();
     defer control.deinit();
 
@@ -13758,6 +14443,8 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;
     _ = control.currentRevision();
+    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    control.syncLifecycle();
     try std.testing.expect(control.task_runtime.tasks[0] == null);
     try std.testing.expect(control.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownTask, control.renameTask(3, "gone"));
@@ -14028,7 +14715,7 @@ test "automation installs one ordinary Custom Provider without publishing its cr
     try std.testing.expect(control.executionGeneration() != 0);
 
     var snapshot_storage: [256 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, fixture.credential) == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "metask:automation-key") == null);
 
@@ -14491,7 +15178,7 @@ test "Product Control non-destructively recovers Models admission without touchi
         control.modelsView().persistence_health,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const recovery_snapshot = try control.writeSnapshot(&snapshot_storage);
+    const recovery_snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, recovery_snapshot, "\"persistenceHealth\":\"recovery_required\"") != null,
     );
@@ -14621,7 +15308,7 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expect(task.durable.model_intent != null);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
-    const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
+    const scrubbed_snapshot = try control.writeAggregateFixture(&scrubbed_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
     var workspace_storage: [2]WorkspaceProjection = undefined;
     const workspace_projection = try control.copyWorkspaceProjections(&workspace_storage);
@@ -14919,7 +15606,7 @@ test "Task model selection unknown commit resolves the original candidate before
         digest(control.approval_history_unknown.?, &retained_digest, .{});
         try std.testing.expectEqualSlices(u8, &original_digest, &retained_digest);
         var snapshot_bytes: [16 * 1024]u8 = undefined;
-        try std.testing.expect(std.mem.indexOf(u8, try control.writeSnapshot(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try control.writeAggregateFixture(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
         history.result = .committed;
         history.resolution_result = resolution;
         try std.testing.expectEqual(PersistenceRecoveryOutcome.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
@@ -15149,7 +15836,7 @@ test "released Task credential is permanently scrubbed from every product projec
     try std.testing.expect(compactTerminalPayload(compact).?.diagnostic_redacted);
     try std.testing.expect(task.durable.ui_history[0].?.redacted);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"diagnosticDisposition\":\"withheld\"") != null,
@@ -15208,7 +15895,7 @@ test "clearing the last default execution scrubs its credential before secure ze
 
     try std.testing.expectEqual(@as(usize, 0), control.execution_state.credential().len);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 }
 
@@ -15230,9 +15917,28 @@ test "known credential matching chooses the longest overlapping secret" {
         control.limits.max_task_title_bytes,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
+}
+
+test "Product view security epoch invalidates learned and retiring credentials" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const epoch = control.projectionSecurityEpoch();
+    control.learnProjectionCredential("future-credential");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    control.redactAllProductProjectionsNoFail("");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    var storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&storage, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
+    control.projection_security_epoch = std.math.maxInt(u64);
+    control.retireProjectionCredential("retiring-credential");
+    try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
+    try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
 
 test "opaque credential redaction preserves UTF-8 projection validity" {
@@ -15386,11 +16092,11 @@ test "Run elapsed projection samples an injected clock without publishing revisi
         run.active_phase = phase;
         try std.testing.expectEqual(@as(?u64, 250), task_test_state.runElapsedMs(run, now));
     }
-    const first = try control.writeSnapshot(&storage);
+    const first = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, first, "\"elapsedMs\":\"250\"") != null);
     const revision = control.revision;
     now = 135000;
-    const second = try control.writeSnapshot(&storage);
+    const second = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, second, "\"elapsedMs\":\"134000\"") != null);
     try std.testing.expectEqual(revision, control.revision);
     try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, 999));
@@ -15451,7 +16157,7 @@ test "thinking and assistant chunks update distinct safe projections" {
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-reasoning-marker") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "more-private-reasoning") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "public response") != null);
@@ -15501,7 +16207,7 @@ test "output segments commit commentary and a continued final while discarding r
     try std.testing.expectEqual(@as(u64, 5), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -15655,7 +16361,7 @@ test "partial output stays provisional until the segment is classified" {
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqualStrings("unfinished", run.output_segment.list.items);
     var provisional_storage: [96 * 1024]u8 = undefined;
-    const provisional_snapshot = try control.writeSnapshot(&provisional_storage);
+    const provisional_snapshot = try control.writeAggregateFixture(&provisional_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         provisional_snapshot,
@@ -15676,7 +16382,7 @@ test "partial output stays provisional until the segment is classified" {
     );
     try std.testing.expectEqual(@as(usize, 0), run.assistant_output_start.?);
     var classified_storage: [96 * 1024]u8 = undefined;
-    const classified_snapshot = try control.writeSnapshot(&classified_storage);
+    const classified_snapshot = try control.writeAggregateFixture(&classified_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         classified_snapshot,
@@ -15702,7 +16408,7 @@ test "provisional output exposes only credential-safe committed bytes" {
     defer prefix.deinit();
     try control.applyEvent(&prefix);
     var prefix_storage: [96 * 1024]u8 = undefined;
-    const prefix_snapshot = try control.writeSnapshot(&prefix_storage);
+    const prefix_snapshot = try control.writeAggregateFixture(&prefix_storage);
     try std.testing.expect(std.mem.indexOf(u8, prefix_snapshot, "SECRET-") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15714,7 +16420,7 @@ test "provisional output exposes only credential-safe committed bytes" {
     defer suffix.deinit();
     try control.applyEvent(&suffix);
     var redacted_storage: [96 * 1024]u8 = undefined;
-    const redacted_snapshot = try control.writeSnapshot(&redacted_storage);
+    const redacted_snapshot = try control.writeAggregateFixture(&redacted_storage);
     try std.testing.expect(std.mem.indexOf(u8, redacted_snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15749,7 +16455,7 @@ test "output partition redacts a known credential across commentary boundaries" 
     }
     try std.testing.expectEqualStrings("SECRET-KEYdone", run.assistant.list.items);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15784,7 +16490,7 @@ test "event projection preserves commentary groups split by its credential suffi
     try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqual(@as(?usize, 3), run.assistant_output_start);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -15970,7 +16676,7 @@ test "Conversation context observation survives Runs and clears with attachment"
         run.observed_activity,
     );
     var context_storage: [96 * 1024]u8 = undefined;
-    const context_snapshot = try control.writeSnapshot(&context_storage);
+    const context_snapshot = try control.writeAggregateFixture(&context_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         context_snapshot,
@@ -16526,7 +17232,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
-    const snapshot = try control.writeSnapshot(snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(snapshot_storage);
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
@@ -16563,8 +17269,11 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     control.finishAccountCommitNoFail();
 }
 
-test "default snapshot budget contains the maximum structural projection" {
-    const limits = Limits{};
+fn maximumProjectionFixture() !Runtime {
+    return maximumProjectionFixtureWithTools(false, .{});
+}
+
+fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -16573,7 +17282,7 @@ test "default snapshot budget contains the maximum structural projection" {
         limits,
         .{},
     );
-    defer control.deinit();
+    errdefer control.deinit();
     try installMaximumAccountProjection(&control);
 
     for (0..limits.max_tasks) |task_index| {
@@ -16585,12 +17294,15 @@ test "default snapshot budget contains the maximum structural projection" {
         );
         product_workspace.testing.installOwned(&control.workspace, task_index, .{
             .id = @intCast(task_index + 1),
+            .kind = if (task_index < limits.max_workspaces) .manual else .automatic,
+            .automatic_task_id = if (task_index < limits.max_workspaces) 0 else @intCast(task_index + 1),
+            .visible = task_index < limits.max_workspaces,
             .canonical_root = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_storage = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_len = root.len,
             .display_name_storage = try control.copyBounded("maximum", limits.max_workspace_bytes),
             .display_name_len = "maximum".len,
-            .recent_order = @intCast(task_index + 1),
+            .recent_order = if (task_index < limits.max_workspaces) @intCast(task_index + 1) else 0,
         });
         control.skill.registerWorkspaceOwned(.{
             .id = @intCast(task_index + 1),
@@ -16634,8 +17346,8 @@ test "default snapshot budget contains the maximum structural projection" {
                     .route_digest = toolRouteDigest(""),
                     .id = try control.copyBounded(tool_id, limits.max_tool_field_bytes),
                     .order = @intCast(tool_index + 1),
-                    .name = try control.copyBounded("tool", limits.max_tool_field_bytes),
-                    .input = try control.copyBounded("", limits.max_tool_field_bytes),
+                    .name = try control.copyBounded(if (tool_inputs and task_index == 0) "Bash" else "tool", limits.max_tool_field_bytes),
+                    .input = try control.copyBounded(if (tool_inputs and task_index == 0) "{\"command\":\"echo\"}" else "", limits.max_tool_field_bytes),
                     .progress = try control.copyBounded("", limits.max_tool_field_bytes),
                     .content = try control.copyBounded("", limits.max_tool_field_bytes),
                     .state = .completed,
@@ -16795,11 +17507,18 @@ test "default snapshot budget contains the maximum structural projection" {
         escaped_tool,
         limits.max_tool_field_bytes,
     );
-    try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
+    if (limits.max_tasks == (Limits{}).max_tasks) try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
+    return control;
+}
+
+test "default snapshot budget contains the maximum structural projection" {
+    const limits = Limits{};
+    var control = try maximumProjectionFixture();
+    defer control.deinit();
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
-    const snapshot = try control.writeSnapshot(storage);
+    const snapshot = try control.writeAggregateFixture(storage);
     try std.testing.expect(snapshot.len <= worstCaseSnapshotBytes(limits).?);
     try std.testing.expect(snapshot.len <= limits.max_snapshot_bytes);
 
@@ -17076,10 +17795,10 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeSnapshot(&storage);
+        const snapshot = try control.writeViewFixture(&storage, .{ .task_id = 3 });
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer parsed.deinit();
-        const projected = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+        const projected = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
         const bash = projected.object.get("bash").?;
         const tool_json = try std.json.Stringify.valueAlloc(std.testing.allocator, projected, .{});
         defer std.testing.allocator.free(tool_json);
@@ -17130,7 +17849,7 @@ test "built-in Tool presentation projects readable parameters and failures" {
     }
 
     var storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
@@ -17163,7 +17882,7 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
     }
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
@@ -17181,7 +17900,7 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
     try control.applyEvent(&envelope);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
@@ -17596,7 +18315,7 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     ) == null);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"diffAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 
@@ -17779,7 +18498,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     try std.testing.expect(std.mem.indexOf(u8, safe, "后缀") != null);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, late_credential) == null);
 }
 
@@ -17930,7 +18649,7 @@ test "completed terminal drain closes collecting file change observation" {
     try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
     try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -18070,7 +18789,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
@@ -18129,7 +18848,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     var pending_snapshot_storage: [96 * 1024]u8 = undefined;
-    const pending_snapshot = try control.writeSnapshot(&pending_snapshot_storage);
+    const pending_snapshot = try control.writeAggregateFixture(&pending_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
     try control.appendTrackedText(assistant, "KEY", control.limits.max_assistant_message_bytes);
@@ -18152,7 +18871,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     ));
     control.markTerminalRunsBeforeEventDrain();
     var terminal_pending_storage: [96 * 1024]u8 = undefined;
-    const terminal_pending = try control.writeSnapshot(&terminal_pending_storage);
+    const terminal_pending = try control.writeAggregateFixture(&terminal_pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -18183,7 +18902,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
     var terminal_snapshot_storage: [96 * 1024]u8 = undefined;
-    const terminal_snapshot = try control.writeSnapshot(&terminal_snapshot_storage);
+    const terminal_snapshot = try control.writeAggregateFixture(&terminal_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_snapshot, "tail SECRET-") != null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
@@ -18245,7 +18964,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     ));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
@@ -18264,7 +18983,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         control.finalizeMarkedTerminalRunsAfterEventDrain();
         detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeSnapshot(&storage);
+        const snapshot = try control.writeAggregateFixture(&storage);
         const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer decoded.deinit();
         const terminal = decoded.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object;
@@ -18296,7 +19015,7 @@ test "event drain barrier atomically publishes terminal product state" {
 
     try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
     var pending_storage: [96 * 1024]u8 = undefined;
-    const pending = try control.writeSnapshot(&pending_storage);
+    const pending = try control.writeAggregateFixture(&pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"phase\":\"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"terminal\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\"") == null);
@@ -18317,7 +19036,7 @@ test "event drain barrier atomically publishes terminal product state" {
     detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
-    const terminal = try control.writeSnapshot(&terminal_storage);
+    const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
@@ -18466,7 +19185,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     }
     try std.testing.expectEqual(control.limits.max_ui_history_per_task, view.durable.ui_history_count);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&storage);
+    const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"1\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"10\"") != null);
@@ -18897,7 +19616,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const empty_snapshot = try control.writeSnapshot(&output);
+    const empty_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         empty_snapshot,
@@ -18920,7 +19639,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    const created_snapshot = try control.writeSnapshot(&output);
+    const created_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
@@ -18933,14 +19652,14 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     try control.beginMcpConnectionTest(server_id);
-    const testing_snapshot = try control.writeSnapshot(&output);
+    const testing_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         testing_snapshot,
         "\"connectionTest\":{\"status\":\"testing\",\"toolCount\":0,\"issueCount\":0}",
     ) != null);
     control.completeMcpConnectionTest(server_id, .connected, 3, 1);
-    const connected_snapshot = try control.writeSnapshot(&output);
+    const connected_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         connected_snapshot,
@@ -18950,7 +19669,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
     try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
-    const applying_snapshot = try control.writeSnapshot(&output);
+    const applying_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         applying_snapshot,
@@ -18961,7 +19680,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     control.failMcpConfigurationApply(1);
-    const failed_apply_snapshot = try control.writeSnapshot(&output);
+    const failed_apply_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         failed_apply_snapshot,
@@ -19216,7 +19935,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&output);
+    const snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -19364,7 +20083,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
 
-    const effective_snapshot = try control.writeSnapshot(&output);
+    const effective_snapshot = try control.writeAggregateFixture(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
@@ -19783,7 +20502,7 @@ test "Product Control snapshot serializer omits image formats when attachments a
     var control = try testRuntimeWithLimits(limits, .{});
     defer control.deinit();
     var storage: [8192]u8 = undefined;
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeSnapshot(&storage), .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeAggregateFixture(&storage), .{});
     defer parsed.deinit();
     const capability = parsed.value.object.get("capabilities").?.object.get("attachments").?;
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, capability, .{});
@@ -19835,4 +20554,487 @@ test "complete model metadata image refresh changes default generation while exi
     const pinned = try control.task_runtime.testExecutionInput(task_id);
     try std.testing.expectEqual(generation, pinned.execution_generation);
     try std.testing.expect(!pinned.target.image_capabilities[0].supported);
+}
+
+test "Product view cached delivery confirms versions without rebuilding stable blocks" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var storage: [96 * 1024]u8 = undefined;
+    const first = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first, .{});
+    defer parsed.deinit();
+    var versions: view_cache.Versions = .{};
+    inline for (std.meta.fields(view_cache.Versions)) |field| {
+        @field(versions, field.name) = try std.fmt.parseInt(u64, parsed.value.object.get("blockVersions").?.object.get(field.name).?.string, 10);
+    }
+    const request: ViewRequest = .{ .task_id = 3, .known_epoch = control.projectionSecurityEpoch(), .known_versions = versions };
+    const second = try control.writeViewFixture(&storage, request);
+    var confirmed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, second, .{});
+    defer confirmed.deinit();
+    try std.testing.expectEqual(@as(usize, 7), confirmed.value.object.get("reusedBlocks").?.array.items.len);
+    inline for (std.meta.fields(view_cache.Versions)) |field| try std.testing.expect(confirmed.value.object.get(field.name).? == .null);
+    const sequence = control.encoded_views.sequence;
+    control.encoded_views.invalidateEvent(999, 999);
+    _ = try control.writeViewFixture(&storage, request);
+    try std.testing.expectEqual(sequence, control.encoded_views.sequence);
+    control.learnProjectionCredential("revoked-cache-secret");
+    try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
+    const secured = try control.writeViewFixture(&storage, request);
+    var secured_view = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, secured, .{});
+    defer secured_view.deinit();
+    try std.testing.expectEqual(@as(usize, 0), secured_view.value.object.get("reusedBlocks").?.array.items.len);
+    try std.testing.expect(secured_view.value.object.get("context").? == .object);
+}
+
+test "Product view credential matcher preserves UTF-8 and clears its owned scan set after reads" {
+    var control = try testRuntime();
+    defer control.deinit();
+    execution_state.testing.setCredentialBytes(&control.execution_state, &.{0xa9});
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
+    var storage: [96 * 1024]u8 = undefined;
+    const bytes = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.unicode.utf8ValidateSlice(bytes));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "caf** ***") != null);
+    try std.testing.expect(control.view_credentials == null);
+    var short: [1]u8 = undefined;
+    try std.testing.expectError(error.SnapshotTooLarge, control.writeViewFixture(&short, .{}));
+    try std.testing.expect(control.view_credentials == null);
+}
+
+test "Product view frozen read survives business updates and rejects replaced revoked and shutdown handles" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var expected_storage: [96 * 1024]u8 = undefined;
+    const expected = try control.writeViewFixture(&expected_storage, .{ .task_id = 3 });
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.produced);
+    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 1, 1));
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    var unrelated_storage: [96 * 1024]u8 = undefined;
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &unrelated_storage, 64, 64));
+    var first: [64]u8 = undefined;
+    @memcpy(&first, output[0..64]);
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "new committed title", control.limits.max_task_title_bytes);
+    control.bumpRevision();
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expectEqualSlices(u8, &first, output[0..64]);
+    try std.testing.expectEqual(@as(usize, 64), control.view_read.produced);
+    var offset: usize = 64;
+    while (offset < read.bytes) : (offset += 64) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 64), read.bytes - offset));
+    try std.testing.expectEqualStrings(expected, output[0..read.bytes]);
+    const next = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expect(next.id != read.id);
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 1));
+    control.learnProjectionCredential("newly-learned-secret");
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 1));
+    const last = try control.writeSnapshot(&output, .{});
+    control.beginShutdown();
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(last.id, &output, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.skeleton.len);
+    try std.testing.expectEqual(@as(usize, 0), control.view_read.text.items.len);
+}
+
+test "Product view duplicate credential ownership preserves reads while exact new values revoke and wake" {
+    const Host = struct {
+        wakes: std.atomic.Value(usize) = .init(0),
+        fn wake(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            _ = self.wakes.fetchAdd(1, .monotonic);
+            return true;
+        }
+    };
+    var host: Host = .{};
+    var control = try testRuntimeWith(.{ .change_notifier = .{ .context = &host, .wake = Host.wake } });
+    defer control.deinit();
+    var output: [96 * 1024]u8 = undefined;
+    _ = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    const epoch = control.projectionSecurityEpoch();
+    const wakes = host.wakes.load(.monotonic);
+    const duplicate = try control.allocator.dupe(u8, control.execution_state.credential());
+    defer control.allocator.free(duplicate);
+    control.learnProjectionCredential(duplicate);
+    control.retireProjectionCredential(duplicate);
+    control.redactAllProductProjectionsNoFail(duplicate);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes, host.wakes.load(.monotonic));
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    // A substring of a known credential is a different value, not a known owner.
+    control.learnProjectionCredential("SECRET");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
+    const next = try control.writeSnapshot(&output, .{});
+    // The Task retains a different owned copy of SECRET-KEY. Retiring the
+    // installed copy preserves the set; retiring the remaining Task copy does not.
+    control.retireProjectionCredential(control.execution_state.credential());
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    execution_state.testing.setCredentialBytes(&control.execution_state, "GLOBAL");
+    const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
+    control.retireProjectionCredential(task_credential);
+    try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
+}
+
+test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
+    var control = try maximumProjectionFixture();
+    defer control.deinit();
+    const epoch = control.projection_history_epoch;
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const unrelated = control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version;
+    const version = run.projection_content_version;
+    control.bumpRevision(); // Account, Schedule or other Task header changes.
+    try std.testing.expectEqual(epoch, control.projection_history_epoch);
+    try std.testing.expectEqual(version, run.projection_content_version);
+    run.pending_file_change_artifacts = 1;
+    const change = run.file_changes[0].?;
+    try std.testing.expect(control.task_runtime.completeFileChangeArtifact(1, run.generation, change.order, null, false));
+    control.bumpRevision();
+    try std.testing.expect(run.projection_content_version > version);
+    try std.testing.expectEqual(unrelated, control.task_runtime.tasks[1].?.durable.runs[0].?.projection_content_version);
+    try std.testing.expectEqual(epoch, control.projection_history_epoch);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const bytes = try control.writeViewFixture(output, .{ .task_id = 1, .before_run_id = 5 });
+    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer decoded.deinit();
+    const observed = decoded.value.object.get("taskPage").?.object.get("runManifest").?.array.items[0].object.get("contentVersion").?.string;
+    try std.testing.expectEqual(run.projection_content_version, try std.fmt.parseInt(u64, observed, 10));
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
+}
+
+test "Product view preparation owns frozen tools and cannot clean a changed cache" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"prepared\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo original\\\"}\",\"content\":\"old result\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    try std.testing.expectEqual(@as(usize, 1), control.view_preparation.tools.items.len);
+    try std.testing.expect(control.view_preparation.credentials != null);
+    try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
+    const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
+    control.bumpRevision();
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+    var offset: usize = 0;
+    while (offset < read.bytes) : (offset += 31) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 31), read.bytes - offset));
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "new result") == null);
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 3 }, .taskPage)) == null);
+    const current = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, current, "new result") != null);
+    control.encoded_views.invalidateAll();
+    read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    control.learnProjectionCredential("new preparation boundary");
+    try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+}
+
+test "Product view failed formatter stage releases partially prepared source and credentials" {
+    var control = try testRuntimeWithLimits(.{}, .{});
+    defer control.deinit();
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"partial\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"result\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    const command = try std.testing.allocator.alloc(u8, 20_000);
+    defer std.testing.allocator.free(command);
+    @memset(command, '\n');
+    const input = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
+    defer std.testing.allocator.free(input);
+    try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    read = try control.continueSnapshot(read.id, &output);
+    try std.testing.expectEqual(@as(usize, 0), read.bytes);
+    try std.testing.expect(control.view_preparation.tools.items[0].state.stage == .bash_input);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const original_allocator = control.allocator;
+    control.allocator = failing.allocator();
+    defer control.allocator = original_allocator;
+    try std.testing.expectError(error.SnapshotTooLarge, control.continueSnapshot(read.id, &output));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
+    try std.testing.expect(control.view_preparation.credentials == null);
+    try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
+}
+
+test "Account image token protects Custom Provider views between Runs and rotation revokes reads" {
+    const Account = struct {
+        token: []const u8 = "account-image-token",
+        epoch: u64 = 1,
+        fn generation(context: *anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.epoch;
+        }
+        fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try callback(visitor_context, self.token);
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var execution = try models_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .custom_provider,
+        .openai_chat_completions,
+        try std.testing.allocator.dupe(u8, "custom-model"),
+        try std.testing.allocator.dupe(u8, "https://custom.example/v1/chat/completions"),
+        2,
+        try std.testing.allocator.dupe(u8, "custom-api-key"),
+        "fixture-provider",
+    );
+    errdefer execution.deinit();
+    var binding = try control.prepareCustomProviderBinding("provider-1", "custom-model");
+    try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionInstall(execution.input());
+    control.installCustomProviderExecutionNoFail(&execution, &binding);
+    control.endExecutionReplacementNoFail();
+    try std.testing.expectEqual(models_contract.Source.custom_provider, control.execution_state.activeSource().?);
+    var account: Account = .{};
+    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    try std.testing.expect(!std.mem.eql(u8, account.token, control.execution_state.credential()));
+    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"account-tool\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo account\\\\u002dimage-token\\\"}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    const epoch = control.projectionSecurityEpoch();
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const len = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, &output, offset, len);
+        offset += len;
+    }
+    const projected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+    defer projected.deinit();
+    const tool = projected.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+    try std.testing.expectEqualStrings("echo ***", tool.object.get("bash").?.object.get("command").?.string);
+    const duplicate = try control.allocator.dupe(u8, account.token);
+    defer control.allocator.free(duplicate);
+    control.learnProjectionCredential(duplicate);
+    control.retireProjectionCredential(duplicate);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expect(control.containsKnownCredential("prefix account-image-token suffix"));
+    var raw = "account-image-token".*;
+    try std.testing.expect(control.redactWithKnownCredentialsNoFail(&raw));
+    var writer = std.Io.Writer.fixed(&output);
+    try control.projectedJsonValueWithKnownCredentials(&writer, "account-image-token");
+    try std.testing.expectEqualStrings("\"***\"", writer.buffered());
+    account.token = "rotated-account-image-token";
+    account.epoch += 1;
+    control.syncAccountProjectionCredentialNoFail();
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
+    control.syncAccountProjectionCredentialNoFail();
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+}
+
+test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const initial_epoch = control.projectionSecurityEpoch();
+    const cases = [_]struct { source: models_contract.Source = .metask, endpoint: []const u8 = models_contract.metask_anthropic_messages_url, secret: []const u8 = "SECRET-KEY", provider: []const u8 = "", revoked: bool }{
+        .{ .revoked = false },
+        .{ .secret = "replacement-secret", .revoked = true },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = true },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = false },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .endpoint = "https://changed.example/v1/messages", .revoked = true },
+    };
+    var epoch = initial_epoch;
+    var output: [96 * 1024]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+        var execution = try models_contract.OwnedConfig.initOwned(std.testing.allocator, case.source, .anthropic_messages, try std.testing.allocator.dupe(u8, "fixture-model"), try std.testing.allocator.dupe(u8, case.endpoint), @intCast(index + 2), try std.testing.allocator.dupe(u8, case.secret), case.provider);
+        errdefer execution.deinit();
+        try control.beginDefaultExecutionReplacement();
+        try control.prepareExecutionInstall(execution.input());
+        if (case.source == .metask) control.installExecutionNoFail(&execution) else {
+            var binding = try control.prepareCustomProviderBinding("provider-1", "fixture-model");
+            control.installCustomProviderExecutionNoFail(&execution, &binding);
+        }
+        control.endExecutionReplacementNoFail();
+        if (case.revoked) epoch += 1;
+        try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+        if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
+    }
+}
+
+test "transport cancellation cannot revoke a replacement Product read" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var output: [96 * 1024]u8 = undefined;
+    const old = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    var current = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    control.cancelSnapshotRead(old.id);
+    while (current.bytes == 0) current = try control.continueSnapshot(current.id, &output);
+    try control.writeSnapshotRange(current.id, &output, 0, 64);
+    control.cancelSnapshotRead(current.id);
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(current.id, &output, 0, 64));
+}
+
+test "Product view cached large body moves into frozen read without a body-sized begin copy" {
+    var control = try TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    try TestSupport.installResultFixture(&control, true);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const request: ViewRequest = .{ .task_id = 1 };
+    var first_read = try control.writeSnapshot(output, request);
+    while (first_read.bytes == 0) first_read = try control.continueSnapshot(first_read.id, output);
+    const task_slot = @intFromEnum(view_cache.Kind.taskPage);
+    var cache_candidate: ?[*]u8 = null;
+    var first_offset: usize = 0;
+    while (first_offset < first_read.bytes) {
+        const length = @min(projection_step_bytes, first_read.bytes - first_offset);
+        try control.writeSnapshotRange(first_read.id, output, first_offset, length);
+        if (control.view_blocks[task_slot]) |block| if (block.encoding) |candidate| {
+            if (cache_candidate) |pointer| try std.testing.expectEqual(pointer, candidate.ptr) else cache_candidate = candidate.ptr;
+            try std.testing.expect(control.encoded_views.get(Runtime.viewKey(request, .taskPage)) == null);
+        };
+        first_offset += length;
+    }
+    try std.testing.expect(cache_candidate != null);
+    try std.testing.expectEqual(cache_candidate.?, control.encoded_views.get(Runtime.viewKey(request, .taskPage)).?.bytes.ptr);
+    const expected = try std.testing.allocator.dupe(u8, output[0..first_read.bytes]);
+    defer std.testing.allocator.free(expected);
+    const key = Runtime.viewKey(request, .taskPage);
+    const version = control.encoded_views.get(key).?.version;
+    const pointer = control.encoded_views.get(key).?.bytes.ptr;
+    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 4 * 1024 * 1024);
+    // Include revalidation after a dirty mark with identical facts: this must
+    // attach the owned encoded body rather than copy it through replaceSpan.
+    for ([_]bool{ false, true }) |revalidate| {
+        if (revalidate) control.encoded_views.invalidate(.taskPage);
+        var read = try control.writeSnapshot(output, request);
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
+        try std.testing.expect(read.scratch_bytes < projection_step_bytes);
+        try std.testing.expect(control.view_read.skeleton.len < projection_step_bytes);
+        const cached = control.view_cached_blocks[@intFromEnum(view_cache.Kind.taskPage)].?;
+        try std.testing.expectEqual(pointer, cached.child.skeleton.ptr);
+        try std.testing.expectEqual(version, cached.version);
+        try std.testing.expect(control.encoded_views.get(key) == null);
+        var offset: usize = 0;
+        while (offset < read.bytes) {
+            const length = @min(projection_step_bytes, read.bytes - offset);
+            try control.writeSnapshotRange(read.id, output, offset, length);
+            offset += length;
+        }
+        try std.testing.expectEqualSlices(u8, expected, output[0..read.bytes]);
+        try std.testing.expectEqual(pointer, control.encoded_views.get(key).?.bytes.ptr);
+    }
+    // Cache eviction while a read is in flight cannot invalidate the owned
+    // frozen bytes, and completing that read cannot repopulate an evicted slot.
+    const read = try control.writeSnapshot(output, request);
+    control.encoded_views.clear(std.testing.allocator);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const length = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, output, offset, length);
+        offset += length;
+    }
+    try std.testing.expectEqualSlices(u8, expected, output[0..read.bytes]);
+    try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
+}
+
+test "Product view cached ownership returns through allocation failures and security cancellation" {
+    var succeeded = false;
+    for (0..40) |fail_index| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var output: [96 * 1024]u8 = undefined;
+        const request: ViewRequest = .{};
+        _ = try control.writeViewFixture(&output, request);
+        const key = Runtime.viewKey(request, .context);
+        const pointer = control.encoded_views.get(key).?.bytes.ptr;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        control.allocator = failing.allocator();
+        if (control.writeSnapshot(&output, request)) |_| {
+            succeeded = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+        control.cancelSnapshot();
+        control.allocator = std.testing.allocator;
+        try std.testing.expectEqual(pointer, control.encoded_views.get(key).?.bytes.ptr);
+        const read = try control.writeSnapshot(&output, request);
+        control.learnProjectionCredential("new-cache-transfer-secret");
+        try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 16));
+        try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
+        for (control.view_cached_blocks) |slot| try std.testing.expect(slot == null);
+        if (succeeded) break;
+    }
+    try std.testing.expect(succeeded);
+}
+
+test "Product view partial encoded cache fill is discarded on cancellation invalidation or allocation failure" {
+    var reached_success = false;
+    for (0..16) |fail_index| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var output: [96 * 1024]u8 = undefined;
+        var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        control.allocator = failing.allocator();
+        if (control.writeSnapshotRange(read.id, &output, 0, @min(projection_step_bytes, read.bytes))) |_| {
+            reached_success = true;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        control.cancelSnapshot();
+        control.allocator = std.testing.allocator;
+        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+        // Any committed entry must be a complete independently valid JSON value;
+        // failed allocations cannot expose an incompletely filled candidate.
+        for (control.encoded_views.entries) |slot| if (slot) |entry| if (entry.bytes.len != 0) {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, entry.bytes, .{});
+            parsed.deinit();
+        };
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
+
+    var control = try TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    try TestSupport.installResultFixture(&control, true);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const task_slot = @intFromEnum(view_cache.Kind.taskPage);
+    for ([_]bool{ false, true }) |invalidate| {
+        control.encoded_views.clear(std.testing.allocator);
+        var read = try control.writeSnapshot(output, .{ .task_id = 1 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
+        var offset: usize = 0;
+        while (control.view_blocks[task_slot].?.encoding == null) {
+            const length = @min(projection_step_bytes, read.bytes - offset);
+            try control.writeSnapshotRange(read.id, output, offset, length);
+            offset += length;
+        }
+        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
+        if (invalidate) {
+            control.encoded_views.invalidate(.taskPage);
+            while (offset < read.bytes) {
+                const length = @min(projection_step_bytes, read.bytes - offset);
+                try control.writeSnapshotRange(read.id, output, offset, length);
+                offset += length;
+            }
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+            defer parsed.deinit();
+        } else control.cancelSnapshot();
+        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
+        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+    }
 }

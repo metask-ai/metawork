@@ -110,7 +110,7 @@ pub const EventOutcome = union(enum) {
     unknown,
     unchanged,
     late_terminal: struct { task_id: u64, count: u64 },
-    applied: struct { durable_boundary: bool },
+    applied: struct { durable_boundary: bool, task_id: u64 },
 };
 
 pub const WorkspaceSignals = struct {
@@ -2091,6 +2091,7 @@ pub const Runtime = struct {
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
+                run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.sequence = sequence;
@@ -2101,6 +2102,7 @@ pub const Runtime = struct {
                 result.sequence = sequence;
             },
             .unknown => {
+                run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
                 run.additional_inputs[index].?.state = .unknown;
@@ -2172,6 +2174,7 @@ pub const Runtime = struct {
                 has_payload = has_payload or record.raw_text != null;
             };
             if (!run.input_continuation_pending and !has_payload) continue;
+            run.noteProjectionChange();
             run.input_continuation_cancelled = true;
             run.input_continuation_pending = false;
             run.input_continuation_failure = reason;
@@ -2232,6 +2235,7 @@ pub const Runtime = struct {
             _ = self.cancelInputContinuation(task_id, source.id, .binding_changed);
             return .ended;
         }
+        source.noteProjectionChange();
         source.input_continuation_pending = false;
         source.input_continuation_attempted = true;
         const text = self.mergeInputContinuation(source, max_bytes) catch |err| {
@@ -2245,6 +2249,7 @@ pub const Runtime = struct {
     pub fn finishInputContinuation(self: *Runtime, task_id: u64, source_id: u64, reason: ?SendInputReason) void {
         const task = self.find(task_id) orelse return;
         const source = task_state.findRun(task.durable.runs, source_id) orelse return;
+        source.noteProjectionChange();
         if (reason) |failure| source.input_continuation_failure = failure;
         self.discardInputPayloads(source);
     }
@@ -2252,6 +2257,7 @@ pub const Runtime = struct {
     pub fn markInputTransferred(self: *Runtime, task_id: u64, source_id: u64, target_id: ?u64) void {
         const task = self.find(task_id) orelse unreachable;
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
+        run.noteProjectionChange();
         for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .unadopted and record.state != .transferred) continue;
             if (record.continuation_cancel_reason != null) continue;
@@ -3616,7 +3622,7 @@ pub const Runtime = struct {
         self: *Runtime,
         envelope: *const agent.OwnedCoreEvent,
         effects: EventEffects,
-    ) (task_state.EventApplyError || error{UnknownTask})!EventOutcome {
+    ) (task_state.EventApplyError || error{ UnknownTask, ViewVersionExhausted })!EventOutcome {
         const task = self.findByRouteId(envelope.session_id) orelse
             return error.UnknownTask;
         var context = EventContext{ .runtime = self, .effects = effects, .image_secret = if (task_state.findRun(task.durable.runs, envelope.run_id)) |run| run.redactionSecrets()[1] else &.{} };
@@ -3632,7 +3638,12 @@ pub const Runtime = struct {
             .replace_file_references_fn = replaceEventFileReferences,
             .record_file_changes_fn = recordEventFileChanges,
         };
+        const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
+        if (versioned_run) |run| if (run.projection_content_version == 0 or run.projection_content_version == std.math.maxInt(u64)) return error.ViewVersionExhausted;
         const application_result = try task_state.applyEvent(task, envelope, projection);
+        if (application_result == .applied) if (versioned_run) |run| {
+            run.noteProjectionChange();
+        };
         if (application_result == .applied) {
             const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
             for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
@@ -3650,6 +3661,7 @@ pub const Runtime = struct {
             } },
             .applied => |application| .{ .applied = .{
                 .durable_boundary = application.durable_boundary,
+                .task_id = task.durable.id,
             } },
         };
     }
@@ -3681,6 +3693,7 @@ pub const Runtime = struct {
             }
         }
         if (target_run.pending_file_change_artifacts == 0) return false;
+        target_run.noteProjectionChange();
         target_run.pending_file_change_artifacts -= 1;
         const change = target orelse {
             _ = markFileChangesIncomplete(target_run);
@@ -4356,6 +4369,34 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// Exact value membership, excluding aliases of an owner about to release.
+    /// The caller borrows bytes synchronously; this creates no secret registry.
+    pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
+        if (value.len == 0) return false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
+                if (releasing != null and credential.ptr == releasing.?) continue;
+                if (std.mem.eql(u8, credential, value)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Borrow each retained execution credential only during the callback.
+    /// Projection composition may build its own bounded, securely owned matcher;
+    /// it must not retain pointers into Task attachments or Run bindings.
+    pub fn visitExecutionCredentials(self: *const Runtime, context: *anyopaque, visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
+                if (credential.len != 0) try visit_fn(context, credential);
+            }
+        }
+    }
+
     /// Applies a callback-scoped projection scrubber against every credential
     /// still retained by a live Task execution. The callback may observe a
     /// borrowed credential only for the duration of the call and must not
@@ -4474,6 +4515,125 @@ pub const Runtime = struct {
                 },
             }) catch |err| return err;
         }
+    }
+
+    pub fn writeSummaryList(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+        var count: usize = 0;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            try task_view.writeSummary(writer, task, text);
+        }
+    }
+
+    pub fn hasInputReceipt(self: *const Runtime, task_id: u64, operation_id: []const u8) bool {
+        const task = self.findConst(task_id) orelse return false;
+        for (task.input_submissions.items) |record| if (std.mem.eql(u8, operation_id, record.submission.operationId())) return true;
+        return task_state.submissionHasExecution(task, operation_id);
+    }
+
+    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+        var count: usize = 0;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            for (task.durable.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                count += 1;
+                try task_view.writeSearchRun(writer, task, run, text);
+            }
+        }
+    }
+
+    /// Missing Task is explicit null. A history cursor must name a retained
+    /// Run belonging to this Task; it cannot silently become another page.
+    const RunBounds = struct { start: usize, end: usize, older: bool };
+
+    fn runBounds(task: *const task_state.Task, before_run_id: ?u64, limit: u8) error{InvalidViewRequest}!RunBounds {
+        if (limit == 0 or limit > 4) return error.InvalidViewRequest;
+        var end: usize = 0;
+        for (task.durable.runs, 0..) |entry, index| if (entry != null) {
+            end = index + 1;
+        };
+        if (before_run_id) |id| {
+            end = for (task.durable.runs, 0..) |entry, index| {
+                if (entry != null and entry.?.id == id) break index;
+            } else return error.InvalidViewRequest;
+        }
+        var start = end;
+        var count: usize = 0;
+        while (start > 0 and count < limit) {
+            start -= 1;
+            if (task.durable.runs[start] != null) count += 1;
+        }
+        const older = for (task.durable.runs[0..start]) |entry| {
+            if (entry != null) break true;
+        } else false;
+        return .{ .start = start, .end = end, .older = older };
+    }
+
+    pub fn writeHistoryPage(self: *const Runtime, writer: *std.Io.Writer, effects: ProjectionEffects, task_id: u64, before_run_id: u64, limit: u8) (task_view.Error || error{InvalidViewRequest})!void {
+        const task = self.findConst(task_id) orelse {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        };
+        const bounds = try runBounds(task, before_run_id, limit);
+        writer.print("{{\"beforeRunId\":\"{d}\",\"nextBeforeRunId\":", .{before_run_id}) catch return error.SnapshotTooLarge;
+        if (bounds.older) writer.print("\"{d}\"", .{task.durable.runs[bounds.start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
+        var count: usize = 0;
+        for (task.durable.runs[bounds.start..bounds.end]) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            count += 1;
+            try task_view.writeRun(writer, effects.text, run, task_state.runProjectionFacts(run), effects.now_ms);
+        }
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    pub fn writeProjectionPage(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+        effects: ProjectionEffects,
+        task_id: u64,
+        before_run_id: ?u64,
+        limit: u8,
+    ) (task_view.Error || error{InvalidViewRequest})!void {
+        if (limit == 0 or limit > 4) return error.InvalidViewRequest;
+        const task = self.findConst(task_id) orelse {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return;
+        };
+        const bounds = try runBounds(task, before_run_id, limit);
+        const start = bounds.start;
+        const end = bounds.end;
+        const older = bounds.older;
+        var pending_ui_context = PendingUiContext{ .runtime = self, .max_json_bytes = effects.max_pending_ui_json_bytes };
+        const external = effects.authority(projectionAuthorityQuery(task));
+        var available_modes: [3]task_state.ApprovalMode = undefined;
+        writer.writeAll("{\"beforeRunId\":") catch return error.SnapshotTooLarge;
+        if (before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
+        if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
+        try task_view.writeRunManifest(writer, task);
+        writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
+        try task_view.writeProjection(writer, .{
+            .task = task,
+            .now_ms = effects.now_ms,
+            .recovery = self.recoveryProjectionWithAuthority(task, external),
+            .model_selection_availability = external.model_selection_availability,
+            .available_approval_modes = self.availableApprovalModes(task, external, &available_modes),
+            .shutting_down = external.shutting_down,
+            .input_acceptance_reason = self.inputAcceptanceReason(task, external, effects.max_pending_inputs_per_task),
+            .text = effects.text,
+            .catalog = effects.catalog,
+            .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
+            .run_start = start,
+            .run_end = end,
+        });
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
     pub fn recoveryStartFacts(
@@ -4964,6 +5124,7 @@ pub const Runtime = struct {
                     record.raw_text = null;
                 }
             };
+            run.noteProjectionChange();
             run.input_continuation_pending = pending;
             changed = true;
         }
@@ -5736,6 +5897,7 @@ fn excludePendingConversationTail(task: *task_state.Task) bool {
         const run = &(entry.* orelse continue);
         if (run.coverage == .pending) {
             run.coverage = .excluded;
+            run.noteProjectionChange();
             changed = true;
         }
     }

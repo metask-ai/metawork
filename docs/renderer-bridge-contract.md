@@ -13,7 +13,7 @@ Renderer 的可信定位与 Native SDK WebView UI/input 边界以[高层架构](
 
 Task binding projection 只运输 `epoch + availability + protocol + model + executionGeneration + unavailableReason`。Scheduled Task 的 `binding` 精确为 `{ status: "bound", modelRef, sourceGeneration, selectionRevision, protocol }`，没有其他判别分支。两处 protocol 均精确取 `openai_responses | openai_chat_completions | anthropic_messages | gemini_native`，不发布厂商类别。revision 1 对这些 shape 原地 hard cut，旧 Scheduled Task `execution`、旧 `provider` 与 migration shape 既不接受也不归一化。`unavailableReason` 当前只有 `runtime_detached`，表示恢复历史没有进程内 Session/ExecutionConfig；Task projection 不包含 account identity、API Key selection/metadata、Custom Provider identity/generation、credential locator 或完整 ExecutionConfig，也不得用当前 Account/Models projection 为历史 Task 补写这些字段。
 
-Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、snapshot identity 和 snapshot transport storage 都不再存放在 `app.zig`。Dispatcher 通过明确的 `*product_control.Runtime` 同步生成 snapshot；Application 只注入 Native emit/timer/dialog/window-chrome/main-thread capability，并组织 Bridge、Product、Agent 与 Native SDK 的顶层 shutdown；Agent event 的产品投影和固定终态 drain 屏障由 Product Control 执行，Application 只安排 main-loop 调用。
+Bridge 的唯一产品数据面由具体 `Dispatcher` 内部的 `ProductDelivery` 统一拥有：connection generation、revision retry/timer、读取 identity 和 transport storage。Dispatcher 只调用 Product Control 的无业务副作用查询，运输按消费者范围生成的产品视图；查询、版本通知与运输重试不执行 lifecycle、Run admission 或持久化。Application 只注入 Native emit/timer/dialog/window-chrome/main-thread capability，并组织 Bridge、Product、Agent 与 Native SDK 的顶层 shutdown；Agent event 的产品接纳与固定终态 drain 屏障由 Product Control 执行，Application 安排独立于 Renderer 的 main-loop wake。
 
 `hidden_inset_tall` 的 System WebView window chrome 是独立于 ProductDelivery connection 的受限 Host bootstrap capability。browser-side Bridge 使用既有 `window.zero.invoke` transport 调用 `metawork.host.windowChrome.connect/refresh/control/disconnect`。`connect` 接受空 payload，返回 document generation、safe insets、caption-button bounds、`rendererControls` 与 `maximized`；`refresh` 只接受 `{ generation }` 并返回同一环境格式，不接受 viewport、DOM 区域或手势模式。`control` 只接受同 generation 的 `minimize | toggle_maximize | close`，成功返回严格的 `{ generation, handled: true }`，只表示受理，不保证原生交互完成。`disconnect` 精确撤销当前 generation，返回 `{ generation, detached: true }`。所有响应均须 runtime decode；只有 connect/refresh 可更新 CSS variables/document dataset。React 只登记标题栏真实 DOM 节点以绑定窗口按钮及清理，不消费 DTO、调用 transport、持有原生 identity 或维护窗口状态。
 
@@ -29,9 +29,26 @@ Windows 窗口按钮执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 ## 2. ProductDelivery 与 Snapshot transport
 
-Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 64 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Models provider/API Key/model catalog、bounded Custom Provider projection、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*product_control.Runtime`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 `app.zig`。Product Control writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Product Control borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。Host 独占 revision 通知投递的 pending/retry 状态；Renderer 独占快照拉取的需求合并、在途读取与有限重试。Host revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。
+ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。工作台摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。
 
-Renderer 在读取开始时冻结该次 revision 目标，读取期间的新通知只产生后续需求；合格读取无需追上未来通知，也不因正常滞后消耗失败预算。空闲后的通知按固定窗口合并，持续通知不能推迟首次读取。显式刷新只有在调用之后开始的合格读取被当前连接消费后才能完成，不等待整条追赶链；在途失败与退避期间到达的等待者共享同一份有限重试预算。预算耗尽、合同故障、停止、断开及等待期间 generation 被替换均须明确拒绝，不得零读取返回成功或把旧等待者转移到新连接。
+实时上下文必须覆盖当前消费者所需的 Account、capabilities、permissions、Models、new-task admission 以及相关 command CAS 事实。Task Composer、TaskInformation、模型选择、Slash 和附件能力在 Task 页面保持实时；Models、Skills、MCP 与 Schedule 的异步管理结果在对应页面挂载期间继续更新，不能仅在进入页面时读取一次。
+
+一次响应冻结同一 Product 提交 revision，明确所返回范围、产品块 identity、内容版本及安全代次。Renderer 只复用 Host 确认仍有效的块，并原子接纳本次页面所需的摘要、上下文和 Task 内容；没有返回某个范围不等于该范围为空。内容版本表达数据变化，不是第二个协议版本。缺失块、错误关联、重复 identity 和未知范围均严格拒绝，不能从其他 Task 或全局默认补造事实。
+
+`snapshot` 请求精确包含消费者范围 `taskId / beforeRunId / runLimit / management / search / receipts` 和 `known = { securityEpoch, versions }`。`versions` 与响应 `blockVersions` 使用同一闭合块目录：`context / workspaces / taskIndex / taskPage / historyPage / management / searchIndex`；请求未知版本为 `"0"`，响应版本为非零 canonical decimal u64。请求中的版本仅是交付提示，不授予 authority，也不参与消费者范围 identity。Host 对相同范围、相同安全代次及相同内容版本确认复用时，响应将块正文置 null 并在唯一、无重复的 `reusedBlocks` 中列出；其他 null 仍按该块原有空值语义解释。Renderer 必须持有本次读取开始时捕获的完全匹配缓存才可补全，严格解码与跨块关联校验成功后才原子安装，禁止根据版本猜测、接受不完整缓存或回退全量通道。实时上下文不重复携带提交 revision；根 revision 绑定本次冻结响应。
+
+已加载历史的复用另受根 `historyEpoch` 与 Run manifest 的 `contentVersion` 确认。historyEpoch 只在整体历史对象被替换时推进，防止持久 identity 与新运行期版本重用；普通产品 revision 不作废其他 Task 的历史。CoreEvent、终态发布、后续输入转移或取消、coverage 排除及异步文件变更结果都推进所修改 Run 的运行期内容版本。Renderer 只保留同一 Task、安全代次、historyEpoch 且 manifest 仍确认相同内容版本的已加载 Run；新返回的当前页和历史页覆盖同 identity 的旧内容。Renderer 只呈现 Host manifest 确认的连续已加载区间，阅读目标按稳定 Run identity 保存，运输游标随连续区间重新计算；范围切换或内容失效造成缺页时有界重取，不得把两端拼成完整历史或丢失访问中间 Run 的入口。这些失效标识不进入历史持久化格式。Product 编码缓存和 Renderer 交付缓存均按总字节预算有界，淘汰只造成后续重建，不改变可访问数据容量；安全失效清空缓存，旧版本不得重新分配给不同内容。
+
+Product 在 begin 时冻结同一提交的 owned 事实、范围、安全代次及 receipt，不保留 Product 对象借用或执行句柄。需要工具展示解析时，`snapshot` 先返回精确 `{ snapshotId, phase: "preparing" }`；消费者在同一 command 上以精确 `{ preparingSnapshotId }` 继续该读取，每次只推进一个有界 Product 准备步，直到返回既有 `{ snapshotId, bytes, chunkBytes }` descriptor。准备与 ready 的 snapshotId 必须相同，准备期间拒绝 chunk，未知字段、错误 identity 或失效连接严格拒绝；消费者限制连续准备次数并通过既有读取失败路径恢复，不能重放产品命令。准备只使用 begin 冻结的 Host-owned 临时输入和 credential 副本，完成、替换、撤销或关闭时清除；原始工具 JSON 可能包含编码后的敏感文本，只能由 Host 的唯一工具 formatter 解析、清洗，不能成为 Bridge payload、缓存或 worker 输入。ready 计划仅持已脱敏的 owned 内容、精确编码长度和块版本。
+大字符串的 JSON 转义随 chunk 请求有界推进，每次最多一个 Product 编码步；准备及编码均不推进业务或查询新的 aggregate 事实。Bridge 只保存读取 identity、准备状态与运输 bytes，不解释计划或执行 JSON 投影。Renderer 只等待准备并按 descriptor 的 chunk 大小递增读取；允许重读已生成前缀，拒绝越过前缀跳读。旧读取被替换、断开、安全失效或关闭时撤销计划，并在忘记有效长度之前清除准备 scratch 与运输已写入区域。编码结果只有在源内容仍有效时才能回填当前块缓存；同一次冻结读取不因普通后续业务更新而混入新内容。
+
+Bridge transport storage 是有界 encoded bytes，不持有 Product 内部状态或 credential。Product writer 只在同步调用期间借用 output buffer；运输使用绑定读取 identity、generation、window、范围和安全代次的分块，base64 后仍须满足 Native SDK 单次 result 上限。新的 begin 或安全失效必须先撤销旧 descriptor；失败不得继续读取被部分覆盖或安全代次过期的 buffer。缓存和运输容量必须覆盖合法产品范围，不能通过永久 SnapshotTooLarge、缩小产品状态或回退旧全量路径处理合格数据。
+
+Product Control 改变安全代次后，旧代次缓存和在途读取立即失效；版本通知精确携带 `{ generation, revision, securityEpoch }`，绑定当前已连接文档，响应也明确交付新安全代次。安全代次改变本身需要通知，即使提交 revision 不变；通知前先撤销并清除旧运输存储。Renderer 收到当前 generation 的新安全代次即清除旧 Host 正文、历史、预览和读取候选，不等待下一次快照成功；旧 generation 的迟到通知不能撤销新连接内容。Renderer 清除旧代次正文、块版本和读取候选，按当前范围重新获取；迟到分块不得拼接或重新安装。Host 与 Renderer 都不得把旧安全代次命中当作缓存成功。
+
+Renderer 在读取开始时冻结本次 revision、消费者范围和目标 identity，读取期间的新通知只产生后续需求；合格读取无需追上未来通知，也不因正常滞后消耗失败预算。每个连接最多一个在途读取，后续需求有界合并；空闲后的通知按固定窗口合并，持续通知不能推迟首次读取。显式刷新只有在调用之后开始的合格读取被当前连接消费后才能完成，不等待整条追赶链；在途失败与退避期间到达的等待者共享同一份有限重试预算。预算耗尽、合同故障、停止、断开及等待期间 generation 被替换均须明确拒绝，不得零读取返回成功或把旧等待者转移到新连接。Task、页面或范围切换后，旧请求不得覆盖当前范围；恢复只重新取得当前所需数据，不先物化全部历史。
+
+连接就绪的内部等待追随当前消费者范围，不因启动或恢复期间的正常切页而断开连接；显式页面刷新等待仍在范围被替换时拒绝。两者都必须由所属 generation 的真实合格读取完成，不能由旧范围完成或仅等待旧 Promise 冒充成功。
 
 连接层独占 readiness：新 generation 必须完成有效握手、真实首读与 ping，不能把等待旧 Promise 误判为同步成功；后续正常 pending 不撤销已确认的 readiness，最终命令 admission 仍属于 Host。新 event generation 建立时使旧 snapshot descriptor 失效；读取与 ACK、ping、定时及清理回调均须校验所属连接，旧异步结果不能影响新连接、复活 stopped 连接或清除合同故障。
 
@@ -75,7 +92,7 @@ Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投
 
 Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或仅由 Host 按精确 built-in identifier 投影的 discriminated union：`read { target, offset, limit }`、`write|edit { target }`、`glob { pattern, scope }`、`grep { pattern, scope, include }`、`bash_output { jobId, result }`、`kill_shell { jobId }`、`web_search { query }`、`web_fetch { url, prompt, result }`；nullable 数字以 canonical decimal `u64` string 发布。`bash_output.result` 精确包含闭合 status `running | exited | killed`、stdout/stderr 与各自 incomplete 标志；`web_fetch.result` 精确包含 url、nullable bytes 与正文。截断 input 不得携带 presentation，运行中或截断 content 不得携带 result。解析失败保持 presentation null，由安全原始字段兜底，不在 Renderer 猜测。`errorDetail` 为 nullable string，只允许 failed Tool，由 Host 从已知错误 envelope 提取并再次 credential 清洗；无法解释时保持 null。上述字段不进入持久化格式，也不建立第二套 Tool identity 或 executor。
 
-`output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal 呈现收口和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
+`output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位与 active→terminal 呈现收口由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
 ## Skill source settings
 
@@ -121,7 +138,6 @@ response result 精确为：
 Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
 
 同一 `metawork.files.preview` 接纳 PNG、JPEG 和静态 WebP：worker 在相同路径和 authority 校验下读取最多 10 MiB 原件；主线程通过现有 Native 图片准备 capability 生成最多 384 KiB PNG，并拒绝命中已知 credential 的原件或预览。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { mediaType: "image/png", dataBase64 }`；Base64 最多 524288 字符，总响应仍受 Native SDK 上限约束。文本响应不含 `image`；非 ready 响应不得携带图片。Renderer 仅将这一 closed variant 作为内存中的 PNG 显示，不接收磁盘路径、file URL 或任意 MIME；内联生成图预览与右栏沿用相同请求身份和失败语义，跨 Task 或引用失效不保留图片。
-
 
 Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 

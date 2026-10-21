@@ -9,3 +9,6 @@ zig-pkg/
 zig-out/
 .DS_Store
 *.log
+
+# Local probes and raw working logs; durable evidence lives in docs/evidence.
+.tmp/

@@ -833,6 +833,23 @@ pub const Runtime = struct {
         return self.summary.clearAuthorization();
     }
 
+    pub fn accessTokenProjection(self: *Runtime) contract.AccessTokenProjection {
+        self.assertMainThread();
+        return .{ .context = self, .generation_fn = projectionGeneration, .visit_fn = visitProjectionToken };
+    }
+
+    fn projectionGeneration(context: *anyopaque) u64 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        return self.authorization_generation;
+    }
+
+    fn visitProjectionToken(context: *anyopaque, visitor_context: *anyopaque, visitor: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        if (self.credentials.tokens) |*tokens| try visitor(visitor_context, tokens.access_token.view());
+    }
+
     pub fn authorizationLease(
         self: *Runtime,
     ) std.mem.Allocator.Error!?contract.OwnedAuthorizationLease {
@@ -2877,4 +2894,37 @@ test "stopping suppresses a prepared unsent refresh retry" {
     runtime.stopAdmission();
     try std.testing.expect(runtime.dispatchCommitted(&failed) == null);
     try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+}
+
+test "projection inspection follows Account access token ownership without exporting refresh tokens" {
+    const Inspection = struct {
+        seen: usize = 0,
+        fn visit(context: *anyopaque, token: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(std.mem.eql(u8, "access-token", token));
+            self.seen += 1;
+        }
+    };
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    const source = runtime.accessTokenProjection();
+    var inspection: Inspection = .{};
+    try source.visit(&inspection, Inspection.visit);
+    try std.testing.expectEqual(@as(usize, 0), inspection.seen);
+    var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "User", "access-token", "refresh-token", 200);
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    const generation = source.generation();
+    try source.visit(&inspection, Inspection.visit);
+    try std.testing.expectEqual(@as(usize, 1), inspection.seen);
+    runtime.clearCredentials();
+    try std.testing.expect(source.generation() != generation);
+    try source.visit(&inspection, Inspection.visit);
+    try std.testing.expectEqual(@as(usize, 1), inspection.seen);
 }

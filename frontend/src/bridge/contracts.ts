@@ -994,8 +994,124 @@ export type TaskView = {
   uiHistory: UiRecord[];
 };
 
+export type ViewScope = {
+  taskId: string | null;
+  beforeRunId: string | null;
+  runLimit: number;
+  management: "none" | "skills" | "mcp" | "schedules";
+  search: boolean;
+  receipts: { taskId: string; operationId: string }[];
+};
+
+export const initialViewScope: ViewScope = {
+  taskId: null,
+  beforeRunId: null,
+  runLimit: 4,
+  management: "none",
+  search: false,
+  receipts: [],
+};
+
+export function sameViewPageScope(a: ViewScope, b: ViewScope): boolean {
+  return (
+    a.taskId === b.taskId &&
+    a.beforeRunId === b.beforeRunId &&
+    a.runLimit === b.runLimit &&
+    a.management === b.management &&
+    a.search === b.search
+  );
+}
+export function sameViewScope(a: ViewScope, b: ViewScope): boolean {
+  return (
+    sameViewPageScope(a, b) &&
+    a.receipts.length === b.receipts.length &&
+    a.receipts.every(
+      (query, index) =>
+        query.taskId === b.receipts[index]!.taskId &&
+        query.operationId === b.receipts[index]!.operationId,
+    )
+  );
+}
+export function cloneViewScope(scope: ViewScope): ViewScope {
+  return { ...scope, receipts: scope.receipts.map((query) => ({ ...query })) };
+}
+
+export type RunManifest = Pick<
+  RunView,
+  "id" | "phase" | "permissionProfile" | "permissionInteraction" | "terminal"
+> & { contentVersion: string };
+
+export type TaskSummary = Pick<
+  TaskView,
+  | "id"
+  | "recentOrder"
+  | "title"
+  | "workspaceId"
+  | "archived"
+  | "lifecycle"
+  | "deletionStatus"
+  | "permissionReviewState"
+  | "currentRunPhase"
+  | "activeOperation"
+  | "unreadCompletionRunId"
+> & {
+  historyReadOnly: boolean;
+  activeCompactPhase: CompactView["phase"] | null;
+  lastCompactPhase: CompactView["phase"] | null;
+  latestTerminal: Pick<
+    NonNullable<RunView["terminal"]>,
+    "outcome" | "cause"
+  > | null;
+};
+
+export const viewBlockNames = [
+  "context",
+  "workspaces",
+  "taskIndex",
+  "taskPage",
+  "historyPage",
+  "management",
+  "searchIndex",
+] as const;
+export type ViewBlockName = (typeof viewBlockNames)[number];
+export type ViewVersions = Record<ViewBlockName, string>;
+export const emptyViewVersions: ViewVersions = {
+  context: "0",
+  workspaces: "0",
+  taskIndex: "0",
+  taskPage: "0",
+  historyPage: "0",
+  management: "0",
+  searchIndex: "0",
+};
+
 export type WorkbenchSnapshot = {
   revision: string;
+  blockVersions: ViewVersions;
+  securityEpoch: string;
+  historyEpoch: string;
+  scope: ViewScope;
+  taskIndex: TaskSummary[];
+  receipts: { taskId: string; operationId: string; observed: boolean }[];
+  searchIndex:
+    | {
+        taskId: string;
+        runId: string;
+        input: RunInputView;
+        output: RunView["output"] | null;
+      }[]
+    | null;
+  taskPage: {
+    beforeRunId: string | null;
+    nextBeforeRunId: string | null;
+    runManifest: RunManifest[];
+    task: TaskView;
+  } | null;
+  historyPage: {
+    beforeRunId: string;
+    nextBeforeRunId: string | null;
+    runs: RunView[];
+  } | null;
   automaticWorkspaceRoot: {
     generation: string;
     mode: "system_default" | "custom" | null;
@@ -1079,10 +1195,10 @@ export type WorkbenchSnapshot = {
   models: ModelsView;
   newTaskAdmission: NewTaskAdmissionView;
   skillCatalog: SkillCatalogView;
-  skillManagement: SkillManagementView;
-  mcp: McpManagementView;
+  skillManagement: SkillManagementView | null;
+  mcp: McpManagementView | null;
   workspaces: WorkspaceView[];
-  scheduledTasks: ScheduledTaskView[];
+  scheduledTasks: ScheduledTaskView[] | null;
   tasks: TaskView[];
 };
 

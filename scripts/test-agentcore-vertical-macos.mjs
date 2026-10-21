@@ -1,3 +1,4 @@
+import { readProbeProductState } from "./probe-product-state.mjs";
 import { localArchiveEnvironment } from "./archive-environment.mjs";
 import { runOfficeSkillVertical } from "./office-skill-vertical.mjs";
 import { execFile, spawn } from "node:child_process";
@@ -2481,67 +2482,9 @@ async function snapshot() {
 }
 
 async function readSnapshot() {
-  const descriptor = await invokeBridge("metawork.workbench.snapshot", {});
-  if (descriptor === null) {
-    const error = new Error("snapshot descriptor response was unavailable");
-    error.retryableSnapshotRead = true;
-    throw error;
-  }
-  if (
-    !/^[1-9][0-9]*$/.test(descriptor.snapshotId) ||
-    !Number.isSafeInteger(descriptor.bytes) ||
-    descriptor.bytes <= 0 ||
-    descriptor.bytes > 64 * 1024 * 1024 ||
-    !Number.isSafeInteger(descriptor.chunkBytes) ||
-    descriptor.chunkBytes <= 0 ||
-    descriptor.chunkBytes > 256 * 1024
-  )
-    throw new Error(
-      `invalid snapshot descriptor: ${JSON.stringify(descriptor)}`,
-    );
-
-  const assembled = Buffer.alloc(descriptor.bytes);
-  for (
-    let offset = 0;
-    offset < descriptor.bytes;
-    offset += descriptor.chunkBytes
-  ) {
-    const chunk = await invokeBridge("metawork.workbench.snapshot.chunk", {
-      snapshotId: descriptor.snapshotId,
-      offset: String(offset),
-    });
-    if (chunk === null) {
-      const error = new Error("snapshot chunk response was unavailable");
-      error.retryableSnapshotRead = true;
-      throw error;
-    }
-    const expectedBytes = Math.min(
-      descriptor.chunkBytes,
-      descriptor.bytes - offset,
-    );
-    const decoded = Buffer.from(chunk?.data ?? "", "base64");
-    if (
-      chunk?.snapshotId !== descriptor.snapshotId ||
-      chunk?.offset !== offset ||
-      chunk?.bytes !== expectedBytes ||
-      decoded.length !== expectedBytes
-    )
-      throw new Error(`invalid snapshot chunk: ${JSON.stringify(chunk)}`);
-    decoded.copy(assembled, offset);
-  }
-  const encoded = assembled.toString("utf8");
-  if (encoded.includes("metawork-agentcore-vertical-fixture-key"))
-    throw new Error("Host provider credential reached the Renderer snapshot");
-  const parsed = JSON.parse(encoded);
-  if (
-    typeof parsed.account !== "object" ||
-    parsed.account === null ||
-    Array.isArray(parsed.account) ||
-    !Array.isArray(parsed.workspaces) ||
-    !Array.isArray(parsed.tasks)
-  )
-    throw new Error("invalid Workbench snapshot");
-  return parsed;
+  return readProbeProductState(invokeBridge, {
+    forbidden: ["metawork-agentcore-vertical-fixture-key"],
+  });
 }
 
 function isWireId(value) {

@@ -186,3 +186,15 @@ fn createTestWindow() !HWND {
         null,
     ) orelse error.TestWindowCreationFailed;
 }
+
+pub const TestSupport = if (@import("builtin").is_test) struct {
+    pub const Window = struct {
+        handle: HWND,
+        pub fn init() !Window {
+            return .{ .handle = try createTestWindow() };
+        }
+        pub fn deinit(self: Window) void {
+            std.debug.assert(DestroyWindow(self.handle) != 0);
+        }
+    };
+} else struct {};

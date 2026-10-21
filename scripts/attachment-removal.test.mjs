@@ -1,3 +1,4 @@
+import { productStateFixture } from "./test-support/product-view-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -416,7 +417,7 @@ async function fixture(ctx) {
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => structuredClone(snapshot),
+    fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
     releaseAttachment: (token) => {
       const gate = deferred();
       releases.push({ token, ...gate });

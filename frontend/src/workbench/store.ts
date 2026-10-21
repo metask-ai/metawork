@@ -1,5 +1,5 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
-import { skillSourceIds } from "../bridge/contracts.ts";
+import { emptyViewVersions, initialViewScope } from "../bridge/contracts.ts";
 import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
@@ -23,6 +23,7 @@ export type WorkbenchAction =
       receivedAt: number;
       generation?: string;
     }
+  | { type: "security.invalidated"; securityEpoch: string; generation: string }
   | { type: "task.selected"; taskId: string }
   | { type: "task.draft.opened"; workspaceId: string | null }
   | { type: "task.draft.closed" };
@@ -31,6 +32,15 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
+    blockVersions: emptyViewVersions,
+    securityEpoch: "1",
+    historyEpoch: "1",
+    scope: initialViewScope,
+    taskIndex: [],
+    receipts: [],
+    searchIndex: null,
+    taskPage: null,
+    historyPage: null,
     automaticWorkspaceRoot: {
       generation: "1",
       mode: null,
@@ -151,35 +161,10 @@ export const initialWorkbenchState: WorkbenchState = {
       skills: [],
       issues: [],
     },
-    skillManagement: {
-      availability: "unavailable",
-      enablementAvailability: "unavailable",
-      sourceSettings: {
-        revision: null,
-        health: "unavailable",
-        entries: skillSourceIds.map((sourceId) => ({
-          sourceId,
-          enabled: null,
-          canSetEnabled: false,
-        })),
-        recovery: { canReread: false, canReset: false, token: null },
-      },
-      personalSourceDiscovery: null,
-      assets: [],
-    },
-    mcp: {
-      availability: "unavailable",
-      managementHealth: "unavailable",
-      operation: "idle",
-      configurationApply: "idle",
-      authorizationOperation: { kind: "idle" },
-      desiredGeneration: null,
-      runtimeAlignment: "unknown",
-      redacted: false,
-      servers: [],
-    },
+    skillManagement: null,
+    mcp: null,
     workspaces: [],
-    scheduledTasks: [],
+    scheduledTasks: null,
     tasks: [],
   },
   connectionGeneration: "0",
@@ -220,6 +205,18 @@ export function workbenchReducer(
       draftWorkspaceId: null,
     };
 
+  if (action.type === "security.invalidated") {
+    if (action.generation !== state.connectionGeneration) return state;
+    return {
+      ...state,
+      snapshot: {
+        ...initialWorkbenchState.snapshot,
+        securityEpoch: action.securityEpoch,
+      },
+      snapshotReceivedAt: null,
+    };
+  }
+
   if (action.type === "generation.started") {
     if (action.generation === state.connectionGeneration) return state;
     return {
@@ -236,11 +233,51 @@ export function workbenchReducer(
 
   const generation = action.generation ?? state.connectionGeneration;
   if (generation !== state.connectionGeneration) return state;
+  let snapshot = action.snapshot;
+  const page = snapshot.taskPage;
+  if (page) {
+    // Retain only explicitly fetched Runs of this Task. Current header and
+    // current Run always come from this commit, including during history reads.
+    const previous =
+      state.snapshot.securityEpoch === snapshot.securityEpoch &&
+      state.snapshot.historyEpoch === snapshot.historyEpoch
+        ? state.snapshot.tasks.find((task) => task.id === page.task.id)
+        : undefined;
+    const previousManifest = new Map(
+      state.snapshot.taskPage?.runManifest.map((run) => [
+        run.id,
+        run.contentVersion,
+      ]),
+    );
+    const confirmed = new Set(
+      page.runManifest
+        .filter((run) => previousManifest.get(run.id) === run.contentVersion)
+        .map((run) => run.id),
+    );
+    const runs = new Map(
+      previous?.runs
+        .filter((run) => confirmed.has(run.id))
+        .map((run) => [run.id, run]),
+    );
+    for (const run of snapshot.historyPage?.runs ?? []) runs.set(run.id, run);
+    for (const run of page.task.runs) runs.set(run.id, run);
+    let first = page.runManifest.length;
+    while (first > 0 && runs.has(page.runManifest[first - 1]!.id)) first--;
+    snapshot = {
+      ...snapshot,
+      tasks: [
+        {
+          ...page.task,
+          runs: page.runManifest.slice(first).map((run) => runs.get(run.id)!),
+        },
+      ],
+    };
+  }
 
   if (state.draftOpen)
     return {
       ...state,
-      snapshot: action.snapshot,
+      snapshot,
       snapshotReceivedAt: action.receivedAt,
       snapshotGeneration: generation,
       activeTaskId: null,
@@ -249,7 +286,7 @@ export function workbenchReducer(
       draftWorkspaceId: state.draftWorkspaceId,
     };
 
-  const availableTasks = navigableTasks(action.snapshot);
+  const availableTasks = navigableTasks(snapshot);
   const activeTaskStillExists = availableTasks.some(
     (task) => task.id === state.activeTaskId,
   );
@@ -259,7 +296,7 @@ export function workbenchReducer(
   // silently opening another historical conversation.
   const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
   return {
-    snapshot: action.snapshot,
+    snapshot,
     snapshotReceivedAt: action.receivedAt,
     connectionGeneration: state.connectionGeneration,
     snapshotGeneration: generation,

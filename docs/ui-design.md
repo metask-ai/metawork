@@ -558,12 +558,12 @@ Task 按稳定 Run 顺序显示 `Run exchange`：用户指令及其元信息之�
 
 ### 7.2 Agent 对话渲染机制
 
-Agent 对话不是 CoreEvent 列表、Tool timeline 或逐 chunk DOM append。它是 Product Task 已经定性的完整 Run projection，经 Bridge full Snapshot 进入 Renderer 后，再派生为稳定的 Run exchange。唯一 owner 链为：
+Agent 对话不是 CoreEvent 列表、Tool timeline 或逐 chunk DOM append。它是 Product Task 已经定性的 Run projection，由 Bridge 按当前 Task 和历史范围交付后，再派生为稳定的 Run exchange。运输、版本、范围与安全失效只由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义；Renderer 不根据范围读取进度推断执行进度。唯一 owner 链为：
 
 ```text
 AgentCore typed CoreEvent
   → Product Task：output / activity / tools / terminal facts
-  → Renderer Bridge revision 1：完整 Run snapshot
+  → Renderer Bridge revision 1：范围内的 canonical Run projection
   → deriveRunPresentation(run)：纯 presentation derivation
   → TaskContent：稳定 Run exchange 槽位
   → RunProcess：active status 与可展开的 current/historical technical evidence
@@ -636,13 +636,13 @@ Tool start/progress/result 只更新同一 Tool record 和 process surface，不
 
 #### Snapshot revision、阅读位置与稀疏输出
 
-ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新的完整 Snapshot 到达。Renderer 对每个 Snapshot 重新执行纯派生：commentary block 稳定追加、provisional 原位变化、activity 原位替换、Tool 行按 Host order 更新，不能把 revision 数或事件次数显示成进度。用户正在 following latest 时才自动滚动；用户上滚后任何流式更新都不得抢回位置，只显示 `Jump to latest`。
+ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页面所需的范围和版本，未变化的产品块保持引用与阅读位置。commentary block 稳定追加、provisional 原位变化、activity 原位替换、Tool 行按 Host order 更新，不能把 revision 数、事件次数或历史加载页数显示成进度。用户正在 following latest 时才自动滚动；用户上滚后任何流式更新或历史补载都不得抢回位置，只显示 `Jump to latest`。Task 切换和安全失效清除不再有效的候选，迟到结果不得恢复旧正文。
 
 真实 Provider 没有提交新 commentary 或 provisional 时，主阅读流保持不变，只显示当前 canonical activity 和按需技术证据。Renderer 不重复状态行、不从 Tool 结果生成总结、不展示 thinking 正文，也不通过动画、计时器或伪百分比制造推进感。scripted Provider vertical 证明的是这套机制可以持续交付已存在的事实，不代表真实 Provider 的叙事频率。
 
 #### 本轮耗时
 
-活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从完整 Snapshot 的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后停止外推，存在 Tool 且 Host 最终 `elapsedMs` 非空时，在“执行详情”入口右侧固化显示“本轮用时 {duration}”，耗时不可得时不占位，没有 Tool 时不为耗时单独保留 surface。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
+活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从该 Run 投影的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后停止外推，存在 Tool 且 Host 最终 `elapsedMs` 非空时，在“执行详情”入口右侧固化显示“本轮用时 {duration}”，耗时不可得时不占位，没有 Tool 时不为耗时单独保留 surface。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
 
 ### 7.3 用户指令
 

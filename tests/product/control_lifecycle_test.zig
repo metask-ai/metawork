@@ -125,7 +125,7 @@ test "approval modes start with automatic review and restore the global choice w
     try installControlExecution(&control);
     try std.testing.expectEqual(.auto_review, control.defaultApprovalMode());
     var snapshot_buffer: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeSnapshot(&snapshot_buffer);
+    const snapshot = try control.writeAggregateFixture(&snapshot_buffer);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const permissions = parsed.value.object.get("permissions").?.object;
@@ -282,7 +282,7 @@ test "Control permission reviewer keeps repeated manual and full-access requests
         try control.respondUi(task_id, run_id, 1, .{ .permission = .allow_once });
         try waitControlSnapshot(&control, "\"pendingUi\":{\"requestId\":\"2\"");
         var snapshot: [64 * 1024]u8 = undefined;
-        const json = try control.writeSnapshot(&snapshot);
+        const json = try control.writeAggregateFixture(&snapshot);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"permissionReviewState\":\"idle\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, json, "\"permissionReviewState\":\"needs_user\"") == null);
         try std.testing.expectEqual(@as(usize, 0), transport.calls.load(.acquire));
@@ -1194,6 +1194,7 @@ fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !vo
 
 fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !void {
     for (0..5000) |_| {
+        try workbench.drainAgentEvents();
         if ((try workbench.taskCatalog(task_id)).availability != .loading) return;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
@@ -1202,7 +1203,7 @@ fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !vo
 
 fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, present: bool) !void {
     var storage: [256 * 1024]u8 = undefined;
-    const bytes = try workbench.writeSnapshot(&storage);
+    const bytes = try workbench.writeAggregateFixture(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
     defer parsed.deinit();
     for (parsed.value.object.get("workspaces").?.array.items) |workspace| {
@@ -2614,6 +2615,7 @@ fn waitCatalogReady(
     workspace_id: u64,
 ) !product_control.CatalogProjection {
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const projection = try workbench.workspaceCatalog(workspace_id);
         switch (projection.availability) {
             .ready, .degraded => return projection,
@@ -2635,7 +2637,7 @@ fn waitTaskSnapshot(
     var output: [128 * 1024]u8 = undefined;
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
-        const snapshot = try workbench.writeSnapshot(&output);
+        const snapshot = try workbench.writeAggregateFixture(&output);
         if (std.mem.indexOf(u8, snapshot, task_marker)) |start| {
             if (std.mem.indexOf(u8, snapshot[start..], needle) != null) return;
         }
@@ -2678,7 +2680,7 @@ fn waitCheckpointRecord(
     var output: [128 * 1024]u8 = undefined;
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
-        _ = try workbench.writeSnapshot(&output);
+        _ = try workbench.writeAggregateFixture(&output);
         if (persistence.len != 0 and
             std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], "\"checkpoint_anchor\":\"available\"") != null)
             return;
@@ -2695,7 +2697,7 @@ fn waitHistoryNeedle(
     var output: [128 * 1024]u8 = undefined;
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
-        _ = try workbench.writeSnapshot(&output);
+        _ = try workbench.writeAggregateFixture(&output);
         if (persistence.len != 0 and
             std.mem.indexOf(u8, persistence.storage.?[0..persistence.len], needle) != null)
             return;
@@ -3443,7 +3445,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     shutdown_thread.join();
     shutdown_joined = true;
     var shutdown_snapshot_storage: [128 * 1024]u8 = undefined;
-    const shutdown_snapshot = try shutdown_restore.writeSnapshot(
+    const shutdown_snapshot = try shutdown_restore.writeAggregateFixture(
         &shutdown_snapshot_storage,
     );
     try std.testing.expect(
@@ -3524,7 +3526,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     try waitControlSnapshot(&workspace_invalidation, "\"workspaces\":[]");
     var invalidation_snapshot_storage: [128 * 1024]u8 = undefined;
-    const invalidation_snapshot = try workspace_invalidation.writeSnapshot(
+    const invalidation_snapshot = try workspace_invalidation.writeAggregateFixture(
         &invalidation_snapshot_storage,
     );
     try std.testing.expect(std.mem.indexOf(
@@ -3898,7 +3900,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
     var snapshot: [128 * 1024]u8 = undefined;
-    _ = try workbench.writeSnapshot(&snapshot);
+    _ = try workbench.writeAggregateFixture(&snapshot);
     const terminal_commits = persistence.commits;
     persistence.result = .failed;
     fake_core.releaseCheckpointExport();
@@ -3921,7 +3923,8 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     }
     try std.testing.expect(blob_ready);
     for (0..10_000) |_| {
-        _ = try workbench.writeSnapshot(&snapshot);
+        try workbench.drainAgentEvents();
+        _ = try workbench.writeAggregateFixture(&snapshot);
         if (persistence.commits > terminal_commits) break;
         std.Thread.yield() catch {};
     }
@@ -3954,7 +3957,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
         restored.checkpointStoreHealth(),
     );
     var restored_snapshot: [128 * 1024]u8 = undefined;
-    const restored_json = try restored.writeSnapshot(&restored_snapshot);
+    const restored_json = try restored.writeAggregateFixture(&restored_snapshot);
     try std.testing.expect(std.mem.indexOf(
         u8,
         restored_json,
@@ -4008,7 +4011,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
     var snapshot: [128 * 1024]u8 = undefined;
-    _ = try workbench.writeSnapshot(&snapshot);
+    _ = try workbench.writeAggregateFixture(&snapshot);
     persistence.result = .outcome_unknown;
     fake_core.releaseCheckpointExport();
 
@@ -4026,7 +4029,8 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
             std.Thread.yield() catch {};
             continue;
         };
-        const snapshot_json = try workbench.writeSnapshot(&snapshot);
+        try workbench.drainAgentEvents();
+        const snapshot_json = try workbench.writeAggregateFixture(&snapshot);
         if (std.mem.indexOf(u8, snapshot_json, "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"") != null) {
             outcome_observed = true;
             break;
@@ -4058,7 +4062,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         "\"operationId\":\"1\"",
         "\"phase\":\"compacted\"",
     );
-    const healed_snapshot = try workbench.writeSnapshot(&snapshot);
+    const healed_snapshot = try workbench.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(
         u8,
         healed_snapshot,
@@ -4334,7 +4338,7 @@ test "terminal drain candidate restarts without a stale active operation" {
     );
     defer restarted.deinit();
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try restarted.writeSnapshot(&snapshot_storage);
+    const snapshot = try restarted.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"activeOperation\":null") != null);
@@ -4391,7 +4395,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     );
     defer workbench.deinit();
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -4402,7 +4406,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "Continue without saved history" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
-    const continued = try workbench.writeSnapshot(&snapshot_storage);
+    const continued = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         continued,
@@ -4455,6 +4459,7 @@ fn waitCatalogUnavailable(
     workspace_id: u64,
 ) !void {
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const projection = try workbench.workspaceCatalog(workspace_id);
         switch (projection.availability) {
             .unavailable => return,
@@ -4626,7 +4631,7 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     try std.testing.expect(!admission.available);
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -4648,7 +4653,7 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
         workbench.recoverScheduledTaskStore(workbench.currentRevision()),
     );
     try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
-    const recovered_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const recovered_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         recovered_snapshot,
@@ -4747,7 +4752,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
 
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"stopped\"");
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -4838,7 +4843,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
     try std.testing.expectEqual(@as(usize, 0), run_calls);
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -4907,7 +4912,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     );
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const rejected = try workbench.writeSnapshot(&snapshot_storage);
+    const rejected = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         rejected,
@@ -4926,7 +4931,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     );
     _ = try workbench.runTask(task_id, .{ .text = "Continue interactively" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
-    const continued = try workbench.writeSnapshot(&snapshot_storage);
+    const continued = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         continued,
@@ -5008,7 +5013,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
     try std.testing.expectEqual(@as(usize, 0), run_calls);
     try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const unknown_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const unknown_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         unknown_snapshot,
@@ -5071,7 +5076,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
         restart_configuration,
     );
     defer restarted.deinit();
-    const restarted_snapshot = try restarted.writeSnapshot(&snapshot_storage);
+    const restarted_snapshot = try restarted.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         restarted_snapshot,
@@ -5154,7 +5159,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), run_calls);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -5238,7 +5243,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -5268,7 +5273,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         .{pure_run_id},
     );
     try waitControlSnapshot(&workbench, terminal);
-    const pure_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const pure_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         pure_snapshot,
@@ -5305,7 +5310,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         .{text_run_id},
     );
     try waitControlSnapshot(&workbench, text_terminal);
-    const text_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const text_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         text_snapshot,
@@ -5443,7 +5448,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
     );
     try waitControlSnapshot(&workbench, "\"title\":\"Review\"");
     var skill_title_snapshot: [128 * 1024]u8 = undefined;
-    const skill_title_snapshot_bytes = try workbench.writeSnapshot(&skill_title_snapshot);
+    const skill_title_snapshot_bytes = try workbench.writeAggregateFixture(&skill_title_snapshot);
     try std.testing.expect(
         std.mem.indexOf(u8, skill_title_snapshot_bytes, "\"title\":\"Review\"") != null,
     );
@@ -5514,6 +5519,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     fake_core.setCatalogPlan(.query_incomplete);
     fake_core.releaseCatalogQuery();
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         if (workbench.currentRevision() > refresh_revision) break;
         std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     } else return error.TestUnexpectedResult;
@@ -5578,7 +5584,7 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
     const after = try workbench.copyWorkspaceProjections(&projection_storage);
     try std.testing.expect(after[0].recent_order > recent_order);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     var task_id_storage: [32]u8 = undefined;
     const task_id_json = try std.fmt.bufPrint(&task_id_storage, "\"id\":\"{d}\"", .{task_id});
     try std.testing.expect(std.mem.indexOf(u8, snapshot, task_id_json) != null);
@@ -5849,7 +5855,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     try std.testing.expectEqual(manual_recent_order, projected_manual.recent_order);
     try std.testing.expectEqual(first_workspace, projected_automatic.id);
     var automatic_snapshot_storage: [128 * 1024]u8 = undefined;
-    const automatic_snapshot = try workbench.writeSnapshot(
+    const automatic_snapshot = try workbench.writeAggregateFixture(
         &automatic_snapshot_storage,
     );
     try std.testing.expect(std.mem.indexOf(
@@ -5903,7 +5909,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     _ = try workbench.runTask(second_task, .{ .text = "must not replace preset" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     var preset_title_snapshot: [128 * 1024]u8 = undefined;
-    const preset_title_snapshot_bytes = try workbench.writeSnapshot(&preset_title_snapshot);
+    const preset_title_snapshot_bytes = try workbench.writeAggregateFixture(&preset_title_snapshot);
     try std.testing.expect(
         std.mem.indexOf(u8, preset_title_snapshot_bytes, "\"title\":\"Preset title\"") != null,
     );
@@ -5916,7 +5922,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     var provisional_title_snapshot: [128 * 1024]u8 = undefined;
-    const provisional_title_snapshot_bytes = try workbench.writeSnapshot(
+    const provisional_title_snapshot_bytes = try workbench.writeAggregateFixture(
         &provisional_title_snapshot,
     );
     try std.testing.expect(
@@ -5941,7 +5947,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     try waitSetTaskArchived(&workbench, first_task);
     try workbench.deleteTask(first_task);
     var deleting_snapshot_storage: [128 * 1024]u8 = undefined;
-    const deleting_snapshot = try workbench.writeSnapshot(&deleting_snapshot_storage);
+    const deleting_snapshot = try workbench.writeAggregateFixture(&deleting_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         deleting_snapshot,
@@ -6144,7 +6150,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
         try workbench.scheduledTaskEpoch(default_schedule),
     );
     var updated_snapshot_storage: [128 * 1024]u8 = undefined;
-    const updated_snapshot = try workbench.writeSnapshot(&updated_snapshot_storage);
+    const updated_snapshot = try workbench.writeAggregateFixture(&updated_snapshot_storage);
     const schedules_offset = std.mem.indexOf(
         u8,
         updated_snapshot,
@@ -6220,7 +6226,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(root_a));
     try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(root_b));
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"target\"") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -6314,7 +6320,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     );
     try std.testing.expectEqual(@as(usize, 3), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -6367,6 +6373,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     try installControlExecution(&workbench);
 
     for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
         const personal = workbench.skillCatalog();
         if (personal.availability == .ready or personal.availability == .degraded)
             break;
@@ -6798,7 +6805,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
     try waitControlSnapshot(&workbench, "\"lifecycle\":\"open\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[{") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[]") != null);
@@ -6833,7 +6840,7 @@ test "Workspace removal failure remains a retryable Workspace fact" {
     );
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -6921,7 +6928,7 @@ test "Product Control manual compact uses the active operation lane and appends 
     );
 
     var storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&storage);
+    const snapshot = try workbench.writeAggregateFixture(&storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -6990,7 +6997,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     const operation_id = try workbench.compactTaskAtBinding(compact_task, 1);
     try std.testing.expectEqual(@as(u64, 1), operation_id);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -8156,7 +8163,7 @@ test "Product Control shutdown rejects new Task admission without creating produ
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 
     var snapshot_storage: [8192]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
 }
 
@@ -8205,7 +8212,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     try std.testing.expectEqual(@as(u64, 1), workbench.testLateTerminalEventCount());
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const open_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const open_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"lifecycle\":\"open\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"currentRunPhase\":\"running\"") != null);
     fake_core.releaseControlled();
@@ -10127,7 +10134,7 @@ test "active input approval cancellation applies only to existing messages and r
             }
         }
         var snapshot_storage: [512 * 1024]u8 = undefined;
-        const snapshot = try scenario.control.writeSnapshot(&snapshot_storage);
+        const snapshot = try scenario.control.writeAggregateFixture(&snapshot_storage);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
         defer parsed.deinit();
         const inputs = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items;
@@ -10202,6 +10209,98 @@ test "active input checkpoint export failure ends continuation without retry" {
     for (0..5) |_| scenario.control.syncLifecycle();
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
     try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+}
+
+test "Product view scopes exclude history from navigation and bound selected Run pages" {
+    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 2, .controlled, true);
+    defer scenario.deinit();
+    fake_core.releaseControlled();
+    try waitControlSnapshot(&scenario.control, "\"terminal\":{\"outcome\":\"completed\"");
+    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "second-page-only-input" });
+    try waitTaskSnapshot(&scenario.control, "\"id\":\"2\",\"conversationCoverage\"", "\"phase\":\"completed\"");
+    var storage: [512 * 1024]u8 = undefined;
+    const index_bytes = try scenario.control.writeViewFixture(&storage, .{});
+    var index = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, index_bytes, .{});
+    defer index.deinit();
+    try std.testing.expect(index.value.object.get("taskPage").? == .null);
+    const summary = index.value.object.get("taskIndex").?.array.items[0].object;
+    try std.testing.expect(!summary.contains("runs"));
+    try std.testing.expect(!summary.contains("skillCatalog"));
+    try std.testing.expect(std.mem.indexOf(u8, index_bytes, "second-page-only-input") == null);
+    const page_bytes = try scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .run_limit = 1 });
+    var page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page_bytes, .{});
+    defer page.deinit();
+    const task_page = page.value.object.get("taskPage").?.object;
+    try std.testing.expectEqualStrings("2", task_page.get("nextBeforeRunId").?.string);
+    const runs = task_page.get("task").?.object.get("runs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), runs.len);
+    try std.testing.expectEqualStrings("2", runs[0].object.get("id").?.string);
+    const older_bytes = try scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .before_run_id = 2, .run_limit = 1 });
+    var older = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, older_bytes, .{});
+    defer older.deinit();
+    const older_page = older.value.object.get("historyPage").?.object;
+    try std.testing.expectEqualStrings("2", older.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("id").?.string);
+    try std.testing.expect(older_page.get("nextBeforeRunId").? == .null);
+    try std.testing.expectEqualStrings("1", older_page.get("runs").?.array.items[0].object.get("id").?.string);
+    try std.testing.expectError(error.InvalidViewRequest, scenario.control.writeViewFixture(&storage, .{ .task_id = scenario.task_id, .before_run_id = 999 }));
+}
+
+test "ProductDelivery reads do not advance worker lifecycle" {
+    const Read = enum { revision, snapshot, view, workspace_catalog, personal_catalog, task_catalog, workspace_epoch, workspace_kind, task_workspace, permission_profile, permission_interaction, binding_epoch, mcp_authority, workspace_projections, schedule_epoch };
+    inline for (std.meta.tags(Read)) |read| {
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = history.capability();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const control = &scenario.control;
+        const task = control.task_runtime.find(scenario.task_id).?;
+        const run = &task.durable.runs[0].?;
+        fake_core.releaseControlled();
+        for (0..5000) |_| {
+            if (run.terminal_publication.load(.acquire) == .published) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(.published, run.terminal_publication.load(.acquire));
+        const before_revision = control.revision;
+        const before_phase = task_state.runPhase(run);
+        const before_commits = history.commits;
+        var snapshot: [512 * 1024]u8 = undefined;
+        var workspaces: [1]product_control.WorkspaceProjection = undefined;
+        switch (read) {
+            .revision => _ = control.currentRevision(),
+            .snapshot => _ = try control.writeAggregateFixture(&snapshot),
+            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true }),
+            .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
+            .personal_catalog => _ = control.skillCatalog(),
+            .task_catalog => _ = try control.taskCatalog(task.durable.id),
+            .workspace_epoch => _ = try control.workspaceEpoch(task.durable.workspace_id),
+            .workspace_kind => _ = try control.workspaceKind(task.durable.workspace_id),
+            .task_workspace => _ = try control.taskWorkspaceId(task.durable.id),
+            .permission_profile => _ = try control.taskPermissionProfile(task.durable.id),
+            .permission_interaction => _ = try control.taskPermissionInteraction(task.durable.id),
+            .binding_epoch => _ = try control.taskBindingEpoch(task.durable.id),
+            .mcp_authority => _ = try control.taskMcpAuthority(task.durable.id),
+            .workspace_projections => _ = try control.copyWorkspaceProjections(&workspaces),
+            .schedule_epoch => _ = control.scheduledTaskEpoch(0) catch 0,
+        }
+        try std.testing.expectEqual(before_revision, control.revision);
+        try std.testing.expectEqual(before_phase, task_state.runPhase(run));
+        try std.testing.expectEqual(before_commits, history.commits);
+        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) != null);
+        // Worker completion advances without a Renderer once Application
+        // consumes its wake through the explicit Product event boundary.
+        try control.drainAgentEvents();
+        try std.testing.expect(run.event_stream_finalized);
+        try std.testing.expectEqual(.completed, task_state.runPhase(run));
+        if (read == .view) {
+            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) == null);
+            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true });
+            var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, finalized, .{});
+            defer decoded.deinit();
+            try std.testing.expect(decoded.value.object.get("searchIndex").?.array.items[0].object.get("output").? != .null);
+        }
+    }
 }
 
 test "Task message acceptance synchronously submits ready text without duplicating owned input" {
@@ -10442,7 +10541,7 @@ test "image Run admission freezes per-Run input and retains scrub ownership thro
     try std.testing.expectEqual(@as(usize, 1), image.released);
     try std.testing.expect(!scenario.control.task_runtime.containsExecutionCredential("run-image-secret-a"));
     var snapshot: [128 * 1024]u8 = undefined;
-    const encoded = try scenario.control.writeSnapshot(&snapshot);
+    const encoded = try scenario.control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "run-image-secret-a") == null);
     fake_core.rearmControlled();
     _ = try scenario.control.runTask(scenario.task_id, .{ .text = "text remains available" });
@@ -10483,4 +10582,49 @@ test "image Run follow-up resolves the next configuration and admission rollback
     try std.testing.expect(task.durable.runs[2].?.image_execution == null);
     try std.testing.expectEqual(@as(?u64, task.durable.runs[2].?.id), task.durable.runs[1].?.additional_inputs[0].?.transferred_to_run_id);
     try std.testing.expect(fake_core.image_tool_seen);
+}
+
+test "image Run duplicate bearer ownership does not revoke the Renderer on admission completion or rejection" {
+    for ([_]bool{ false, true }) |account_owned| {
+        const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+        defer scenario.deinit();
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        const Account = struct {
+            fn generation(_: *anyopaque) u64 {
+                return 1;
+            }
+            fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+                try callback(context, "account-image-token");
+            }
+        };
+        var image: ImageAdmissionProbe = .{ .secret = if (account_owned) "account-image-token" else "fixture-secret" };
+        if (account_owned) scenario.control.setAccountProjectionCredentials(.{ .context = &image, .generation_fn = Account.generation, .visit_fn = Account.visit });
+        scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+        defer scenario.control.setImageRunPreparation(null);
+        const epoch = scenario.control.projectionSecurityEpoch();
+        for (0..2) |index| {
+            fake_core.rearmControlled();
+            _ = try scenario.control.runTask(scenario.task_id, .{ .text = "ordinary message with image capability" });
+            try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+            try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+            fake_core.releaseControlled();
+            try settleInputScenario(scenario);
+            // Product terminal may precede the last worker lease (for example the
+            // automatic title). Observe the actual image-owner release boundary.
+            for (0..5000) |_| {
+                try scenario.control.drainAgentEvents();
+                if (image.released == index + 1) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(index + 1, image.released);
+            try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+        }
+        try std.testing.expectEqual(@as(usize, 2), image.released);
+        try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
+        try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
+        image.secret = "new-image-bearer";
+        try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
+        try std.testing.expectEqual(epoch + 1, scenario.control.projectionSecurityEpoch());
+    }
 }

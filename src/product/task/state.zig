@@ -750,6 +750,8 @@ pub const OwnedImageExecution = struct {
 };
 
 pub const RunRecord = struct {
+    /// Projection invalidation only; never persisted or supplied to AgentCore.
+    projection_content_version: u64 = 1,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
 
@@ -849,6 +851,13 @@ pub const RunRecord = struct {
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
     automatic_title: AutomaticTitle = .{},
+
+    /// Main-thread observable changes only. Zero is a permanent exhausted
+    /// identity, never an ABA restart; the projection writer fails closed.
+    pub fn noteProjectionChange(self: *RunRecord) void {
+        if (self.projection_content_version != 0)
+            self.projection_content_version = std.math.add(u64, self.projection_content_version, 1) catch 0;
+    }
 
     pub fn redactionSecrets(self: *const RunRecord) [2][]const u8 {
         return .{ self.redaction_secret, if (self.image_execution) |*image| image.candidate.input().bearer else &.{} };
@@ -1194,6 +1203,7 @@ pub fn currentActivity(run: *const RunRecord) ?RunActivity {
 
 pub fn setActivePhase(run: *RunRecord, phase: ActiveRunPhase) bool {
     if (run.terminal_publication.load(.acquire) != .open) return false;
+    if (run.active_phase != phase) run.noteProjectionChange();
     run.active_phase = phase;
     return run.terminal_publication.load(.acquire) == .open;
 }
@@ -1309,6 +1319,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         freezeRunElapsedMs(run, finished_at_ms);
         if (terminalPayload(run).?.exclude_on_product_terminal and run.coverage == .pending)
             run.coverage = .excluded;
+        run.noteProjectionChange();
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)
             run.finished_at_unix_ms = if (finished_at_unix_ms) |value|
@@ -1338,12 +1349,14 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
 
 pub fn recordEventProjectionFailure(run: *RunRecord) bool {
     if (run.event_projection_failure != null) return false;
+    run.noteProjectionChange();
     run.event_projection_failure = .consumer_rejected;
     return true;
 }
 
 pub fn recordDependencyContractFailure(run: *RunRecord) bool {
     if (run.event_projection_failure != null) return false;
+    run.noteProjectionChange();
     run.event_projection_failure = .dependency_contract_failure;
     return true;
 }

@@ -48,6 +48,7 @@ function snapshot(revision, tasks, workspaceIds = null) {
     newTaskAdmission: initialWorkbenchState.snapshot.newTaskAdmission,
     workspaces: ids.map((id) => workspace(id)),
     tasks,
+    taskIndex: tasks,
   };
 }
 
@@ -371,4 +372,95 @@ test("removing a Workspace keeps its New task draft identity", () => {
   });
   assert.equal(removed.draftWorkspaceId, "1");
   assert.equal(removed.draftOpen, true);
+});
+
+test("loaded history survives streaming only while Host confirms its exact Run content", () => {
+  const older = { id: "1", output: { text: "old" } };
+  const latest = { id: "2", output: { text: "current" } };
+  function page({
+    historyEpoch = "1",
+    securityEpoch = "1",
+    contentVersion = "1",
+    history = true,
+  } = {}) {
+    const selected = { ...task("17", "1"), runs: [latest] };
+    return {
+      ...initialWorkbenchState.snapshot,
+      revision: "2",
+      historyEpoch,
+      securityEpoch,
+      workspaces: [workspace("1")],
+      taskIndex: [selected],
+      tasks: [selected],
+      taskPage: {
+        task: selected,
+        beforeRunId: null,
+        nextBeforeRunId: "2",
+        runManifest: [
+          { id: "1", contentVersion },
+          { id: "2", contentVersion: "1" },
+        ],
+      },
+      historyPage: history
+        ? { beforeRunId: "2", nextBeforeRunId: null, runs: [older] }
+        : null,
+    };
+  }
+  const accept = (state, snapshot) =>
+    workbenchReducer(state, {
+      type: "snapshot.accepted",
+      snapshot,
+      receivedAt: 1,
+    });
+  const loaded = accept(initialWorkbenchState, page());
+  assert.deepEqual(
+    loaded.snapshot.tasks[0].runs.map((run) => run.id),
+    ["1", "2"],
+  );
+  const streamed = accept(loaded, page({ history: false }));
+  assert.equal(streamed.snapshot.tasks[0].runs[0], older);
+  for (const changed of [
+    { historyEpoch: "2" },
+    { securityEpoch: "2" },
+    { contentVersion: "2" },
+  ]) {
+    const refreshed = accept(loaded, page({ ...changed, history: false }));
+    assert.deepEqual(
+      refreshed.snapshot.tasks[0].runs.map((run) => run.id),
+      ["2"],
+    );
+  }
+  const updated = { ...older, output: { text: "new" } };
+  const snapshot = page({ contentVersion: "2" });
+  snapshot.historyPage.runs = [updated];
+  assert.equal(accept(loaded, snapshot).snapshot.tasks[0].runs[0], updated);
+});
+
+test("security invalidation clears Host content while preserving the selected route", () => {
+  const state = {
+    ...initialWorkbenchState,
+    activeTaskId: "17",
+    snapshot: {
+      ...initialWorkbenchState.snapshot,
+      tasks: [task("17", "1")],
+      taskIndex: [task("17", "1")],
+    },
+  };
+  const next = workbenchReducer(state, {
+    type: "security.invalidated",
+    securityEpoch: "2",
+    generation: "0",
+  });
+  assert.deepEqual(next.snapshot.tasks, []);
+  assert.deepEqual(next.snapshot.taskIndex, []);
+  assert.equal(next.activeTaskId, "17");
+  assert.equal(next.snapshot.securityEpoch, "2");
+  assert.equal(
+    workbenchReducer(state, {
+      type: "security.invalidated",
+      securityEpoch: "2",
+      generation: "old",
+    }),
+    state,
+  );
 });

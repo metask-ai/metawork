@@ -34,6 +34,7 @@ import {
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { Button } from "../../components/ui/button.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
@@ -55,7 +56,65 @@ import {
   responseCopyEligible,
 } from "./response-copy.ts";
 
-type ReadingState = { scrollTop: number; followingLatest: boolean };
+type ReadingState = {
+  scrollTop: number;
+  followingLatest: boolean;
+  anchor?: { runId: string; offset: number };
+};
+
+function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
+  const bounds = viewport.getBoundingClientRect();
+  for (const run of viewport.querySelectorAll<HTMLElement>("[data-run-id]")) {
+    const rect = run.getBoundingClientRect();
+    if (rect.bottom > bounds.top && rect.top < bounds.bottom)
+      return { runId: run.dataset.runId!, offset: rect.top - bounds.top };
+  }
+  return undefined;
+}
+
+function restoreReadingAnchor(viewport: HTMLDivElement, saved: ReadingState) {
+  const anchor = saved.anchor;
+  if (!anchor) return false;
+  const run = Array.from(
+    viewport.querySelectorAll<HTMLElement>("[data-run-id]"),
+  ).find((node) => node.dataset.runId === anchor.runId);
+  if (!run) return false;
+  viewport.scrollTop +=
+    run.getBoundingClientRect().top -
+    viewport.getBoundingClientRect().top -
+    anchor.offset;
+  return true;
+}
+export function createTaskReadingMemory() {
+  const memory = {
+    reading: new Map<string, ReadingState>(),
+    processDisclosure: new Map<string, RunProcessDisclosure>(),
+    toolDisclosure: new Map<string, ReadonlySet<string>>(),
+  };
+  return {
+    ...memory,
+    prune(
+      taskIds: ReadonlySet<string>,
+      manifest?: { taskId: string; runIds: ReadonlySet<string> },
+    ) {
+      for (const taskId of memory.reading.keys())
+        if (!taskIds.has(taskId)) memory.reading.delete(taskId);
+      for (const entries of [memory.processDisclosure, memory.toolDisclosure]) {
+        for (const key of entries.keys()) {
+          const [taskId, runId] = key.split(":");
+          if (
+            !taskIds.has(taskId!) ||
+            (manifest?.taskId === taskId && !manifest.runIds.has(runId!))
+          )
+            entries.delete(key);
+        }
+      }
+    },
+  };
+}
+
+export type TaskReadingMemory = ReturnType<typeof createTaskReadingMemory>;
+
 const emptyToolDisclosure: ReadonlySet<string> = new Set();
 
 function formatAttachmentSize(value: string) {
@@ -230,8 +289,12 @@ export function TaskContent({
   onRespond,
   renderPendingUi,
   localSubmissions,
+  history,
+  memory,
 }: {
   task: TaskView | null;
+  memory?: TaskReadingMemory;
+  history?: { available: boolean; loading: boolean; onLoad: () => void };
   localSubmissions?: ReactNode;
   snapshotReceivedAt: number | null;
   synchronized: boolean;
@@ -267,11 +330,16 @@ export function TaskContent({
 }) {
   const { locale, t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
-  const reading = useRef(new Map<string, ReadingState>());
-  const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
-  const toolDisclosure = useRef(new Map<string, ReadonlySet<string>>());
+  const [localMemory] = useState(createTaskReadingMemory);
+  const { reading, processDisclosure, toolDisclosure } = memory ?? localMemory;
+  const restoringTask = useRef<string | null>(null);
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
+  const previousLayout = useRef<{
+    taskId: string;
+    firstRunId: string | null;
+    height: number;
+  } | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
   const hasRunTimes =
@@ -379,38 +447,80 @@ export function TaskContent({
     const node = viewport.current;
     if (!node) return;
     const taskId = task?.id ?? null;
+    const before = previousLayout.current;
+    const firstRunId = task?.runs[0]?.id ?? null;
+    previousLayout.current = taskId
+      ? { taskId, firstRunId, height: node.scrollHeight }
+      : null;
     if (!taskId) {
       node.scrollTop = 0;
       setShowJumpLatest(false);
       previousTaskId.current = null;
       return;
     }
-    if (previousTaskId.current !== taskId) {
-      const saved = reading.current.get(taskId);
-      node.scrollTop = saved?.scrollTop ?? node.scrollHeight;
+    const intervalShrank =
+      before?.taskId === taskId &&
+      firstRunId &&
+      before.firstRunId &&
+      BigInt(firstRunId) > BigInt(before.firstRunId);
+    if (
+      history?.loading &&
+      (previousTaskId.current !== taskId || intervalShrank)
+    )
+      restoringTask.current = taskId;
+    if (restoringTask.current === taskId && history?.loading) return;
+    if (previousTaskId.current !== taskId || restoringTask.current === taskId) {
+      restoringTask.current = null;
+      const saved = reading.get(taskId);
+      if (!saved || saved.followingLatest) node.scrollTop = node.scrollHeight;
+      else if (!restoreReadingAnchor(node, saved))
+        node.scrollTop = saved.scrollTop;
       setShowJumpLatest(saved ? !saved.followingLatest : false);
       previousTaskId.current = taskId;
       return;
     }
-    const saved = reading.current.get(taskId);
+    const saved = reading.get(taskId);
+    if (saved && !saved.followingLatest && restoreReadingAnchor(node, saved)) {
+      reading.set(taskId, { ...saved, scrollTop: node.scrollTop });
+      setShowJumpLatest(true);
+      return;
+    }
+    if (
+      before?.taskId === taskId &&
+      firstRunId &&
+      before.firstRunId &&
+      BigInt(firstRunId) < BigInt(before.firstRunId)
+    ) {
+      node.scrollTop =
+        (saved?.scrollTop ?? node.scrollTop) +
+        node.scrollHeight -
+        before.height;
+      reading.set(taskId, {
+        scrollTop: node.scrollTop,
+        followingLatest: false,
+      });
+      setShowJumpLatest(true);
+      return;
+    }
     if (!saved || saved.followingLatest) {
       node.scrollTop = node.scrollHeight;
-      reading.current.set(taskId, {
+      reading.set(taskId, {
         scrollTop: node.scrollTop,
         followingLatest: true,
       });
       setShowJumpLatest(false);
     }
-  }, [task?.id, revision]);
+  }, [task?.id, task?.runs, revision, history?.loading]);
 
   function updateReadingState() {
     const node = viewport.current;
-    if (!node || !task) return;
+    if (!node || !task || restoringTask.current !== null) return;
     const followingLatest =
       node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
-    reading.current.set(task.id, {
+    reading.set(task.id, {
       scrollTop: node.scrollTop,
       followingLatest,
+      anchor: followingLatest ? undefined : readingAnchor(node),
     });
     setShowJumpLatest(!followingLatest);
   }
@@ -418,7 +528,7 @@ export function TaskContent({
   function jumpToLatest() {
     const node = viewport.current;
     if (!node || !task) return;
-    reading.current.set(task.id, {
+    reading.set(task.id, {
       scrollTop: node.scrollHeight,
       followingLatest: true,
     });
@@ -430,10 +540,10 @@ export function TaskContent({
     const node = viewport.current;
     const taskId = task?.id;
     if (!node || !taskId) return;
-    const saved = reading.current.get(taskId);
+    const saved = reading.get(taskId);
     if (saved && !saved.followingLatest) return;
     node.scrollTop = node.scrollHeight;
-    reading.current.set(taskId, {
+    reading.set(taskId, {
       scrollTop: node.scrollTop,
       followingLatest: true,
     });
@@ -451,6 +561,18 @@ export function TaskContent({
           : undefined
       }
     >
+      {history && (history.available || history.loading) && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="md"
+          disabled={history.loading || !synchronized}
+          aria-busy={history.loading}
+          onClick={history.onLoad}
+        >
+          {t(history.loading ? "common.loading" : "task.load_earlier")}
+        </Button>
+      )}
       {hasExcludedCompactHistory && (
         <p
           className="projection-notice conversation-coverage-notice"
@@ -497,14 +619,14 @@ export function TaskContent({
         );
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
-          processDisclosure.current.get(disclosureKey),
+          processDisclosure.get(disclosureKey),
         );
-        processDisclosure.current.set(disclosureKey, disclosure);
+        processDisclosure.set(disclosureKey, disclosure);
         const expandedToolIds =
-          toolDisclosure.current.get(disclosureKey) ?? emptyToolDisclosure;
+          toolDisclosure.get(disclosureKey) ?? emptyToolDisclosure;
 
         function setProcessExpanded(expanded: boolean) {
-          processDisclosure.current.set(
+          processDisclosure.set(
             disclosureKey,
             toggleRunProcessDisclosure(expanded),
           );
@@ -512,10 +634,10 @@ export function TaskContent({
         }
 
         function setToolExpanded(toolId: string, expanded: boolean) {
-          const next = new Set(toolDisclosure.current.get(disclosureKey) ?? []);
+          const next = new Set(toolDisclosure.get(disclosureKey) ?? []);
           if (expanded) next.add(toolId);
           else next.delete(toolId);
-          toolDisclosure.current.set(disclosureKey, next);
+          toolDisclosure.set(disclosureKey, next);
           setDisclosureRevision((value) => value + 1);
         }
 
@@ -826,12 +948,15 @@ export function TaskContent({
           </section>
         );
       })}
-      {task && task.runs.length === 0 && (
-        <div className="ai-conversation-empty">
-          <h2>{t("task.empty_title")}</h2>
-          <p>{t("task.created_empty_body")}</p>
-        </div>
-      )}
+      {task &&
+        task.runs.length === 0 &&
+        submissions.length === 0 &&
+        !localSubmissions && (
+          <div className="ai-conversation-empty">
+            <h2>{t("task.empty_title")}</h2>
+            <p>{t("task.created_empty_body")}</p>
+          </div>
+        )}
       {localSubmissions}
     </Conversation>
   );

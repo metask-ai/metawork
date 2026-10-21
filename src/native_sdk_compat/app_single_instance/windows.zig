@@ -1,6 +1,7 @@
 //! Windows app-instance transport: current-user Named Pipe and fixed prompt.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("../app_single_instance.zig");
 
 const HANDLE = ?*anyopaque;
@@ -102,6 +103,7 @@ const State = struct {
     pipe: HANDLE,
     handler: contract.Handler,
     stopping: std.atomic.Value(bool) = .init(false),
+    test_joining: if (builtin.is_test) std.atomic.Value(bool) else void = if (builtin.is_test) .init(false) else {},
     thread: ?std.Thread = null,
     request: [contract.max_transport_request_bytes]u8 = undefined,
     response: [contract.max_transport_response_bytes]u8 = undefined,
@@ -211,6 +213,7 @@ pub const Server = struct {
             );
             if (wake_pipe != invalid_handle) _ = CloseHandle(wake_pipe);
             _ = CancelSynchronousIo(thread.getHandle());
+            if (builtin.is_test) state.test_joining.store(true, .release);
             thread.join();
             state.thread = null;
         }
@@ -223,6 +226,12 @@ pub const Server = struct {
         self.allocator.destroy(state);
         self.* = undefined;
     }
+
+    pub const joiningForTest = if (builtin.is_test) struct {
+        fn read(self: *const Server) bool {
+            return self.state.test_joining.load(.acquire);
+        }
+    }.read else {};
 };
 
 pub fn forward(

@@ -571,7 +571,8 @@ test("Metask model selection refreshes canonical CAS inputs before selecting glo
   assert.ok(start >= 0 && end > start);
   const selectionFlow = appSource.slice(start, end);
   const configure = selectionFlow.indexOf("client.configureMetaskSelection");
-  const refresh = selectionFlow.indexOf("client.fetchSnapshot()");
+  const refresh = selectionFlow.indexOf("latestSnapshotRef.current");
+  assert.doesNotMatch(selectionFlow, /client\.fetchSnapshot/);
   const selectDefault = selectionFlow.indexOf("client.selectModelsDefault");
   assert.ok(configure >= 0 && refresh > configure && selectDefault > refresh);
   assert.match(
