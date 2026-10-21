@@ -5903,7 +5903,17 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     boundary.breakConnection();
     try std.testing.expect(!control.hasFilePreviews());
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.wait(&boundary, 6);
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"7\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    control.beginShutdown();
     boundary.stopIngress();
+    control.shutdownFilePreviewExecutor();
+    control.drainFilePreviewCompletions(boundary.filePreviewSink());
+    boundary.settleFilePreviewsForShutdown();
+    try std.testing.expectEqual(@as(usize, 7), opened.calls);
+    try std.testing.expect(!control.hasFilePreviews());
     boundary.assertQuiescent();
 }
 
