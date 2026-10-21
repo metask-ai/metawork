@@ -2630,7 +2630,7 @@ pub const Runtime = struct {
         self: *Runtime,
         execution: *models_contract.OwnedConfig,
     ) void {
-        self.invalidateProjectionSecurity();
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .metask, null)) self.invalidateProjectionSecurity();
         self.execution_state.installMetaskNoFail(
             execution,
             execution.input().execution_generation,
@@ -2659,7 +2659,7 @@ pub const Runtime = struct {
         execution: *models_contract.OwnedConfig,
         prepared_binding: *PreparedCustomProviderBinding,
     ) void {
-        self.invalidateProjectionSecurity();
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .custom_provider, prepared_binding.provider_id)) self.invalidateProjectionSecurity();
         self.execution_state.installCustomProviderNoFail(
             execution,
             prepared_binding,
@@ -3065,7 +3065,7 @@ pub const Runtime = struct {
             self.execution_state.rejectReplacementNoFail(metaskStageError(err));
             return;
         };
-        self.invalidateProjectionSecurity();
+        if (!self.execution_state.projectionAuthorityMatches(execution.input(), desired.source, if (prepared_binding) |binding| binding.provider_id else null)) self.invalidateProjectionSecurity();
         switch (desired.source) {
             .metask => self.execution_state.installMetaskNoFail(
                 &execution,
@@ -20783,4 +20783,35 @@ test "Account image token protects Custom Provider views between Runs and rotati
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
     control.syncAccountProjectionCredentialNoFail();
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+}
+
+test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const initial_epoch = control.projectionSecurityEpoch();
+    const cases = [_]struct { source: models_contract.Source = .metask, endpoint: []const u8 = models_contract.metask_anthropic_messages_url, secret: []const u8 = "SECRET-KEY", provider: []const u8 = "", revoked: bool }{
+        .{ .revoked = false },
+        .{ .secret = "replacement-secret", .revoked = true },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = true },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = false },
+        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .endpoint = "https://changed.example/v1/messages", .revoked = true },
+    };
+    var epoch = initial_epoch;
+    var output: [96 * 1024]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+        var execution = try models_contract.OwnedConfig.initOwned(std.testing.allocator, case.source, .anthropic_messages, try std.testing.allocator.dupe(u8, "fixture-model"), try std.testing.allocator.dupe(u8, case.endpoint), @intCast(index + 2), try std.testing.allocator.dupe(u8, case.secret), case.provider);
+        errdefer execution.deinit();
+        try control.beginDefaultExecutionReplacement();
+        try control.prepareExecutionInstall(execution.input());
+        if (case.source == .metask) control.installExecutionNoFail(&execution) else {
+            var binding = try control.prepareCustomProviderBinding("provider-1", "fixture-model");
+            control.installCustomProviderExecutionNoFail(&execution, &binding);
+        }
+        control.endExecutionReplacementNoFail();
+        if (case.revoked) epoch += 1;
+        try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+        if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
+    }
 }
