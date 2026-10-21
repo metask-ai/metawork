@@ -1234,7 +1234,8 @@ pub const Runtime = struct {
     capture_view: ?*view_plan.Plan = null,
     view_step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
     next_view_read_id: u64 = 0,
-    view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize } = @splat(null),
+    view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize, encoding: ?[]u8 = null } = @splat(null),
+    view_cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
     projection_history_epoch: u64 = 1,
     view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
@@ -6547,7 +6548,10 @@ pub const Runtime = struct {
                 if (request.known_epoch == self.projection_security_epoch and @field(request.known_versions, field.name) == version) {
                     writer.writeAll("null") catch return error.SnapshotTooLarge;
                     self.view_preparation.reused[field.value] = true;
-                } else writer.writeAll(entry.bytes) catch return error.SnapshotTooLarge;
+                } else {
+                    const child = try self.view_read.appendChild(self.allocator, &writer);
+                    try self.takeCachedViewBlock(field.value, key, version, child);
+                }
             } else try self.writeViewBlock(&writer, request, kind);
             self.view_preparation.blocks[field.value] = .{ .key = key, .start = start, .end = writer.end, .known = @field(request.known_versions, field.name), .version = version };
             @field(self.view_preparation.versions, field.name) = version;
@@ -6631,15 +6635,23 @@ pub const Runtime = struct {
                 }
                 block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
                 var replacement: ?[]const u8 = null;
+                var cached = false;
                 if (self.view_preparation.known_epoch == self.projection_security_epoch and block.known == block.version) {
                     replacement = "null";
                     self.view_preparation.reused[index] = true;
                 } else if (self.encoded_views.get(block.key)) |entry| {
-                    if (entry.version == block.version) replacement = entry.bytes;
+                    if (entry.version == block.version) {
+                        replacement = "[]";
+                        cached = true;
+                    }
                 }
                 if (replacement) |value| {
                     const delta = try self.view_read.replaceSpan(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end, value);
                     block.end = block.start + value.len;
+                    if (cached) {
+                        const child = try self.view_read.insertChild(self.allocator, block.start);
+                        try self.takeCachedViewBlock(index, block.key, block.version, child);
+                    }
                     for (self.view_preparation.blocks[index + 1 ..]) |*later| {
                         later.start = @intCast(@as(isize, @intCast(later.start)) + delta);
                         later.end = @intCast(@as(isize, @intCast(later.end)) + delta);
@@ -6702,14 +6714,35 @@ pub const Runtime = struct {
         self.view_preparation.raw_bytes += size;
     }
 
+    fn takeCachedViewBlock(self: *Runtime, index: usize, key: view_cache.Key, version: u64, child: *view_plan.Plan) Error!void {
+        const owned = self.encoded_views.takeEncoded(key, version) orelse return error.StaleSnapshot;
+        child.adoptEncoded(owned);
+        self.view_cached_blocks[index] = .{ .key = key, .version = version, .child = child };
+    }
+
+    fn returnCachedViewBlocks(self: *Runtime) void {
+        for (&self.view_cached_blocks) |*slot| if (slot.*) |block| {
+            const owned = block.child.takeEncoded();
+            slot.* = null;
+            self.encoded_views.returnEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
+        };
+    }
+
     pub fn cancelSnapshotRead(self: *Runtime, read_id: u64) void {
         if (read_id != 0 and self.view_read.id == read_id) self.cancelSnapshot();
     }
 
     pub fn cancelSnapshot(self: *Runtime) void {
+        self.returnCachedViewBlocks();
         self.view_preparation.clear(self.allocator);
         self.view_read.clear(self.allocator);
-        self.view_blocks = @splat(null);
+        for (&self.view_blocks) |*slot| if (slot.*) |block| {
+            if (block.encoding) |owned| {
+                std.crypto.secureZero(u8, owned);
+                self.allocator.free(owned);
+            }
+            slot.* = null;
+        };
     }
 
     pub fn writeSnapshotRange(self: *Runtime, read_id: u64, output: []u8, offset: usize, length: usize) Error!void {
@@ -6717,17 +6750,38 @@ pub const Runtime = struct {
         if (!self.view_preparation.ready or length == 0 or length > projection_step_bytes or offset > self.view_read.produced or offset > self.view_read.total or length > self.view_read.total - offset or output.len < self.view_read.total) return error.InvalidOffset;
         errdefer self.cancelSnapshot();
         const encode_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
+        const before = self.view_read.produced;
         const end = offset + length;
         if (end > self.view_read.produced) _ = try self.view_read.writeNext(output[self.view_read.produced..end]);
         const cache_start = if (builtin.is_test) std.Io.Timestamp.now(self.io, .awake) else {};
         if (builtin.is_test) self.view_step_timing.encode_ns = encode_start.durationTo(cache_start).nanoseconds;
-        for (&self.view_blocks) |*maybe| if (maybe.*) |block| {
-            if (block.end <= self.view_read.produced) {
-                try self.encoded_views.installEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, output[block.start..block.end]);
+        for (&self.view_blocks) |*maybe| if (maybe.*) |*block| {
+            if (!self.encoded_views.needsEncoded(self.limits.max_snapshot_bytes, block.key, block.version, block.end - block.start)) {
+                if (block.encoding) |owned| {
+                    std.crypto.secureZero(u8, owned);
+                    self.allocator.free(owned);
+                }
+                maybe.* = null;
+                continue;
+            }
+            const first = @max(before, block.start);
+            const last = @min(self.view_read.produced, block.end);
+            if (last <= first) continue;
+            if (block.encoding == null) block.encoding = try self.allocator.alloc(u8, block.end - block.start);
+            // The disjoint block intersections total at most this encoding
+            // quantum. Partial bytes are owned by this read, never cache hits.
+            @memcpy(block.encoding.?[first - block.start .. last - block.start], output[first..last]);
+            if (last == block.end) {
+                const owned = block.encoding.?;
+                block.encoding = null;
+                try self.encoded_views.installOwnedEncoded(self.allocator, self.limits.max_snapshot_bytes, block.key, block.version, owned);
                 maybe.* = null;
             }
         };
-        if (self.view_read.produced == self.view_read.total and self.view_read.skeleton.len != 0) self.view_read.releasePayload(self.allocator);
+        if (self.view_read.produced == self.view_read.total and self.view_read.skeleton.len != 0) {
+            self.returnCachedViewBlocks();
+            self.view_read.releasePayload(self.allocator);
+        }
         if (builtin.is_test) self.view_step_timing.cache_copy_ns = cache_start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
     }
 
@@ -20831,4 +20885,156 @@ test "transport cancellation cannot revoke a replacement Product read" {
     try control.writeSnapshotRange(current.id, &output, 0, 64);
     control.cancelSnapshotRead(current.id);
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(current.id, &output, 0, 64));
+}
+
+test "Product view cached large body moves into frozen read without a body-sized begin copy" {
+    var control = try TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    try TestSupport.installResultFixture(&control, true);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const request: ViewRequest = .{ .task_id = 1 };
+    var first_read = try control.writeSnapshot(output, request);
+    while (first_read.bytes == 0) first_read = try control.continueSnapshot(first_read.id, output);
+    const task_slot = @intFromEnum(view_cache.Kind.taskPage);
+    var cache_candidate: ?[*]u8 = null;
+    var first_offset: usize = 0;
+    while (first_offset < first_read.bytes) {
+        const length = @min(projection_step_bytes, first_read.bytes - first_offset);
+        try control.writeSnapshotRange(first_read.id, output, first_offset, length);
+        if (control.view_blocks[task_slot]) |block| if (block.encoding) |candidate| {
+            if (cache_candidate) |pointer| try std.testing.expectEqual(pointer, candidate.ptr) else cache_candidate = candidate.ptr;
+            try std.testing.expect(control.encoded_views.get(Runtime.viewKey(request, .taskPage)) == null);
+        };
+        first_offset += length;
+    }
+    try std.testing.expect(cache_candidate != null);
+    try std.testing.expectEqual(cache_candidate.?, control.encoded_views.get(Runtime.viewKey(request, .taskPage)).?.bytes.ptr);
+    const expected = try std.testing.allocator.dupe(u8, output[0..first_read.bytes]);
+    defer std.testing.allocator.free(expected);
+    const key = Runtime.viewKey(request, .taskPage);
+    const version = control.encoded_views.get(key).?.version;
+    const pointer = control.encoded_views.get(key).?.bytes.ptr;
+    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 4 * 1024 * 1024);
+    // Include revalidation after a dirty mark with identical facts: this must
+    // attach the owned encoded body rather than copy it through replaceSpan.
+    for ([_]bool{ false, true }) |revalidate| {
+        if (revalidate) control.encoded_views.invalidate(.taskPage);
+        var read = try control.writeSnapshot(output, request);
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
+        try std.testing.expect(read.scratch_bytes < projection_step_bytes);
+        try std.testing.expect(control.view_read.skeleton.len < projection_step_bytes);
+        const cached = control.view_cached_blocks[@intFromEnum(view_cache.Kind.taskPage)].?;
+        try std.testing.expectEqual(pointer, cached.child.skeleton.ptr);
+        try std.testing.expectEqual(version, cached.version);
+        try std.testing.expect(control.encoded_views.get(key) == null);
+        var offset: usize = 0;
+        while (offset < read.bytes) {
+            const length = @min(projection_step_bytes, read.bytes - offset);
+            try control.writeSnapshotRange(read.id, output, offset, length);
+            offset += length;
+        }
+        try std.testing.expectEqualSlices(u8, expected, output[0..read.bytes]);
+        try std.testing.expectEqual(pointer, control.encoded_views.get(key).?.bytes.ptr);
+    }
+    // Cache eviction while a read is in flight cannot invalidate the owned
+    // frozen bytes, and completing that read cannot repopulate an evicted slot.
+    const read = try control.writeSnapshot(output, request);
+    control.encoded_views.clear(std.testing.allocator);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const length = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, output, offset, length);
+        offset += length;
+    }
+    try std.testing.expectEqualSlices(u8, expected, output[0..read.bytes]);
+    try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
+}
+
+test "Product view cached ownership returns through allocation failures and security cancellation" {
+    var succeeded = false;
+    for (0..40) |fail_index| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var output: [96 * 1024]u8 = undefined;
+        const request: ViewRequest = .{};
+        _ = try control.writeViewFixture(&output, request);
+        const key = Runtime.viewKey(request, .context);
+        const pointer = control.encoded_views.get(key).?.bytes.ptr;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        control.allocator = failing.allocator();
+        if (control.writeSnapshot(&output, request)) |_| {
+            succeeded = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+        control.cancelSnapshot();
+        control.allocator = std.testing.allocator;
+        try std.testing.expectEqual(pointer, control.encoded_views.get(key).?.bytes.ptr);
+        const read = try control.writeSnapshot(&output, request);
+        control.learnProjectionCredential("new-cache-transfer-secret");
+        try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 16));
+        try std.testing.expectEqual(@as(usize, 0), control.encoded_views.bytes);
+        for (control.view_cached_blocks) |slot| try std.testing.expect(slot == null);
+        if (succeeded) break;
+    }
+    try std.testing.expect(succeeded);
+}
+
+test "Product view partial encoded cache fill is discarded on cancellation invalidation or allocation failure" {
+    var reached_success = false;
+    for (0..16) |fail_index| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var output: [96 * 1024]u8 = undefined;
+        var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        control.allocator = failing.allocator();
+        if (control.writeSnapshotRange(read.id, &output, 0, @min(projection_step_bytes, read.bytes))) |_| {
+            reached_success = true;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        control.cancelSnapshot();
+        control.allocator = std.testing.allocator;
+        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+        // Any committed entry must be a complete independently valid JSON value;
+        // failed allocations cannot expose an incompletely filled candidate.
+        for (control.encoded_views.entries) |slot| if (slot) |entry| if (entry.bytes.len != 0) {
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, entry.bytes, .{});
+            parsed.deinit();
+        };
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
+
+    var control = try TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    try TestSupport.installResultFixture(&control, true);
+    const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
+    defer std.testing.allocator.free(output);
+    const task_slot = @intFromEnum(view_cache.Kind.taskPage);
+    for ([_]bool{ false, true }) |invalidate| {
+        control.encoded_views.clear(std.testing.allocator);
+        var read = try control.writeSnapshot(output, .{ .task_id = 1 });
+        while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
+        var offset: usize = 0;
+        while (control.view_blocks[task_slot].?.encoding == null) {
+            const length = @min(projection_step_bytes, read.bytes - offset);
+            try control.writeSnapshotRange(read.id, output, offset, length);
+            offset += length;
+        }
+        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
+        if (invalidate) {
+            control.encoded_views.invalidate(.taskPage);
+            while (offset < read.bytes) {
+                const length = @min(projection_step_bytes, read.bytes - offset);
+                try control.writeSnapshotRange(read.id, output, offset, length);
+                offset += length;
+            }
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+            defer parsed.deinit();
+        } else control.cancelSnapshot();
+        try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
+        for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+    }
 }

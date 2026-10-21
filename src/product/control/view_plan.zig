@@ -48,6 +48,32 @@ pub const Plan = struct {
         try self.strings.append(allocator, .{ .at = writer.end - 2, .start = 0, .len = 0, .escaped_len = 0, .child = child });
         return child;
     }
+    /// Insert an owned fragment at a placeholder already present after block
+    /// replacement. This keeps the encoding cursor's fragments in source order.
+    pub fn insertChild(self: *Plan, allocator: std.mem.Allocator, at: usize) Error!*Plan {
+        std.debug.assert(at <= self.skeleton.len and self.skeleton.len - at >= 2 and std.mem.eql(u8, self.skeleton[at..][0..2], "[]"));
+        const child = try allocator.create(Plan);
+        errdefer allocator.destroy(child);
+        child.* = .{ .id = self.id, .security_epoch = self.security_epoch };
+        var index: usize = 0;
+        while (index < self.strings.items.len and self.strings.items[index].at < at) : (index += 1) {}
+        try self.strings.insert(allocator, index, .{ .at = at, .start = 0, .len = 0, .escaped_len = 0, .child = child });
+        return child;
+    }
+
+    pub fn adoptEncoded(self: *Plan, owned: []u8) void {
+        std.debug.assert(self.skeleton.len == 0 and self.text.items.len == 0 and self.strings.items.len == 0 and owned.len >= 2);
+        self.skeleton = owned;
+        self.total = owned.len;
+    }
+
+    pub fn takeEncoded(self: *Plan) []u8 {
+        std.debug.assert(self.text.items.len == 0 and self.strings.items.len == 0);
+        const owned = self.skeleton;
+        self.skeleton = &.{};
+        return owned;
+    }
+
     pub fn encodedPosition(self: *const Plan, skeleton_position: usize) Error!usize {
         var result = skeleton_position;
         for (self.strings.items) |item| {
@@ -341,6 +367,47 @@ test "Product view child allocation failure and block replacement release owned 
             try root.finalize(4096);
             _ = try root.writeNext(bytes[0..root.total]);
             try std.testing.expectEqualStrings("[null]", bytes[0..root.total]);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "Product view adopted encoded fragment preserves tiny chunk boundaries and ownership" {
+    const expected = "{\"cached\":{\"text\":\"caf\xc3\xa9\\n\"},\"next\":true}";
+    for (1..18) |quantum| {
+        var plan: Plan = .{ .id = 1 };
+        defer plan.clear(std.testing.allocator);
+        var output: [256]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try writer.writeAll("{\"cached\":");
+        const child = try plan.appendChild(std.testing.allocator, &writer);
+        child.adoptEncoded(try std.testing.allocator.dupe(u8, "{\"text\":\"caf\xc3\xa9\\n\"}"));
+        try writer.writeAll(",\"next\":true}");
+        try plan.seal(std.testing.allocator, 1024, writer.buffered());
+        var offset: usize = 0;
+        while (offset < plan.total) {
+            const length = @min(quantum, plan.total - offset);
+            _ = try plan.writeNext(output[offset..][0..length]);
+            offset += length;
+        }
+        try std.testing.expectEqualStrings(expected, output[0..plan.total]);
+        const owned = child.takeEncoded();
+        std.testing.allocator.free(owned);
+    }
+}
+
+test "Product view inserted encoded fragment releases ownership at every allocation failure" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var plan: Plan = .{ .id = 1 };
+            defer plan.clear(allocator);
+            var output: [64]u8 = undefined;
+            try plan.capture(allocator, "[]");
+            const child = try plan.insertChild(allocator, 0);
+            child.adoptEncoded(try allocator.dupe(u8, "{\"ok\":true}"));
+            try plan.finalize(1024);
+            _ = try plan.writeNext(output[0..plan.total]);
+            try std.testing.expectEqualStrings("{\"ok\":true}", output[0..plan.total]);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});

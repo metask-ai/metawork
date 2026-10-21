@@ -20,6 +20,37 @@ pub const Cache = struct {
         }
         return null;
     }
+    pub fn needsEncoded(self: *const Cache, budget: usize, key: Key, version: u64, length: usize) bool {
+        const entry = self.entries[@intFromEnum(key.kind)] orelse return false;
+        return !entry.dirty and entry.version == version and std.meta.eql(entry.key, key) and entry.bytes.len == 0 and length <= budget -| entry.source.len;
+    }
+
+    /// The one frozen read takes ownership instead of copying an encoded body.
+    /// Source/version metadata can be invalidated or evicted independently.
+    pub fn takeEncoded(self: *Cache, key: Key, version: u64) ?[]u8 {
+        const entry = if (self.entries[@intFromEnum(key.kind)]) |*entry| entry else return null;
+        if (entry.dirty or entry.version != version or !std.meta.eql(entry.key, key) or entry.bytes.len == 0) return null;
+        const owned = entry.bytes;
+        entry.bytes = &.{};
+        self.bytes -= owned.len;
+        return owned;
+    }
+
+    /// Always consumes ownership. A stale read cannot restore an obsolete body.
+    pub fn returnEncoded(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, version: u64, owned: []u8) void {
+        const slot = @intFromEnum(key.kind);
+        if (self.entries[slot]) |entry| {
+            if (!entry.dirty and entry.version == version and std.meta.eql(entry.key, key) and entry.bytes.len == 0 and owned.len <= budget -| entry.source.len) {
+                self.makeRoom(allocator, budget - owned.len, slot);
+                self.entries[slot].?.bytes = owned;
+                self.bytes += owned.len;
+                return;
+            }
+        }
+        std.crypto.secureZero(u8, owned);
+        allocator.free(owned);
+    }
+
     /// Equality is over canonical unescaped source, not a probabilistic hash.
     /// Versions can therefore be confirmed without synchronously escaping long strings.
     pub fn putSource(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, source: []const u8) Error!u64 {
@@ -56,20 +87,15 @@ pub const Cache = struct {
 
     /// A later Product mutation may have invalidated this frozen read. Such bytes
     /// remain valid for that read, but must not repopulate the current cache.
-    pub fn installEncoded(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, version: u64, value: []const u8) Error!void {
-        const slot = @intFromEnum(key.kind);
-        const current = self.entries[slot] orelse return;
-        if (current.dirty or current.version != version or !std.meta.eql(current.key, key)) return;
-        if (current.bytes.len != 0) {
-            if (!std.mem.eql(u8, current.bytes, value)) return error.ViewContentMismatch;
-            return;
+    pub fn installOwnedEncoded(self: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, version: u64, owned: []u8) error{ViewContentMismatch}!void {
+        if (self.entries[@intFromEnum(key.kind)]) |current| {
+            if (!current.dirty and current.version == version and std.meta.eql(current.key, key) and current.bytes.len != 0 and !std.mem.eql(u8, current.bytes, owned)) {
+                std.crypto.secureZero(u8, owned);
+                allocator.free(owned);
+                return error.ViewContentMismatch;
+            }
         }
-        // Oversized cache entries remain deliverable through the bounded read plan.
-        if (value.len > budget -| current.source.len) return;
-        const owned = try allocator.dupe(u8, value);
-        self.makeRoom(allocator, budget - value.len, slot);
-        self.entries[slot].?.bytes = owned;
-        self.bytes += value.len;
+        self.returnEncoded(allocator, budget, key, version, owned);
     }
     fn makeRoom(self: *Cache, allocator: std.mem.Allocator, available: usize, protected: usize) void {
         while (self.bytes > available) {
@@ -115,9 +141,13 @@ pub const Cache = struct {
     }
 };
 
+fn encodeForTest(cache: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, version: u64, value: []const u8) Error!void {
+    return cache.installOwnedEncoded(allocator, budget, key, version, try allocator.dupe(u8, value));
+}
+
 fn seed(cache: *Cache, allocator: std.mem.Allocator, budget: usize, key: Key, value: []const u8) Error!u64 {
     const version = try cache.putSource(allocator, budget, key, value);
-    try cache.installEncoded(allocator, budget, key, version, value);
+    try encodeForTest(cache, allocator, budget, key, version, value);
     return version;
 }
 
@@ -187,14 +217,14 @@ test "Product view stale frozen encoding cannot refill a newer or invalidated so
     const key = Key{ .kind = .taskPage, .task_id = 1, .limit = 4 };
     const old = try cache.putSource(std.testing.allocator, 128, key, "old source");
     cache.invalidateEvent(1, 1);
-    try cache.installEncoded(std.testing.allocator, 128, key, old, "old encoded");
+    try encodeForTest(&cache, std.testing.allocator, 128, key, old, "old encoded");
     try std.testing.expect(cache.get(key) == null);
     const current = try cache.putSource(std.testing.allocator, 128, key, "new source");
-    try cache.installEncoded(std.testing.allocator, 128, key, old, "old encoded");
+    try encodeForTest(&cache, std.testing.allocator, 128, key, old, "old encoded");
     try std.testing.expect(cache.get(key) == null);
-    try cache.installEncoded(std.testing.allocator, 128, key, current, "new encoded");
+    try encodeForTest(&cache, std.testing.allocator, 128, key, current, "new encoded");
     try std.testing.expectEqualStrings("new encoded", cache.get(key).?.bytes);
-    try std.testing.expectError(error.ViewContentMismatch, cache.installEncoded(std.testing.allocator, 128, key, current, "different encoding"));
+    try std.testing.expectError(error.ViewContentMismatch, encodeForTest(&cache, std.testing.allocator, 128, key, current, "different encoding"));
 }
 
 test "Product view obsolete preparation cannot confirm current cache source" {
@@ -209,8 +239,31 @@ test "Product view obsolete preparation cannot confirm current cache source" {
     try std.testing.expect(obsolete != first);
     try std.testing.expect(cache.get(key) == null);
     const current = try cache.putSource(std.testing.allocator, 128, key, "current");
-    try cache.installEncoded(std.testing.allocator, 128, key, obsolete, "changed");
+    try encodeForTest(&cache, std.testing.allocator, 128, key, obsolete, "changed");
     try std.testing.expect(cache.get(key) == null);
-    try cache.installEncoded(std.testing.allocator, 128, key, current, "current encoded");
+    try encodeForTest(&cache, std.testing.allocator, 128, key, current, "current encoded");
     try std.testing.expectEqualStrings("current encoded", cache.get(key).?.bytes);
+}
+
+test "Product view encoded transfer returns only to its exact live source and version" {
+    var cache: Cache = .{};
+    defer cache.clear(std.testing.allocator);
+    const key: Key = .{ .kind = .taskPage, .task_id = 1, .limit = 4 };
+    const version = try seed(&cache, std.testing.allocator, 128, key, "body");
+    const pointer = cache.get(key).?.bytes.ptr;
+    const owned = cache.takeEncoded(key, version).?;
+    try std.testing.expectEqual(pointer, owned.ptr);
+    try std.testing.expect(cache.get(key) == null);
+    try std.testing.expectEqual(@as(usize, 4), cache.bytes);
+    cache.returnEncoded(std.testing.allocator, 128, key, version, owned);
+    try std.testing.expectEqual(pointer, cache.get(key).?.bytes.ptr);
+    const stale = cache.takeEncoded(key, version).?;
+    cache.invalidate(.taskPage);
+    cache.returnEncoded(std.testing.allocator, 128, key, version, stale);
+    try std.testing.expect(cache.get(key) == null);
+    const next = try seed(&cache, std.testing.allocator, 128, key, "next");
+    const evicted = cache.takeEncoded(key, next).?;
+    cache.clear(std.testing.allocator);
+    cache.returnEncoded(std.testing.allocator, 128, key, next, evicted);
+    try std.testing.expectEqual(@as(usize, 0), cache.bytes);
 }
