@@ -10,5 +10,5 @@ zig-out/
 .DS_Store
 *.log
 
-# Local probes and raw working logs; durable evidence lives in docs/evidence.
+# Local probes and raw working logs; historical evidence is indexed in docs/validation.md.
 .tmp/
