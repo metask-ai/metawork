@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-21
+
+### Added
+
+- Task 现在可以持续接收有效的文本、Skill 和已完成 staging 的附件消息，不再因当前 Run 的启动、停止或收尾阶段拒绝普通发送；消息按 Task 顺序等待，只有普通文本可以作为当前 Run 的插话，Skill 和附件留待后续 Run。Stop 只取消当时已有的等待消息和当前 operation，之后提交的新消息继续保留。
+- Agent Runtime 新增固定的 `GenerateImage` Host Tool 桌面执行链：每个 Run 从当前 Metask 授权解析图片模型，按权限、并发、容量和取消边界生成一张 PNG、JPEG 或静态 WebP，并保存到所属 Workspace；失败或结果不确定时禁止自动重试。该能力仍处于内部测试阶段，图片模型设置尚未向用户开放，正式服务与发布验收尚未闭合。
+- Host 生成图片可以在所属 Run 中内联显示并打开完整预览；文件预览新增静态 PNG、JPEG 和 WebP 原图读取，通过有界临时授权和分块传输交付，不把原图复制到 Snapshot、产品历史或额外磁盘缓存。
+
+### Changed
+
+- Renderer 产品数据面改为按消费范围读取版本化视图，并按页补充 Task 历史；缓存复用、权限失效和范围替换由 Host 明确控制，不再要求先运输全部 Task 正文，同时保留阅读位置和已打开面板状态。
+- 插话统一呈现为普通用户消息，不再显示采纳、接续或转入等内部状态；等待消息转入执行后仍只显示一次。
+- AgentCore 升级至 `0.11.0-dev+9c2f68671198` / ABI revision 24，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
+
+### Fixed
+
+- 修复审批恢复在历史写入完成后未继续收口，以及长回复可能撑出中央阅读列的问题。
+- 修复图片生成的 JPEG/WebP 结果、模型图片能力传递、费用事实、取消与清理竞态，并确保拒绝或结果不确定时不会隐式重试。
+- 修复分区视图刷新时历史连续性、阅读锚点、已提交命令对账、Account 图片凭据识别和安全撤权不稳定的问题。
+- 修复单实例启动期间激活请求过早接纳或唤醒丢失，以及图片预览失效后的重试、拒绝原因保留和 shutdown 资源收口问题。
+
 ## [0.2.5] - 2026-10-18
 
 ### Added
@@ -407,7 +428,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.5...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/metask-ai/metawork/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/metask-ai/metawork/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/metask-ai/metawork/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/metask-ai/metawork/compare/v0.2.2...v0.2.3
