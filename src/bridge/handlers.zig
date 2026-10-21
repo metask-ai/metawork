@@ -18,39 +18,73 @@ pub const RendererBridgeConnect = struct {
 };
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
-pub const ProductSnapshotContinue = struct { preparingSnapshotId: []const u8 };
-pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
+pub const WireText = struct {
+    value: []const u8,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+        return .{ .value = try std.json.innerParse([]const u8, allocator, source, options) };
+    }
+};
+pub const WireId = struct {
+    value: u64,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const text = try WireText.jsonParse(allocator, source, options);
+        return .{ .value = parseWireId(text.value) catch return error.InvalidNumber };
+    }
+};
+const JsonRunLimit = struct {
+    value: u8,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        if (try source.peekNextTokenType() != .number) return error.UnexpectedToken;
+        const token = try source.nextAllocMax(allocator, .alloc_always, options.max_value_len.?);
+        const text = switch (token) {
+            .number, .allocated_number => |value| value,
+            else => return error.UnexpectedToken,
+        };
+        for (text) |byte| if (byte < '0' or byte > '9') return error.UnexpectedToken;
+        return .{ .value = try std.fmt.parseInt(u8, text, 10) };
+    }
+};
+const JsonManagement = struct {
+    value: @FieldType(product_control.ViewRequest, "management"),
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+        return .{ .value = try std.json.innerParse(@FieldType(@This(), "value"), allocator, source, options) };
+    }
+};
+pub const ProductSnapshotContinue = struct { preparingSnapshotId: WireId };
+pub const ProductSnapshotChunk = struct { snapshotId: WireId, offset: WireId };
 pub const ViewVersions = struct {
-    context: []const u8,
-    workspaces: []const u8,
-    taskIndex: []const u8,
-    taskPage: []const u8,
-    historyPage: []const u8,
-    management: []const u8,
-    searchIndex: []const u8,
+    context: WireId,
+    workspaces: WireId,
+    taskIndex: WireId,
+    taskPage: WireId,
+    historyPage: WireId,
+    management: WireId,
+    searchIndex: WireId,
 };
 pub const ProductViewRequest = struct {
-    taskId: ?[]const u8,
-    beforeRunId: ?[]const u8,
-    runLimit: u8,
-    management: @FieldType(product_control.ViewRequest, "management"),
+    taskId: ?WireId,
+    beforeRunId: ?WireId,
+    runLimit: JsonRunLimit,
+    management: JsonManagement,
     search: bool,
-    receipts: []const struct { taskId: []const u8, operationId: []const u8 },
-    known: struct { securityEpoch: []const u8, versions: ViewVersions },
+    receipts: []const struct { taskId: WireId, operationId: WireText },
+    known: struct { securityEpoch: WireId, versions: ViewVersions },
 
     pub fn product(self: ProductViewRequest, storage: []product_control.ViewReceiptQuery) !product_control.ViewRequest {
         if (self.receipts.len > 64 or self.receipts.len > storage.len) return error.InvalidViewRequest;
-        for (self.receipts, storage[0..self.receipts.len]) |query, *target| target.* = .{ .task_id = try parseWireId(query.taskId), .operation_id = query.operationId };
+        for (self.receipts, storage[0..self.receipts.len]) |query, *target| target.* = .{ .task_id = query.taskId.value, .operation_id = query.operationId.value };
         var request: product_control.ViewRequest = .{
-            .task_id = if (self.taskId) |id| try parseWireId(id) else null,
-            .before_run_id = if (self.beforeRunId) |id| try parseWireId(id) else null,
-            .run_limit = self.runLimit,
-            .management = self.management,
+            .task_id = if (self.taskId) |id| id.value else null,
+            .before_run_id = if (self.beforeRunId) |id| id.value else null,
+            .run_limit = self.runLimit.value,
+            .management = self.management.value,
             .search = self.search,
             .receipts = storage[0..self.receipts.len],
         };
-        request.known_epoch = try parseWireId(self.known.securityEpoch);
-        inline for (std.meta.fields(ViewVersions)) |field| @field(request.known_versions, field.name) = try parseWireId(@field(self.known.versions, field.name));
+        request.known_epoch = self.known.securityEpoch.value;
+        inline for (std.meta.fields(ViewVersions)) |field| @field(request.known_versions, field.name) = @field(self.known.versions, field.name).value;
         try request.validate();
         return request;
     }
@@ -1097,6 +1131,37 @@ test "Product view request is closed and validates stable history identity" {
         \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"none","search":false,"receipts":[],"fields":["tasks"]}
     };
     for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductViewRequest, payload));
-    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = null, .beforeRunId = "2", .runLimit = 4, .management = .none, .search = false, .receipts = &.{}, .known = .{ .securityEpoch = "0", .versions = .{ .context = "0", .workspaces = "0", .taskIndex = "0", .taskPage = "0", .historyPage = "0", .management = "0", .searchIndex = "0" } } }).product(&query_storage));
-    try std.testing.expectError(error.InvalidViewRequest, (ProductViewRequest{ .taskId = "0", .beforeRunId = null, .runLimit = 4, .management = .none, .search = false, .receipts = &.{}, .known = .{ .securityEpoch = "0", .versions = .{ .context = "0", .workspaces = "0", .taskIndex = "0", .taskPage = "0", .historyPage = "0", .management = "0", .searchIndex = "0" } } }).product(&query_storage));
+    parsed.value.taskId = null;
+    parsed.value.beforeRunId = .{ .value = 2 };
+    try std.testing.expectError(error.InvalidViewRequest, parsed.value.product(&query_storage));
+    parsed.value.taskId = .{ .value = 0 };
+    parsed.value.beforeRunId = null;
+    try std.testing.expectError(error.InvalidViewRequest, parsed.value.product(&query_storage));
+}
+
+test "snapshot request scalars reject JSON coercions and accept only canonical wire forms" {
+    const valid = "{\"taskId\":\"7\",\"beforeRunId\":null,\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}";
+    for ([_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = "\"runLimit\":4", .to = "\"runLimit\":\"4\"" },
+        .{ .from = "\"runLimit\":4", .to = "\"runLimit\":4.0" },
+        .{ .from = "\"runLimit\":4", .to = "\"runLimit\":4e0" },
+        .{ .from = "\"management\":\"none\"", .to = "\"management\":0" },
+        .{ .from = "\"taskId\":\"7\"", .to = "\"taskId\":[55]" },
+        .{ .from = "\"taskId\":\"7\"", .to = "\"taskId\":7" },
+        .{ .from = "\"securityEpoch\":\"0\"", .to = "\"securityEpoch\":[48]" },
+    }) |case| {
+        const input = try std.mem.replaceOwned(u8, std.testing.allocator, valid, case.from, case.to);
+        defer std.testing.allocator.free(input);
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductViewRequest, input));
+    }
+    inline for (.{ "{\"preparingSnapshotId\":[49]}", "{\"preparingSnapshotId\":1}", "{\"preparingSnapshotId\":\"01\"}", "{\"preparingSnapshotId\":\"1\",\"extra\":true}" }) |input|
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductSnapshotContinue, input));
+    inline for (.{ "{\"snapshotId\":[49],\"offset\":\"0\"}", "{\"snapshotId\":\"1\",\"offset\":[48]}", "{\"snapshotId\":\"1\",\"offset\":\"+0\"}", "{\"snapshotId\":\"1\",\"offset\":\"00\"}" }) |input|
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductSnapshotChunk, input));
+    var continuation = try parsePayload(ProductSnapshotContinue, "{\"preparingSnapshotId\":\"1\"}");
+    defer continuation.deinit();
+    try std.testing.expectEqual(@as(u64, 1), continuation.value.preparingSnapshotId.value);
+    var chunk = try parsePayload(ProductSnapshotChunk, "{\"snapshotId\":\"1\",\"offset\":\"0\"}");
+    defer chunk.deinit();
+    try std.testing.expectEqual(@as(u64, 0), chunk.value.offset.value);
 }

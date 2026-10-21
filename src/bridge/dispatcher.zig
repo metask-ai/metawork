@@ -790,7 +790,7 @@ pub const Dispatcher = struct {
             var continuation = try handlers.parsePayload(handlers.ProductSnapshotContinue, invocation.request.payload);
             defer continuation.deinit();
             const control = try self.requireProductControl();
-            const descriptor = try self.delivery.prepareSnapshot(invocation.source.window_id, control.projectionSecurityEpoch(), try handlers.parseWireId(continuation.value.preparingSnapshotId), .{ .context = control, .prepare_fn = continueSnapshot });
+            const descriptor = try self.delivery.prepareSnapshot(invocation.source.window_id, control.projectionSecurityEpoch(), continuation.value.preparingSnapshotId.value, .{ .context = control, .prepare_fn = continueSnapshot });
             return encodeSnapshotDescriptor(output, descriptor);
         }
         var parsed = try handlers.parsePayloadWithLimit(handlers.ProductViewRequest, invocation.request.payload, 16 * 1024);
@@ -800,7 +800,7 @@ pub const Dispatcher = struct {
         const descriptor = self.delivery.publishSnapshot(
             invocation.source.window_id,
             view.control.projectionSecurityEpoch(),
-            .{ .context = &view, .write_fn = writeSnapshot },
+            .{ .context = &view, .write_fn = writeSnapshot, .cancellation = .{ .context = view.control, .cancel_fn = cancelSnapshotRead } },
         ) catch |err| {
             std.debug.assert(product_control.decideTransportFailure(.{
                 .stage = .snapshot_transport,
@@ -808,6 +808,11 @@ pub const Dispatcher = struct {
             return err;
         };
         return encodeSnapshotDescriptor(output, descriptor);
+    }
+
+    fn cancelSnapshotRead(context: *anyopaque, read_id: u64) void {
+        const control: *product_control.Runtime = @ptrCast(@alignCast(context));
+        control.cancelSnapshotRead(read_id);
     }
 
     fn encodeSnapshotDescriptor(output: []u8, descriptor: product_delivery.SnapshotDescriptor) ![]const u8 {
@@ -837,9 +842,8 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        const snapshot_id = try handlers.parseWireId(parsed.value.snapshotId);
-        const offset = std.fmt.parseInt(usize, parsed.value.offset, 10) catch
-            return error.InvalidBridgePayload;
+        const snapshot_id = parsed.value.snapshotId.value;
+        const offset = std.math.cast(usize, parsed.value.offset.value) orelse return error.InvalidBridgePayload;
         const chunk = self.delivery.snapshotChunk(
             invocation.source.window_id,
             (try self.requireProductControl()).projectionSecurityEpoch(),

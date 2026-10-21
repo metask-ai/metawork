@@ -1,3 +1,6 @@
+import { decodeWorkbenchSnapshot as decodeScopedSnapshot } from "../frontend/src/bridge/decode-contracts.ts";
+import { productViewFixture } from "./test-support/product-view-fixture.mjs";
+import { initialViewScope } from "../frontend/src/bridge/contracts.ts";
 import { decodeProductStateFixture as decodeWorkbenchSnapshot } from "./test-support/decode-product-state-fixture.mjs";
 import { decodeSendInputResult } from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
@@ -3494,4 +3497,58 @@ test("file image preview matches the Host shared fixture", () => {
     ),
   );
   assert.deepEqual(decodeFilePreview(value), value);
+});
+
+test("visible Tasks reject deletion state before any unrelated lifecycle checks", () => {
+  const value = clone(fixture);
+  const scoped = productViewFixture(value, {
+    ...initialViewScope,
+    taskId: value.tasks[0].id,
+  });
+  scoped.taskPage.task.deletionStatus = "failed";
+  assert.throws(
+    () => decodeScopedSnapshot(scoped),
+    /only an archived Task can have deletion state/,
+  );
+});
+
+test("active Compact identity must match the sole active compact", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("completed");
+  const compact = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/compact-interrupted.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  compact.phase = "compacting";
+  task.compacts = [compact];
+  task.activeOperation = { kind: "compact", id: compact.operationId };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  const scoped = productViewFixture(value, {
+    ...initialViewScope,
+    taskId: task.id,
+  });
+  scoped.taskPage.task.activeOperation.id = "8";
+  assert.throws(
+    () => decodeScopedSnapshot(scoped),
+    /active Compact operation must be the only active Task work/,
+  );
+});
+
+test("disabled MCP management rejects a nonbaseline redaction state", () => {
+  const value = clone(fixture);
+  value.mcp.redacted = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(value),
+    /disabled MCP management must use the unavailable view/,
+  );
 });

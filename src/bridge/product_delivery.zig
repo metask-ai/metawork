@@ -61,7 +61,12 @@ pub const SnapshotPreparer = struct {
     context: ?*anyopaque = null,
     prepare_fn: *const fn (?*anyopaque, u64, []u8) anyerror!SnapshotStart,
 };
+pub const SnapshotCancellation = struct {
+    context: *anyopaque,
+    cancel_fn: *const fn (*anyopaque, u64) void,
+};
 pub const SnapshotWriter = struct {
+    cancellation: ?SnapshotCancellation = null,
     context: ?*anyopaque = null,
     write_fn: *const fn (?*anyopaque, []u8) anyerror!SnapshotStart,
     fn write(self: SnapshotWriter, output: []u8) !SnapshotStart {
@@ -81,6 +86,7 @@ pub const Delivery = struct {
     snapshot_security_epoch: u64 = 0,
     snapshot_product_read_id: u64 = 0,
     emitted_security_epoch: u64 = 0,
+    snapshot_cancellation: ?SnapshotCancellation = null,
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Delivery {
         return .{ .snapshot = try snapshot_impl.State.initOwned(allocator) };
@@ -196,8 +202,13 @@ pub const Delivery = struct {
         const generation = try self.requireWindow(window_id);
         if (security_epoch == 0) return error.StaleSnapshot;
         self.invalidateSnapshot();
-        errdefer std.crypto.secureZero(u8, self.snapshot.storage);
+        self.snapshot_cancellation = writer.cancellation;
+        errdefer {
+            std.crypto.secureZero(u8, self.snapshot.storage);
+            self.invalidateSnapshot();
+        }
         const prepared = try writer.write(self.snapshot.storage);
+        self.snapshot_product_read_id = prepared.read_id;
         if (prepared.read_id == 0 or @max(prepared.bytes, prepared.scratch_bytes) > self.snapshot.storage.len)
             return error.InvalidStorage;
         try self.snapshot.publish(prepared.bytes, generation, window_id, snapshot_chunk_bytes);
@@ -248,9 +259,13 @@ pub const Delivery = struct {
     }
 
     fn invalidateSnapshot(self: *Delivery) void {
+        const read_id = self.snapshot_product_read_id;
+        const cancellation = self.snapshot_cancellation;
+        self.snapshot_cancellation = null;
         self.snapshot.invalidate();
         self.snapshot_security_epoch = 0;
         self.snapshot_product_read_id = 0;
+        if (read_id != 0) if (cancellation) |owner| owner.cancel_fn(owner.context, read_id);
     }
 
     fn requireConnection(
@@ -514,5 +529,49 @@ test "Product view pending preparation binds identity and clears its scratch on 
     for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     _ = try delivery.connect(7, transport);
     try std.testing.expectError(error.StaleSnapshot, delivery.prepareSnapshot(7, 2, next.id, preparer));
+    delivery.breakConnection(transport);
+}
+
+test "snapshot revocation cancels the corresponding Product plan exactly once" {
+    const Host = struct {
+        id: u64 = 0,
+        cancelled: usize = 0,
+        bytes: usize = 2,
+        fn write(context: ?*anyopaque, output: []u8) !SnapshotStart {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.id += 1;
+            @memcpy(output[0..2], "{}");
+            return .{ .read_id = self.id, .bytes = self.bytes };
+        }
+        fn cancel(context: *anyopaque, id: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(id == self.id);
+            self.cancelled += 1;
+        }
+        fn emit(_: ?*anyopaque, _: WindowId, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancelTimer(_: ?*anyopaque, _: u64) !void {}
+    };
+    var host: Host = .{};
+    var delivery = try Delivery.init(std.testing.allocator);
+    defer delivery.deinitOwnedBuffers();
+    const transport: Transport = .{ .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancelTimer };
+    _ = try delivery.connect(7, transport);
+    const writer: SnapshotWriter = .{ .context = &host, .write_fn = Host.write, .cancellation = .{ .context = &host, .cancel_fn = Host.cancel } };
+    _ = try delivery.publishSnapshot(7, 1, writer);
+    _ = try delivery.publishSnapshot(7, 1, writer);
+    try std.testing.expectEqual(@as(usize, 1), host.cancelled);
+    _ = try delivery.deliverRevision(2, 2, 1, transport);
+    try std.testing.expectEqual(@as(usize, 2), host.cancelled);
+    host.bytes = 0;
+    _ = try delivery.publishSnapshot(7, 2, writer);
+    delivery.breakConnection(transport);
+    try std.testing.expectEqual(@as(usize, 3), host.cancelled);
+    delivery.breakConnection(transport);
+    try std.testing.expectEqual(@as(usize, 3), host.cancelled);
+    _ = try delivery.connect(7, transport);
+    host.bytes = delivery.snapshot.storage.len + 1;
+    try std.testing.expectError(error.InvalidStorage, delivery.publishSnapshot(7, 2, writer));
+    try std.testing.expectEqual(@as(usize, 4), host.cancelled);
     delivery.breakConnection(transport);
 }

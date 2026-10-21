@@ -6702,6 +6702,10 @@ pub const Runtime = struct {
         self.view_preparation.raw_bytes += size;
     }
 
+    pub fn cancelSnapshotRead(self: *Runtime, read_id: u64) void {
+        if (read_id != 0 and self.view_read.id == read_id) self.cancelSnapshot();
+    }
+
     pub fn cancelSnapshot(self: *Runtime) void {
         self.view_preparation.clear(self.allocator);
         self.view_read.clear(self.allocator);
@@ -20814,4 +20818,17 @@ test "execution reinstall preserves projection for equal authority and revokes c
         try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
         if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
     }
+}
+
+test "transport cancellation cannot revoke a replacement Product read" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var output: [96 * 1024]u8 = undefined;
+    const old = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    var current = try control.writeSnapshot(&output, .{ .task_id = 3 });
+    control.cancelSnapshotRead(old.id);
+    while (current.bytes == 0) current = try control.continueSnapshot(current.id, &output);
+    try control.writeSnapshotRange(current.id, &output, 0, 64);
+    control.cancelSnapshotRead(current.id);
+    try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(current.id, &output, 0, 64));
 }
