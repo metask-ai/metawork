@@ -45,6 +45,8 @@ export const commands = {
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
   previewFile: "metawork.files.preview",
+  readPreviewImage: "metawork.files.preview.readImageChunk",
+  releasePreview: "metawork.files.preview.release",
   fileChangeDiff: "metawork.files.diff",
   beginAttachmentAdd: "metawork.attachments.beginAdd",
   appendAttachmentAdd: "metawork.attachments.appendAdd",

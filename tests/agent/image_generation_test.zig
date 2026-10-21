@@ -1310,7 +1310,6 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
     defer checkpoints.deinit();
     var configuration = image_product.fixture_api.productControlConfiguration();
-    configuration.attachment_images = .{ .prepare_fn = testGeneratedImagePreview };
     configuration.task_persistence = image_product.History.port(&history);
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
@@ -1545,11 +1544,6 @@ test "model image declarations reach canonical Core create restore and set_model
     try std.testing.expectError(error.FileNotFound, h.trace());
 }
 
-fn testGeneratedImagePreview(_: ?*anyopaque, allocator: std.mem.Allocator, _: []const u8, max_bytes: usize) anyerror![]u8 {
-    // Product boundary substitute; public Native preview sizing is tested in Application.
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, allocator, .limited(max_bytes));
-}
-
 fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtime, task_id: u64, run_id: u64) !void {
     const task = control.task_runtime.find(task_id).?;
     var reference: ?[]const u8 = null;
@@ -1565,13 +1559,16 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
         calls: usize = 0,
         state: image_product.control_api.FilePreviewState = .failed,
         image_len: usize = 0,
+        image_id: u64 = 0,
         fn receive(context: *anyopaque, result: image_product.control_api.FilePreviewResult) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             self.state = result.state;
             std.debug.assert(result.content.len == 0 and !result.truncated and !result.redacted);
-            self.image_len = result.image_png.len;
-            if (result.image_png.len != 0) std.debug.assert(std.mem.startsWith(u8, result.image_png, "\x89PNG\r\n\x1a\n"));
+            if (result.image) |image| {
+                self.image_len = image.size_bytes;
+                self.image_id = image.id;
+            }
         }
     };
     var capture: Capture = .{};
@@ -1587,6 +1584,9 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expectEqual(image_product.control_api.FilePreviewState.ready, capture.state);
     try std.testing.expect(capture.image_len > 0);
+    const chunk = try control.readFilePreviewImage(capture.image_id, 0);
+    try std.testing.expect(chunk.len > 0);
+    try std.testing.expect(control.releaseFilePreview(capture.image_id));
     var snapshot: [256 * 1024]u8 = undefined;
     const json = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);

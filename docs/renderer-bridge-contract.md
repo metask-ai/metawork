@@ -116,28 +116,36 @@ revision 1 的 Skill 来源设置提供两个 typed 写入口：`metawork.skills
 {
   "taskId": "17",
   "runId": "23",
-  "fileReferenceId": "task:17:run:23:file:1"
+  "fileReferenceId": "task:17:run:23:file:1",
+  "generation": "1",
+  "previewId": "1"
 }
 ```
 
-三个字段均不可省略或增加替代字段；Task/Run 必须是 canonical decimal `u64`，reference id 必须是 1–128 bytes 的 opaque identity。Renderer 永不提交文件系统路径、URI、shell command、range、Tool name 或 AgentCore handle。Host 只在精确 Task + Run 内解析 reference，不做全局 reference id 扫描。
+五个字段均不可省略或增加替代字段；Task/Run、connection generation 和递增 previewId 必须是 canonical decimal `u64`，reference id 必须是 1–128 bytes 的 opaque identity。Renderer 永不提交文件系统路径、URI、shell command、range、Tool name 或 AgentCore handle。Host 只在精确 Task + Run 内解析 reference，不做全局 reference id 扫描。
 
 response result 精确为：
 
 ```json
 {
-  "state": "ready | missing | restricted | unsupported | changing | error",
+  "state": "ready | busy | stale_security | missing | restricted | unsupported | changing | error",
   "content": "...",
   "truncated": false,
   "redacted": false
 }
 ```
 
-`loading` 只属于 Renderer 临时状态，不进入 wire。仅 `ready` 可以携带正文与 true 的 `truncated/redacted`；其他状态必须精确返回空 `content` 和两个 false。`changing` 表示同一次有界读取的 before/after metadata 连续两次不稳定，不是 FileChange observation。Host 结果编码必须容纳 256 KiB 正文在 JSON escaping 后仍落在 Native SDK 1 MiB async response 上限内；任一解析、authority、容量或 shutdown failure 都以一次 terminal `error` result 收口，不悬挂 responder，也不改用同步 handler。
+`loading` 只属于 Renderer 临时状态，不进入 wire。仅 `ready` 可以携带正文与 true 的 `truncated/redacted`；其他状态必须返回空 `content` 和两个 false。`unsupported` 可以附带 `reason: "image_limit" | "animated_image"`。`changing` 表示同一次有界读取的 before/after metadata 连续两次不稳定，不是 FileChange observation。Host 结果编码必须容纳 256 KiB 正文在 JSON escaping 后仍落在 Native SDK 1 MiB async response 上限内；容量不足独立返回 `busy`，解析、authority 或 shutdown failure 以一次 terminal result 收口，不悬挂 responder。
 
-Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
+Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer。图片类型及实际大小识别后才在 lane 锁内预留原图额度，文本不占图片槽，锁内不执行文件 IO。主线程交付前重新校验 Task、Run、reference locator、Workspace id/epoch/root/authorization，并有界分步扫描当前及历史 Task execution credential（含分步边界及全部尾部字节）。文本仅在 callback 期间借用；图片由 Product 保留不可变原图，释放时 secure-zero。正文不进入 Snapshot、Task persistence、日志或磁盘缓存。
 
-同一 `metawork.files.preview` 接纳 PNG、JPEG 和静态 WebP：worker 在相同路径和 authority 校验下读取最多 10 MiB 原件；主线程通过现有 Native 图片准备 capability 生成最多 384 KiB PNG，并拒绝命中已知 credential 的原件或预览。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { mediaType: "image/png", dataBase64 }`；Base64 最多 524288 字符，总响应仍受 Native SDK 上限约束。文本响应不含 `image`；非 ready 响应不得携带图片。Renderer 仅将这一 closed variant 作为内存中的 PNG 显示，不接收磁盘路径、file URL 或任意 MIME；内联生成图预览与右栏沿用相同请求身份和失败语义，跨 Task 或引用失效不保留图片。
+同一 `metawork.files.preview` 接纳静态 PNG、JPEG 和静态 WebP；不解码、不缩小、不转码。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { token, mediaType, sizeBytes, chunkBytes, width, height, securityEpoch }`。token 是 24 随机字节的小写十六进制串，三个 byte/epoch 字段使用 canonical decimal u64 string，尺寸使用正整数。mediaType 只允许 `image/png | image/jpeg | image/webp`；chunkBytes 固定 `"262143"`。文本响应不含 image；非 ready 响应不得携带图片。容器结构校验允许有效主图或 RIFF 容器之后的尾部数据，但完整原件仍受大小及凭据检查；APNG/动画 WebP 拒绝。
+
+`metawork.files.preview.readImageChunk` 是同步 command，精确接收 `{ generation, previewId, token, offset, securityEpoch }`，只接受所属 window/connection 的 grant 与连续 offset。ready 精确返回 `{ state: "ready", token, offset, bytes, dataBase64 }`，offset/bytes 是 canonical u64 string，每块最多 262143 原始字节，独立 Base64 编码且受 SDK response 上限约束；非 ready 只返回 `{ state: "stale_security" | "restricted" | "expired" | "error" }`。每次读取重新检查 authority、安全代次和期限。`metawork.files.preview.release` 是异步 command，精确接收 `{ generation, previewId }`，返回同 key 加 `released: true`；准备尚未返回 token 时也能取消，ack 表示原图已释放或未创建。先 release 后迟到的同编号 prepare 不得重新创建资源。
+
+Host 原图生命周期合计最多 2 份 / 20 MiB，每次请求总期限 30 秒、交付 grant 闲置期限 15 秒；连接替换、取消、失效、过期及 shutdown 都收口并释放。Renderer 准备请求最多 2 个、接收链路 1 个、显式解码准入 1 个；`busy` 有界重新排队。窗口保留最多 32 张 / 40 MiB 编码字节 / 33554432 像素；额度不足明确反馈，不静默缩图。以上是逻辑准入额度，不是 WebView 物理内存保证。
+
+Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给实际 `<img>` 解码；实际 `decode()` 完成前保持 loading。安全代次变化清除已交付资源；传输中的 `stale_security` 只在观察到更新的 canonical epoch 并重新授权后最多重试一次。关闭、跨 Task、引用/连接失效、内联预览离开保留区域都会取消并释放；打开的标签允许保留 bytes，刷新和关闭后重开重新读取，不建立跨 Task、跨连接或磁盘缓存。模型图片输入准备不属于此协议，继续保持原有策略。
 
 Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 

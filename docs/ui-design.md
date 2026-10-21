@@ -889,9 +889,9 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - 工作过程不提供 fileRefs 预览入口，只允许在 Tool 单行摘要缺少 description/progress 时显示只读 `displayPath`，也不把引用聚合到回复 footer 或右栏列表；正文内联入口按精确引用身份在 Task Panel 打开或激活对应对象标签，只显示用户已经显式打开的文件，不提供全部引用选择器；
 - 文件预览使用 Task Panel 顶部对象标签表达当前路径，活动标签右侧只提供刷新和标签关闭/面板隐藏动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供更弱层级的“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换标签后恢复各文件自己的模式和滚动位置，关闭后重开恢复默认模式；非活动视图不保留隐藏正文；
 - Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，只有 HTTP(S) 链接可按主阅读流相同的 Host handoff 与就地失败反馈打开，不接受 `mailto` 或新增资源读取、网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
-- PNG、JPEG 与静态 WebP 文件在同一预览标签中显示 Host 交付的有界 PNG 图片，保持比例并使用容器内可用空间，不显示源码模式或原始 Base64。
+- 静态 PNG、JPEG 与静态 WebP 文件在同一预览标签中显示 Host 交付的完整原图，实际 WebView 解码完成前保持 loading，完成后按解码尺寸保持比例并使用容器内可用空间，不显示源码模式或原始 Base64。APNG/动画 WebP、单图超限和窗口累计容量不足分别解释原因，不静默缩图；容量不足允许用户关闭现有预览后重试。内联图片离开保留区域释放资源，重新接近时按需读取；
 - 普通文本、代码文件及其他已支持的文本格式显示中性等宽源码，保留空白并允许自身横向滚动，不增加模式切换。源码左侧显示从 1 开始的单列行号；行号与正文共用滚动容器，横向滚动时固定在左侧，不进入文本选择、复制内容或辅助技术朗读，只编号当前实际显示的文件前缀且不推断截断后的未读取行数。已识别且处于 Renderer 高亮预算内的代码文件自动渐进增强为主题适配的语法颜色，Markdown 的“源码”模式同样适用；未知格式、超出预算、模块加载失败、grammar 异常或高亮结果校验失败时静默保留完整纯文本，不自动猜测语言、不增加状态、重试、开关或语言选择。HTML、SVG 与 XML 即使显示 markup 语法颜色也始终只渲染惰性源码，不形成真实元素、执行脚本或加载资源，界面不为这一限制增加常驻提示或说明入口。只有具备经验证的独立隔离容器和受控资源读取能力后才能开放页面渲染，不能复用应用主页面执行 HTML 或放宽安全策略作为临时方案。文件预览不做 diff、range 高亮、自动刷新或文件 watcher；
-- UI-only `loading` 不进入 Host wire；Host 状态精确映射为 `ready | missing | restricted | unsupported | changing | error`。`changing` 与 `error` 可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
+- UI-only `loading` 不进入 Host wire；稳定呈现状态为 `ready | missing | restricted | unsupported | changing | error`，传输的 `busy` 有界重新排队并保持 loading，安全代次重试规则由 [Renderer Bridge 合同](renderer-bridge-contract.md#file-preview-command) 定义。`changing`、`error` 与累计容量不足可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
 - Renderer 为每个文件标签独立维护 request generation。首次打开和刷新推进该标签 generation；关闭标签、切换 Task、reference 从新 snapshot 消失或该标签后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容。切换到其他标签只卸载当前文件 DOM，不清除仍打开标签的已读取 bytes；重新激活 ready 标签不请求，关闭后显式重开才重新请求；
 - File Preview 只陈述“这个 Run 引用了哪个文件，以及它现在可读取的内容”。Renderer 不从 reference kind、Tool 名称、Assistant 文本、Bash 输出或文件后缀推断 create/modify/delete、Output、citation 或 Run 时版本。
 

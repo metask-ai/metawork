@@ -111,7 +111,7 @@ import {
   type TaskModelSelectionResult,
   type ToolView,
   type FileReferenceView,
-  type FilePreview,
+  type FilePreviewResponse,
   type FileChangeDiffResult,
   type UiRecord,
   type WorkbenchSnapshot,
@@ -2005,11 +2005,13 @@ function decodeFileReference(value: unknown, path: string): FileReferenceView {
   };
 }
 
-export function decodeFilePreview(value: unknown): FilePreview {
+export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");
   const hasImage = Object.hasOwn(raw, "image");
+  const hasReason = Object.hasOwn(raw, "reason");
   const item = object(value, "$", [
     ...(hasImage ? ["image"] : []),
+    ...(hasReason ? ["reason"] : []),
     "state",
     "content",
     "truncated",
@@ -2017,42 +2019,132 @@ export function decodeFilePreview(value: unknown): FilePreview {
   ]);
   const state = enumValue(item.state, "$.state", [
     "ready",
+    "busy",
+    "stale_security",
     "missing",
     "restricted",
     "unsupported",
     "changing",
     "error",
   ] as const);
+  const reason = hasReason
+    ? enumValue(item.reason, "$.reason", [
+        "image_limit",
+        "animated_image",
+      ] as const)
+    : undefined;
+  if (reason && state !== "unsupported")
+    fail("$.reason", "reason requires unsupported preview");
   const content = stringValue(item.content, "$.content");
   const truncated = booleanValue(item.truncated, "$.truncated");
   const redacted = booleanValue(item.redacted, "$.redacted");
-  let image: FilePreview["image"];
+  let image: FilePreviewResponse["image"];
   if (hasImage) {
-    const entry = object(item.image, "$.image", ["mediaType", "dataBase64"]);
-    const data = stringValue(entry.dataBase64, "$.image.dataBase64");
+    const entry = object(item.image, "$.image", [
+      "token",
+      "mediaType",
+      "sizeBytes",
+      "width",
+      "height",
+      "chunkBytes",
+      "securityEpoch",
+    ]);
+    const token = stringValue(entry.token, "$.image.token");
+    const mediaType = enumValue(entry.mediaType, "$.image.mediaType", [
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+    ] as const);
+    const sizeBytes = Number(
+      positiveU64WireId(entry.sizeBytes, "$.image.sizeBytes"),
+    );
+    const chunkBytes = Number(
+      positiveU64WireId(entry.chunkBytes, "$.image.chunkBytes"),
+    );
+    const width = positiveNumber(entry.width, "$.image.width");
+    const height = positiveNumber(entry.height, "$.image.height");
+    const securityEpoch = positiveU64WireId(
+      entry.securityEpoch,
+      "$.image.securityEpoch",
+    );
     if (
       state !== "ready" ||
       content !== "" ||
       truncated ||
       redacted ||
-      entry.mediaType !== "image/png" ||
-      data.length > 524288 ||
-      data.length % 4 !== 0 ||
-      !data.startsWith("iVBORw0KGgo") ||
-      !/^[A-Za-z0-9+/]+={0,2}$/.test(data)
+      !/^[a-f0-9]{48}$/.test(token) ||
+      sizeBytes > 10 * 1024 * 1024 ||
+      chunkBytes !== 262143 ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      width > 8192 ||
+      height > 8192 ||
+      width * height > 16777216
     )
-      fail("$.image", "invalid bounded PNG preview");
-    image = { mediaType: "image/png", dataBase64: data };
+      fail("$.image", "invalid bounded original-image descriptor");
+    image = {
+      token,
+      mediaType,
+      sizeBytes,
+      width,
+      height,
+      chunkBytes,
+      securityEpoch,
+    };
   }
-  if (state !== "ready" && (content !== "" || truncated || redacted))
+  if (
+    state !== "ready" &&
+    (hasImage || content !== "" || truncated || redacted)
+  )
     fail("$", "non-ready preview must not publish content or success facts");
-  return {
-    state,
-    content,
-    truncated,
-    redacted,
-    ...(image ? { image } : {}),
-  };
+  return { state, content, truncated, redacted, ...(image ? { image } : {}) };
+}
+export function decodePreviewChunk(value: unknown) {
+  const raw = record(value, "$");
+  const state = enumValue(raw.state, "$.state", [
+    "ready",
+    "stale_security",
+    "restricted",
+    "expired",
+    "error",
+  ] as const);
+  if (state !== "ready") {
+    object(value, "$", ["state"]);
+    return { state };
+  }
+  const item = object(value, "$", [
+    "state",
+    "token",
+    "offset",
+    "bytes",
+    "dataBase64",
+  ]);
+  const token = stringValue(item.token, "$.token");
+  const offset = Number(wireId(item.offset, "$.offset"));
+  const bytes = Number(positiveU64WireId(item.bytes, "$.bytes"));
+  const dataBase64 = stringValue(item.dataBase64, "$.dataBase64");
+  if (
+    !/^[a-f0-9]{48}$/.test(token) ||
+    !Number.isSafeInteger(offset) ||
+    bytes > 262143 ||
+    dataBase64.length !== Math.ceil(bytes / 3) * 4 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)
+  )
+    fail("$", "invalid preview image chunk");
+  return { state, token, offset, bytes, dataBase64 };
+}
+export function decodePreviewRelease(
+  value: unknown,
+  generation: string,
+  previewId: string,
+) {
+  const item = object(value, "$", ["generation", "previewId", "released"]);
+  if (
+    item.generation !== generation ||
+    item.previewId !== previewId ||
+    item.released !== true
+  )
+    fail("$", "invalid preview release confirmation");
 }
 
 export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {

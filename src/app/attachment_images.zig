@@ -5,7 +5,7 @@ const product_control = @import("metawork_product_control");
 const app_platform = @import("platform.zig");
 
 /// Public SDK codec runs on the Native loop thread. Original bytes remain
-/// in the Product store; a bounded PNG serves model input or file preview at the caller's byte ceiling.
+/// in the Product store; a bounded PNG serves model input at its encoded byte ceiling.
 pub fn prepare(context: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8, max_bytes: usize) anyerror![]u8 {
     if (max_bytes == 0 or max_bytes > product_control.max_attachment_preview_bytes) return error.ImageTooLarge;
     const self: *app_platform.Adapter = @ptrCast(@alignCast(context orelse return error.RuntimeUnavailable));
@@ -60,27 +60,4 @@ test "high-entropy previews reduce pixel count and remain within the encoded inp
     // This worst-case preview actually exercises the larger checkpoint string
     // budget after Base64 encoding, instead of proving it with a tiny image.
     try std.testing.expect(std.base64.standard.Encoder.calcSize(preview.len) > 1024 * 1024);
-}
-
-test "file image preview uses the same codec at the Bridge byte ceiling" {
-    const Decoder = struct {
-        fn decode(_: ?*anyopaque, _: []const u8, buffer: []u8, max_pixels: usize) anyerror!native_sdk.platform.DecodedImage {
-            const width = @min(max_pixels, 1200);
-            const height = max_pixels / width;
-            const pixels = buffer[0 .. width * height * 4];
-            var state: u32 = 12345;
-            for (pixels) |*byte| {
-                state = state *% 1664525 +% 1013904223;
-                byte.* = @truncate(state >> 24);
-            }
-            return .{ .width = width, .height = height, .rgba8 = pixels };
-        }
-    };
-    var platform = app_platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer platform.deinit();
-    platform.platform_services = .{ .decode_image_fn = Decoder.decode };
-    const preview = try prepare(&platform, std.testing.allocator, "source", 384 * 1024);
-    defer std.testing.allocator.free(preview);
-    try std.testing.expect(preview.len <= 384 * 1024);
-    try std.testing.expectEqualSlices(u8, &native_sdk.canvas.png.signature, preview[0..8]);
 }

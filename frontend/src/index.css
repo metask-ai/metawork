@@ -9781,3 +9781,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   max-height: 100%;
   object-fit: contain;
 }
+
+.file-preview-decoded {
+  display: grid;
+  width: 100%;
+}
+.file-preview-decoded > img,
+.file-preview-decoded > .file-preview-image-feedback {
+  grid-area: 1 / 1;
+}
+.file-preview-decoded[data-ready="false"] > img {
+  visibility: hidden;
+}
+.file-preview-image-feedback {
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  min-height: 100px;
+}

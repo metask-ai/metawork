@@ -282,6 +282,11 @@ pub fn build(b: *std.Build) void {
     artifacts.tests.step.dependOn(&projection_performance_tests.step);
     b.step("test-projection-performance", "Measure legal maximum scoped Product presentation budgets").dependOn(&b.addRunArtifact(projection_performance_tests).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
+    const file_preview_step = b.step("test-file-preview", "Run image container, preview lane and Product resource tests");
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.bridge, .filters = &.{"file preview"} })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_file_preview })).step);
+    file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_control_runtime, .filters = &.{ "file preview", "File Preview" } })).step);
     for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_task_runtime, test_modules.product_control_runtime }) |module| {
         product_views_step.dependOn(&b.addRunArtifact(b.addTest(.{
             .root_module = module,
@@ -1432,6 +1437,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    file_preview.addImport("image_container", image_container);
     const product_workspace_automatic_root = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/automatic_root.zig"),
         .target = target,

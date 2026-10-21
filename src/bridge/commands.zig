@@ -46,6 +46,8 @@ pub const mcp_refresh_catalog = "metawork.mcp.refreshCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const preview_file = "metawork.files.preview";
+pub const read_preview_image = "metawork.files.preview.readImageChunk";
+pub const release_preview = "metawork.files.preview.release";
 pub const diff_file = "metawork.files.diff";
 pub const begin_attachment_add = "metawork.attachments.beginAdd";
 pub const append_attachment_add = "metawork.attachments.appendAdd";
@@ -146,6 +148,8 @@ pub const product = [_][]const u8{
     snapshot,
     snapshot_chunk,
     preview_file,
+    read_preview_image,
+    release_preview,
     diff_file,
     begin_attachment_add,
     append_attachment_add,

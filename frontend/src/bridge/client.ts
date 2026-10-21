@@ -1,3 +1,4 @@
+import { FilePreviewLoader } from "./file-preview.ts";
 import { object } from "./wire-codec.ts";
 import { decodeSendInputResult } from "./decode-contracts.ts";
 import {
@@ -22,6 +23,7 @@ import type {
   UiResponsePayload,
   WorkspaceChoice,
   FilePreview,
+  FilePreviewLoadOptions,
   FileChangeDiffResult,
   ModelMetadata,
   SkillSourceBrand,
@@ -67,7 +69,6 @@ import {
   decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
-  decodeFilePreview,
   decodeFileChangeDiff,
   decodeAttachmentReleaseResult,
   decodeAttachmentAddBegin,
@@ -120,6 +121,10 @@ export class BridgeClient {
       }
     | undefined;
   private nextReceiveBatch = 1n;
+  private readonly previews = new FilePreviewLoader(
+    (command, payload) => this.invoke(command, payload),
+    () => this.attachmentConnection?.generation,
+  );
 
   constructor(options: BridgeClientOptions = {}) {
     this.bridgeOverride = options.bridge;
@@ -176,6 +181,7 @@ export class BridgeClient {
         if (notification.generation !== this.attachmentConnection?.generation)
           return;
         this.viewCache.observeSecurityEpoch(notification.securityEpoch);
+        this.previews.observeSecurityEpoch(notification.securityEpoch);
         consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
@@ -197,6 +203,7 @@ export class BridgeClient {
   }
 
   async connect() {
+    this.previews.reset();
     this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
       contractId: RENDERER_BRIDGE_CONTRACT_ID,
@@ -234,8 +241,10 @@ export class BridgeClient {
 
   async disconnect(generation: string) {
     this.viewCache.clear();
-    if (this.attachmentConnection?.generation === generation)
+    if (this.attachmentConnection?.generation === generation) {
+      this.previews.reset();
       this.attachmentConnection = undefined;
+    }
     assertDisconnected(
       await this.invoke(commands.disconnect, { generation }),
       generation,
@@ -256,18 +265,13 @@ export class BridgeClient {
     );
   }
 
-  async previewFile(
+  previewFile(
     taskId: string,
     runId: string,
     fileReferenceId: string,
+    options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
-    return decodeFilePreview(
-      await this.invoke(commands.previewFile, {
-        taskId,
-        runId,
-        fileReferenceId,
-      }),
-    );
+    return this.previews.load(taskId, runId, fileReferenceId, options);
   }
 
   async fileChangeDiff(

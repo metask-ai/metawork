@@ -806,6 +806,11 @@ export const enUS = {
   "tool.output_shortened": "Long details were shortened",
   "privacy.sensitive_hidden": "Sensitive values were hidden",
   "file_preview.title": "File preview",
+  "file_preview.state.capacity":
+    "Image preview limit reached. Close other images and retry.",
+  "file_preview.state.image_limit":
+    "Image exceeds the preview file size or dimension limit.",
+  "file_preview.state.animated_image": "Only static images can be previewed.",
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",
