@@ -12,6 +12,13 @@ import {
   type RendererBridgeContractErrorCode,
 } from "./contract-error.ts";
 
+export class WorkbenchScopeSupersededError extends Error {
+  constructor() {
+    super("Product consumer scope changed");
+    this.name = "WorkbenchScopeSupersededError";
+  }
+}
+
 export type WorkbenchConnectionCallbacks = {
   onSnapshot: (snapshot: WorkbenchSnapshot, generation: string) => void;
   onStatus: (status: WorkbenchConnectionStatus) => void;
@@ -114,11 +121,11 @@ export class WorkbenchConnection {
     if (pageChanged) {
       for (const waiter of this.state.waiters) {
         if (!waiter.scopeBound) continue;
-        waiter.reject(new Error("Product consumer scope changed"));
+        waiter.reject(new WorkbenchScopeSupersededError());
         this.state.waiters.delete(waiter);
       }
     }
-    return this.refresh();
+    return this.refreshView(true);
   }
 
   async start() {
@@ -156,7 +163,13 @@ export class WorkbenchConnection {
     return this.recover(true, options.replaceConnection ?? false);
   }
 
+  // Command reconciliation waits for a fresh installed view of the current
+  // consumer scope. Paging/navigation may replace that scope while it waits.
   refresh(): Promise<void> {
+    return this.refreshView(false);
+  }
+
+  private refreshView(scopeBound: boolean): Promise<void> {
     if (this.stopped)
       return Promise.reject(new Error("Workbench connection is stopped"));
     if (this.contractFault) return Promise.reject(this.contractFault);
@@ -164,7 +177,7 @@ export class WorkbenchConnection {
     if (!state)
       return Promise.reject(new Error("Workbench connection is disconnected"));
     if (state.fault) return Promise.reject(state.fault);
-    return this.requestView(state, true);
+    return this.requestView(state, scopeBound);
   }
 
   private requestView(

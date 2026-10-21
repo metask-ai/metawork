@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { WorkbenchConnection } from "../frontend/src/bridge/connection.ts";
+import {
+  WorkbenchConnection,
+  WorkbenchScopeSupersededError,
+} from "../frontend/src/bridge/connection.ts";
 import { RendererBridgeContractError } from "../frontend/src/bridge/client.ts";
 import { initialViewScope } from "../frontend/src/bridge/contracts.ts";
 import {
@@ -991,7 +994,7 @@ test("scope changes discard old reads and serialize a single merged follow-up", 
   });
   await connection.start();
   const a = connection.setScope({ ...initialViewScope, taskId: "3" });
-  const rejectedA = assert.rejects(a, /scope changed/);
+  const rejectedA = assert.rejects(a, WorkbenchScopeSupersededError);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(reads.length, 2);
   const b = connection.setScope({ ...initialViewScope, taskId: "4" });
@@ -1098,23 +1101,101 @@ test("navigation during bootstrap follows the current scope without converting c
   await flush();
   assert.equal(reads.length, 1);
   const oldRefresh = connection.refresh();
-  const rejected = assert.rejects(oldRefresh, /scope changed/);
+  let refreshed = false;
+  void oldRefresh.then(() => {
+    refreshed = true;
+  });
   const navigation = connection.setScope({
     ...initialViewScope,
     management: "skills",
   });
-  await rejected;
+  assert.equal(refreshed, false);
   reads[0].release();
   await flush();
   assert.equal(reads.length, 2);
   assert.equal(pings, 0);
   assert.equal(reads[1].scope.management, "skills");
   reads[1].release();
-  await Promise.all([startup, navigation]);
+  await Promise.all([startup, navigation, oldRefresh]);
+  assert.equal(refreshed, true);
   assert.deepEqual(published, ["skills"]);
   assert.equal(statuses.at(-1).kind, "connected");
   assert.equal(ready.at(-1), true);
   assert.equal(pings, 1);
   assert.equal(maximum, 1);
+  await connection.stop();
+});
+
+test("committed model refresh follows history refills and completes the second CAS from the installed context", async () => {
+  const reads = [],
+    committed = [],
+    published = [];
+  let current,
+    finished = false;
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: (scope) =>
+      new Promise((resolve) => reads.push({ scope, resolve })),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (view) => {
+      current = view;
+      published.push(view);
+    },
+    onStatus: () => {},
+    onReady: () => {},
+    onViewSyncFailed: () => {},
+  });
+  const start = connection.start();
+  await flush();
+  reads[0].resolve({
+    ...snapshot("1"),
+    scope: reads[0].scope,
+    selectionRevision: "1",
+  });
+  await start;
+  const command = (async () => {
+    committed.push("configure");
+    await connection.refresh();
+    committed.push(["selectDefault", current.selectionRevision]);
+    finished = true;
+  })();
+  await flush();
+  const first = connection.setScope({
+    ...initialViewScope,
+    taskId: "3",
+    beforeRunId: "9",
+  });
+  const cancelled = assert.rejects(first, WorkbenchScopeSupersededError);
+  const refill = connection.setScope({
+    ...initialViewScope,
+    taskId: "3",
+    beforeRunId: "5",
+  });
+  await cancelled;
+  reads[1].resolve({
+    ...snapshot("2"),
+    scope: reads[1].scope,
+    selectionRevision: "2",
+  });
+  await flush();
+  assert.equal(finished, false);
+  assert.equal(reads.length, 3);
+  reads[2].resolve({
+    ...snapshot("3"),
+    scope: reads[2].scope,
+    selectionRevision: "3",
+  });
+  await Promise.all([command, refill]);
+  assert.deepEqual(committed, ["configure", ["selectDefault", "3"]]);
+  assert.deepEqual(
+    published.map((view) => view.revision),
+    ["1", "3"],
+  );
   await connection.stop();
 });
