@@ -6980,3 +6980,83 @@ test("reading memory prunes confirmed deletions while preserving unloaded scopes
   assert.equal(memory.toolDisclosure.has("1:2"), false);
   assert.equal(memory.reading.get("2").scrollTop, 180);
 });
+
+test("same Task history refill restores the visible Run anchor despite changed earlier heights", () => {
+  const memory = createTaskReadingMemory();
+  const value = task({
+    id: "task-a",
+    runs: [
+      run({ id: "1" }),
+      run({ id: "2" }),
+      run({ id: "3" }),
+      run({ id: "4" }),
+    ],
+  });
+  const history = { available: true, loading: false, onLoad() {} };
+  const view = render(taskContentElement(value, "1", { memory, history }));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let earlierHeight = 400,
+    totalHeight = 1600,
+    position = 450;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => totalHeight },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: {
+      configurable: true,
+      get: () => position,
+      set: (value) => {
+        position = value;
+      },
+    },
+  });
+  viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 });
+  function installRunBounds() {
+    for (const node of viewport.querySelectorAll("[data-run-id]")) {
+      node.getBoundingClientRect = () => {
+        const id = Number(node.dataset.runId);
+        const top =
+          100 + (id === 1 ? 0 : earlierHeight + (id - 2) * 400) - position;
+        return { top, bottom: top + (id === 1 ? earlierHeight : 400) };
+      };
+    }
+  }
+  installRunBounds();
+  fireEvent.scroll(viewport);
+  assert.deepEqual(memory.reading.get("task-a").anchor, {
+    runId: "2",
+    offset: -50,
+  });
+  totalHeight = 400;
+  position = 0; // Browser clamps scrollTop after the continuous suffix shrinks.
+  view.rerender(
+    taskContentElement({ ...value, runs: [value.runs[3]] }, "2", {
+      memory,
+      history: { ...history, loading: true },
+    }),
+  );
+  fireEvent.scroll(viewport);
+  assert.equal(memory.reading.get("task-a").scrollTop, 450);
+  earlierHeight = 700;
+  totalHeight = 1900;
+  // Populate/refine DOM geometry before layout effects read the restored interval.
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (!this.dataset.runId) return original.call(this);
+    const id = Number(this.dataset.runId);
+    const top =
+      100 + (id === 1 ? 0 : earlierHeight + (id - 2) * 400) - position;
+    return { top, bottom: top + (id === 1 ? earlierHeight : 400) };
+  };
+  try {
+    view.rerender(taskContentElement(value, "3", { memory, history }));
+    assert.equal(viewport.scrollTop, 750);
+    assert.equal(
+      viewport.querySelector('[data-run-id="2"]').getBoundingClientRect().top,
+      50,
+    );
+    fireEvent.scroll(viewport);
+    assert.equal(memory.reading.get("task-a").anchor.runId, "2");
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = original;
+  }
+});

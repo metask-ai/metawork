@@ -56,7 +56,35 @@ import {
   responseCopyEligible,
 } from "./response-copy.ts";
 
-type ReadingState = { scrollTop: number; followingLatest: boolean };
+type ReadingState = {
+  scrollTop: number;
+  followingLatest: boolean;
+  anchor?: { runId: string; offset: number };
+};
+
+function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
+  const bounds = viewport.getBoundingClientRect();
+  for (const run of viewport.querySelectorAll<HTMLElement>("[data-run-id]")) {
+    const rect = run.getBoundingClientRect();
+    if (rect.bottom > bounds.top && rect.top < bounds.bottom)
+      return { runId: run.dataset.runId!, offset: rect.top - bounds.top };
+  }
+  return undefined;
+}
+
+function restoreReadingAnchor(viewport: HTMLDivElement, saved: ReadingState) {
+  const anchor = saved.anchor;
+  if (!anchor) return false;
+  const run = Array.from(
+    viewport.querySelectorAll<HTMLElement>("[data-run-id]"),
+  ).find((node) => node.dataset.runId === anchor.runId);
+  if (!run) return false;
+  viewport.scrollTop +=
+    run.getBoundingClientRect().top -
+    viewport.getBoundingClientRect().top -
+    anchor.offset;
+  return true;
+}
 export function createTaskReadingMemory() {
   const memory = {
     reading: new Map<string, ReadingState>(),
@@ -430,18 +458,33 @@ export function TaskContent({
       previousTaskId.current = null;
       return;
     }
-    if (previousTaskId.current !== taskId && history?.loading)
+    const intervalShrank =
+      before?.taskId === taskId &&
+      firstRunId &&
+      before.firstRunId &&
+      BigInt(firstRunId) > BigInt(before.firstRunId);
+    if (
+      history?.loading &&
+      (previousTaskId.current !== taskId || intervalShrank)
+    )
       restoringTask.current = taskId;
     if (restoringTask.current === taskId && history?.loading) return;
     if (previousTaskId.current !== taskId || restoringTask.current === taskId) {
       restoringTask.current = null;
       const saved = reading.get(taskId);
-      node.scrollTop = saved?.scrollTop ?? node.scrollHeight;
+      if (!saved || saved.followingLatest) node.scrollTop = node.scrollHeight;
+      else if (!restoreReadingAnchor(node, saved))
+        node.scrollTop = saved.scrollTop;
       setShowJumpLatest(saved ? !saved.followingLatest : false);
       previousTaskId.current = taskId;
       return;
     }
     const saved = reading.get(taskId);
+    if (saved && !saved.followingLatest && restoreReadingAnchor(node, saved)) {
+      reading.set(taskId, { ...saved, scrollTop: node.scrollTop });
+      setShowJumpLatest(true);
+      return;
+    }
     if (
       before?.taskId === taskId &&
       firstRunId &&
@@ -477,6 +520,7 @@ export function TaskContent({
     reading.set(task.id, {
       scrollTop: node.scrollTop,
       followingLatest,
+      anchor: followingLatest ? undefined : readingAnchor(node),
     });
     setShowJumpLatest(!followingLatest);
   }
