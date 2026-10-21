@@ -973,6 +973,7 @@ fn absoluteReferenceRelativePath(
 
 pub const FilePreviewState = file_preview.State;
 pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
+const file_preview_scan_bytes = 256 * 1024;
 
 /// Callback-scoped safe projection. `content` has already passed current
 /// authority and known-credential redaction and must not be retained by the
@@ -1954,7 +1955,8 @@ pub const Runtime = struct {
                 continue;
             }
             if (image.announced) continue;
-            const end = @min(raw.content.len, image.scanned + projection_step_bytes);
+            // Bound each drain without paying one event-loop wake per 32 KiB.
+            const end = @min(raw.content.len, image.scanned + file_preview_scan_bytes);
             const scan_end = end + @min(image.overlap, raw.content.len - end);
             if (self.containsKnownCredential(raw.content[image.scanned..scan_end])) {
                 self.preview_lane.release(image.taken);
@@ -18926,12 +18928,12 @@ test "file preview scans all original bytes including a credential across the sc
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    const bytes = try std.testing.allocator.alloc(u8, projection_step_bytes * 2);
+    const bytes = try std.testing.allocator.alloc(u8, file_preview_scan_bytes * 2);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 'a');
     const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
     @memcpy(bytes[0..jpeg.len], jpeg);
-    @memcpy(bytes[projection_step_bytes - 4 ..][0..10], "SECRET-KEY");
+    @memcpy(bytes[file_preview_scan_bytes - 4 ..][0..10], "SECRET-KEY");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
     var control = try testImagePreviewRuntime(root);
     defer control.deinit();

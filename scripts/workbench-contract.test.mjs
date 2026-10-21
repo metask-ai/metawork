@@ -3460,6 +3460,29 @@ test("Models rejects retired image selection projection and execution authority"
   }
 });
 
+test("file preview preserves explicit refusal reasons", () => {
+  const response = {
+    state: "unsupported",
+    content: "",
+    truncated: false,
+    redacted: false,
+  };
+  for (const reason of ["image_limit", "animated_image"]) {
+    assert.deepEqual(decodeFilePreview({ ...response, reason }), {
+      ...response,
+      reason,
+    });
+    assert.throws(
+      () => decodeFilePreview({ ...response, state: "ready", reason }),
+      /Invalid Host contract/,
+    );
+  }
+  assert.throws(
+    () => decodeFilePreview({ ...response, reason: "unknown" }),
+    /Invalid Host contract/,
+  );
+});
+
 test("file preview admits only bounded ready original image descriptors", () => {
   const value = JSON.parse(
     readFileSync(

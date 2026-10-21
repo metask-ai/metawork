@@ -2097,7 +2097,14 @@ export function decodeFilePreview(value: unknown): FilePreviewResponse {
     (hasImage || content !== "" || truncated || redacted)
   )
     fail("$", "non-ready preview must not publish content or success facts");
-  return { state, content, truncated, redacted, ...(image ? { image } : {}) };
+  return {
+    state,
+    content,
+    truncated,
+    redacted,
+    ...(image ? { image } : {}),
+    ...(reason ? { reason } : {}),
+  };
 }
 export function decodePreviewChunk(value: unknown) {
   const raw = record(value, "$");
