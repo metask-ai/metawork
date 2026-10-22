@@ -712,6 +712,30 @@ export type RunActivity =
 
 export type ConversationCoverage = "included" | "excluded";
 
+export const outputActionStates = [
+  "ready",
+  "revealed",
+  "busy",
+  "missing",
+  "restricted",
+  "changed",
+  "too_large",
+  "cancelled",
+  "timed_out",
+  "stale_security",
+  "unavailable",
+  "failed",
+] as const;
+export type OutputActionState = (typeof outputActionStates)[number];
+export type OutputAction = "check" | "reveal";
+export type OutputActionHandler = (
+  taskId: string,
+  runId: string,
+  outputId: string,
+  action: OutputAction,
+  signal: AbortSignal,
+) => Promise<OutputActionState>;
+
 export type DeliveredOutputView = {
   id: string;
   displayPath: string;

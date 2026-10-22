@@ -96,6 +96,14 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 每个 Run 另精确发布必需的 `outputs` 数组，最多八项；每项精确为 `{ id, displayPath, sizeBytes, redacted }`。id 是非零、32 位小写十六进制的 opaque 成果身份，在 owning Task/Run 内唯一；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只用于显示，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件动作须按自己的 Host 授权与内容校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
 
+## Delivered file actions
+
+`metawork.outputs.action` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, outputId, action }`。前四项为非零 canonical decimal u64 string；outputId 为所属 Task/Run 内非零 32 位小写十六进制成果 ID；action 只允许 `check | reveal`。Renderer 不提交路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection、Task/Run/成果和 Workspace authority。
+
+结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。ready 只表示本次 worker 实际读出的字节与交付身份一致，且结果发布时授权有效，不是未来读取的 grant；revealed 只表示同一条校验链通过后，系统接收了定位 Workspace 源文件的请求，不证明文件管理器已显示。check 不返回 revealed，reveal 不返回 ready。其他失败状态不能发起系统定位；后续每次操作都重新校验。
+
+Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。Product 发布校验结果或执行 Application 定位 effect 前，Bridge 必须再次证明该请求的 connection/window 仍有效且未取消。Renderer 换 Task、成果身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.outputs.cancel` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。期限覆盖排队和执行，超时或 transport 失败不自动重放定位。
+
 ## Office component management
 
 实时上下文块和完整 snapshot 必须包含 `office`，精确为 `{ generation, supported, health, offered, current, updateAvailable, operation, terminal, cleanupPending, actions }`。它复用既有 `context` 块与 revision 1 transport，不增加块目录或协议版本。`generation` 为非零 canonical decimal u64 string；`health = unavailable | ready | read_failed | corrupt | outcome_unknown | restart_required`。`offered` 为 null 或 `{ downloadBytes, installedBytes }`，两项为可为零的 canonical decimal u64 string；`current` 为 null 或 `{ state: ready | damaged | incompatible | unverified }`。projection 不运输组件摘要、下载 URL、目录、进程身份、catalog lease 或原始错误。

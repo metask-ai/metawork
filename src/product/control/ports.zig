@@ -329,3 +329,9 @@ pub const OfficeManagement = struct {
         return self.source_fn(self.context, root, lifetime);
     }
 };
+
+/// Main-loop effect for a currently authorized, hash-verified Output only.
+pub const OutputFileReveal = struct {
+    context: *anyopaque,
+    reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
+};

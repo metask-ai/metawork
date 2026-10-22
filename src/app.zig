@@ -288,6 +288,7 @@ const App = struct {
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
+        control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -363,12 +364,15 @@ const App = struct {
             control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
+            control.shutdownOutputChecks();
             control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
+                control.drainOutputChecks(dispatcher.outputCheckSink());
                 control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
                 dispatcher.settleAttachmentStagingForShutdown();
                 dispatcher.settleFilePreviewsForShutdown();
+                dispatcher.settleOutputActionsForShutdown();
                 dispatcher.settleFileChangeDiffsForShutdown();
             }
         }
@@ -441,6 +445,7 @@ const App = struct {
                         control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
                         );
+                        control.drainOutputChecks(dispatcher.outputCheckSink());
                         control.drainAttachmentStagingCompletions(
                             dispatcher.attachmentStagingSink(),
                         );

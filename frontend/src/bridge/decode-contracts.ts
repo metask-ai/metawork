@@ -1,3 +1,4 @@
+import { outputActionStates } from "./contracts.ts";
 import {
   decodeTaskApprovalResultWire,
   decodeOfficeComponentView,
@@ -125,6 +126,24 @@ import {
 } from "./contracts.ts";
 
 type JsonObject = Record<string, unknown>;
+
+export function decodeOutputActionResult(value: unknown) {
+  const item = object(value, "$", ["generation", "operationId", "state"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    operationId: positiveU64WireId(item.operationId, "$.operationId"),
+    state: enumValue(item.state, "$.state", outputActionStates),
+  };
+}
+
+export function decodeOutputActionCancel(value: unknown) {
+  const item = object(value, "$", ["generation", "operationId", "cancelled"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    operationId: positiveU64WireId(item.operationId, "$.operationId"),
+    cancelled: booleanValue(item.cancelled, "$.cancelled"),
+  };
+}
 
 export function decodeExternalLinkOpenResult(value: unknown) {
   const item = object(value, "$", ["outcome"]);

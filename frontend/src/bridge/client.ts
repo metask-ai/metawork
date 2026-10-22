@@ -1,7 +1,11 @@
 import { FilePreviewLoader } from "./file-preview.ts";
 import { decodeOfficeComponentResult } from "./generated-wire.ts";
 import { object } from "./wire-codec.ts";
-import { decodeSendInputResult } from "./decode-contracts.ts";
+import {
+  decodeOutputActionResult,
+  decodeOutputActionCancel,
+  decodeSendInputResult,
+} from "./decode-contracts.ts";
 import {
   commands,
   events,
@@ -11,6 +15,8 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  OutputAction,
+  OutputActionState,
   ViewScope,
   McpHttpConnectionInput,
   McpSecretSlot,
@@ -122,6 +128,7 @@ export class BridgeClient {
       }
     | undefined;
   private nextReceiveBatch = 1n;
+  private nextOutputOperation = 1n;
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
     () => this.attachmentConnection?.generation,
@@ -138,16 +145,19 @@ export class BridgeClient {
     return bridge;
   }
 
-  private invoke(command: string, payload: NativeSdkJson) {
+  private invoke(
+    command: string,
+    payload: NativeSdkJson,
+    timeoutMs = this.commandTimeoutMs,
+  ) {
     const pending = this.bridge().invoke(command, payload);
-    if (this.commandTimeoutMs <= 0) return pending;
+    if (timeoutMs <= 0) return pending;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () =>
-          reject(new BridgeCommandTimeoutError(command, this.commandTimeoutMs)),
-        this.commandTimeoutMs,
+        () => reject(new BridgeCommandTimeoutError(command, timeoutMs)),
+        timeoutMs,
       );
     });
     return Promise.race([pending, timeout]).finally(() => {
@@ -237,6 +247,7 @@ export class BridgeClient {
       ...result.attachmentInput,
     };
     this.nextReceiveBatch = 1n;
+    this.nextOutputOperation = 1n;
     return result.generation;
   }
 
@@ -264,6 +275,77 @@ export class BridgeClient {
     return decodeExternalLinkOpenResult(
       await this.invoke(commands.openExternalLink, { url }),
     );
+  }
+
+  async outputAction(
+    taskId: string,
+    runId: string,
+    outputId: string,
+    action: OutputAction,
+    signal: AbortSignal,
+  ): Promise<OutputActionState> {
+    const connection = this.attachmentConnection;
+    if (!connection) throw new Error("Host connection is unavailable");
+    if (signal.aborted)
+      throw new DOMException("Output action cancelled", "AbortError");
+    if (this.nextOutputOperation > 18446744073709551615n)
+      throw new Error("Output operation identity exhausted");
+    const key = {
+      generation: connection.generation,
+      operationId: String(this.nextOutputOperation++),
+    };
+    const matches = (result: { generation: string; operationId: string }) => {
+      if (
+        result.generation !== key.generation ||
+        result.operationId !== key.operationId
+      )
+        throw new RendererBridgeContractError(
+          "invalid_response",
+          "Output operation identity mismatch",
+        );
+    };
+    let cancelled = false;
+    const cancel = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (this.attachmentConnection?.generation !== key.generation) return;
+      void this.invoke(commands.cancelOutputAction, key)
+        .then(decodeOutputActionCancel)
+        .then(matches)
+        .catch(() => undefined);
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const result = decodeOutputActionResult(
+        await this.invoke(
+          commands.outputAction,
+          { ...key, taskId, runId, outputId, action },
+          this.commandTimeoutMs <= 0
+            ? 0
+            : Math.max(35_000, this.commandTimeoutMs),
+        ),
+      );
+      matches(result);
+      if (
+        signal.aborted ||
+        this.attachmentConnection?.generation !== key.generation
+      )
+        throw new DOMException("Output action cancelled", "AbortError");
+      if (
+        (action === "check" && result.state === "revealed") ||
+        (action === "reveal" && result.state === "ready")
+      )
+        throw new RendererBridgeContractError(
+          "invalid_response",
+          "Output action result mismatch",
+        );
+      return result.state;
+    } catch (error) {
+      cancel();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
   }
 
   previewFile(

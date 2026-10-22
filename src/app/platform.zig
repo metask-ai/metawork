@@ -58,6 +58,20 @@ pub const Adapter = struct {
         self.window.deinit();
     }
 
+    pub fn outputFileReveal(self: *Adapter) control_ports.OutputFileReveal {
+        return .{ .context = self, .reveal_fn = revealOutputFile };
+    }
+
+    fn revealOutputFile(context: *anyopaque, root: []const u8, relative: []const u8) !void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        if (!std.fs.path.isAbsolute(root)) return error.InvalidPath;
+        try @import("app_output_file").validatePath(relative);
+        const path = try std.fs.path.join(std.heap.c_allocator, &.{ root, relative });
+        defer std.heap.c_allocator.free(path);
+        try (self.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+    }
+
     pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {
         return self.platform_services;
     }
@@ -678,4 +692,36 @@ test "SDK consumption file picker keeps multi-selection cancel and Runtime valid
     try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, options, &.{}));
     try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, .{ .title = "bad\x00title" }, &output));
     try std.testing.expectEqual(@as(usize, 3), Spy.calls);
+}
+
+test "Output location uses the SDK Runtime reveal boundary and rejects invalid input before the platform" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        fn reveal(_: ?*anyopaque, path: []const u8) !void {
+            calls += 1;
+            try std.testing.expect(std.mem.endsWith(u8, path, "report.docx"));
+            if (fail) return error.InjectedRevealFailure;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.reveal_path_fn = Spy.reveal;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.outputFileReveal();
+    const root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace";
+    try port.reveal_fn(port.context, root, "report.docx");
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expectError(error.InvalidOutputPath, port.reveal_fn(port.context, root, "../report.docx"));
+    try std.testing.expectError(error.InvalidPath, port.reveal_fn(port.context, "relative", "report.docx"));
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    Spy.fail = true;
+    try std.testing.expectError(error.InjectedRevealFailure, port.reveal_fn(port.context, root, "report.docx"));
+    adapter.native_runtime = null;
+    try std.testing.expectError(error.RuntimeUnavailable, port.reveal_fn(port.context, root, "report.docx"));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }

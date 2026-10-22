@@ -4065,6 +4065,9 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
+                onOutputAction={(taskId, runId, outputId, action, signal) =>
+                  client.outputAction(taskId, runId, outputId, action, signal)
+                }
                 onPrepareRetry={prepareRetry}
                 onPreviewFile={openFilePreview}
                 loadFilePreview={loadFilePreview}

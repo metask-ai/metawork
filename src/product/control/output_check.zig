@@ -27,7 +27,8 @@ pub const Target = struct {
     }
 };
 
-pub const State = enum { ready, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
+pub const Kind = enum { check, reveal };
+pub const State = enum { ready, revealed, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
 pub const max_in_flight = 2;
 const timeout_ns = 30 * std.time.ns_per_s;
 pub const Notifier = struct { context: ?*anyopaque, wake_fn: *const fn (?*anyopaque) bool };
@@ -37,6 +38,7 @@ const Job = struct {
     target: Target,
     delivery: task.OwnedFileDelivery,
     completion_id: u64,
+    kind: Kind,
     notifier: Notifier,
     created_at: std.Io.Timestamp,
     cancelled: std.atomic.Value(bool) = .init(false),
@@ -86,7 +88,7 @@ const Job = struct {
     }
 };
 
-pub const Taken = struct { job: *Job, target: *const Target, completion_id: u64, state: State };
+pub const Taken = struct { job: *Job, target: *const Target, completion_id: u64, kind: Kind, state: State };
 
 pub const Lane = struct {
     executor: ?*executor_impl.Executor = null,
@@ -95,7 +97,7 @@ pub const Lane = struct {
 
     /// Takes both owned values only on success. Admission/release are main-loop
     /// operations; the worker sees only the job's immutable input and atomics.
-    pub fn begin(self: *Lane, io: std.Io, allocator: std.mem.Allocator, notifier: Notifier, completion_id: u64, target: Target, delivery: task.OwnedFileDelivery) !void {
+    pub fn begin(self: *Lane, io: std.Io, allocator: std.mem.Allocator, notifier: Notifier, completion_id: u64, kind: Kind, target: Target, delivery: task.OwnedFileDelivery) !void {
         if (self.stopping) return error.ShuttingDown;
         if (completion_id == 0) return error.InvalidCompletion;
         for (self.jobs) |entry| if (entry) |job| {
@@ -107,7 +109,7 @@ pub const Lane = struct {
         if (self.executor == null) self.executor = try executor_impl.Executor.create(io, allocator, .{ .worker_count = 1, .queue_capacity = max_in_flight });
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
-        job.* = .{ .allocator = allocator, .target = target, .delivery = delivery, .completion_id = completion_id, .notifier = notifier, .created_at = .now(io, .awake) };
+        job.* = .{ .allocator = allocator, .target = target, .delivery = delivery, .completion_id = completion_id, .kind = kind, .notifier = notifier, .created_at = .now(io, .awake) };
         slot.* = job;
         errdefer slot.* = null;
         try self.executor.?.enqueue(.{ .identity = job, .context = job, .execute_fn = Job.execute, .cancel_fn = Job.cancelQueued });
@@ -137,7 +139,7 @@ pub const Lane = struct {
             }
             if (!job.done.load(.acquire) or job.taken) continue;
             job.taken = true;
-            return .{ .job = job, .target = &job.target, .completion_id = job.completion_id, .state = if (job.expired) .timed_out else if (job.cancelled.load(.acquire)) .cancelled else job.state };
+            return .{ .job = job, .target = &job.target, .completion_id = job.completion_id, .kind = job.kind, .state = if (job.expired) .timed_out else if (job.cancelled.load(.acquire)) .cancelled else job.state };
         };
         return null;
     }

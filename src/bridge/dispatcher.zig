@@ -19,7 +19,8 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 9;
+const async_product_handler_count = 10;
+const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
 const max_preview_in_flight: usize = 8;
@@ -210,6 +211,16 @@ pub const Dispatcher = struct {
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
+    const OutputInFlight = struct {
+        completion_id: u64,
+        generation: u64,
+        operation_id: u64,
+        window_id: native_sdk.platform.WindowId,
+        cancelled: bool = false,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: [native_sdk.bridge.max_id_bytes]u8,
+        request_len: usize,
+    };
     const DiffInFlight = struct {
         active: bool = false,
         completion_id: u64 = 0,
@@ -272,6 +283,10 @@ pub const Dispatcher = struct {
     preview_high_water: u64 = 0,
     preview_grants: [2]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
+    output_timer_armed: bool = false,
+    output_in_flight: [2]?OutputInFlight = @splat(null),
+    output_high_water: u64 = 0,
+    next_output_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
     next_diff_completion_id: u64 = 1,
     attachment_in_flight: [max_attachment_in_flight]AttachmentInFlight = @splat(.{}),
@@ -340,6 +355,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
             .{ .name = commands.open_external_link, .function = openExternalLink },
+            .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
@@ -459,6 +475,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[6] = .{ .name = commands.finish_attachment_add, .context = self, .invoke_fn = finishAttachmentAdd };
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
+        self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -497,6 +514,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.cancelOutputConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
@@ -542,6 +560,11 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
+        if (timer_id == output_timer_id) {
+            if (self.control) |control| control.drainOutputChecks(self.outputCheckSink());
+            self.updateOutputTimer();
+            return true;
+        }
         if (timer_id == preview_timer_id) {
             if (self.control) |control| {
                 control.drainFilePreviewCompletions(self.filePreviewSink());
@@ -662,6 +685,7 @@ pub const Dispatcher = struct {
         self.cancelPreviewConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.preview_high_water = 0;
+        self.output_high_water = 0;
         self.grants.invalidate();
         self.skill_grants.invalidate();
         self.releaseAllAttachmentGrants();
@@ -923,6 +947,137 @@ pub const Dispatcher = struct {
         std.base64.standard.Encoder.encodeWriter(&writer, chunk) catch return error.NoSpaceLeft;
         writer.writeAll("\"}") catch return error.NoSpaceLeft;
         return writer.buffered();
+    }
+
+    fn outputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginOutputAction(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Output action rejected") catch {};
+        };
+    }
+
+    fn requireOutputConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64, operation: u64) !void {
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        if (generation == 0 or operation == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+    }
+
+    fn beginOutputAction(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.OutputAction, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        const generation = request.generation.value;
+        const operation = request.operationId.value;
+        try self.requireOutputConnection(invocation, generation, operation);
+        if (operation <= self.output_high_water or request.taskId.value == 0 or request.runId.value == 0) return error.InvalidBridgeId;
+        const id = try handlers.parseOutputId(request.outputId.value);
+        self.output_high_water = operation;
+        const control = try self.requireProductControl();
+        const vacant = for (&self.output_in_flight) |*slot| {
+            if (slot.* == null) break slot;
+        } else {
+            respondOutputAction(responder, invocation.request.id, generation, operation, .busy);
+            return;
+        };
+        if (self.next_output_completion_id == std.math.maxInt(u64)) return error.Capacity;
+        const completion = self.next_output_completion_id;
+        self.next_output_completion_id += 1;
+        vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
+        @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
+        switch (control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value)) {
+            .queued => self.updateOutputTimer(),
+            .immediate => |state| self.completeOutputAction(.{ .completion_id = completion, .state = state }),
+        }
+    }
+
+    pub fn outputCheckSink(self: *Dispatcher) product_control.OutputCheckSink {
+        return .{ .context = self, .request_active_fn = outputRequestActive, .complete_fn = completeOutputFromSink };
+    }
+
+    fn outputRequestActive(context: *anyopaque, completion_id: u64) bool {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        for (self.output_in_flight) |entry| if (entry) |slot| {
+            if (slot.completion_id != completion_id) continue;
+            if (slot.cancelled) return false;
+            self.delivery.validateConnection(slot.generation, slot.window_id) catch return false;
+            return true;
+        };
+        return false;
+    }
+
+    fn completeOutputFromSink(context: *anyopaque, result: product_control.OutputCheckResult) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.completeOutputAction(result);
+    }
+
+    fn completeOutputAction(self: *Dispatcher, result: product_control.OutputCheckResult) void {
+        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            if (slot.completion_id != result.completion_id) continue;
+            const active = outputRequestActive(self, result.completion_id);
+            entry.* = null;
+            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active) result.state else .cancelled);
+            self.updateOutputTimer();
+            return;
+        };
+    }
+
+    fn respondOutputAction(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, generation: u64, operation: u64, state: product_control.OutputCheckState) void {
+        var buffer: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&buffer, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"state\":\"{s}\"}}", .{ generation, operation, @tagName(state) }) catch unreachable;
+        responder.success(request_id, result) catch {};
+    }
+
+    fn cancelOutputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.OutputActionCancel, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = parsed.value.generation.value;
+        const operation = parsed.value.operationId.value;
+        try self.requireOutputConnection(invocation, generation, operation);
+        var cancelled = false;
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
+            slot.cancelled = true;
+            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
+            cancelled = true;
+            break;
+        };
+        return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"cancelled\":{}}}", .{ generation, operation, cancelled });
+    }
+
+    fn updateOutputTimer(self: *Dispatcher) void {
+        const active = if (self.control) |control| control.hasOutputChecks() else false;
+        if (active and !self.output_timer_armed) {
+            self.platform.start_timer_fn(self.platform.context, output_timer_id, 250 * std.time.ns_per_ms, true) catch {
+                self.cancelOutputConnection();
+                return;
+            };
+            self.output_timer_armed = true;
+        } else if (!active and self.output_timer_armed) {
+            self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
+            self.output_timer_armed = false;
+        }
+    }
+
+    fn cancelOutputConnection(self: *Dispatcher) void {
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            slot.cancelled = true;
+            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
+        };
+    }
+
+    pub fn settleOutputActionsForShutdown(self: *Dispatcher) void {
+        if (self.output_timer_armed) self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
+        self.output_timer_armed = false;
+        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            entry.* = null;
+            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
+        };
     }
 
     fn requirePreviewKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, preview_text: []const u8) !struct { generation: u64, preview_id: u64 } {
@@ -7985,4 +8140,102 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     try std.testing.expectEqual(bytes, control.view_read.produced);
     dispatcher.breakConnection();
     try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
+}
+
+test "Output action Bridge binds fixture identities and refuses replay cancellation and disconnected reveal" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: native_sdk.platform.WindowId, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        count: usize = 0,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+            self.count += 1;
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8, window: u64) !void {
+            const handler = native.async_registry.find(commands.output_action).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = window };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "output-test", .command = commands.output_action, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), control: *product_control.Runtime, boundary: *Dispatcher, count: usize) !void {
+            for (0..5000) |_| {
+                _ = boundary.onTimer(output_timer_id);
+                if (self.count >= count) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            _ = control;
+            return error.TestTimeout;
+        }
+    };
+    var effect: product_control.TestSupport.OutputFileEffect = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2 };
+    var capture: Capture = .{};
+    defer if (capture.response) |bytes| std.testing.allocator.free(bytes);
+    var control = try product_control.TestSupport.filePreviewFixture("/tmp/metawork-test");
+    try product_control.TestSupport.recordDeliveredOutputFixture(&control);
+    defer control.deinit();
+    product_control.TestSupport.bindOutputFileEffect(&control, &effect);
+    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    defer boundary.deinit();
+    defer {
+        control.shutdownOutputChecks();
+        control.drainOutputChecks(boundary.outputCheckSink());
+        boundary.settleOutputActionsForShutdown();
+    }
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_action, .{});
+    defer fixture.deinit();
+    const request = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("request").?, .{});
+    defer std.testing.allocator.free(request);
+    try capture.invoke(native, request, 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), effect.prepares);
+    try capture.invoke(native, request, 3);
+    try capture.wait(&control, &boundary, 2);
+    var response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer response.deinit();
+    const result = try std.json.Stringify.valueAlloc(std.testing.allocator, response.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(result);
+    const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result);
+    try capture.invoke(native, request, 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.prepares);
+    const reveal = "{\"generation\":\"1\",\"operationId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(true, .release);
+    try capture.invoke(native, reveal, 3);
+    var output: [256]u8 = undefined;
+    const cancel = native.registry.find(commands.output_action_cancel).?;
+    const ack = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-output", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"2\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    try std.testing.expect(std.mem.indexOf(u8, ack, "\"cancelled\":true") != null);
+    try capture.wait(&control, &boundary, 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), effect.reveals);
+    const third = "{\"generation\":\"1\",\"operationId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(false, .release);
+    try capture.invoke(native, third, 3);
+    try capture.wait(&control, &boundary, 5);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"revealed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.reveals);
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(true, .release);
+    try capture.invoke(native, fourth, 3);
+    boundary.breakConnection();
+    try capture.wait(&control, &boundary, 6);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.reveals);
+    try std.testing.expect(!control.hasOutputChecks());
 }

@@ -91,6 +91,30 @@ pub const ProductViewRequest = struct {
         return request;
     }
 };
+pub const OutputAction = struct {
+    generation: WireId,
+    operationId: WireId,
+    taskId: WireId,
+    runId: WireId,
+    outputId: WireText,
+    action: struct {
+        value: product_control.OutputCheckKind,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const name = try WireText.jsonParse(allocator, source, options);
+            return .{ .value = std.meta.stringToEnum(product_control.OutputCheckKind, name.value) orelse return error.UnexpectedToken };
+        }
+    },
+};
+pub const OutputActionCancel = struct { generation: WireId, operationId: WireId };
+pub fn parseOutputId(value: []const u8) ![16]u8 {
+    if (value.len != 32) return error.InvalidBridgeId;
+    for (value) |byte| if (!(byte >= '0' and byte <= '9') and !(byte >= 'a' and byte <= 'f')) return error.InvalidBridgeId;
+    var id: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&id, value) catch return error.InvalidBridgeId;
+    if (std.mem.allEqual(u8, &id, 0)) return error.InvalidBridgeId;
+    return id;
+}
+
 pub const Empty = struct {};
 pub const WindowChromeRefresh = struct { generation: []const u8 };
 pub const WindowChromeControl = struct {
@@ -1170,4 +1194,24 @@ test "snapshot request scalars reject JSON coercions and accept only canonical w
     var chunk = try parsePayload(ProductSnapshotChunk, "{\"snapshotId\":\"1\",\"offset\":\"0\"}");
     defer chunk.deinit();
     try std.testing.expectEqual(@as(u64, 0), chunk.value.offset.value);
+}
+
+test "Output action strict payload accepts only scoped identities and known actions" {
+    const valid = "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\"}";
+    var parsed = try parsePayload(OutputAction, valid);
+    defer parsed.deinit();
+    _ = try parseOutputId(parsed.value.outputId.value);
+    for ([_][]const u8{ "", "00000000000000000000000000000000", "ABCDEFABCDEFABCDEFABCDEFABCDEFAB", "030303" }) |id|
+        try std.testing.expectError(error.InvalidBridgeId, parseOutputId(id));
+    for ([_][]const u8{
+        "{\"generation\":[49],\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\"}",
+        "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"shell\"}",
+        "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\",\"path\":\"C:/secret\"}",
+    }) |invalid| {
+        if (parsePayload(OutputAction, invalid)) |value| {
+            var owned = value;
+            owned.deinit();
+            return error.InvalidPayloadAccepted;
+        } else |_| {}
+    }
 }

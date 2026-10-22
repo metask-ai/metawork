@@ -57,6 +57,7 @@ pub const TestSupport = runtime_impl.TestSupport;
 pub const ChangeNotifier = runtime_impl.ChangeNotifier;
 pub const OutputFileTarget = runtime_impl.OutputFileTarget;
 pub const OutputCheckState = runtime_impl.OutputCheckState;
+pub const OutputCheckKind = runtime_impl.OutputCheckKind;
 pub const OutputCheckResult = runtime_impl.OutputCheckResult;
 pub const OutputCheckSink = runtime_impl.OutputCheckSink;
 pub const OutputFileAuthorityError = runtime_impl.OutputFileAuthorityError;

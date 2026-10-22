@@ -984,8 +984,9 @@ fn absoluteReferenceRelativePath(
 
 pub const OutputFileTarget = output_check.Target;
 pub const OutputCheckState = output_check.State;
+pub const OutputCheckKind = output_check.Kind;
 pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState };
-pub const OutputCheckSink = struct { context: *anyopaque, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
+pub const OutputCheckSink = struct { context: *anyopaque, request_active_fn: *const fn (*anyopaque, u64) bool, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
 
 pub const OutputFileAuthorityError = error{
     UnknownOutput,
@@ -1337,6 +1338,7 @@ pub const Runtime = struct {
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
+    output_file_reveal: ?control_ports.OutputFileReveal = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1790,7 +1792,7 @@ pub const Runtime = struct {
 
     pub const OutputCheckAdmission = union(enum) { queued, immediate: OutputCheckState };
 
-    pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8) OutputCheckAdmission {
+    pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8, kind: OutputCheckKind) OutputCheckAdmission {
         if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
         var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
             return .{ .immediate = outputCheckAuthorityState(err) };
@@ -1806,7 +1808,7 @@ pub const Runtime = struct {
         self.output_checks.begin(self.io, self.allocator, .{
             .context = self.change_notifier.context,
             .wake_fn = self.change_notifier.wake,
-        }, completion_id, target, delivery) catch |err| {
+        }, completion_id, kind, target, delivery) catch |err| {
             delivery.deinit();
             target.deinit();
             return .{ .immediate = if (err == error.Capacity) .busy else .failed };
@@ -1824,11 +1826,24 @@ pub const Runtime = struct {
 
     pub fn drainOutputChecks(self: *Runtime, sink: OutputCheckSink) void {
         while (self.output_checks.take(self.io)) |taken| {
-            const state = if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            var state = if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            if (state == .ready and taken.kind == .reveal) {
+                state = if (self.output_file_reveal) |reveal| result: {
+                    reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
+                        error.UnsupportedService, error.RuntimeUnavailable => OutputCheckState.unavailable,
+                        else => OutputCheckState.failed,
+                    };
+                    break :result .revealed;
+                } else .unavailable;
+            }
             const completion_id = taken.completion_id;
             self.output_checks.release(taken);
             sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state });
         }
+    }
+
+    pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
+        self.output_file_reveal = reveal;
     }
 
     pub fn shutdownOutputChecks(self: *Runtime) void {
@@ -10233,6 +10248,16 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const OutputFileEffect = OutputCheckHarness;
+    pub fn bindOutputFileEffect(control: *Runtime, effect: *OutputFileEffect) void {
+        effect.bind(control);
+        control.setOutputFileReveal(.{ .context = effect, .reveal_fn = OutputCheckHarness.reveal });
+    }
+
+    pub fn recordDeliveredOutputFixture(control: *Runtime) !void {
+        try recordTestOutput(control, @splat(3), "results/年度报告.docx");
+    }
+
     pub fn filePreviewFixture(root: []const u8) !Runtime {
         return testImagePreviewRuntime(root);
     }
@@ -21751,19 +21776,22 @@ test "Output file target owns its input after the aggregate is released and hand
 
 const OutputCheckHarness = struct {
     main_thread_id: std.Thread.Id,
+    workspace_id: u64 = 1,
     outcome: lifecycle.FileDeliveryInspection = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } },
     entered: std.atomic.Value(bool) = .init(false),
     blocked: std.atomic.Value(bool) = .init(false),
     inspections: std.atomic.Value(usize) = .init(0),
     prepares: usize = 0,
     releases: usize = 0,
+    requester_active: bool = true,
+    reveals: usize = 0,
     results: [16]?OutputCheckResult = @splat(null),
     count: usize = 0,
 
     fn prepare(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
-        std.debug.assert(workspace.id == 1 and workspace.epoch == 1);
+        std.debug.assert(workspace.id == self.workspace_id and workspace.epoch == 1);
         self.prepares += 1;
         return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
     }
@@ -21791,7 +21819,18 @@ const OutputCheckHarness = struct {
     }
 
     fn sink(self: *OutputCheckHarness) OutputCheckSink {
-        return .{ .context = self, .complete_fn = complete };
+        return .{ .context = self, .request_active_fn = requestActive, .complete_fn = complete };
+    }
+
+    fn requestActive(context: *anyopaque, _: u64) bool {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        return self.requester_active;
+    }
+    fn reveal(context: *anyopaque, _: []const u8, path: []const u8) !void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        try std.testing.expectEqualStrings("results/年度报告.docx", path);
+        self.reveals += 1;
     }
 
     fn bind(self: *OutputCheckHarness, control: *Runtime) void {
@@ -21821,7 +21860,7 @@ test "Output check worker distinguishes current bytes from changed or unavailabl
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
-    try std.testing.expectEqual(OutputCheckState.unavailable, control.beginOutputCheck(1, 3, 7, @splat(3)).immediate);
+    try std.testing.expectEqual(OutputCheckState.unavailable, control.beginOutputCheck(1, 3, 7, @splat(3), .check).immediate);
     try std.testing.expect(control.output_checks.executor == null);
     harness.bind(&control);
     const Case = struct { outcome: lifecycle.FileDeliveryInspection, expected: OutputCheckState };
@@ -21836,7 +21875,7 @@ test "Output check worker distinguishes current bytes from changed or unavailabl
     };
     for (cases, 0..) |case, i| {
         harness.outcome = case.outcome;
-        try std.testing.expect(control.beginOutputCheck(i + 1, 3, 7, @splat(3)) == .queued);
+        try std.testing.expect(control.beginOutputCheck(i + 1, 3, 7, @splat(3), .check) == .queued);
         try harness.drainAll(&control);
         try std.testing.expectEqual(case.expected, harness.results[i].?.state);
         try std.testing.expectEqual(i + 1, harness.results[i].?.completion_id);
@@ -21852,10 +21891,10 @@ test "Output check cancellation bounds active and queued work without retaining 
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
     try harness.waitEntered();
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
-    try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3)).immediate);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3), .check).immediate);
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
     try std.testing.expect(control.cancelOutputCheck(2));
     try std.testing.expect(control.cancelOutputCheck(1));
@@ -21874,7 +21913,7 @@ test "Output check completion revalidates authority changed while the worker was
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
     try harness.waitEntered();
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
     harness.blocked.store(false, .release);
@@ -21883,7 +21922,7 @@ test "Output check completion revalidates authority changed while the worker was
     product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
     harness.entered.store(false, .release);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
     try harness.waitEntered();
     control.learnProjectionCredential("new-check-security-boundary");
     harness.blocked.store(false, .release);
@@ -21899,16 +21938,16 @@ test "Output check deadline and shutdown cancel then join before releasing froze
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
     try harness.waitEntered();
     control.output_checks.jobs[0].?.created_at.nanoseconds -= 31 * std.time.ns_per_s;
     try harness.drainAll(&control);
     try std.testing.expectEqual(OutputCheckState.timed_out, harness.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
     harness.entered.store(false, .release);
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
     try harness.waitEntered();
-    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3)) == .queued);
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .check) == .queued);
     control.shutdownOutputChecks();
     // Joined jobs retain their owned effects until the main loop drains them.
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
@@ -21916,5 +21955,29 @@ test "Output check deadline and shutdown cancel then join before releasing froze
     try std.testing.expectEqual(@as(usize, 3), harness.releases);
     try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[1].?.state);
     try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
-    try std.testing.expectEqual(OutputCheckState.failed, control.beginOutputCheck(4, 3, 7, @splat(3)).immediate);
+    try std.testing.expectEqual(OutputCheckState.failed, control.beginOutputCheck(4, 3, 7, @splat(3), .check).immediate);
+}
+
+test "Output reveal requires both verified bytes and an active requester immediately before the main loop effect" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    control.setOutputFileReveal(.{ .context = &harness, .reveal_fn = OutputCheckHarness.reveal });
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } };
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.changed, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } };
+    harness.requester_active = false;
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
 }

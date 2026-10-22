@@ -2005,6 +2005,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "output_action", @embedFile("frontend/src/bridge/__fixtures__/output-action.fixture"));
     product_control_contract_fixture.addOption([]const u8, "delivered_output", @embedFile("frontend/src/bridge/__fixtures__/delivered-output.fixture"));
     product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
@@ -2024,15 +2025,13 @@ fn wireAgentCore(
         "permission_file_target",
         @embedFile("frontend/src/bridge/__fixtures__/permission-file-target.fixture"),
     );
-    product_control_runtime.addOptions(
-        "product_control_contract_fixture",
-        product_control_contract_fixture,
-    );
     product_control_contract_fixture.addOption(
         []const u8,
         "skill_recovery_required",
         @embedFile("frontend/src/bridge/__fixtures__/skill-recovery-required.fixture"),
     );
+    const shared_contract_fixture_module = product_control_contract_fixture.createModule();
+    product_control_runtime.addImport("product_control_contract_fixture", shared_contract_fixture_module);
     const product_control = b.createModule(.{
         .root_source_file = b.path("src/product/control.zig"),
         .target = target,
@@ -2049,6 +2048,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     bridge.addImport("product_view_encoding", view_encoding);
+    bridge.addImport("contract_fixture", shared_contract_fixture_module);
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_product_models_contract", models_contract);

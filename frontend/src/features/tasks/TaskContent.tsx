@@ -17,6 +17,7 @@ import {
 
 import type {
   FileReferenceView,
+  OutputActionHandler,
   PendingUi,
   RunInputView,
   RunOutcome,
@@ -283,6 +284,7 @@ export function TaskContent({
   responseDisabled,
   fileChangesEnabled,
   outputsEnabled,
+  onOutputAction,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -307,6 +309,7 @@ export function TaskContent({
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
   outputsEnabled: boolean;
+  onOutputAction?: OutputActionHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -847,7 +850,15 @@ export function TaskContent({
                   <p>{record.reviewReason}</p>
                 </details>
               ))}
-            {outputsEnabled && <RunOutputs outputs={run.outputs} />}
+            {outputsEnabled && (
+              <RunOutputs
+                outputs={run.outputs}
+                taskId={task.id}
+                runId={run.id}
+                disabled={responseDisabled || !synchronized}
+                onAction={onOutputAction}
+              />
+            )}
             {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}

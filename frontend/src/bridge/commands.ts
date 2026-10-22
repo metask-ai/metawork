@@ -44,6 +44,8 @@ export const commands = {
   mcpRefreshCatalog: "metawork.mcp.refreshCatalog",
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
+  outputAction: "metawork.outputs.action",
+  cancelOutputAction: "metawork.outputs.cancel",
   previewFile: "metawork.files.preview",
   readPreviewImage: "metawork.files.preview.readImageChunk",
   releasePreview: "metawork.files.preview.release",
