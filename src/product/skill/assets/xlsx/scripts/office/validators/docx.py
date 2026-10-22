@@ -4,8 +4,7 @@ Validator for Word document XML files against XSD schemas.
 
 import random
 import re
-import tempfile
-import zipfile
+from archive import read_member
 
 import defusedxml.minidom
 import lxml.etree
@@ -184,18 +183,12 @@ class DOCXSchemaValidator(BaseSchemaValidator):
         count = 0
 
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                with zipfile.ZipFile(original, "r") as zip_ref:
-                    zip_ref.extractall(temp_dir)
-
-                doc_xml_path = temp_dir + "/word/document.xml"
-                root = lxml.etree.parse(doc_xml_path).getroot()
-
-                paragraphs = root.findall(f".//{{{self.WORD_2006_NAMESPACE}}}p")
-                count = len(paragraphs)
+            root = lxml.etree.fromstring(read_member(original, "word/document.xml"))
+            paragraphs = root.findall(f".//{{{self.WORD_2006_NAMESPACE}}}p")
+            count = len(paragraphs)
 
         except Exception as e:
-            print(f"Error counting paragraphs in original document: {e}")
+            raise ValueError(f"Cannot read original document paragraphs: {e}") from e
 
         return count
 

@@ -11,7 +11,8 @@ Rules:
 """
 
 import xml.etree.ElementTree as ET
-import zipfile
+from archive import read_member
+from defusedxml import ElementTree as SafeET
 from pathlib import Path
 
 import defusedxml.minidom
@@ -148,24 +149,19 @@ def get_tracked_change_authors(doc_xml_path: Path) -> dict[str, int]:
 
 def _get_authors_from_docx(docx_path: Path) -> dict[str, int]:
     try:
-        with zipfile.ZipFile(docx_path, "r") as zf:
-            if "word/document.xml" not in zf.namelist():
-                return {}
-            with zf.open("word/document.xml") as f:
-                tree = ET.parse(f)
-                root = tree.getroot()
+        root = SafeET.fromstring(read_member(docx_path, "word/document.xml"))
 
-                namespaces = {"w": WORD_NS}
-                author_attr = f"{{{WORD_NS}}}author"
+        namespaces = {"w": WORD_NS}
+        author_attr = f"{{{WORD_NS}}}author"
 
-                authors: dict[str, int] = {}
-                for tag in ["ins", "del"]:
-                    for elem in root.findall(f".//w:{tag}", namespaces):
-                        author = elem.get(author_attr)
-                        if author:
-                            authors[author] = authors.get(author, 0) + 1
-                return authors
-    except (zipfile.BadZipFile, ET.ParseError):
+        authors: dict[str, int] = {}
+        for tag in ["ins", "del"]:
+            for elem in root.findall(f".//w:{tag}", namespaces):
+                author = elem.get(author_attr)
+                if author:
+                    authors[author] = authors.get(author, 0) + 1
+        return authors
+    except KeyError:
         return {}
 
 

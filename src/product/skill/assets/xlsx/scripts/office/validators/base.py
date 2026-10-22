@@ -788,18 +788,13 @@ class BaseSchemaValidator:
         if self.original_file is None:
             return set()
 
-        import tempfile
-        import zipfile
+        from archive import temporary_extract
 
         xml_file = Path(xml_file).resolve()
         unpacked_dir = self.unpacked_dir.resolve()
         relative_path = xml_file.relative_to(unpacked_dir)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-
-            with zipfile.ZipFile(self.original_file, "r") as zip_ref:
-                zip_ref.extractall(temp_path)
+        with temporary_extract(self.original_file) as temp_path:
 
             original_xml_file = temp_path / relative_path
 

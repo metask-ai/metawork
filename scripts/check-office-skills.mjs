@@ -55,6 +55,11 @@ run(process.execPath, [
   "--check",
 ]);
 run(config.python, [path.join(root, "scripts/check-office-archives.py")]);
+for (const skill of ["docx", "xlsx", "pptx"])
+  run(config.python, [
+    path.join(root, "scripts/check-office-validators.py"),
+    path.join(assets, skill, "scripts/office"),
+  ]);
 const marker = "MetaWork Office smoke";
 run(process.execPath, [
   "-e",
