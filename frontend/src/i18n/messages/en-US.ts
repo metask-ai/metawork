@@ -890,6 +890,16 @@ export const enUS = {
   "file_preview.state.changing":
     "The file changed while it was being read. Try again.",
   "file_preview.state.error": "File preview failed",
+  "outputs.save": "Save as…",
+  "outputs.saving": "Preparing and saving file…",
+  "outputs.cancelling": "Cancelling…",
+  "outputs.state.save_unknown":
+    "Save result is unconfirmed. Check the selected location.",
+  "outputs.state.saved": "File saved",
+  "outputs.state.save_failed": "Could not save the file",
+  "outputs.state.target_changed":
+    "The selected destination changed. Choose it again.",
+  "outputs.state.cleanup_failed": "Temporary file cleanup was incomplete",
   "outputs.check": "Check file",
   "outputs.reveal": "Show in folder",
   "outputs.cancel": "Cancel",

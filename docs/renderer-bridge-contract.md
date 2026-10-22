@@ -98,11 +98,13 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 ## Delivered file actions
 
-`metawork.outputs.action` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, outputId, action }`。前四项为非零 canonical decimal u64 string；outputId 为所属 Task/Run 内非零 32 位小写十六进制成果 ID；action 只允许 `check | reveal`。Renderer 不提交路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection、Task/Run/成果和 Workspace authority。
+`metawork.outputs.action` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, outputId, action }`。前四项为非零 canonical decimal u64 string；outputId 为所属 Task/Run 内非零 32 位小写十六进制成果 ID；action 只允许 `check | reveal | save`。Renderer 不提交路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection、Task/Run/成果和 Workspace authority。
 
-结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。ready 只表示本次 worker 实际读出的字节与交付身份一致，且结果发布时授权有效，不是未来读取的 grant；revealed 只表示同一条校验链通过后，系统接收了定位 Workspace 源文件的请求，不证明文件管理器已显示。check 不返回 revealed，reveal 不返回 ready。其他失败状态不能发起系统定位；后续每次操作都重新校验。
+结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。ready 只表示本次 worker 实际读出的字节与交付身份一致，且结果发布时授权有效，不是未来读取的 grant；revealed 只表示同一条校验链通过后，系统接收了定位 Workspace 源文件的请求，不证明文件管理器已显示。check 不返回 revealed，reveal 不返回 ready；save 不返回 ready/revealed，保存专用终态不出现在其他动作。saved 只证明选定目标已原子发布；save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，不能伪装成成功。其他失败状态不能发起系统定位；后续每次操作都重新校验。
 
-Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。Product 发布校验结果或执行 Application 定位 effect 前，Bridge 必须再次证明该请求的 connection/window 仍有效且未取消。Renderer 换 Task、成果身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.outputs.cancel` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。期限覆盖排队和执行，超时或 transport 失败不自动重放定位。
+Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。Product 发布校验结果或执行 Application 定位 effect 前，Bridge 必须再次证明该请求的 connection/window 仍有效且未取消。Renderer 换 Task、成果身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.outputs.cancel` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
+
+save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路径只在 Host 有界持有。复制并校验完成后，Product 再检查当前成果/Workspace/安全代次，Bridge 再检查请求；通过后形成一次性发布决定，worker 才原子替换目标。决定前取消、失效或超时使 worker 丢弃暂存；决定后等待实际发布结果，不再撤销已授权的动作。断连仍阻止旧内容用于新连接，但不能把已经提交的保存改写成未发生。保存不创建历史成果副本。
 
 ## Office component management
 

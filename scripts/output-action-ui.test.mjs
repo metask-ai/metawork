@@ -157,3 +157,50 @@ test("Task replacement and disconnection invalidate in-flight results; hidden pa
   );
   assert.equal(screen.queryByText("年度报告.docx"), null);
 });
+
+test("Save cancellation waits for the actual Host result and preserves a committed success", async () => {
+  let signal;
+  let finish;
+  render(
+    view({
+      onAction: async (_t, _r, _o, action, s) => {
+        assert.equal(action, "save");
+        signal = s;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  assert.equal(signal.aborted, true);
+  assert.equal(screen.getByRole("button", { name: "Cancel" }).disabled, true);
+  assert.equal(screen.getByRole("status").textContent, "Cancelling…");
+  finish("saved");
+  await screen.findByText("File saved");
+  assert.equal(
+    screen.getByRole("button", { name: "Save as…" }).disabled,
+    false,
+  );
+  assert.equal(screen.queryByText("Operation cancelled"), null);
+});
+
+test("Save transport failure after cancel does not claim the destination was untouched", async () => {
+  let reject;
+  render(
+    view({
+      onAction: async () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  reject(new Error("Transport lost after a possible commit"));
+  await screen.findByText(
+    "Save result is unconfirmed. Check the selected location.",
+  );
+  assert.equal(screen.queryByText("Operation cancelled"), null);
+});

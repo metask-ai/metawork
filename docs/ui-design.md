@@ -905,7 +905,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前 Task 的 Review 标签内并存，不形成跨 Task、跨关闭或持久化的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭 Review 标签、替换其 Run、切换 Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；
 - ready diff 使用等宽 unified-diff 视图，显示新旧双行号与整行增删背景；Renderer 使用 hunk header 计算行号和可证明的未修改行缺口，但不重复显示原始 `@@ … @@` 文本。长行在正文区域横向滚动，路径可截断但必须能取得完整值。malformed 或未识别行安全降级为原文，不执行正文或依赖颜色表达唯一语义；
 - `diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；ready artifact 不提供刷新，只有瞬时 capacity 或普通请求失败提供重试。第一版不合并为累计或 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供语法 token 高亮、Accept/Reject、revert、stage 或 Output 标记；
-- `Outputs` 当前只展示固定 Host 交付动作已验证登记的文件，不从 created 记录、普通引用或工具文本推断。仅真实记录非空时显示紧凑列表；显示交付时大小，路径脱敏时隐藏名称和位置。每项提供“检查文件”和“定位文件”：每次点击独立调用 Host 校验，忙时禁用重复动作并提供取消；检查只表示检查时一致，变化、缺失、受限、超时与失败在该行明确呈现。定位结果只说明系统已接收请求；断连禁用操作，换 Task、失效或卸载取消在途请求并丢弃旧响应。另存、继续修改和文档预览通过各自 Gate 后再开放，不显示占位按钮。链接与结构化成果尚未开放。
+- `Outputs` 当前只展示固定 Host 交付动作已验证登记的文件，不从 created 记录、普通引用或工具文本推断。仅真实记录非空时显示紧凑列表；显示交付时大小，路径脱敏时隐藏名称和位置。每项提供“检查文件”“定位文件”和“另存为”：每次点击独立调用 Host 校验，忙时禁用重复动作并提供取消；取消等待 Host 实际终态，不能立即伪称已取消；检查只表示检查时一致，变化、缺失、受限、超时与失败在该行明确呈现。定位结果只说明系统已接收请求；断连禁用操作，换 Task、失效或卸载取消在途请求并丢弃旧响应。另存只在系统对话框选择目标，不在 Renderer 编辑或显示目标路径；对话框允许正常停留，取消或关闭由系统交互完成。复制后只按 Host 终态显示已保存、目标已变化、失败或清理未完成；发布提交点之后取消被拒绝时继续呈现实际结果。未取得保存终态的 transport 失败只能显示结果未确认并提示检查所选位置，不能断言目标未变化或操作已取消，也不自动重试。继续修改和文档预览通过各自 Gate 后再开放，不显示占位按钮。链接与结构化成果尚未开放。
 
 ### 12.3 Output 卡片
 

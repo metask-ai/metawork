@@ -320,20 +320,26 @@ export class BridgeClient {
         await this.invoke(
           commands.outputAction,
           { ...key, taskId, runId, outputId, action },
-          this.commandTimeoutMs <= 0
+          action === "save" || this.commandTimeoutMs <= 0
             ? 0
             : Math.max(35_000, this.commandTimeoutMs),
         ),
       );
       matches(result);
       if (
-        signal.aborted ||
+        (signal.aborted && action !== "save") ||
         this.attachmentConnection?.generation !== key.generation
       )
         throw new DOMException("Output action cancelled", "AbortError");
       if (
         (action === "check" && result.state === "revealed") ||
-        (action === "reveal" && result.state === "ready")
+        (action === "reveal" && result.state === "ready") ||
+        (action === "save" &&
+          (result.state === "ready" || result.state === "revealed")) ||
+        (action !== "save" &&
+          ["saved", "save_failed", "target_changed", "cleanup_failed"].includes(
+            result.state,
+          ))
       )
         throw new RendererBridgeContractError(
           "invalid_response",

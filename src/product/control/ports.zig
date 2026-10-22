@@ -335,3 +335,30 @@ pub const OutputFileReveal = struct {
     context: *anyopaque,
     reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
 };
+
+/// Callback-scoped source identity. The Application copies this and the picker
+/// selection into an owned effect before returning; no Product pointer escapes.
+pub const OutputFileSaveInput = struct {
+    workspace_root: []const u8,
+    relative_path: []const u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+};
+pub const OutputFileSave = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, OutputFileSaveInput) anyerror!?OwnedOutputSave,
+};
+/// Owned exception to the borrowed coordination ports above. Stage, publish
+/// and discard run only on the worker; release runs after quiescence on main.
+/// Stage/publish must close and discard resources on failure, or report cleanup.
+pub const OwnedOutputSave = struct {
+    context: *anyopaque,
+    stage_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
+    publish_fn: *const fn (*anyopaque) anyerror!void,
+    discard_fn: *const fn (*anyopaque) anyerror!void,
+    release_fn: *const fn (*anyopaque) void,
+    pub fn deinit(self: *OwnedOutputSave) void {
+        self.release_fn(self.context);
+        self.* = undefined;
+    }
+};

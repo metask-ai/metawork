@@ -289,6 +289,7 @@ const App = struct {
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
+        control_storage.setOutputFileSave(self.platform.outputFileSave());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,

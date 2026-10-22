@@ -988,7 +988,10 @@ pub const Dispatcher = struct {
         vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
         @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
         switch (control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value)) {
-            .queued => self.updateOutputTimer(),
+            .queued => {
+                if (vacant.* == null or vacant.*.?.cancelled) _ = control.cancelOutputCheck(completion);
+                self.updateOutputTimer();
+            },
             .immediate => |state| self.completeOutputAction(.{ .completion_id = completion, .state = state }),
         }
     }
@@ -1018,7 +1021,7 @@ pub const Dispatcher = struct {
             if (slot.completion_id != result.completion_id) continue;
             const active = outputRequestActive(self, result.completion_id);
             entry.* = null;
-            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active) result.state else .cancelled);
+            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active or result.committed or result.state == .cleanup_failed) result.state else .cancelled);
             self.updateOutputTimer();
             return;
         };
@@ -1042,8 +1045,11 @@ pub const Dispatcher = struct {
         var cancelled = false;
         for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
             if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
+            if (self.control) |control| {
+                if (control.outputPublicationCommitted(slot.completion_id)) break;
+                _ = control.cancelOutputCheck(slot.completion_id);
+            }
             slot.cancelled = true;
-            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
             cancelled = true;
             break;
         };
@@ -8230,11 +8236,40 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try capture.wait(&control, &boundary, 5);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"revealed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
-    const fourth = "{\"generation\":\"1\",\"operationId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    var save_effect: product_control.TestSupport.OutputSaveEffect = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save_effect.publishing_blocked.store(true, .release);
+    defer save_effect.publishing_blocked.store(false, .release);
+    product_control.TestSupport.bindOutputSaveEffect(&control, &save_effect);
+    var save_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_save, .{});
+    defer save_wire.deinit();
+    const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
+    defer std.testing.allocator.free(save_request);
+    try capture.invoke(native, save_request, 3);
+    for (0..5000) |_| {
+        _ = boundary.onTimer(output_timer_id);
+        if (save_effect.publish_entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestTimeout;
+    const late_cancel = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-save", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"4\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    const expected_cancel = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("cancelTooLate").?, .{});
+    defer std.testing.allocator.free(expected_cancel);
+    try std.testing.expectEqualStrings(expected_cancel, late_cancel);
+    save_effect.publishing_blocked.store(false, .release);
+    try capture.wait(&control, &boundary, 6);
+    var saved = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer saved.deinit();
+    const actual_save = try std.json.Stringify.valueAlloc(std.testing.allocator, saved.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(actual_save);
+    const expected_save = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(expected_save);
+    try std.testing.expectEqualStrings(expected_save, actual_save);
+    try std.testing.expectEqual(@as(usize, 1), save_effect.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save_effect.releases);
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(&control, &boundary, 6);
+    try capture.wait(&control, &boundary, 7);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());

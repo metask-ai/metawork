@@ -985,7 +985,7 @@ fn absoluteReferenceRelativePath(
 pub const OutputFileTarget = output_check.Target;
 pub const OutputCheckState = output_check.State;
 pub const OutputCheckKind = output_check.Kind;
-pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState };
+pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState, committed: bool = false };
 pub const OutputCheckSink = struct { context: *anyopaque, request_active_fn: *const fn (*anyopaque, u64) bool, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
 
 pub const OutputFileAuthorityError = error{
@@ -1339,6 +1339,7 @@ pub const Runtime = struct {
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
+    output_file_save: ?control_ports.OutputFileSave = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1796,23 +1797,29 @@ pub const Runtime = struct {
         if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
         var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
             return .{ .immediate = outputCheckAuthorityState(err) };
-        const preparation = self.file_delivery_preparation orelse {
-            target.deinit();
-            return .{ .immediate = .unavailable };
+        var target_owned = true;
+        defer if (target_owned) target.deinit();
+        var work: output_check.Work = if (kind == .save) save: {
+            const preparation = self.output_file_save orelse return .{ .immediate = .unavailable };
+            const owned = preparation.prepare_fn(preparation.context, .{ .workspace_root = target.workspace_root, .relative_path = target.relative_path, .size_bytes = target.size_bytes, .sha256 = target.sha256 }) catch |err|
+                return .{ .immediate = if (err == error.UnsupportedService or err == error.RuntimeUnavailable) .unavailable else .save_failed };
+            break :save .{ .save = owned orelse return .{ .immediate = .cancelled } };
+        } else inspect: {
+            const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
+            const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
+            break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
         };
-        const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
-        var delivery = preparation.prepare(workspace) orelse {
-            target.deinit();
-            return .{ .immediate = .unavailable };
-        };
+        var work_owned = true;
+        defer if (work_owned) work.deinit();
+        // A Native picker may pump messages; no pre-dialog authority survives it.
+        self.revalidateOutputFileTarget(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
         self.output_checks.begin(self.io, self.allocator, .{
             .context = self.change_notifier.context,
             .wake_fn = self.change_notifier.wake,
-        }, completion_id, kind, target, delivery) catch |err| {
-            delivery.deinit();
-            target.deinit();
+        }, completion_id, kind, target, work) catch |err|
             return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        };
+        target_owned = false;
+        work_owned = false;
         return .queued;
     }
 
@@ -1825,8 +1832,13 @@ pub const Runtime = struct {
     }
 
     pub fn drainOutputChecks(self: *Runtime, sink: OutputCheckSink) void {
+        self.output_checks.expire(self.io);
+        while (self.output_checks.awaitingPublication()) |publication| {
+            const state = if (!sink.request_active_fn(sink.context, publication.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(publication.target)) |_| OutputCheckState.ready else |err| outputCheckAuthorityState(err);
+            self.output_checks.decide(publication, state);
+        }
         while (self.output_checks.take(self.io)) |taken| {
-            var state = if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
             if (state == .ready and taken.kind == .reveal) {
                 state = if (self.output_file_reveal) |reveal| result: {
                     reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
@@ -1838,8 +1850,16 @@ pub const Runtime = struct {
             }
             const completion_id = taken.completion_id;
             self.output_checks.release(taken);
-            sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state });
+            sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state, .committed = taken.committed });
         }
+    }
+
+    pub fn outputPublicationCommitted(self: *const Runtime, completion_id: u64) bool {
+        return self.output_checks.publicationCommitted(completion_id);
+    }
+
+    pub fn setOutputFileSave(self: *Runtime, save: control_ports.OutputFileSave) void {
+        self.output_file_save = save;
     }
 
     pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
@@ -10249,6 +10269,11 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const OutputFileEffect = OutputCheckHarness;
+    pub const OutputSaveEffect = OutputSaveHarness;
+    pub fn bindOutputSaveEffect(control: *Runtime, effect: *OutputSaveEffect) void {
+        effect.bind(control);
+    }
+
     pub fn bindOutputFileEffect(control: *Runtime, effect: *OutputFileEffect) void {
         effect.bind(control);
         control.setOutputFileReveal(.{ .context = effect, .reveal_fn = OutputCheckHarness.reveal });
@@ -21980,4 +22005,139 @@ test "Output reveal requires both verified bytes and an active requester immedia
     try harness.drainAll(&control);
     try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
     try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+}
+
+const OutputSaveHarness = struct {
+    main_thread_id: std.Thread.Id,
+    stage_entered: std.atomic.Value(bool) = .init(false),
+    publish_entered: std.atomic.Value(bool) = .init(false),
+    publishing_blocked: std.atomic.Value(bool) = .init(false),
+    published: std.atomic.Value(usize) = .init(0),
+    discarded: std.atomic.Value(usize) = .init(0),
+    releases: usize = 0,
+    picker_cancel: bool = false,
+    publish_error: bool = false,
+    fn prepare(context: *anyopaque, input: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        try std.testing.expectEqual(@as(u64, 42), input.size_bytes);
+        if (self.picker_cancel) return null;
+        return .{ .context = self, .stage_fn = stage, .publish_fn = publish, .discard_fn = discard, .release_fn = release };
+    }
+    fn stage(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        self.stage_entered.store(true, .release);
+    }
+    fn publish(context: *anyopaque) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        self.publish_entered.store(true, .release);
+        while (self.publishing_blocked.load(.acquire)) std.Thread.yield() catch {};
+        if (self.publish_error) return error.AccessDenied;
+        _ = self.published.fetchAdd(1, .acq_rel);
+    }
+    fn discard(context: *anyopaque) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        _ = self.discarded.fetchAdd(1, .acq_rel);
+    }
+    fn release(context: *anyopaque) void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        self.releases += 1;
+    }
+    fn bind(self: *OutputSaveHarness, control: *Runtime) void {
+        control.setOutputFileSave(.{ .context = self, .prepare_fn = prepare });
+    }
+    fn waitApproval(control: *Runtime) !void {
+        for (0..5000) |_| {
+            if (control.output_checks.awaitingPublication() != null) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+};
+
+test "Save As waits for current publication authority and discards staged bytes when revoked" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.restricted, requester.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save.releases);
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    requester.requester_active = false;
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), save.releases);
+}
+
+test "Save As accepted publication refuses late cancellation and reports its actual terminal result" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save.publishing_blocked.store(true, .release);
+    var control = try testRuntime();
+    defer control.deinit();
+    defer save.publishing_blocked.store(false, .release);
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.drainOutputChecks(requester.sink());
+    for (0..5000) |_| {
+        if (save.publish_entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestTimeout;
+    try std.testing.expect(control.outputPublicationCommitted(1));
+    try std.testing.expect(!control.cancelOutputCheck(1));
+    control.learnProjectionCredential("changed-after-save-commit");
+    requester.requester_active = false;
+    save.publishing_blocked.store(false, .release);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.saved, requester.results[0].?.state);
+    try std.testing.expect(requester.results[0].?.committed);
+    try std.testing.expectEqual(@as(usize, 1), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save.releases);
+}
+
+test "Save As picker cancellation deadline and shutdown preserve the pre-publication boundary" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    save.picker_cancel = true;
+    try std.testing.expectEqual(OutputCheckState.cancelled, control.beginOutputCheck(1, 3, 7, @splat(3), .save).immediate);
+    try std.testing.expect(!control.hasOutputChecks());
+    save.picker_cancel = false;
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.output_checks.decide(control.output_checks.awaitingPublication().?, .timed_out);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.timed_out, requester.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.shutdownOutputChecks();
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), save.releases);
 }

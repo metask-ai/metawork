@@ -59,13 +59,16 @@ function OutputRow({
 }) {
   const { locale, t } = useI18n();
   const nameId = useId();
-  const [pending, setPending] = useState(false);
-  const [state, setState] = useState<OutputActionState | null>(null);
+  const [pending, setPending] = useState<OutputAction | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [state, setState] = useState<OutputActionState | "save_unknown" | null>(
+    null,
+  );
   const active = useRef<AbortController | null>(null);
   useEffect(() => {
     active.current?.abort();
     active.current = null;
-    setPending(false);
+    setPending(null);
     setState(null);
     return () => {
       active.current?.abort();
@@ -92,7 +95,8 @@ function OutputRow({
       return;
     const controller = new AbortController();
     active.current = controller;
-    setPending(true);
+    setPending(action);
+    setCancelling(false);
     setState(null);
     try {
       const result = await onAction(
@@ -102,15 +106,23 @@ function OutputRow({
         action,
         controller.signal,
       );
-      if (!controller.signal.aborted && active.current === controller)
-        setState(result);
+      if (active.current === controller)
+        setState(
+          controller.signal.aborted && action !== "save" ? "cancelled" : result,
+        );
     } catch {
-      if (!controller.signal.aborted && active.current === controller)
-        setState("failed");
+      if (active.current === controller)
+        setState(
+          action === "save"
+            ? "save_unknown"
+            : controller.signal.aborted
+              ? "cancelled"
+              : "failed",
+        );
     } finally {
       if (active.current === controller) {
         active.current = null;
-        setPending(false);
+        setPending(null);
       }
     }
   };
@@ -139,7 +151,7 @@ function OutputRow({
               variant="ghost"
               size="sm"
               aria-describedby={nameId}
-              disabled={disabled || pending || output.redacted}
+              disabled={disabled || pending !== null || output.redacted}
               onClick={() => void perform("check")}
             >
               {t("outputs.check")}
@@ -148,20 +160,29 @@ function OutputRow({
               variant="ghost"
               size="sm"
               aria-describedby={nameId}
-              disabled={disabled || pending || output.redacted}
+              disabled={disabled || pending !== null || output.redacted}
               onClick={() => void perform("reveal")}
             >
               {t("outputs.reveal")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-describedby={nameId}
+              disabled={disabled || pending !== null || output.redacted}
+              onClick={() => void perform("save")}
+            >
+              {t("outputs.save")}
             </Button>
             {pending && (
               <Button
                 variant="ghost"
                 size="sm"
+                disabled={cancelling}
+                aria-describedby={nameId}
                 onClick={() => {
                   active.current?.abort();
-                  active.current = null;
-                  setPending(false);
-                  setState("cancelled");
+                  setCancelling(true);
                 }}
               >
                 {t("outputs.cancel")}
@@ -172,7 +193,13 @@ function OutputRow({
         {(pending || state) && (
           <p className="run-output-status" role="status" aria-live="polite">
             {pending
-              ? t("outputs.checking")
+              ? t(
+                  cancelling
+                    ? "outputs.cancelling"
+                    : pending === "save"
+                      ? "outputs.saving"
+                      : "outputs.checking",
+                )
               : state && t(`outputs.state.${state}`)}
           </p>
         )}

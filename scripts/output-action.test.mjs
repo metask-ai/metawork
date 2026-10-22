@@ -184,3 +184,74 @@ test("Output client rejects an old connection response and never cancels in the 
   await assert.rejects(pending, { name: "AbortError" });
   assert.deepEqual(cancels, []);
 });
+
+test("Save results remain truthful after a cancellation request is too late", async () => {
+  for (const state of [
+    "saved",
+    "save_failed",
+    "target_changed",
+    "cleanup_failed",
+    "cancelled",
+  ]) {
+    let finish;
+    const calls = [];
+    const client = new BridgeClient({
+      bridge: bridge(async (command, payload) => {
+        calls.push({ command, payload });
+        if (command === "metawork.events.connect") return connect();
+        if (command === "metawork.outputs.cancel")
+          return { ...payload, cancelled: state === "cancelled" };
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      }),
+    });
+    await client.connect();
+    const abort = new AbortController();
+    const pending = client.outputAction(
+      "3",
+      "7",
+      fixture.request.outputId,
+      "save",
+      abort.signal,
+    );
+    abort.abort();
+    finish({ ...fixture.result, state });
+    assert.equal(await pending, state);
+    assert.equal(calls[1].payload.action, "save");
+    assert.equal(Object.hasOwn(calls[1].payload, "path"), false);
+  }
+});
+test("Save shared fixture is strict and cannot masquerade as a read or reveal response", async () => {
+  const wire = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/output-save.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeOutputActionResult(wire.result), wire.result);
+  assert.deepEqual(
+    decodeOutputActionCancel(wire.cancelTooLate),
+    wire.cancelTooLate,
+  );
+  const client = new BridgeClient({
+    bridge: bridge(async (command) =>
+      command === "metawork.events.connect"
+        ? connect()
+        : { ...fixture.result, state: "saved" },
+    ),
+  });
+  await client.connect();
+  await assert.rejects(
+    client.outputAction(
+      "3",
+      "7",
+      fixture.request.outputId,
+      "check",
+      new AbortController().signal,
+    ),
+  );
+});

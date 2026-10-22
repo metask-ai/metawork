@@ -715,6 +715,10 @@ export type ConversationCoverage = "included" | "excluded";
 export const outputActionStates = [
   "ready",
   "revealed",
+  "saved",
+  "save_failed",
+  "target_changed",
+  "cleanup_failed",
   "busy",
   "missing",
   "restricted",
@@ -727,7 +731,7 @@ export const outputActionStates = [
   "failed",
 ] as const;
 export type OutputActionState = (typeof outputActionStates)[number];
-export type OutputAction = "check" | "reveal";
+export type OutputAction = "check" | "reveal" | "save";
 export type OutputActionHandler = (
   taskId: string,
   runId: string,
