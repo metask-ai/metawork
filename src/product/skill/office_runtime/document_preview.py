@@ -11,10 +11,12 @@ from decimal import Decimal
 import hashlib
 import json
 import math
+import posixpath
 import re
 from pathlib import Path
 import tempfile
 import zipfile
+from urllib.parse import unquote, urlsplit
 from xml.sax.handler import ContentHandler
 
 from defusedxml import sax
@@ -31,6 +33,7 @@ MAX_COLUMNS = 256
 MAX_VISITED_CELLS = 100_000
 MAX_CELL_BYTES = 32 * 1024
 MAX_XML_ELEMENTS = 1_000_000
+MAX_MEDIA_PIXELS = 16_777_216
 
 
 class SourceText(ContentHandler):
@@ -44,6 +47,9 @@ class SourceText(ContentHandler):
         self.embedded_count = 0
         self.embedded_bytes = 0
         self.embedded_expanded_bytes = 0
+        self.part_names = set()
+        self.part_extensions = set()
+        self.relationship_base = ""
 
     def append(self, target, value):
         data = value.encode("utf-8")
@@ -60,12 +66,26 @@ class SourceText(ContentHandler):
             self.append(self.attributes, value + "\n")
         local = self.stack[-1]
         content_type = attrs.get("ContentType", "").lower()
-        if any(kind in content_type for kind in ("vbaproject", "oleobject", "image/svg+xml")):
+        declared_part_exists = (
+            local == "Override" and unquote(attrs.get("PartName", ""), errors="strict").lstrip("/") in self.part_names
+            or local == "Default" and attrs.get("Extension", "").lower() in self.part_extensions)
+        if declared_part_exists and any(kind in content_type for kind in ("vbaproject", "oleobject", "image/svg+xml")):
             raise ValueError("Preview contains an unsupported content type")
-        if local == "Relationship" and attrs.get("TargetMode") == "External":
-            if not attrs.get("Type", "").endswith("/hyperlink"):
-                raise ValueError("Preview cannot load external document resources")
-            self.omissions.add("external_hyperlinks")
+        if local == "Relationship":
+            target = unquote(attrs.get("Target", ""), errors="strict")
+            uri = urlsplit(target)
+            external = attrs.get("TargetMode", "").lower() == "external"
+            if external:
+                if not attrs.get("Type", "").endswith("/hyperlink"):
+                    raise ValueError("Preview cannot load external document resources")
+                self.omissions.add("external_hyperlinks")
+            elif uri.scheme or uri.netloc or "\\" in target:
+                raise ValueError("Preview relationship has an external target")
+            else:
+                resolved = posixpath.normpath(uri.path.lstrip("/") if uri.path.startswith("/")
+                                             else posixpath.join(self.relationship_base, uri.path))
+                if resolved == ".." or resolved.startswith("../"):
+                    raise ValueError("Preview relationship escapes the package")
         for tag, omission in (("mergeCell", "merged_cells"),
                               ("conditionalFormatting", "conditional_formatting"),
                               ("dataValidation", "data_validation")):
@@ -87,11 +107,20 @@ class SourceText(ContentHandler):
 
 def scan_archive(source, scan, depth=0):
     with zipfile.ZipFile(source) as archive:
+        parts = {item.filename for item in archive.infolist() if not item.is_dir()}
+        extensions = {Path(part).suffix.lower().lstrip(".") for part in parts}
         for info in archive.infolist():
             if info.is_dir():
                 continue
             name = info.filename
             lower = name.lower()
+            if "/media/" in lower:
+                from PIL import Image
+                with archive.open(info) as stream, Image.open(stream) as image:
+                    if (image.format not in ("PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP")
+                            or image.width * image.height > MAX_MEDIA_PIXELS):
+                        raise ValueError("Preview media is unsupported or exceeds the pixel budget")
+                    image.verify()
             if (lower.endswith("vbaproject.bin")
                     or "/activex/" in lower or lower.endswith(".svg")):
                 raise ValueError("Preview contains unsupported active or embedded content")
@@ -130,6 +159,9 @@ def scan_archive(source, scan, depth=0):
                 if lower.startswith(prefix):
                     scan.omissions.add(omission)
             if lower.endswith((".xml", ".rels")):
+                scan.part_names = parts
+                scan.part_extensions = extensions
+                scan.relationship_base = posixpath.dirname(posixpath.dirname(name))
                 with archive.open(name) as stream:
                     sax.parse(stream, scan, forbid_dtd=True,
                               forbid_entities=True, forbid_external=True)

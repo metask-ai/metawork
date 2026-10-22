@@ -181,16 +181,47 @@ await deck.writeFile({fileName:process.argv[2]});
     def test_external_resources_active_content_and_dtd_are_rejected_before_rendering(self):
         for index, (name, content) in enumerate([
             ("word/_rels/document.xml.rels", '<Relationships><Relationship Type="image" TargetMode="External" Target="https://example.invalid/image.png"/></Relationships>'),
+            ("word/_rels/document.xml.rels", '<Relationships><Relationship Type="image" Target="https://example.invalid/image.png"/></Relationships>'),
+            ("word/_rels/document.xml.rels", '<Relationships><Relationship Type="image" Target="../../../outside.png"/></Relationships>'),
             ("word/document.xml", '<!DOCTYPE doc [<!ENTITY x "secret">]><doc>&x;</doc>'),
-            ("[Content_Types].xml", '<Types><Override ContentType="application/vnd.ms-office.vbaProject"/></Types>'),
-            ("[Content_Types].xml", '<Types><Override ContentType="image/svg+xml"/></Types>'),
+            ("[Content_Types].xml", '<Types><Override PartName="/word/opaque.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>'),
+            ("[Content_Types].xml", '<Types><Override PartName="/word/opaque.bin" ContentType="image/svg+xml"/></Types>'),
+            ("[Content_Types].xml", '<Types><Override PartName="/word/opaque%2Ebin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/></Types>'),
+            ("[Content_Types].xml", '<Types><Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/></Types>'),
             ("word/embeddings/object.bin", "object"),
         ]):
             source = self.root / f"rejected-{index}.docx"
             with zipfile.ZipFile(source, "w") as archive:
                 archive.writestr(name, content)
+                if name == "[Content_Types].xml":
+                    archive.writestr("word/opaque.bin", b"nonstandard part name")
             with self.assertRaises((ValueError, DefusedXmlException)):
                 preview.source_text(source)
+
+    def test_unused_default_types_are_safe_but_existing_default_active_parts_are_rejected(self):
+        source = self.root / "unused-default.docx"
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("[Content_Types].xml", '<Types><Default Extension="svg" ContentType="image/svg+xml"/></Types>')
+        preview.source_text(source)
+        with zipfile.ZipFile(source, "a") as archive:
+            archive.writestr("word/media/icon.svg", b"<svg/>")
+        with self.assertRaises(ValueError):
+            preview.source_text(source)
+
+    def test_raster_media_is_checked_by_actual_format_and_pixel_budget(self):
+        png = io.BytesIO()
+        Image.new("RGB", (2, 3), "blue").save(png, format="PNG")
+        source = self.root / "raster.docx"
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("word/media/picture.png", png.getvalue())
+        preview.source_text(source)
+        with patch.object(preview, "MAX_MEDIA_PIXELS", 1), self.assertRaises(ValueError):
+            preview.source_text(source)
+        disguised = self.root / "disguised.docx"
+        with zipfile.ZipFile(disguised, "w") as archive:
+            archive.writestr("word/media/picture.png", b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+        with self.assertRaises(OSError):
+            preview.source_text(disguised)
 
     def test_embedded_chart_workbook_is_bounded_and_its_text_is_scanned(self):
         workbook = self.workbook("embedded.xlsx")
@@ -264,6 +295,18 @@ await deck.writeFile({fileName:process.argv[2]});
         self.assertEqual(json.loads(stdout.getvalue())["status"], "failed")
         self.assertNotIn("private-name", stdout.getvalue())
         self.assertFalse(output.exists())
+
+    @unittest.skipIf(options.source, "Checkout-source mode does not qualify the installed entry command")
+    def test_installed_entry_runs_the_preview_command_and_preserves_source_bytes(self):
+        source = self.workbook("cli-input.xlsx")
+        before = digest(source)
+        output = self.root / "cli-preview"
+        result = subprocess.run([str(COMPONENT / "bin/office.exe"), "preview", str(source), str(output)],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {"status": "success", "kind": "grid", "sheet_count": 2})
+        self.assertEqual(json.loads((output / "preview.json").read_text(encoding="utf-8"))["kind"], "grid")
+        self.assertEqual(digest(source), before)
 
 
 if __name__ == "__main__":
