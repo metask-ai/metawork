@@ -19,10 +19,10 @@ import argparse
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
 
 import defusedxml.minidom
+from office.archive import checked_copy, temporary_extract
 from office.soffice import get_soffice_env
 from PIL import Image, ImageDraw, ImageFont
 
@@ -69,11 +69,10 @@ def main():
     output_path = Path(f"{args.output_prefix}.jpg")
 
     try:
-        slide_info = get_slide_info(input_path)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with checked_copy(input_path) as input_copy, tempfile.TemporaryDirectory() as temp_dir:
+            slide_info = get_slide_info(input_copy)
             temp_path = Path(temp_dir)
-            visible_images = convert_to_images(input_path, temp_path)
+            visible_images = convert_to_images(input_copy, temp_path)
 
             if not visible_images and not any(s["hidden"] for s in slide_info):
                 print("Error: No slides found", file=sys.stderr)
@@ -93,8 +92,8 @@ def main():
 
 
 def get_slide_info(pptx_path: Path) -> list[dict]:
-    with zipfile.ZipFile(pptx_path, "r") as zf:
-        rels_content = zf.read("ppt/_rels/presentation.xml.rels").decode("utf-8")
+    with temporary_extract(pptx_path) as content:
+        rels_content = (content / "ppt/_rels/presentation.xml.rels").read_text(encoding="utf-8")
         rels_dom = defusedxml.minidom.parseString(rels_content)
 
         rid_to_slide = {}
@@ -102,18 +101,28 @@ def get_slide_info(pptx_path: Path) -> list[dict]:
             rid = rel.getAttribute("Id")
             target = rel.getAttribute("Target")
             rel_type = rel.getAttribute("Type")
-            if "slide" in rel_type and target.startswith("slides/"):
-                rid_to_slide[rid] = target.replace("slides/", "")
+            if rel_type.endswith("/slide"):
+                parts = target.split("/")
+                if (len(parts) != 2 or parts[0] != "slides" or not parts[1].endswith(".xml")
+                        or parts[1] in (".", "..") or "\\" in target
+                        or rel.getAttribute("TargetMode") == "External"):
+                    raise ValueError("Unsupported slide relationship target")
+                if not rid or rid in rid_to_slide:
+                    raise ValueError("Missing or duplicate slide relationship identity")
+                rid_to_slide[rid] = parts[1]
 
-        pres_content = zf.read("ppt/presentation.xml").decode("utf-8")
+        pres_content = (content / "ppt/presentation.xml").read_text(encoding="utf-8")
         pres_dom = defusedxml.minidom.parseString(pres_content)
 
         slides = []
         for sld_id in pres_dom.getElementsByTagName("p:sldId"):
             rid = sld_id.getAttribute("r:id")
-            if rid in rid_to_slide:
-                hidden = sld_id.getAttribute("show") == "0"
-                slides.append({"name": rid_to_slide[rid], "hidden": hidden})
+            if rid not in rid_to_slide:
+                raise ValueError("Missing slide relationship")
+            name = rid_to_slide[rid]
+            slide = defusedxml.minidom.parse(str(content / "ppt/slides" / name))
+            hidden = slide.documentElement.getAttribute("show") in ("0", "false")
+            slides.append({"name": name, "hidden": hidden})
 
         return slides
 
@@ -123,6 +132,8 @@ def build_slide_list(
     visible_images: list[Path],
     temp_dir: Path,
 ) -> list[tuple[Path, str]]:
+    if len(visible_images) != sum(not slide["hidden"] for slide in slide_info):
+        raise ValueError("Rendered page count does not match the visible slides")
     if visible_images:
         with Image.open(visible_images[0]) as img:
             placeholder_size = img.size

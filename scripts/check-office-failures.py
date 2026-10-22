@@ -23,6 +23,7 @@ def load(name, path):
 
 recalc = load("office_recalc", assets / "xlsx/scripts/recalc.py")
 accept = load("office_accept", assets / "docx/scripts/accept_changes.py")
+thumbnail = load("office_thumbnail", assets / "pptx/scripts/thumbnail.py")
 
 
 class OfficeFailures(unittest.TestCase):
@@ -169,6 +170,72 @@ class OfficeFailures(unittest.TestCase):
             with patch.object(recalc.subprocess, "run") as process:
                 self.assertIn("cell budget", recalc.recalc(source).get("error", ""))
                 process.assert_not_called()
+
+
+class ThumbnailInputs(unittest.TestCase):
+    def make_deck(self, root, target="slides/slide2.xml", extra=()):
+        deck = Path(root) / "sample.pptx"
+        entries = {
+            "ppt/_rels/presentation.xml.rels": f'''<Relationships>
+              <Relationship Id="visible" Type="http://example/slide" Target="slides/slide1.xml"/>
+              <Relationship Id="hidden" Type="http://example/slide" Target="{target}"/>
+            </Relationships>''',
+            "ppt/presentation.xml": '''<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:sldIdLst><p:sldId r:id="hidden"/><p:sldId r:id="visible"/></p:sldIdLst>
+            </p:presentation>''',
+            "ppt/slides/slide1.xml": '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+            "ppt/slides/slide2.xml": '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" show="false"/>',
+        }
+        entries.update(extra)
+        with zipfile.ZipFile(deck, "w", zipfile.ZIP_DEFLATED) as output:
+            for name, content in entries.items():
+                output.writestr(name, content)
+        return deck
+
+    def test_slide_order_and_hidden_property_come_from_the_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deck = self.make_deck(directory)
+            self.assertEqual(thumbnail.get_slide_info(deck), [
+                {"name": "slide2.xml", "hidden": True}, {"name": "slide1.xml", "hidden": False}])
+
+    def test_unsafe_relationship_or_archive_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for target in ("slides/../../escape.xml", "slides/../escape.xml", "/outside.xml"):
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    thumbnail.get_slide_info(self.make_deck(directory, target))
+            with self.assertRaises(ValueError):
+                thumbnail.get_slide_info(self.make_deck(directory, extra={"../escape": "bad"}))
+
+    def test_missing_visible_render_is_not_silently_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "page count"):
+                thumbnail.build_slide_list([{"name": "slide1.xml", "hidden": False}], [], Path(directory))
+
+    def test_cli_metadata_and_conversion_use_the_same_checked_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deck = self.make_deck(root)
+            original = deck.read_bytes()
+            seen = []
+            inspect = thumbnail.get_slide_info
+            def info(path):
+                self.assertNotEqual(path, deck)
+                seen.append(path)
+                result = inspect(path)
+                deck.write_bytes(b"user changed original after preparation")
+                return result
+            def render(path, temporary):
+                self.assertEqual(path, seen[0])
+                self.assertEqual(path.read_bytes(), original)
+                image = temporary / "visible.jpg"
+                with thumbnail.Image.new("RGB", (40, 30), "white") as content:
+                    content.save(image)
+                return [image]
+            with patch.object(thumbnail, "get_slide_info", side_effect=info), patch.object(thumbnail, "convert_to_images", side_effect=render), patch.object(sys, "argv", ["thumbnail.py", str(deck), str(root / "grid")]):
+                thumbnail.main()
+            self.assertTrue((root / "grid.jpg").is_file())
+            self.assertFalse(seen[0].parent.exists())
+
 
 
 if __name__ == "__main__":
