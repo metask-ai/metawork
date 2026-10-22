@@ -19,37 +19,17 @@ const namespace = "pv";
 // The pinned engine appends registry and operation suffixes below this root.
 // Keep those within its Windows legacy-path limit; no external temp fallback.
 pub const max_root_windows_units = 120;
-pub const Format = enum { docx, pptx, xlsx };
-pub const Kind = enum { pages, grid };
-pub const File = struct { file: []const u8, bytes: u32, sha256: []const u8 };
-pub const Page = struct { file: []const u8, bytes: u32, sha256: []const u8, width: u32, height: u32 };
-pub const Manifest = struct {
-    schema: u8,
-    format: Format,
-    sourceText: File,
-    textScope: []const u8,
-    omissions: []const []const u8,
-    kind: Kind,
-    pages: ?[]Page = null,
-    grid: ?File = null,
-    sheetCount: ?u16 = null,
-};
-pub const Value = struct { kind: enum { number, text, boolean, date, duration, @"error" }, text: []const u8 };
-pub const Cell = struct {
-    row: u32,
-    column: u16,
-    formula: ?[]const u8,
-    value: ?Value,
-    display: []const u8,
-    formatCode: []const u8,
-    formatSupported: bool,
-    bold: bool,
-    italic: bool,
-    alignment: ?[]const u8,
-};
-pub const Sheet = struct { id: []const u8, name: []const u8, hidden: bool, rows: u32, columns: u16, cells: []Cell };
-pub const Grid = struct { schema: u8, calculation: []const u8, sheets: []Sheet };
-pub const Region = struct { sheet: u16, row: u32, column: u16, rows: u16, columns: u16 };
+const contract = @import("product_document_preview_contract");
+pub const Format = contract.Format;
+pub const Kind = contract.Kind;
+pub const File = contract.File;
+pub const Page = contract.Page;
+pub const Manifest = contract.Manifest;
+pub const Value = contract.Value;
+pub const Cell = contract.Cell;
+pub const Sheet = contract.Sheet;
+pub const Grid = contract.Grid;
+pub const Region = contract.Region;
 
 /// Narrow owned lease from Application's validated component registry. Init
 /// consumes it only on success. Release runs on main after physical cleanup.
@@ -106,6 +86,17 @@ pub const Resource = struct {
         errdefer allocator.free(source_root);
         const relative = try allocator.dupe(u8, input.relative);
         return .{ .allocator = allocator, .io = io, .main_thread = main_thread, .environment = environment, .component = .{ .root = component_root, .identity = component.identity, .context = component.context, .release_fn = component.release_fn }, .data_root = data, .source = .{ .root = source_root, .relative = relative, .expected = input.expected }, .operation = operation, .name = std.fmt.bytesToHex(operation, .lower), .format = format };
+    }
+
+    /// Transfer into a narrow owned worker effect. Failure leaves self owned
+    /// by the caller; success invalidates self and keeps the same component pin.
+    pub fn intoOwned(self: *Resource) !contract.Owned {
+        if (std.Thread.getCurrentId() != self.main_thread) return error.WrongPreviewThread;
+        if (self.state != .fresh) return error.InvalidPreviewState;
+        const holder = try self.allocator.create(OwnedResource);
+        holder.* = .{ .resource = self.* };
+        self.* = undefined;
+        return .{ .context = holder, .prepare_fn = OwnedResource.prepare, .material_fn = OwnedResource.material, .read_fn = OwnedResource.read, .cancel_fn = OwnedResource.cancel, .cleanup_fn = OwnedResource.cleanup, .release_fn = OwnedResource.release };
     }
 
     pub fn prepare(self: *Resource, cancellation: *const process.Cancellation) !void {
@@ -483,3 +474,40 @@ test "grid normalization rejects duplicate cells and cannot imply recalculation"
     sheets[0].cells = @constCast(&duplicate);
     try std.testing.expectError(error.InvalidPreviewGrid, validateGrid(&grid, 1));
 }
+
+const OwnedResource = struct {
+    resource: Resource,
+    cancellation: process.Cancellation = .{},
+    fn get(context: *anyopaque) *OwnedResource {
+        return @ptrCast(@alignCast(context));
+    }
+    fn prepare(context: *anyopaque) !void {
+        const self = get(context);
+        try self.resource.prepare(&self.cancellation);
+    }
+    fn material(context: *anyopaque) !contract.Material {
+        const self = get(context);
+        if (std.Thread.getCurrentId() != self.resource.main_thread) return error.WrongPreviewThread;
+        return .{ .manifest = try self.resource.prepared(), .grid = if (self.resource.grid) |*value| &value.value else null, .source_text = self.resource.source_text };
+    }
+    fn read(context: *anyopaque, request: contract.Request) !contract.Read {
+        const self = get(context);
+        return .{ .allocator = self.resource.allocator, .value = switch (request) {
+            .page => |index| .{ .page = try self.resource.page(index, &self.cancellation) },
+            .region => |region| .{ .region = try self.resource.region(region, &self.cancellation) },
+        } };
+    }
+    fn cancel(context: *anyopaque) void {
+        get(context).cancellation.requested.store(true, .release);
+    }
+    fn cleanup(context: *anyopaque) !void {
+        try get(context).resource.cleanup();
+    }
+    fn release(context: *anyopaque) void {
+        const self = get(context);
+        const allocator = self.resource.allocator;
+        // The sole caller is the lane after successful physical cleanup.
+        self.resource.deinit() catch @panic("preview effect released before cleanup");
+        allocator.destroy(self);
+    }
+};

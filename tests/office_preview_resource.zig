@@ -3,6 +3,7 @@
 const std = @import("std");
 const preview = @import("office_preview");
 const process = @import("office_process");
+const document = @import("product_document_preview");
 const Mode = enum { normal, changed, cancel, cancel_live, tamper, root_swap, poison, path_limit, engine_fail };
 const Lease = struct {
     main: std.Thread.Id,
@@ -26,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.randomSecure(init.io, &operation);
     var lease: Lease = .{ .main = std.Thread.getCurrentId() };
     var resource = try preview.Resource.init(init.gpa, init.io, lease.main, init.environ_map, args[4], .{ .root = args[1], .identity = identity, .context = &lease, .release_fn = Lease.release }, .{ .root = args[2], .relative = args[3], .expected = .{ .size_bytes = try std.fmt.parseInt(u64, args[5], 10), .sha256 = digest } }, operation);
+    if (mode == .normal) return qualifyLane(init, &resource, &lease);
     const cancellation: process.Cancellation = .{};
     if (resource.prepare(&cancellation)) |_| return error.MainThreadEffectAccepted else |failure| if (failure != error.MainThreadFileEffect) return failure;
     var blocker: ?process.ResourceScope = if (mode == .poison) try process.ResourceScope.initOperation(operation) else null;
@@ -157,3 +159,60 @@ const Work = struct {
         }
     }
 };
+
+// Normal resources go through the same narrow owned effect and independent
+// Product scheduler. Runtime admission is separate; fault injection above
+// remains resource-only.
+fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Lease) !void {
+    var lane: document.Lane = .{ .io = init.io, .allocator = init.gpa, .main_thread = lease.main, .notifier = .{ .context = null, .wake_fn = laneWake } };
+    defer lane.deinit() catch @panic("qualification cleanup failed");
+    const effect = try resource.intoOwned();
+    lane.open(1, effect) catch |failure| {
+        effect.release_fn(effect.context);
+        return failure;
+    };
+    const prepared = try nextLane(init.io, &lane);
+    const preparation_failure = prepared.failure;
+    lane.finish(prepared);
+    if (preparation_failure) |failure| return failure;
+    const material = try lane.material(1);
+    const pages = if (material.manifest.pages) |items| items.len else 0;
+    const text_bytes = material.source_text.len;
+    var cells: usize = 0;
+    for (0..3) |_| {
+        try lane.read(1, if (pages != 0) .{ .page = 0 } else .{ .region = .{ .sheet = 1, .row = 1, .column = 1, .rows = 10, .columns = 5 } });
+        const taken = try nextLane(init.io, &lane);
+        const failure = taken.failure;
+        if (taken.read) |read| switch (read.value) {
+            .page => {},
+            .region => |items| cells = items.len,
+        };
+        lane.finish(taken);
+        if (failure) |problem| return problem;
+    }
+    if (lease.released) return error.LeaseReleasedBeforeCleanup;
+    _ = lane.close(1);
+    while (lane.hasResources()) {
+        const taken = try nextLane(init.io, &lane);
+        const failure = taken.failure;
+        lane.finish(taken);
+        if (failure) |problem| return problem;
+    }
+    if (!lease.released) return error.LeaseNotReleased;
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(init.io, &buffer);
+    try std.json.Stringify.value(.{ .mode = "normal", .pages = pages, .cells = cells, .source_text_bytes = text_bytes, .read_count = 3, .lease_released = lease.released, .guard = true, .failure_observed = @as(?[]const u8, null), .product_lane = true }, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
+    try writer.interface.flush();
+}
+fn laneWake(_: ?*anyopaque) bool {
+    return true;
+}
+fn nextLane(io: std.Io, lane: *document.Lane) !document.Taken {
+    const start: std.Io.Timestamp = .now(io, .awake);
+    while (start.durationTo(.now(io, .awake)).toMilliseconds() < 150_000) {
+        if (lane.take()) |taken| return taken;
+        try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(2), .clock = .awake } }, io);
+    }
+    return error.QualificationTimeout;
+}

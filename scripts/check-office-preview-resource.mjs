@@ -44,7 +44,7 @@ for (const [name, mode, pathMode] of [
 ]) {
   const owned = path.join(directory, `${results.length}-${mode}`);
   const sourceRoot = path.join(owned, "workspace");
-  let dataRoot = path.join(owned, "数据");
+  let dataRoot = path.join(owned, "鏁版嵁");
   if (pathMode) {
     const base = path.join(owned, "d");
     const target = pathMode === "boundary" ? 120 : 150;
@@ -80,6 +80,7 @@ for (const [name, mode, pathMode] of [
       },
     ),
   );
+  if (mode === "normal") assert.equal(result.product_lane, true);
   assert.equal(result.guard, true);
   assert.equal(result.lease_released, mode !== "poison");
   if (mode === "normal") {
@@ -107,7 +108,7 @@ for (const [name, mode, pathMode] of [
 const evidence = {
   schema: 1,
   scope:
-    "Application resource only; Product/Bridge/Renderer remain unqualified",
+    "Application resource and physical Product lane only; Runtime admission/Bridge/Renderer remain unqualified",
   componentManifestSha256: component.manifestSha256,
   probeSha256: createHash("sha256").update(readFileSync(probe)).digest("hex"),
   results,

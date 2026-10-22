@@ -10,6 +10,7 @@ const versions = @import("office_component_versions.zig");
 const download = @import("office_component_download.zig");
 const process = @import("office_process");
 const preview = @import("office_preview.zig");
+const preview_contract = @import("product_document_preview_contract");
 
 pub const Notify = struct { context: *anyopaque, notify_fn: *const fn (*anyopaque) void };
 const SourceAction = enum { keep, basic, verified };
@@ -60,7 +61,7 @@ pub const Coordinator = struct {
 
     /// Main-only capture of an already verified current version. IO and
     /// process work start later on the preview lane, never during admission.
-    pub fn previewResource(self: *Coordinator, product: ports.OfficeManagement, main_thread: std.Thread.Id, data_root: []const u8, input: preview.Input, operation: [16]u8) !preview.Resource {
+    pub fn previewResource(self: *Coordinator, product: ports.OfficeManagement, main_thread: std.Thread.Id, data_root: []const u8, input: preview.Input, operation: [16]u8) !preview_contract.Owned {
         if (std.Thread.getCurrentId() != main_thread) return error.WrongPreviewThread;
         const current = product.view();
         const version = self.registry.current orelse return error.OfficePreviewUnavailable;
@@ -68,8 +69,16 @@ pub const Coordinator = struct {
             version.retired or version.removing or !std.mem.eql(u8, &current.current.?.identity, &version.record.archive_sha256))
             return error.OfficePreviewUnavailable;
         var pin = try version.pin();
-        errdefer pin.deinit();
-        return preview.Resource.init(self.allocator, self.io, main_thread, self.environment, data_root, .{ .root = version.directory, .identity = version.record.archive_sha256, .context = version, .release_fn = releasePreviewVersion }, input, operation);
+        var transferred = false;
+        errdefer if (!transferred) pin.deinit();
+        var resource = try preview.Resource.init(self.allocator, self.io, main_thread, self.environment, data_root, .{ .root = version.directory, .identity = version.record.archive_sha256, .context = version, .release_fn = releasePreviewVersion }, input, operation);
+        transferred = true;
+        // Once initialized, resource owns the pin, including adapter failure.
+        const owned = resource.intoOwned() catch |failure| {
+            resource.deinit() catch unreachable;
+            return failure;
+        };
+        return owned;
     }
 
     fn releasePreviewVersion(context: *anyopaque) void {
@@ -515,9 +524,9 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     const pointer = coordinator.registry.current.?;
     const references = pointer.references.load(.acquire);
     const preview_input: preview.Input = .{ .root = root, .relative = "not-created.docx", .expected = .{ .size_bytes = 3, .sha256 = @splat(1) } };
-    var resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4));
+    const resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4));
     try std.testing.expectEqual(references + 1, pointer.references.load(.acquire));
-    try resource.deinit(); // no IO occurred; the deliberately absent source is not opened
+    resource.release_fn(resource.context); // no IO occurred; absent source is not opened
     try std.testing.expectEqual(references, pointer.references.load(.acquire));
     var unsupported = preview_input;
     unsupported.relative = "input.pdf";

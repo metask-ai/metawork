@@ -209,6 +209,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
+        .{ .name = "metawork-product-document-preview", .root_module = test_modules.product_document_preview },
         .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
@@ -606,6 +607,7 @@ const WiredModules = struct {
     product_office_component: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
+    product_document_preview: *std.Build.Module,
     product_control_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
@@ -1454,6 +1456,18 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     attachment_staging.addImport("metawork_product_attachment", product_attachment);
+    const document_contract = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview_contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const document_preview = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    document_preview.addImport("product_document_preview_contract", document_contract);
+    document_preview.addImport("product_control_executor", executor);
     const file_preview = b.createModule(.{
         .root_source_file = b.path("src/product/control/file_preview.zig"),
         .target = target,
@@ -2128,6 +2142,8 @@ fn wireAgentCore(
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
     app.addImport("app_output_file", output_file);
+    app.addImport("product_document_preview_contract", document_contract);
+    app.addImport("product_document_preview", document_preview);
     app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);
     app.addImport(
@@ -2253,6 +2269,7 @@ fn wireAgentCore(
         .product_office_component = product_office_component,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
+        .product_document_preview = document_preview,
         .product_control_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
@@ -2384,6 +2401,7 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.B
     });
     preview.addImport("office_process", process);
     preview.addImport("app_output_file", existingImport(app, "app_output_file"));
+    preview.addImport("product_document_preview_contract", existingImport(app, "product_document_preview_contract"));
     preview.addImport("image_container", existingImport(app, "image_container"));
     tests.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "office-preview-resource", .root_module = preview })).step);
     const preview_host = b.addExecutable(.{ .name = "office-preview-resource", .root_module = b.createModule(.{
@@ -2393,6 +2411,7 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.B
         .link_libc = link_libc,
     }) });
     preview_host.root_module.addImport("office_preview", preview);
+    preview_host.root_module.addImport("product_document_preview", existingImport(app, "product_document_preview"));
     preview_host.root_module.addImport("office_process", process);
     b.step("build-office-preview-resource", "Build the owned Application preview resource qualifier").dependOn(&b.addInstallArtifact(preview_host, .{}).step);
     const store = b.createModule(.{
