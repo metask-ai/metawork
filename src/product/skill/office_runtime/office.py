@@ -396,6 +396,10 @@ def selftest():
             cursor.gotoEnd(True)
             cursor.CharFontName = "Noto Sans CJK SC"
             engine.save(document, root / "selftest.pdf", "writer_pdf_Export")
+            from pdf_source import extract
+            checked_text, _, checked_pages = extract(root / "selftest.pdf", 4 * 1024 * 1024)
+            if checked_pages != 1 or "中文".encode("utf-8") not in checked_text:
+                raise RuntimeError("Office PDF text inspection self-test failed")
             pages = root / "pages"
             pages.mkdir()
             if render(engine, root / "selftest.pdf", pages, 640)["page_count"] != 1:

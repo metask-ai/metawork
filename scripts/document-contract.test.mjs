@@ -18,6 +18,13 @@ const fixture = JSON.parse(
 );
 test("document wire fixture is accepted without exposing source text or paths", () => {
   assert.equal(decodeDocumentOpen(fixture.open).state, "ready");
+  assert.equal(decodeDocumentOpen(fixture.openPdf).format, "pdf");
+  assert.throws(() =>
+    decodeDocumentOpen({
+      ...fixture.openPdf,
+      textScope: fixture.open.textScope,
+    }),
+  );
   assert.equal(decodeDocumentRead(fixture.page).kind, "page");
   assert.equal(decodeDocumentRead(fixture.region).cells[0].formula, "=1+1");
   assert.equal(decodeDocumentChunk(fixture.chunk).bytes, "4");

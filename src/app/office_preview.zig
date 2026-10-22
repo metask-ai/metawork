@@ -77,7 +77,7 @@ pub const Resource = struct {
         }
         if (std.mem.allEqual(u8, &component.identity, 0) or std.mem.allEqual(u8, &operation, 0)) return error.InvalidPreviewInput;
         const extension = std.fs.path.extension(input.relative);
-        const format: Format = if (std.ascii.eqlIgnoreCase(extension, ".docx")) .docx else if (std.ascii.eqlIgnoreCase(extension, ".pptx")) .pptx else if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) .xlsx else return error.UnsupportedPreview;
+        const format: Format = if (std.ascii.eqlIgnoreCase(extension, ".docx")) .docx else if (std.ascii.eqlIgnoreCase(extension, ".pptx")) .pptx else if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) .xlsx else if (std.ascii.eqlIgnoreCase(extension, ".pdf")) .pdf else return error.UnsupportedPreview;
         const data = try allocator.dupe(u8, data_root);
         errdefer allocator.free(data);
         const component_root = try allocator.dupe(u8, component.root);
@@ -395,7 +395,7 @@ fn hexDigest(text: []const u8) ![32]u8 {
 }
 fn validateManifest(value: *const Manifest, format: Format) !void {
     if (value.schema != 1 or value.format != format or value.omissions.len > 16 or
-        !std.mem.eql(u8, value.textScope, "ooxml_xml_text_and_attributes_without_ocr") or
+        !std.mem.eql(u8, value.textScope, contract.sourceTextScope(format)) or
         !std.mem.eql(u8, value.sourceText.file, "source-text.txt") or value.sourceText.bytes == 0 or value.sourceText.bytes > max_text_bytes)
         return error.InvalidPreviewManifest;
     _ = try hexDigest(value.sourceText.sha256);
@@ -456,6 +456,12 @@ test "preview metadata never turns a component filename into arbitrary path auth
     var pages = [_]Page{.{ .file = "page-0001.png", .bytes = 10, .sha256 = "1" ** 64, .width = 1280, .height = 1656 }};
     var metadata: Manifest = .{ .schema = 1, .format = .docx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "1" ** 64 }, .textScope = "ooxml_xml_text_and_attributes_without_ocr", .omissions = &.{}, .kind = .pages, .pages = &pages };
     try validateManifest(&metadata, .docx);
+    metadata.format = .pdf;
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .pdf));
+    metadata.textScope = contract.sourceTextScope(.pdf);
+    try validateManifest(&metadata, .pdf);
+    metadata.format = .docx;
+    metadata.textScope = contract.sourceTextScope(.docx);
     pages[0].file = "../page-0001.png";
     try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .docx));
     pages[0].file = "page-0001.png";

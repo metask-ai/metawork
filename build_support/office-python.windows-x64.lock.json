@@ -2,7 +2,7 @@
   "schema": 1,
   "target": "x86_64-windows-msvc",
   "python": "3.13",
-  "requirementsSha256": "8c686980aa1a6b179653abfb36ca58b18c2fe6b8766b219b1f0c4fbd754ba5ac",
+  "requirementsSha256": "9e6cdcad2b34d1d785271f5dfd1e3f923a2601035cfbdb0b99f91a77c710b8b1",
   "wheels": [
     {
       "name": "defusedxml",
@@ -45,6 +45,13 @@
       "version": "12.3.0",
       "url": "https://files.pythonhosted.org/packages/a6/9b/7a58e61d62be561da3a356fe2384d4059a6345fc130e23ef1c36a5b81d24/pillow-12.3.0-cp313-cp313-win_amd64.whl",
       "sha256": "1cca606cd25738df4ed873d5ad46bbdb3d83b5cbca291f6b4ff13a4df6b0bbe8"
+    },
+    {
+      "name": "pypdf",
+      "version": "6.21.2",
+      "url": "https://files.pythonhosted.org/packages/1b/4d/c9d2d67f204eff463237a1a8f5e25a6923b7b1043982b91fcaf104c8ef60/pypdf-6.21.2-py3-none-any.whl",
+      "sha256": "1d44d1a3a200f25062adff0085b02040e4646431ac2ccac22e42679e91466084",
+      "bytes": 407766
     },
     {
       "name": "python-dateutil",

@@ -322,7 +322,7 @@ test("Outputs opens the exact delivered identity and closes preview before retur
     calls = [];
   const output = {
     id: "03".repeat(16),
-    displayPath: "results/report.docx",
+    displayPath: "results/report.pdf",
     sizeBytes: "42",
     redacted: false,
   };

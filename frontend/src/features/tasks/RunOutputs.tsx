@@ -1,5 +1,5 @@
 import type { DocumentPreview } from "../../bridge/document-preview.ts";
-import { isOfficeDocument } from "../../bridge/document-format.ts";
+import { isDocumentPreviewFile } from "../../bridge/document-format.ts";
 import { DocumentPreviewView } from "../task-panel/DocumentPreviewView.tsx";
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../components/ui/button.tsx";
@@ -204,7 +204,7 @@ function OutputRow({
         </p>
         {onAction && taskId && runId && (
           <div className="run-output-actions">
-            {onPreview && isOfficeDocument(output.displayPath) && (
+            {onPreview && isDocumentPreviewFile(output.displayPath) && (
               <Button
                 ref={previewOpener}
                 variant="ghost"

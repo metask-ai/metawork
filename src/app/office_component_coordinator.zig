@@ -524,12 +524,16 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     const pointer = coordinator.registry.current.?;
     const references = pointer.references.load(.acquire);
     const preview_input: preview.Input = .{ .root = root, .relative = "not-created.docx", .expected = .{ .size_bytes = 3, .sha256 = @splat(1) } };
-    const resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4));
-    try std.testing.expectEqual(references + 1, pointer.references.load(.acquire));
-    resource.release_fn(resource.context); // no IO occurred; absent source is not opened
-    try std.testing.expectEqual(references, pointer.references.load(.acquire));
+    for ([_][]const u8{ "not-created.docx", "not-created.pdf" }) |relative| {
+        var accepted = preview_input;
+        accepted.relative = relative;
+        const resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, accepted, @splat(4));
+        try std.testing.expectEqual(references + 1, pointer.references.load(.acquire));
+        resource.release_fn(resource.context); // no IO occurred; absent source is not opened
+        try std.testing.expectEqual(references, pointer.references.load(.acquire));
+    }
     var unsupported = preview_input;
-    unsupported.relative = "input.pdf";
+    unsupported.relative = "input.doc";
     try std.testing.expectError(error.UnsupportedPreview, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, unsupported, @splat(4)));
     try std.testing.expectEqual(references, pointer.references.load(.acquire));
     product.state.current.?.identity[0] ^= 1;

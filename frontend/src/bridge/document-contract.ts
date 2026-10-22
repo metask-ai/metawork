@@ -46,7 +46,7 @@ export type DocumentOpen = {
   sourceBytes: string;
   idleMs: string;
   lifetimeMs: string;
-  format: "docx" | "xlsx" | "pptx";
+  format: "docx" | "xlsx" | "pptx" | "pdf";
   kind: "pages" | "grid";
   pageCount: number;
   sheets: DocumentSheet[];
@@ -204,6 +204,7 @@ export function decodeDocumentOpen(
     "docx",
     "xlsx",
     "pptx",
+    "pdf",
   ] as const);
   const kind = enumValue(raw.kind, `${path}.kind`, ["pages", "grid"] as const);
   const pageCount = bounded(raw.pageCount, `${path}.pageCount`, 100);
@@ -219,7 +220,12 @@ export function decodeDocumentOpen(
   if (omitted.length > 16 || new Set(omitted).size !== omitted.length)
     fail(path, "invalid omission list");
   const textScope = stringValue(raw.textScope, `${path}.textScope`);
-  if (textScope !== "ooxml_xml_text_and_attributes_without_ocr")
+  if (
+    textScope !==
+    (format === "pdf"
+      ? "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
+      : "ooxml_xml_text_and_attributes_without_ocr")
+  )
     fail(path, "unsupported text scope");
   const sourceVersion = hex(raw.sourceVersion, `${path}.sourceVersion`, 64);
   if (/^0+$/.test(sourceVersion)) fail(path, "invalid source version");

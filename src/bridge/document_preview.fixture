@@ -81,5 +81,22 @@
     "previewId": "2",
     "token": "070707070707070707070707070707070707070707070707",
     "reason": "expired"
+  },
+  "openPdf": {
+    "state": "ready",
+    "generation": "1",
+    "previewId": "2",
+    "token": "070707070707070707070707070707070707070707070707",
+    "securityEpoch": "1",
+    "sourceVersion": "0202020202020202020202020202020202020202020202020202020202020202",
+    "sourceBytes": "42",
+    "idleMs": "120000",
+    "lifetimeMs": "900000",
+    "format": "pdf",
+    "kind": "pages",
+    "pageCount": 1,
+    "sheets": [],
+    "omissions": [],
+    "textScope": "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
   }
 }

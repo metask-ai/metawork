@@ -2,7 +2,11 @@
 //! filesystem root, Task pointer, credential or Renderer grant crosses it.
 const std = @import("std");
 
-pub const Format = enum { docx, pptx, xlsx };
+pub const Format = enum { docx, pptx, xlsx, pdf };
+pub fn sourceTextScope(format: Format) []const u8 {
+    return if (format == .pdf) "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr" else "ooxml_xml_text_and_attributes_without_ocr";
+}
+
 pub const Kind = enum { pages, grid };
 pub const File = struct { file: []const u8, bytes: u32, sha256: []const u8 };
 pub const Page = struct { file: []const u8, bytes: u32, sha256: []const u8, width: u32, height: u32 };

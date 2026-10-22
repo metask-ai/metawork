@@ -372,6 +372,14 @@ test "document encoder matches the cross-language fixture without private materi
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("open").?, .{});
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, writer.buffered());
+    var pdf_result = result;
+    pdf_result.summary.?.format = .pdf;
+    pdf_result.summary.?.text_scope = "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr";
+    writer = .fixed(&buffer);
+    try encodeResult(&writer, &grant, pending, pdf_result);
+    const pdf_expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("openPdf").?, .{});
+    defer std.testing.allocator.free(pdf_expected);
+    try std.testing.expectEqualStrings(pdf_expected, writer.buffered());
     pending.kind = .page;
     writer = .fixed(&buffer);
     try encodeResult(&writer, &grant, pending, .{ .request_id = 1, .resource_id = 1, .kind = .page, .state = .ready, .page = .{ .size_bytes = 4, .width = 1280, .height = 1656 } });

@@ -42,8 +42,18 @@ run(component.entry, [
   "from openpyxl import Workbook;import sys;w=Workbook();s=w.active;s['A1']='业务 中文';s['A2']=2;s['B2']='=A2*3';w.save(sys.argv[1]);w.close()",
   workbook,
 ]);
+run(component.entry, [
+  "pdf",
+  path.join(directory, "original.docx"),
+  path.join(directory, "sample.pdf"),
+]);
 const results = [];
-for (const name of ["original.docx", "sample.pptx", "workbook.xlsx"]) {
+for (const name of [
+  "original.docx",
+  "sample.pptx",
+  "workbook.xlsx",
+  "sample.pdf",
+]) {
   const source = path.join(directory, name);
   const before = digest(source);
   const output = path.join(directory, name + "-preview");
@@ -60,7 +70,12 @@ for (const name of ["original.docx", "sample.pptx", "workbook.xlsx"]) {
   );
   assert.equal(manifest.schema, 1);
   assert.equal(manifest.kind, receipt.kind);
-  assert.equal(manifest.textScope, "ooxml_xml_text_and_attributes_without_ocr");
+  assert.equal(
+    manifest.textScope,
+    name.endsWith(".pdf")
+      ? "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
+      : "ooxml_xml_text_and_attributes_without_ocr",
+  );
   const resources = [
     manifest.sourceText,
     ...(manifest.kind === "grid" ? [manifest.grid] : manifest.pages),

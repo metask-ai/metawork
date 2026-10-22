@@ -1,4 +1,4 @@
-import { isOfficeDocument } from "../../bridge/document-format.ts";
+import { isDocumentPreviewFile } from "../../bridge/document-format.ts";
 import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { useEffect, useRef, useState } from "react";
 
@@ -87,7 +87,7 @@ export function useFilePreviewTabs(
       reference,
       requestGeneration,
     };
-    if (loadDocument && isOfficeDocument(reference.displayPath)) {
+    if (loadDocument && isDocumentPreviewFile(reference.displayPath)) {
       const document = loadDocument(
         taskId,
         runId,

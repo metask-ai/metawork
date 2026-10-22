@@ -3,8 +3,8 @@
 The controller supplies the same checked private input to text scanning and
 rendering/normalization. Host must scan source-text.txt for known credentials
 and revalidate source/Task/version/security authority before publishing data.
-Raster text is outside this non-OCR scan. PDF requires a separate qualified
-text extraction path and is deliberately rejected here until that exists.
+Raster text is outside this non-OCR scan. PDF uses the separately qualified
+reachable-string, metadata and page-text inspector before engine loading.
 """
 import datetime
 from decimal import Decimal
@@ -312,15 +312,22 @@ def resource(path):
 
 
 def prepare(source, output, width, engine_factory, render):
-    if source.suffix.lower() not in (".docx", ".pptx", ".xlsx"):
+    if source.suffix.lower() not in (".docx", ".pptx", ".xlsx", ".pdf"):
         raise ValueError("Preview source text extraction is unavailable for this format")
-    text, omissions = source_text(source)
+    expected_pages = None
+    scope = "ooxml_xml_text_and_attributes_without_ocr"
+    if source.suffix.lower() == ".pdf":
+        from pdf_source import extract, SCOPE
+        text, omissions, expected_pages = extract(source, TEXT_BYTES)
+        scope = SCOPE
+    else:
+        text, omissions = source_text(source)
     output.mkdir()
     text_path = output / "source-text.txt"
     text_path.write_bytes(text)
     manifest = {"schema": 1, "format": source.suffix.lower()[1:],
                 "sourceText": resource(text_path),
-                "textScope": "ooxml_xml_text_and_attributes_without_ocr",
+                "textScope": scope,
                 "omissions": omissions}
     if source.suffix.lower() == ".xlsx":
         normalized = grid(source)
@@ -334,6 +341,8 @@ def prepare(source, output, width, engine_factory, render):
             details = render(engine, source, output, width,
                              max_pages=MAX_PAGES, byte_budget=PAGES_BYTES,
                              page_byte_budget=PAGE_BYTES)
+        if expected_pages is not None and details["page_count"] != expected_pages:
+            raise ValueError("PDF render and inspection disagree on page count")
         pages = [{**page, **resource(output / page["file"])} for page in
                  json.loads((output / "pages.json").read_text(encoding="utf-8"))["pages"]]
         manifest.update(kind="pages", pages=pages)
