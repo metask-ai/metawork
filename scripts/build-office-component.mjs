@@ -23,6 +23,7 @@ import {
 } from "./package-windows.mjs";
 import { runChild } from "./run-child-process.mjs";
 import { officeComponentSources } from "./office-component-sources.mjs";
+import { officeWorkflowInventory } from "./office-workflows.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cache = path.join(root, ".zig-cache/office-component-sources");
@@ -59,6 +60,15 @@ if (!["required", "none"].includes(signing))
   throw new Error("Invalid signing mode");
 const signingConfiguration = windowsSigningConfiguration({ signing });
 const { sources, wheels } = officeComponentSources(root);
+const workflows = officeWorkflowInventory(root);
+if (
+  workflows.tools.join(",") !== "office" ||
+  workflows.nodePackages.map((entry) => entry.name).join(",") !==
+    "docx,pptxgenjs"
+)
+  throw new Error(
+    "Office workflows require an entry or authoring package not supplied by this producer",
+  );
 mkdirSync(cache, { recursive: true });
 
 async function fileDigest(filename) {

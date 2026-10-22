@@ -1,5 +1,7 @@
 # PptxGenJS Tutorial
 
+Run saved authoring code with `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`, using the component's PptxGenJS. Read SKILL.md for original-file handling, rendering and required QA.
+
 ## Setup & Basic Structure
 
 ```javascript

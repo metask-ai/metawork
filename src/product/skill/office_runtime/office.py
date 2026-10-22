@@ -189,10 +189,17 @@ class Engine:
         self.documents.append(document)
         return document
 
-    def save(self, document, path, filter_name):
+    def save(self, document, path, filter_name, **options):
         document.storeToURL(path.as_uri(), self.properties(FilterName=filter_name,
-                            Overwrite=False, InteractionHandler=self.interaction))
+                            Overwrite=False, InteractionHandler=self.interaction, **options))
         bounded_file(path)
+
+    def pdf(self, document, path, suffix):
+        options = {}
+        if suffix == ".pptx":
+            options["FilterData"] = self.uno.Any("[]com.sun.star.beans.PropertyValue",
+                                               self.properties(ExportHiddenSlides=True))
+        self.save(document, path, PDF_FILTERS[suffix], **options)
 
     def __exit__(self, kind, value, traceback):
         # If shutdown blocks, the command watchdog and native job remain armed.
@@ -240,20 +247,23 @@ def convert(engine, source, staged, command, expected_formulas=None):
     if command == "pdf":
         if source.suffix.lower() not in PDF_FILTERS:
             raise ValueError("PDF export requires DOCX, XLSX or PPTX")
-        engine.save(document, staged, PDF_FILTERS[source.suffix.lower()])
+        engine.pdf(document, staged, source.suffix.lower())
         return {}
     raise ValueError("Unknown conversion command")
 
 
 def render(engine, source, output, width):
     document = engine.load(source)
+    expected_slides = document.DrawPages.Count if source.suffix.lower() == ".pptx" else None
     if source.suffix.lower() != ".pdf":
         pdf = engine.directory / "preview.pdf"
-        engine.save(document, pdf, PDF_FILTERS[source.suffix.lower()])
+        engine.pdf(document, pdf, source.suffix.lower())
         document = engine.load(pdf)
     count = document.DrawPages.Count
     if count < 1 or count > MAX_PAGES:
         raise ValueError("Document page budget exceeded")
+    if expected_slides is not None and count != expected_slides:
+        raise ValueError("Presentation rendering lost slide pages")
     remaining = OUTPUT_BYTES
     pages = []
     for index in range(count):
@@ -329,6 +339,12 @@ def author(command, arguments):
         return subprocess.run([str(ROOT / "node/node.exe"), "--import",
                                (ROOT / "tools/node.mjs").as_uri(), *arguments],
                               env=node_environment()).returncode
+    if arguments[0] == "-c":
+        if len(arguments) < 2:
+            raise ValueError("Office Python -c requires source text")
+        sys.argv = ["-c", *arguments[2:]]
+        exec(compile(arguments[1], "<Office Python>", "exec"), {"__name__": "__main__"})
+        return 0
     script = Path(arguments[0]).resolve(strict=True)
     if not script.is_file():
         raise ValueError("Office Python requires a regular script")
@@ -345,7 +361,6 @@ def selftest():
     import lxml.etree
     import pandas
     import PIL
-    import markitdown
     with tempfile.TemporaryDirectory(prefix="metawork-office-selftest-") as directory:
         root = Path(directory).resolve()
         with Engine(root) as engine:

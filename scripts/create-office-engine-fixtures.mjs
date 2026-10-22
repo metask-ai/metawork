@@ -74,8 +74,13 @@ writeFileSync(path.join(directory, "long.docx"), await Packer.toBuffer(long));
 
 const presentation = new pptxgen();
 presentation.layout = "LAYOUT_WIDE";
-for (const text of ["第一页 First slide", "第二页 Second slide"]) {
+for (const text of [
+  "第一页 First slide",
+  "第二页 Second slide",
+  "隐藏页 Hidden slide",
+]) {
   const slide = presentation.addSlide();
+  slide.hidden = text.startsWith("隐藏页");
   slide.addText(text, {
     x: 1,
     y: 1,

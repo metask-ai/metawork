@@ -7,15 +7,17 @@ description: Create, read, edit, clean, format, calculate, and convert spreadshe
 
 Skill resource directory: `${CLAUDE_SKILL_DIR}`
 
-Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy.
+This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
 
-Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
+Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
 
-Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during spreadsheet processing.
+The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
 
-Python 3.10+ with `pandas` and `openpyxl` is required for the workflows below. LibreOffice (`soffice`) is additionally required for formula recalculation. XML helpers require `defusedxml` and `lxml`.
+Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
 
-Legacy `.xls`, macro-enabled workbooks and encrypted files are outside the supported workflow. Before passing an existing XLSX to pandas or openpyxl, use the bundled `scripts/office/archive.py` `checked_copy` context manager and pass its yielded path to the library. It checks all archive payloads and holds the same private bytes until the library finishes; do not check one path and then load the original path. Save edits to a separate workspace output, close the workbook inside the context, then recalculate and verify the output as needed. The examples below assume this checked input preparation for existing files. CSV and TSV are ordinary text inputs, not ZIP files.
+Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
+
+Save Python examples as a script and run `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python work.py`. For creation, use the packaged openpyxl, pandas or xlsxwriter. For an existing workbook, keep `load_workbook` or `read_excel` inside `checked_copy` and save to a separate output.
 
 # Requirements for Outputs
 
@@ -84,7 +86,7 @@ A user may ask you to create, edit, or analyze the contents of an .xlsx file. Yo
 
 ## Important Requirements
 
-**LibreOffice Required for Formula Recalculation**: Verify that LibreOffice is available before using `scripts/recalc.py`. The helper recalculates `.xlsx` files through an isolated LibreOffice conversion with a private profile and a timeout. Conversion failures and formula errors must be reported; do not claim recalculation succeeded from old cached values alone. Use a working copy because LibreOffice can alter workbook features during conversion.
+**Formula recalculation**: Use the component `recalc` command on a working copy, with a new output path. It checks preserved formulas, actual caches and errors before publishing. Do not claim success from old cached values or an exit code alone.
 
 ## Reading and analyzing data
 
@@ -147,9 +149,9 @@ This applies to ALL calculations - totals, percentages, ratios, differences, etc
 2. **Create/Load**: Create new workbook or load existing file
 3. **Modify**: Add/edit data, formulas, and formatting
 4. **Save**: Write to file
-5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the scripts/recalc.py script
+5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the component `recalc` command and a new output path
    ```bash
-   python scripts/recalc.py output.xlsx
+   "${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc output.xlsx calculated.xlsx
    ```
 6. **Verify and fix any errors**:
    - The script returns JSON with error details
@@ -219,15 +221,15 @@ wb.save('modified.xlsx')
 
 ## Recalculating formulas
 
-Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the provided `scripts/recalc.py` script to recalculate formulas:
+Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the component to produce a recalculated working copy:
 
 ```bash
-python scripts/recalc.py <excel_file> [timeout_seconds]
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc <input.xlsx> <new-output.xlsx> [--timeout seconds]
 ```
 
 Example:
 ```bash
-python scripts/recalc.py output.xlsx 30
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc output.xlsx calculated.xlsx --timeout 30
 ```
 
 The script:
@@ -235,7 +237,7 @@ The script:
 - Recalculates all formulas in all sheets
 - Scans ALL cells for Excel errors (#REF!, #DIV/0!, etc.)
 - Returns JSON with detailed error locations and counts
-- Requires a working LibreOffice executable in the Task environment
+- Uses the component's sole Office engine and private profile; no user macros run
 
 ## Formula Verification Checklist
 
@@ -259,7 +261,7 @@ Quick checks to ensure formulas work correctly:
 - [ ] **Verify dependencies**: Check all cells referenced in formulas exist
 - [ ] **Test edge cases**: Include zero, negative, and very large values
 
-### Interpreting scripts/recalc.py Output
+### Interpreting recalculation output
 The script returns JSON with error details:
 ```json
 {
@@ -286,7 +288,7 @@ The script returns JSON with error details:
 - Use `data_only=True` to read calculated values: `load_workbook('file.xlsx', data_only=True)`
 - **Warning**: If opened with `data_only=True` and saved, formulas are replaced with values and permanently lost
 - For large files: Use `read_only=True` for reading or `write_only=True` for writing
-- Formulas are preserved but not evaluated - use scripts/recalc.py to update values
+- Formulas are preserved but not evaluated - use the component `recalc` command to update values
 
 ### Working with pandas
 - Specify data types to avoid inference issues: `pd.read_excel('file.xlsx', dtype={'id': str})`

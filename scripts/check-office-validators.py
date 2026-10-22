@@ -10,6 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 OFFICE = Path(sys.argv.pop(1)).resolve()
+ENTRY = None
+if "--entry" in sys.argv:
+    option = sys.argv.index("--entry")
+    ENTRY = Path(sys.argv[option + 1]).resolve(strict=True)
+    del sys.argv[option:option + 2]
 sys.path.insert(0, str(OFFICE))
 
 from archive import ArchiveError
@@ -79,7 +84,8 @@ class OriginalReaders(unittest.TestCase):
         before = set(self.root.iterdir())
         import os
         result = subprocess.run(
-            [sys.executable, "-B", str(OFFICE / "validate.py"), str(self.original)],
+            ([str(ENTRY), "python"] if ENTRY is not None else [sys.executable, "-B"])
+            + [str(OFFICE / "validate.py"), str(self.original)],
             env={**os.environ, "TMP": str(self.root), "TEMP": str(self.root), "TMPDIR": str(self.root)},
             capture_output=True, text=True, timeout=15)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)

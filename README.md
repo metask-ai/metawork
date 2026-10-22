@@ -39,15 +39,15 @@ npm run dev
 
 ### 本地开发 Office Skills
 
-`npm run dev` 自动加载仓库中的 Word、Excel 和 PowerPoint Skills。处理文件前，准备 Python 3.12、LibreOffice 和 Poppler，并显式选择其可执行文件：
+Windows 开发态显式选择准备好的独立 Office 组件后，`npm run dev` 才加载其中的 Word、Excel 和 PowerPoint Skills；普通开发启动不下载 Office 依赖，也不改写 Task 的解释器环境：
 
 ```bash
-npm run office:setup -- --python /absolute/path/to/python3.12 --soffice /absolute/path/to/soffice --pdftoppm /absolute/path/to/pdftoppm
+npm run office:setup -- --component /absolute/path/to/prepared-office-component
 npm run office:check
 npm run dev
 ```
 
-setup 将 Python 依赖安装在当前 checkout 的 `.zig-cache` 内；Node 依赖由 `npm ci` 安装。需要 Pandoc 提取 Word 内容时另加 `--pandoc /absolute/path/to/pandoc`；未安装时可用解包 XML 的读取流程。
+组件 producer 的构建入口、固定来源及开发签名模式见 [Windows 分发](docs/windows-distribution.md#独立-office-运行时构建)。setup 核验组件并保存本 checkout 的显式选择；三个 Skill 使用组件内的创作、读取、重算、转换和分页入口。应用内按需安装与正式发布仍须独立验收。
 
 创建普通 Task 后直接添加 Office 文件并输入处理要求，由 Agent 在普通 Run 中选择 `docx`、`xlsx` 或 `pptx`。首次发送会等待 Automatic Task 的初始 Skill 准备；也可在 Manual Workspace 中使用 Skill 选择器显式调用。附件保留本地原件，只向模型提供文件引用。ZIP 附件通过既有 Bash 调用归档 helper 查看目录并按需解压；本地开发启动自动提供 helper 位置和依赖说明，由 Agent 查找可用的 Python 并依据工具结果反馈失败，无需先配置解释器。需要固定开发解释器时，可选执行 `npm run archive:setup -- --python /absolute/path/to/python3.9-or-newer`，再通过 `npm run archive:check` 验证；它只需要 Python 标准库，无需安装 Office 依赖。安装包的归档资源交付尚未完成，解释器发现与调用合同见 [Product 附件合同](docs/product-architecture.md#26-文件-attachment-staging)，来源 authority 见 [Product 架构](docs/product-architecture.md#24-skill-authority-与本地资产)，验证边界见 [验证规范](docs/validation.md#标准入口)。
 

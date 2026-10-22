@@ -144,7 +144,7 @@ class OfficeEngine(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix="验收 文档 ", dir=base)
         cls.root = Path(cls.temporary.name)
         cls.exe = COMPONENT / "bin/office.exe"
-        subprocess.run(["node", str(ROOT / "scripts/create-office-engine-fixtures.mjs"),
+        subprocess.run([str(cls.exe), "node", str(ROOT / "scripts/create-office-engine-fixtures.mjs"),
                         str(cls.root)], cwd=ROOT, check=True, timeout=30)
         add_revisions(cls.root / "original.docx", cls.root / "revisions.docx")
         for filename, formula in [("sample.xlsx", "=SUM(A1:B1)"), ("error.xlsx", "=1/0")]:
@@ -240,7 +240,7 @@ class OfficeEngine(unittest.TestCase):
         self.invoke("render", "original.docx", "word-pages")
         self.assert_pages("word-pages", 2)
         self.invoke("render", "sample.pptx", "slide-pages")
-        self.assert_pages("slide-pages", 2)
+        self.assert_pages("slide-pages", 3)
         self.invoke("pdf", "original.docx", "exported.pdf")
         self.assertTrue((self.root / "exported.pdf").read_bytes().startswith(b"%PDF-"))
         self.invoke("render", "exported.pdf", "pdf-pages")
@@ -284,9 +284,10 @@ class OfficeEngine(unittest.TestCase):
         self.assertTrue(any(part["part"].startswith("word/header") for part in word["parts"]))
         self.invoke("text", "sample.pptx", "presentation-text.json")
         slides = json.loads((self.root / "presentation-text.json").read_text(encoding="utf-8"))["slides"]
-        self.assertEqual(len(slides), 2)
+        self.assertEqual(len(slides), 3)
         self.assertIn("第一页 First slide", slides[0]["paragraphs"])
         self.assertIn("第二页 Second slide", slides[1]["paragraphs"])
+        self.assertTrue(slides[2]["hidden"])
 
     def hold_real_tree(self, process):
         deadline = time.monotonic() + 15

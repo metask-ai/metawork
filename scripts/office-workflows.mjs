@@ -62,9 +62,7 @@ export function officeWorkflowInventory(root) {
     }
     for (const guide of skill.guides) {
       const text = readFileSync(path.join(directory, guide), "utf8");
-      for (const match of text.matchAll(
-        /python(?:3)?\s+(scripts\/[\w./-]+\.py)/gu,
-      ))
+      for (const match of text.matchAll(/(scripts\/[\w./-]+\.py)/gu))
         if (!helpers.has(match[1]))
           throw new Error(`Undeclared Office helper: ${skill.id}/${match[1]}`);
     }
@@ -74,8 +72,7 @@ export function officeWorkflowInventory(root) {
         throw new Error(`Invalid Office workflow identity: ${skill.id}`);
       workflowIds.add(workflow.id);
       for (const tool of workflow.tools ?? []) {
-        if (!["soffice", "pdftoppm", "pandoc"].includes(tool))
-          throw new Error(`Unknown Office tool: ${tool}`);
+        if (tool !== "office") throw new Error(`Unknown Office tool: ${tool}`);
         tools.add(tool);
       }
       for (const dependency of workflow.pythonPackages ?? []) {

@@ -8,33 +8,33 @@
         "scripts/office/archive.py",
         "scripts/office/unpack.py",
         "scripts/office/pack.py",
-        "scripts/office/soffice.py",
         "scripts/office/validate.py",
-        "scripts/accept_changes.py",
         "scripts/comment.py"
       ],
       "workflows": [
         {
           "id": "read",
-          "tools": ["pandoc"],
+          "tools": ["office"],
           "pythonPackages": ["defusedxml"]
         },
         {
           "id": "create",
           "nodePackages": ["docx"],
-          "pythonPackages": ["defusedxml", "lxml"]
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
         },
         {
           "id": "edit-and-comment",
-          "pythonPackages": ["defusedxml", "lxml"]
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
         },
         {
           "id": "accept-revisions",
-          "tools": ["soffice"]
+          "tools": ["office"]
         },
         {
           "id": "render-and-pdf",
-          "tools": ["soffice", "pdftoppm"]
+          "tools": ["office"]
         }
       ]
     },
@@ -45,18 +45,17 @@
         "scripts/office/archive.py",
         "scripts/office/unpack.py",
         "scripts/office/pack.py",
-        "scripts/office/soffice.py",
-        "scripts/recalc.py",
         "scripts/office/formulas.py"
       ],
       "workflows": [
         {
           "id": "read-create-edit",
-          "pythonPackages": ["pandas", "openpyxl", "defusedxml", "lxml"]
+          "pythonPackages": ["pandas", "openpyxl", "defusedxml", "lxml"],
+          "tools": ["office"]
         },
         {
           "id": "recalculate",
-          "tools": ["soffice"],
+          "tools": ["office"],
           "pythonPackages": ["openpyxl", "defusedxml"]
         }
       ]
@@ -68,29 +67,30 @@
         "scripts/office/archive.py",
         "scripts/office/unpack.py",
         "scripts/office/pack.py",
-        "scripts/office/soffice.py",
         "scripts/office/validate.py",
-        "scripts/thumbnail.py",
         "scripts/add_slide.py",
         "scripts/clean.py"
       ],
       "workflows": [
         {
           "id": "read",
-          "pythonPackages": ["markitdown", "python-pptx"]
+          "pythonPackages": ["defusedxml"],
+          "tools": ["office"]
         },
         {
           "id": "create",
           "nodePackages": ["pptxgenjs"],
-          "pythonPackages": ["defusedxml", "lxml"]
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
         },
         {
           "id": "edit",
-          "pythonPackages": ["defusedxml", "lxml"]
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
         },
         {
-          "id": "thumbnail-and-pdf",
-          "tools": ["soffice", "pdftoppm"],
+          "id": "page-images-and-pdf",
+          "tools": ["office"],
           "pythonPackages": ["pillow", "defusedxml"]
         }
       ]

@@ -9,11 +9,15 @@ description: Create, read, edit, revise, and manage comments in Word documents. 
 
 Skill resource directory: `${CLAUDE_SKILL_DIR}`
 
-Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy.
+This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
 
-Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
+Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
 
-Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during document processing.
+The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
+
+Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
+
+Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
 
 ## Overview
 
@@ -23,7 +27,7 @@ A .docx file is a ZIP archive containing XML files.
 
 | Task | Approach |
 |------|----------|
-| Read/analyze content | `pandoc` or unpack for raw XML |
+| Read/analyze content | Component `text` command, or bounded unpack for raw XML |
 | Create new document | Use `docx-js` - see Creating New Documents below |
 | Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
@@ -33,35 +37,36 @@ Legacy `.doc` files, encrypted documents and user document macros are outside th
 
 ```bash
 # Text extraction with tracked changes
-pandoc --track-changes=all document.docx -o output.md
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text document.docx content.json
 
 # Raw XML access
-python scripts/office/unpack.py document.docx unpacked/
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" document.docx unpacked/
 ```
 
 ### Converting to Images
 
 ```bash
-python scripts/office/soffice.py --headless --convert-to pdf document.docx
-pdftoppm -jpeg -r 150 document.pdf page
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render document.docx preview-pages/
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" pdf document.docx exported.pdf
 ```
 
 ### Accepting Tracked Changes
 
-To produce a clean document with all tracked changes accepted (requires LibreOffice):
+To produce a checked clean working copy with all tracked changes accepted:
 
 ```bash
-python scripts/accept_changes.py input.docx output.docx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" accept input.docx output.docx
 ```
 
 ---
 
 ## Creating New Documents
 
-Generate .docx files with JavaScript using the `docx` package, then validate.
+Generate .docx files with JavaScript using the `docx` package, then validate. Run the saved script with `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`; do not run a system Node or install a package.
 
 ### Setup
 ```javascript
+const fs = require('node:fs');
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun,
         Header, Footer, AlignmentType, PageOrientation, LevelFormat, ExternalHyperlink,
         InternalHyperlink, Bookmark, FootnoteReferenceRun, PositionalTab,
@@ -77,7 +82,7 @@ Packer.toBuffer(doc).then(buffer => fs.writeFileSync("doc.docx", buffer));
 ### Validation
 After creating the file, validate it. If validation fails, unpack, fix the XML, and repack.
 ```bash
-python scripts/office/validate.py doc.docx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/validate.py" doc.docx
 ```
 
 ### Page Size
@@ -404,7 +409,7 @@ sections: [{
 
 ### Step 1: Unpack
 ```bash
-python scripts/office/unpack.py document.docx unpacked/
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" document.docx unpacked/
 ```
 Extracts XML, pretty-prints, merges adjacent runs, and converts smart quotes to XML entities (`&#x201C;` etc.) so they survive editing. Use `--merge-runs false` to skip run merging.
 
@@ -430,15 +435,15 @@ Edit files in `unpacked/word/`. See XML Reference below for patterns.
 
 **Adding comments:** Use `comment.py` to handle boilerplate across multiple XML files (text must be pre-escaped XML):
 ```bash
-python scripts/comment.py unpacked/ 0 "Comment text with &amp; and &#x2019;"
-python scripts/comment.py unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
-python scripts/comment.py unpacked/ 0 "Text" --author "Custom Author"  # custom author name
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Comment text with &amp; and &#x2019;"
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Text" --author "Custom Author"  # custom author name
 ```
 Then add markers to document.xml (see Comments in XML Reference).
 
 ### Step 3: Pack
 ```bash
-python scripts/office/pack.py unpacked/ output.docx --original document.docx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/pack.py" unpacked/ output.docx --original document.docx
 ```
 Validates with auto-repair, condenses XML, and creates DOCX. Use `--validate false` to skip.
 
@@ -585,10 +590,6 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 
 ---
 
-## Dependencies
+## Runtime
 
-- **pandoc**: Text extraction
-- **Python 3.10+**: Bundled helpers; `defusedxml` and `lxml` for XML processing and validation
-- **Node.js + docx**: New documents
-- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
-- **Poppler**: `pdftoppm` for images
+The Office component supplies its sole conversion engine, Python with defusedxml/lxml, and Node with docx. Use the component entry shown above for creation, XML helpers, acceptance, export and page images. No separate system tool installation is part of this workflow.

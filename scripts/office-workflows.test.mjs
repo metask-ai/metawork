@@ -21,7 +21,7 @@ test("retained Office guide commands have resources and pinned runtime dependenc
     "pptx",
     "xlsx",
   ]);
-  assert.deepEqual(inventory.tools, ["pandoc", "pdftoppm", "soffice"]);
+  assert.deepEqual(inventory.tools, ["office"]);
   assert.deepEqual(
     inventory.nodePackages.map((entry) => entry.name),
     ["docx", "pptxgenjs"],
