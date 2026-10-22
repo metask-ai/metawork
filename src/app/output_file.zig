@@ -50,6 +50,177 @@ pub fn copyVerified(io: std.Io, request: Request, cancelled: *const std.atomic.V
     _ = try read(io, request, cancelled, .{ .expected = expected, .destination = destination });
 }
 
+/// One selected Save As transaction. Construction and release only own bytes;
+/// stage/publish/discard perform all filesystem effects on a worker. The caller
+/// must authorize publication after stage verifies the actual copied stream.
+pub const Save = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    main_thread_id: std.Thread.Id,
+    storage: []u8,
+    root: []const u8,
+    relative: []const u8,
+    destination: []const u8,
+    expected: Inspection,
+    pending: ?Pending = null,
+
+    const Pending = struct {
+        parent: std.Io.Dir,
+        parent_identity: std.Io.File.Stat,
+        previous: ?std.Io.File.Stat,
+        atomic_file: std.Io.File.Atomic,
+        copied_identity: ?std.Io.File.Stat = null,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, request: Request, destination: []const u8, expected: Inspection) !Save {
+        try validatePath(request.relative_path);
+        if (request.workspace_root.len == 0 or request.workspace_root.len > std.Io.Dir.max_path_bytes or
+            !std.fs.path.isAbsolute(request.workspace_root) or !std.unicode.utf8ValidateSlice(request.workspace_root) or expected.size_bytes > max_file_bytes)
+            return error.InvalidWorkspaceRoot;
+        if (!std.fs.path.isAbsolute(destination) or destination.len > 4096 or
+            !std.unicode.utf8ValidateSlice(destination)) return error.InvalidOutputDestination;
+        for (destination) |byte| if (std.ascii.isControl(byte)) return error.InvalidOutputDestination;
+        try validatePath(std.fs.path.basename(destination));
+        const storage = try allocator.alloc(u8, request.workspace_root.len + request.relative_path.len + destination.len);
+        const root = storage[0..request.workspace_root.len];
+        const relative = storage[root.len..][0..request.relative_path.len];
+        const target = storage[root.len + relative.len ..];
+        @memcpy(root, request.workspace_root);
+        @memcpy(relative, request.relative_path);
+        @memcpy(target, destination);
+        return .{ .allocator = allocator, .io = io, .main_thread_id = request.main_thread_id, .storage = storage, .root = root, .relative = relative, .destination = target, .expected = expected };
+    }
+
+    pub fn deinit(self: *Save) void {
+        std.debug.assert(self.pending == null);
+        self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+
+    pub fn stage(self: *Save, cancelled: *const std.atomic.Value(bool)) !void {
+        try self.requireWorker();
+        self.stageInner(cancelled) catch |err| {
+            self.discard() catch return error.OutputCleanupFailed;
+            return err;
+        };
+    }
+
+    fn stageInner(self: *Save, cancelled: *const std.atomic.Value(bool)) !void {
+        try self.requireWorker();
+        if (self.pending != null) return error.InvalidOutputDestination;
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        const parent_path = std.fs.path.dirname(self.destination) orelse return error.InvalidOutputDestination;
+        var parent = try openRoot(self.io, parent_path);
+        var parent_owned = true;
+        errdefer if (parent_owned) parent.close(self.io);
+        const parent_identity = try parent.stat(self.io);
+        const basename = std.fs.path.basename(self.destination);
+        const previous = try destinationStat(self.io, parent, basename);
+        // Reject selecting the source itself, including another name for the
+        // same inode on the same volume. A different volume can reuse an inode.
+        if (previous) |existing| {
+            var source_root = try openRoot(self.io, self.root);
+            defer source_root.close(self.io);
+            var source = try openScopedFile(self.io, source_root, self.relative);
+            defer source.close(self.io);
+            const source_stat = try source.stat(self.io);
+            const same_volume = if (builtin.os.tag == .windows)
+                std.ascii.eqlIgnoreCase(std.fs.path.diskDesignator(self.root), std.fs.path.diskDesignator(self.destination))
+            else
+                true;
+            if (same_volume and existing.inode == source_stat.inode) return error.SameOutputDestination;
+        }
+        const atomic_file = try parent.createFileAtomic(self.io, basename, .{ .replace = true, .permissions = if (builtin.os.tag == .windows) .default_file else .fromMode(0o600) });
+        self.pending = .{ .parent = parent, .parent_identity = parent_identity, .previous = previous, .atomic_file = atomic_file };
+        parent_owned = false;
+        // std Atomic creates a write-only Windows handle. Byte-copy validation
+        // also needs read attributes, so retain a read/write handle to that
+        // same exclusive temporary name before copying.
+        if (builtin.os.tag == .windows) {
+            const temporary_name = std.fmt.hex(self.pending.?.atomic_file.file_basename_hex);
+            var readable = try parent.openFile(self.io, &temporary_name, .{ .mode = .read_write, .allow_directory = false, .follow_symlinks = false, .resolve_beneath = true });
+            readable.flags.nonblocking = true;
+            self.pending.?.atomic_file.file.close(self.io);
+            self.pending.?.atomic_file.file = readable;
+        }
+        try copyVerified(self.io, .{ .workspace_root = self.root, .relative_path = self.relative, .main_thread_id = self.main_thread_id }, cancelled, self.expected, self.pending.?.atomic_file.file);
+        self.pending.?.copied_identity = try self.pending.?.atomic_file.file.stat(self.io);
+    }
+
+    /// Only called after the Product owner's publication decision. Cancellation
+    /// is no longer accepted once that decision has committed this operation.
+    pub fn publish(self: *Save) !void {
+        try self.requireWorker();
+        self.publishInner() catch |err| {
+            self.discard() catch return error.OutputCleanupFailed;
+            return err;
+        };
+        try self.discard();
+    }
+
+    fn publishInner(self: *Save) !void {
+        try self.requireWorker();
+        const pending = if (self.pending) |*value| value else return error.InvalidOutputDestination;
+        var named_parent = try openRoot(self.io, std.fs.path.dirname(self.destination).?);
+        defer named_parent.close(self.io);
+        if ((try named_parent.stat(self.io)).inode != pending.parent_identity.inode) return error.OutputDestinationChanged;
+        const current = try destinationStat(self.io, pending.parent, std.fs.path.basename(self.destination));
+        if (pending.previous) |old| {
+            if (current == null or !stable(old, current.?)) return error.OutputDestinationChanged;
+        } else if (current != null) return error.OutputDestinationChanged;
+        const temporary_name = std.fmt.hex(pending.atomic_file.file_basename_hex);
+        var named_temporary = try pending.parent.openFile(self.io, &temporary_name, .{ .allow_directory = false, .follow_symlinks = false, .resolve_beneath = true });
+        const named_identity = named_temporary.stat(self.io) catch |err| {
+            named_temporary.close(self.io);
+            return err;
+        };
+        named_temporary.close(self.io);
+        const copied_identity = try pending.atomic_file.file.stat(self.io);
+        if (!stable(named_identity, copied_identity) or pending.copied_identity == null or
+            !stable(pending.copied_identity.?, copied_identity) or copied_identity.size != self.expected.size_bytes) return error.OutputCopyChanged;
+        try pending.atomic_file.replace(self.io);
+    }
+
+    /// std Atomic.deinit intentionally ignores deletion errors. Observe cleanup
+    /// explicitly here so an external destination cannot leave a hidden failure.
+    /// Every handle closes even if deletion is refused; callers must report it.
+    pub fn discard(self: *Save) !void {
+        try self.requireWorker();
+        var pending = self.pending orelse return;
+        self.pending = null;
+        var cleanup_failed = false;
+        if (pending.atomic_file.file_open) {
+            pending.atomic_file.file.close(self.io);
+            pending.atomic_file.file_open = false;
+        }
+        if (pending.atomic_file.file_exists) {
+            const temporary_name = std.fmt.hex(pending.atomic_file.file_basename_hex);
+            pending.parent.deleteFile(self.io, &temporary_name) catch {
+                cleanup_failed = true;
+            };
+            pending.atomic_file.file_exists = false;
+        }
+        pending.atomic_file.deinit(self.io);
+        pending.parent.close(self.io);
+        if (cleanup_failed) return error.OutputCleanupFailed;
+    }
+
+    fn requireWorker(self: *const Save) !void {
+        if (std.Thread.getCurrentId() == self.main_thread_id) return error.MainThreadFileEffect;
+    }
+};
+
+fn destinationStat(io: std.Io, parent: std.Io.Dir, basename: []const u8) !?std.Io.File.Stat {
+    var file = parent.openFile(io, basename, .{ .allow_directory = false, .follow_symlinks = false, .resolve_beneath = true }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.InvalidOutputDestination;
+    return stat;
+}
+
 const Copy = struct { expected: Inspection, destination: std.Io.File };
 
 fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), copy: ?Copy) !Inspection {
@@ -84,7 +255,7 @@ fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), 
         const count = try file.readPositionalAll(io, buffer[0..amount], offset);
         if (count != amount) return error.OutputChanged;
         hash.update(buffer[0..count]);
-        if (copy) |value| try value.destination.writeStreamingAll(io, buffer[0..count]);
+        if (copy) |value| try value.destination.writePositionalAll(io, buffer[0..count], offset);
         offset += count;
         if (builtin.is_test) if (request.test_after_chunk) |hook| try hook.call_fn(hook.context);
     }
@@ -334,4 +505,144 @@ test "output inspection refuses a Windows junction at a relative ancestor or Wor
     const outside = try tmp.dir.readFileAlloc(std.testing.io, "outside/private.txt", std.testing.allocator, .limited(100));
     defer std.testing.allocator.free(outside);
     try std.testing.expectEqualStrings("outside authority", outside);
+}
+
+const TestSave = struct {
+    save: *Save,
+    operation: enum { stage, publish, discard },
+    cancelled: std.atomic.Value(bool) = .init(false),
+    result: anyerror!void = error.NotStarted,
+    fn run(self: *TestSave) void {
+        self.result = switch (self.operation) {
+            .stage => self.save.stage(&self.cancelled),
+            .publish => self.save.publish(),
+            .discard => self.save.discard(),
+        };
+    }
+    fn execute(self: *TestSave) !void {
+        const thread = try std.Thread.spawn(.{}, run, .{self});
+        thread.join();
+        return self.result;
+    }
+};
+
+fn expectSaveContents(dir: std.Io.Dir, path: []const u8, expected: []const u8) !void {
+    const actual = try dir.readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+fn expectSaveFiles(dir: std.Io.Dir, expected: usize) !void {
+    var readable = try dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer readable.close(std.testing.io);
+    var iterator = readable.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |_| count += 1;
+    try std.testing.expectEqual(expected, count);
+}
+
+test "Save As stages verified bytes without changing the selected target then atomically publishes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "最终结果.txt", .data = "keep me" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "最终结果.txt" });
+    defer std.testing.allocator.free(selected);
+    var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
+    const expected = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    defer save.deinit();
+    var stage: TestSave = .{ .save = &save, .operation = .stage };
+    try stage.execute();
+    try expectSaveContents(tmp.dir, "最终结果.txt", "keep me");
+    try expectSaveFiles(tmp.dir, 3);
+    var publish: TestSave = .{ .save = &save, .operation = .publish };
+    try publish.execute();
+    try expectSaveContents(tmp.dir, "最终结果.txt", "abc");
+    try expectSaveContents(tmp.dir, "source.txt", "abc");
+    try expectSaveFiles(tmp.dir, 2);
+}
+
+test "Save As cancellation discard and wrong digest preserve existing bytes and remove staging" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target.txt", .data = "original target" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "target.txt" });
+    defer std.testing.allocator.free(selected);
+    var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
+    var expected = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    defer save.deinit();
+    var stage: TestSave = .{ .save = &save, .operation = .stage };
+    stage.cancelled.store(true, .release);
+    try std.testing.expectError(error.Cancelled, stage.execute());
+    try expectSaveFiles(tmp.dir, 2);
+    stage.cancelled.store(false, .release);
+    try stage.execute();
+    var discard: TestSave = .{ .save = &save, .operation = .discard };
+    try discard.execute();
+    try expectSaveContents(tmp.dir, "target.txt", "original target");
+    try expectSaveFiles(tmp.dir, 2);
+    expected.sha256[0] ^= 1;
+    save.expected = expected;
+    try std.testing.expectError(error.OutputChanged, stage.execute());
+    try expectSaveContents(tmp.dir, "target.txt", "original target");
+    try expectSaveFiles(tmp.dir, 2);
+}
+
+test "Save As refuses a target modified after selection or newly occupied before publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "target.txt" });
+    defer std.testing.allocator.free(selected);
+    var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
+    const expected = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    defer save.deinit();
+    var stage: TestSave = .{ .save = &save, .operation = .stage };
+    var publish: TestSave = .{ .save = &save, .operation = .publish };
+    try stage.execute();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target.txt", .data = "new occupant" });
+    try std.testing.expectError(error.OutputDestinationChanged, publish.execute());
+    try expectSaveContents(tmp.dir, "target.txt", "new occupant");
+    try expectSaveFiles(tmp.dir, 2);
+    try stage.execute();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target.txt", .data = "modified during copy approval" });
+    try std.testing.expectError(error.OutputDestinationChanged, publish.execute());
+    try expectSaveContents(tmp.dir, "target.txt", "modified during copy approval");
+    try expectSaveFiles(tmp.dir, 2);
+}
+
+test "Save As refuses source overwrite and main thread effects and releases allocation failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "source.txt" });
+    defer std.testing.allocator.free(selected);
+    var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
+    const expected = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    defer save.deinit();
+    var stage: TestSave = .{ .save = &save, .operation = .stage };
+    try std.testing.expectError(error.MainThreadFileEffect, save.stage(&stage.cancelled));
+    try std.testing.expectError(error.SameOutputDestination, stage.execute());
+    try expectSaveContents(tmp.dir, "source.txt", "abc");
+    try expectSaveFiles(tmp.dir, 1);
+    const Harness = struct {
+        fn init(allocator: std.mem.Allocator, request: Request, path: []const u8, value: Inspection) !void {
+            var candidate = try Save.init(allocator, std.testing.io, request, path, value);
+            defer candidate.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.init, .{ source.request, selected, expected });
 }
