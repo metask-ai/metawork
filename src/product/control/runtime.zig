@@ -13,6 +13,7 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const output_check = @import("output_check.zig");
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_control_attachment_staging");
@@ -981,28 +982,10 @@ fn absoluteReferenceRelativePath(
     return storage[0..relative.len];
 }
 
-/// Host-only owned input to a bounded file operation. This is a snapshot,
-/// never a lasting grant: revalidate on the main loop before publishing bytes
-/// or invoking a platform effect. No Task/Run pointers survive admission.
-pub const OutputFileTarget = struct {
-    allocator: std.mem.Allocator,
-    storage: []u8,
-    task_id: u64,
-    run_id: u64,
-    output_id: [16]u8,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    security_epoch: u64,
-    workspace_root: []const u8,
-    relative_path: []const u8,
-    size_bytes: u64,
-    sha256: [32]u8,
-
-    pub fn deinit(self: *OutputFileTarget) void {
-        self.allocator.free(self.storage);
-        self.* = undefined;
-    }
-};
+pub const OutputFileTarget = output_check.Target;
+pub const OutputCheckState = output_check.State;
+pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState };
+pub const OutputCheckSink = struct { context: *anyopaque, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
 
 pub const OutputFileAuthorityError = error{
     UnknownOutput,
@@ -1010,6 +993,15 @@ pub const OutputFileAuthorityError = error{
     StaleSecurityEpoch,
     ExecutorShuttingDown,
 };
+
+fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
+    return switch (err) {
+        error.UnknownOutput => .missing,
+        error.RestrictedOutput => .restricted,
+        error.StaleSecurityEpoch => .stale_security,
+        else => .failed,
+    };
+}
 
 pub const FilePreviewState = file_preview.State;
 pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
@@ -1344,6 +1336,7 @@ pub const Runtime = struct {
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
+    output_checks: output_check.Lane = .{},
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1793,6 +1786,53 @@ pub const Runtime = struct {
         _ = lifecycle.FileDeliveryReceipt.init(reference.id, reference.locator, reference.size_bytes, reference.sha256) catch
             return error.RestrictedOutput;
         return reference;
+    }
+
+    pub const OutputCheckAdmission = union(enum) { queued, immediate: OutputCheckState };
+
+    pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8) OutputCheckAdmission {
+        if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
+        var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
+            return .{ .immediate = outputCheckAuthorityState(err) };
+        const preparation = self.file_delivery_preparation orelse {
+            target.deinit();
+            return .{ .immediate = .unavailable };
+        };
+        const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
+        var delivery = preparation.prepare(workspace) orelse {
+            target.deinit();
+            return .{ .immediate = .unavailable };
+        };
+        self.output_checks.begin(self.io, self.allocator, .{
+            .context = self.change_notifier.context,
+            .wake_fn = self.change_notifier.wake,
+        }, completion_id, target, delivery) catch |err| {
+            delivery.deinit();
+            target.deinit();
+            return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        };
+        return .queued;
+    }
+
+    pub fn cancelOutputCheck(self: *Runtime, completion_id: u64) bool {
+        return self.output_checks.cancel(completion_id);
+    }
+
+    pub fn hasOutputChecks(self: *const Runtime) bool {
+        return self.output_checks.hasPending();
+    }
+
+    pub fn drainOutputChecks(self: *Runtime, sink: OutputCheckSink) void {
+        while (self.output_checks.take(self.io)) |taken| {
+            const state = if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            const completion_id = taken.completion_id;
+            self.output_checks.release(taken);
+            sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state });
+        }
+    }
+
+    pub fn shutdownOutputChecks(self: *Runtime) void {
+        self.output_checks.shutdown();
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -5139,6 +5179,7 @@ pub const Runtime = struct {
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
         self.office.beginShutdown();
+        self.output_checks.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
@@ -7608,6 +7649,7 @@ pub const Runtime = struct {
         self.execution_state.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
+        self.output_checks.deinit();
         self.executor.deinit();
         self.approval_executor.deinit();
         for (&self.preview_images) |*slot| if (slot.*) |image| {
@@ -7663,6 +7705,7 @@ pub const Runtime = struct {
         self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
+        self.shutdownOutputChecks();
         self.drainFileChangeCompletions(.{
             .context = self,
             .complete_fn = discardFileChangeDiffCompletion,
@@ -21704,4 +21747,174 @@ test "Output file target owns its input after the aggregate is released and hand
     try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
     try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
     try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
+}
+
+const OutputCheckHarness = struct {
+    main_thread_id: std.Thread.Id,
+    outcome: lifecycle.FileDeliveryInspection = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } },
+    entered: std.atomic.Value(bool) = .init(false),
+    blocked: std.atomic.Value(bool) = .init(false),
+    inspections: std.atomic.Value(usize) = .init(0),
+    prepares: usize = 0,
+    releases: usize = 0,
+    results: [16]?OutputCheckResult = @splat(null),
+    count: usize = 0,
+
+    fn prepare(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        std.debug.assert(workspace.id == 1 and workspace.epoch == 1);
+        self.prepares += 1;
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) lifecycle.FileDeliveryInspection {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() != self.main_thread_id);
+        std.debug.assert(std.mem.eql(u8, path, "results/年度报告.docx"));
+        _ = self.inspections.fetchAdd(1, .acq_rel);
+        self.entered.store(true, .release);
+        while (self.blocked.load(.acquire) and !cancelled.load(.acquire)) std.Thread.yield() catch {};
+        return if (cancelled.load(.acquire)) .{ .failed = .cancelled } else self.outcome;
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        self.releases += 1;
+    }
+
+    fn complete(context: *anyopaque, result: OutputCheckResult) void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        self.results[self.count] = result;
+        self.count += 1;
+    }
+
+    fn sink(self: *OutputCheckHarness) OutputCheckSink {
+        return .{ .context = self, .complete_fn = complete };
+    }
+
+    fn bind(self: *OutputCheckHarness, control: *Runtime) void {
+        control.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepare });
+    }
+
+    fn waitEntered(self: *OutputCheckHarness) !void {
+        for (0..5000) |_| {
+            if (self.entered.load(.acquire)) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+
+    fn drainAll(self: *OutputCheckHarness, control: *Runtime) !void {
+        for (0..5000) |_| {
+            control.drainOutputChecks(self.sink());
+            if (!control.hasOutputChecks()) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+};
+
+test "Output check worker distinguishes current bytes from changed or unavailable files" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    try std.testing.expectEqual(OutputCheckState.unavailable, control.beginOutputCheck(1, 3, 7, @splat(3)).immediate);
+    try std.testing.expect(control.output_checks.executor == null);
+    harness.bind(&control);
+    const Case = struct { outcome: lifecycle.FileDeliveryInspection, expected: OutputCheckState };
+    const cases = [_]Case{
+        .{ .outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } }, .expected = .ready },
+        .{ .outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(2) } }, .expected = .changed },
+        .{ .outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } }, .expected = .changed },
+        .{ .outcome = .{ .failed = .missing }, .expected = .missing },
+        .{ .outcome = .{ .failed = .restricted }, .expected = .restricted },
+        .{ .outcome = .{ .failed = .too_large }, .expected = .too_large },
+        .{ .outcome = .{ .failed = .read_failed }, .expected = .failed },
+    };
+    for (cases, 0..) |case, i| {
+        harness.outcome = case.outcome;
+        try std.testing.expect(control.beginOutputCheck(i + 1, 3, 7, @splat(3)) == .queued);
+        try harness.drainAll(&control);
+        try std.testing.expectEqual(case.expected, harness.results[i].?.state);
+        try std.testing.expectEqual(i + 1, harness.results[i].?.completion_id);
+        try std.testing.expectEqual(i + 1, harness.releases);
+    }
+    try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
+}
+
+test "Output check cancellation bounds active and queued work without retaining effects" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.blocked.store(true, .release);
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try harness.waitEntered();
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
+    try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3)).immediate);
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    try std.testing.expect(control.cancelOutputCheck(2));
+    try std.testing.expect(control.cancelOutputCheck(1));
+    try std.testing.expect(!control.cancelOutputCheck(3));
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(@as(usize, 2), harness.count);
+    for (harness.results[0..harness.count]) |result| try std.testing.expectEqual(OutputCheckState.cancelled, result.?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.inspections.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), harness.releases);
+}
+
+test "Output check completion revalidates authority changed while the worker was active" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try harness.waitEntered();
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    harness.blocked.store(false, .release);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.restricted, harness.results[0].?.state);
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    harness.entered.store(false, .release);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
+    try harness.waitEntered();
+    control.learnProjectionCredential("new-check-security-boundary");
+    harness.blocked.store(false, .release);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.stale_security, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), harness.releases);
+}
+
+test "Output check deadline and shutdown cancel then join before releasing frozen effects" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3)) == .queued);
+    try harness.waitEntered();
+    control.output_checks.jobs[0].?.created_at.nanoseconds -= 31 * std.time.ns_per_s;
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.timed_out, harness.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    harness.entered.store(false, .release);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3)) == .queued);
+    try harness.waitEntered();
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3)) == .queued);
+    control.shutdownOutputChecks();
+    // Joined jobs retain their owned effects until the main loop drains them.
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(@as(usize, 3), harness.releases);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[1].?.state);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
+    try std.testing.expectEqual(OutputCheckState.failed, control.beginOutputCheck(4, 3, 7, @splat(3)).immediate);
 }
