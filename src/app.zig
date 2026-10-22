@@ -514,7 +514,7 @@ pub fn run(init: std.process.Init) !void {
         single_instance_state.deinit();
     }
 
-    const builtin_skill_root: ?[]u8 = root: {
+    const builtin_skill_root: ?[:0]u8 = root: {
         if (product_identity.artifact_kind != .release) {
             if (init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT")) |configured|
                 break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, configured, std.heap.c_allocator);
@@ -800,7 +800,10 @@ test "MCP Application composition imports the startup owner" {
 
 test {
     _ = @import("app/office_component_archive.zig");
-    _ = @import("app/office_process.zig");
+    _ = @import("office_process");
+    _ = @import("app/office_component_store.zig");
+    _ = @import("app/office_component_release.zig");
+    _ = @import("app/office_component_download.zig");
     std.testing.refAllDecls(basic_office_skills);
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);

@@ -85,3 +85,16 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 组件归档为 `tar.gz`，tar 使用 USTAR；当前 Windows producer 不生成链接或特殊成员，不包含字节码缓存、PDB 或安装器副本。归档根的 `office-runtime.json` 使用 schema 1，固定 `target`，以 `files` 列出相对 `path`、实际 `bytes` 和 `sha256`；`payloadBytes` 是清单自身之外所列文件的总字节。归档旁的机器结果记录完整压缩摘要、压缩量和含清单的实际展开量。构建完成前必须重新流式读取完整归档，检查实际成员与清单一致及 gzip CRC，不能只核对构建目录。容量与成员预算由 producer 检查拥有；安装器的受限解包验收仍需独立完成。
 
 这些 producer 来源不授予客户端任意下载 authority。正式客户端须由主包固定其接受的组件发布身份、来源和完整归档摘要；组件内引擎或解释器安全更新因此需要同步发布主包信任信息。主包升级不自动下载用户尚未启用的 Office 组件。完整 Skill 工作流、安装事务、签名后位置与干净机器验收通过前，不得将开发归档登记为可安装的正式组件。
+
+
+## 客户端 Office 安装事务
+
+主包接受的 Windows x64 组件由 [`office-component-release.windows-x64.json`](../build_support/office-component-release.windows-x64.json) 唯一固定，并在构建时校验、编译到 Application。schema 1、protocolRevision 1 与 target `x86_64-windows-msvc` 固定；`release: null` 表示尚未登记可供客户端安装的发布物，不得推测下载地址或转用开发归档。非空 release 必须同时提供 `url`、`archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`。URL 只接受固定 HTTPS 绝对地址，不含 credential、query 或 fragment；下载不接受重定向、远端 manifest、任意用户 URL 或恢复旧下载。组件安全修复需要重新发布包含新信任输入的主包。独立 producer 的供应商输入不能代替这个客户端发布输入。
+
+Application 只有在持有本地数据目录 Primary authority 且该组件操作已串行准入时才能修改组件 store。下载限量写入本次阶段文件，校验同一实际字节的完整摘要及长度，再由主包 Zig 解包、校验完整清单与主包固定的清单摘要。运行前检查目标 PE machine，校验 MetaWork 入口及所带 Python、Node、引擎入口的 Authenticode，再通过 Application Office Job 执行自检。发布到独立最终目录后必须重新校验和自检，才能原子替换当前记录。失败保留旧当前版本；不得把未签名开发模式接到正式客户端。自检只继承固定 OS 环境，使用事务所属 scratch 作为工作目录及临时目录，不继承任务或 Provider credential。
+
+组件 store 的持久记录仅描述组件自身，不写入 Task 或 Session。`current.json` 与 `pending.json` 使用 schema 1、`installId`（32 位小写十六进制随机身份）及 `archiveSha256`（64 位小写十六进制）；固定 `.next` 文件是机械临时文件，不授予身份。阶段目录为 `staging/<installId>`，最终版本目录为 `versions/<installId>`，不得覆盖既有目录。新安装与修复都使用独立身份，不原地替换仍被引用的资源。归档摘要保留在记录中，不重复拼进长运行时路径，以避免供应商 Windows loader 的路径限制。
+
+pending 必须先于阶段写入；只有最终位置验证完成后才能提交 current。取消先等待进程与下载真正静止，再删除本次未提交资源；进程静止无法证实则保留事务并明确失败。current 提交后到达的取消不能撤销已提交事实；清理失败如实表示待清理。原子替换后的持久化结果不确定时保留 pending 与候选目录，禁止猜测回滚。恢复只在启动或 worker 已静止时读取 canonical current/pending：已提交候选予以保留，未提交候选只清理 pending 精确登记的目录，不扫描或收养未登记目录，不重放下载、自检或激活。旧版本最终清理由进程内 catalog lease、执行进程及预览 handle 的引用拥有者决定，安装事务不得自行删除旧版本。
+
+机械事务测试与开发组件安装验证不表示正式签名发布、公开下载服务、干净机器或应用 UI 已通过验收。实际发布仍须通过完整的目标平台分发验证。

@@ -28,6 +28,8 @@ def fixture(name, *, path="payload.bin", target="x86_64-windows-msvc", link=Fals
     manifest = json.dumps({"schema": 1, "target": target,
                            "payloadBytes": sum(len(data) for _, data in entries),
                            "files": manifest_files}, separators=(",", ":")).encode("utf-8")
+    if name == "valid":
+        (ROOT / "valid.manifest.json").write_bytes(manifest)
     contents = io.BytesIO()
     with tarfile.open(fileobj=contents, mode="w", format=tarfile.PAX_FORMAT if pax else tarfile.USTAR_FORMAT) as archive:
         if directory:

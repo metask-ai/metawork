@@ -107,6 +107,23 @@ class OfficeProcess(unittest.TestCase):
         self.assertEqual(result["term"], {"exited": 7})
         self.assertEqual(json.loads(result["stdout"]), ["selftest"])
 
+    def test_host_environment_and_temporary_files_are_scoped_to_its_transaction(self):
+        source = "import json,os,tempfile;print(json.dumps({'cwd':os.getcwd(),'temp':tempfile.gettempdir(),'ambient':os.environ.get('METAWORK_QUALIFICATION_SECRET')}))"
+        previous = os.environ.get("METAWORK_QUALIFICATION_SECRET")
+        os.environ["METAWORK_QUALIFICATION_SECRET"] = "fixture-only-marker"
+        try:
+            result = self.finish(self.start(source))
+        finally:
+            if previous is None:
+                os.environ.pop("METAWORK_QUALIFICATION_SECRET", None)
+            else:
+                os.environ["METAWORK_QUALIFICATION_SECRET"] = previous
+        captured = json.loads(result["stdout"])
+        self.assertIsNone(captured["ambient"])
+        self.assertEqual(captured["cwd"], captured["temp"])
+        self.assertNotEqual(Path(captured["temp"]), self.root)
+        self.assertFalse(Path(captured["temp"]).exists(), "Qualification must remove its owned transaction scratch")
+
     def test_hard_killed_application_closes_the_only_lifetime_handle(self):
         process, handles = self.tree()
         process.kill()

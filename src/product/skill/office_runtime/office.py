@@ -127,8 +127,10 @@ class Engine:
         self.process = None
 
     def __enter__(self):
-        profile = (self.directory / "profile").as_uri()
-        shared_cache = self.directory / "shared-packages"
+        # LibreOffice's registry paths append long fixed suffixes. Keep our
+        # private names short so scoped installation scratch remains usable.
+        profile = (self.directory / "p").as_uri()
+        shared_cache = self.directory / "sc"
         shared_cache.mkdir()
         pipe = "metawork-office-" + uuid.uuid4().hex
         os.environ["URE_BOOTSTRAP"] = (PROGRAM / "fundamental.ini").as_uri()
@@ -374,7 +376,7 @@ def selftest():
     import lxml.etree
     import pandas
     import PIL
-    with tempfile.TemporaryDirectory(prefix="metawork-office-selftest-") as directory:
+    with tempfile.TemporaryDirectory(prefix="mw-") as directory:
         root = Path(directory).resolve()
         with Engine(root) as engine:
             device = engine.service("com.sun.star.awt.Toolkit").createScreenCompatibleDevice(1, 1)

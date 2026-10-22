@@ -8,6 +8,11 @@ pub const Cancellation = struct {
     requested: std.atomic.Value(bool) = .init(false),
 };
 
+pub const Context = struct {
+    parent_environment: *const std.process.Environ.Map,
+    scratch_root: []const u8,
+};
+
 pub const Command = union(enum) {
     selftest,
     render: struct { input: []const u8, output: []const u8, width: u16 = 1280 },
@@ -36,13 +41,26 @@ pub fn run(
     io: std.Io,
     component_root: []const u8,
     command: Command,
+    context: Context,
     timeout_ms: u32,
     cancellation: *const Cancellation,
 ) !Output {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
-    if (!validPath(component_root) or timeout_ms == 0 or timeout_ms > 300_000) return error.InvalidOfficeRequest;
+    if (!validPath(component_root) or !validPath(context.scratch_root) or timeout_ms == 0 or timeout_ms > 300_000) return error.InvalidOfficeRequest;
     if (cancellation.requested.load(.acquire)) return error.Cancelled;
     const started: std.Io.Timestamp = .now(io, .awake);
+    const scratch = try std.Io.Dir.cwd().openDir(io, context.scratch_root, .{ .follow_symlinks = false });
+    scratch.close(io);
+    var environment: std.process.Environ.Map = .init(allocator);
+    defer environment.deinit();
+    // These fixed Host commands do not need Task/provider credentials or user
+    // interpreter options. Preserve only OS context and use owned scratch.
+    for ([_][]const u8{ "SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432" }) |key| {
+        if (context.parent_environment.get(key)) |value| try environment.put(key, value);
+    }
+    try environment.put("TMP", context.scratch_root);
+    try environment.put("TEMP", context.scratch_root);
+    try environment.put("TMPDIR", context.scratch_root);
     var job = try windows.Job.init(io);
     defer job.deinit();
     const entry = try std.fs.path.join(allocator, &.{ component_root, "bin", "office.exe" });
@@ -74,6 +92,8 @@ pub fn run(
         .stdout = .pipe,
         .stderr = .pipe,
         .create_no_window = true,
+        .cwd = .{ .path = context.scratch_root },
+        .environ_map = &environment,
     });
     defer child.kill(io);
     const stdout = child.stdout.?;
@@ -186,8 +206,11 @@ fn validPath(path: []const u8) bool {
 test "Office Application requests are absolute and cancellation precedes any spawn" {
     const cancellation: Cancellation = .{ .requested = .init(true) };
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try std.testing.expectError(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "relative", .selftest, 1000, &cancellation));
-    try std.testing.expectError(error.Cancelled, run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, 1000, &cancellation));
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    const context: Context = .{ .parent_environment = &environment, .scratch_root = "C:\\scratch" };
+    try std.testing.expectError(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "relative", .selftest, context, 1000, &cancellation));
+    try std.testing.expectError(error.Cancelled, run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, context, 1000, &cancellation));
 }
 
 test {

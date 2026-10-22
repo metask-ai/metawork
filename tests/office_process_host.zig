@@ -6,6 +6,12 @@ const office = @import("office_process");
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4) return error.UsageComponentRootTimeoutCancelAfter;
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(init.io, &random);
+    const name = try std.fmt.allocPrint(init.arena.allocator(), ".host-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const scratch = try std.fs.path.join(init.arena.allocator(), &.{ std.fs.path.dirname(args[1]) orelse return error.InvalidRoot, name });
+    try std.Io.Dir.cwd().createDir(init.io, scratch, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(init.io, scratch) catch {};
     const timeout = try std.fmt.parseInt(u32, args[2], 10);
     const cancel_after = try std.fmt.parseInt(u32, args[3], 10);
     var cancellation: office.Cancellation = .{};
@@ -17,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
-    var result = office.run(init.gpa, init.io, args[1], .selftest, timeout, &cancellation) catch |failure| {
+    var result = office.run(init.gpa, init.io, args[1], .selftest, .{ .parent_environment = init.environ_map, .scratch_root = scratch }, timeout, &cancellation) catch |failure| {
         try std.json.Stringify.value(.{ .failure = @errorName(failure) }, .{}, &writer.interface);
         try writer.interface.writeByte('\n');
         try writer.interface.flush();

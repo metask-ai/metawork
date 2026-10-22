@@ -2123,6 +2123,23 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
         .link_libc = bundle.link_libc,
     }));
+    const office_component_windows = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/office_component_windows.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    if (target.result.os.tag == .windows) office_component_windows.linkSystemLibrary("wintrust", .{});
+    app.addImport("office_component_windows", office_component_windows);
+    const office_process = b.createModule(.{
+        .root_source_file = b.path("src/app/office_process.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    office_process.addImport("office_process_windows", existingImport(app, "office_process_windows"));
+    app.addImport("office_process", office_process);
+    @import("build_support/office_component_release.zig").bind(b, app);
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);
 
@@ -2270,6 +2287,10 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool
     if (app.resolved_target.?.result.os.tag == .windows) {
         const job_tests = b.addTest(.{ .name = "office-process-job", .root_module = existingImport(app, "office_process_windows") });
         tests.dependOn(&b.addRunArtifact(job_tests).step);
+        const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
+        tests.dependOn(&b.addRunArtifact(validation_tests).step);
+        const process_tests = b.addTest(.{ .name = "office-process", .root_module = existingImport(app, "office_process") });
+        tests.dependOn(&b.addRunArtifact(process_tests).step);
     }
     const archive = b.createModule(.{
         .root_source_file = b.path("src/app/office_component_archive.zig"),
@@ -2287,13 +2308,7 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool
     const bootstrap_run = b.addRunArtifact(bootstrap);
     if (b.args) |args| bootstrap_run.addArgs(args);
     b.step("office-bootstrap", "Verify and unpack an actual Office producer archive").dependOn(&bootstrap_run.step);
-    const process = b.createModule(.{
-        .root_source_file = b.path("src/app/office_process.zig"),
-        .target = app.resolved_target,
-        .optimize = app.optimize,
-        .link_libc = link_libc,
-    });
-    process.addImport("office_process_windows", existingImport(app, "office_process_windows"));
+    const process = existingImport(app, "office_process");
     const host = b.addExecutable(.{ .name = "office-process-probe", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_process_host.zig"),
         .target = app.resolved_target,
@@ -2302,6 +2317,24 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool
     }) });
     host.root_module.addImport("office_process", process);
     b.step("build-office-process-probe", "Build the real Application Office lifecycle qualifier").dependOn(&b.addInstallArtifact(host, .{}).step);
+    const store = b.createModule(.{
+        .root_source_file = b.path("src/app/office_component_store.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    });
+    store.addImport("office_process", process);
+    store.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    const install = b.addExecutable(.{ .name = "office-component-install", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_component_install.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    install.root_module.addImport("office_component_store", store);
+    install.root_module.addImport("office_process", process);
+    install.root_module.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    b.step("build-office-component-install", "Build the isolated component installation qualifier").dependOn(&b.addInstallArtifact(install, .{}).step);
 }
 
 fn existingImport(module: *std.Build.Module, name: []const u8) *std.Build.Module {

@@ -189,6 +189,16 @@ class OfficeEngine(unittest.TestCase):
             self.assertNotEqual(process.returncode, 0)
         return process
 
+    def test_selftest_uses_a_deep_owned_installation_temporary_directory(self):
+        directory = self.root / ("installation-scratch-" + "a" * 24)
+        directory.mkdir()
+        environment = {**os.environ, "TMP": str(directory), "TEMP": str(directory), "TMPDIR": str(directory)}
+        result = subprocess.run([str(self.exe), "selftest"], cwd=directory, env=environment,
+                                capture_output=True, text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "success")
+        self.assertEqual(list(directory.iterdir()), [])
+
     def assert_pages(self, directory, expected):
         root = self.root / directory
         manifest = json.loads((root / "pages.json").read_text(encoding="utf-8"))

@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "protocolRevision": 1,
+  "target": "x86_64-windows-msvc",
+  "release": null
+}

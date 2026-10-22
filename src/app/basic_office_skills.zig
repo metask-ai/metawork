@@ -25,7 +25,7 @@ const version = value: {
 /// Called only by the primary Application before catalog queries can start.
 /// The returned canonical path is allocator-owned. Versions are immutable and
 /// distinct so an app update never rewrites files referenced by a live catalog.
-pub fn prepare(allocator: std.mem.Allocator, io: std.Io, data_root: []const u8) ![]u8 {
+pub fn prepare(allocator: std.mem.Allocator, io: std.Io, data_root: []const u8) ![:0]u8 {
     const parent_path = try std.fs.path.join(allocator, &.{ data_root, "builtin-office" });
     defer allocator.free(parent_path);
     const parent = try std.Io.Dir.cwd().createDirPathOpen(io, parent_path, .{
@@ -140,4 +140,16 @@ test "basic Office source cannot acquire additional definitions or executable re
     try temporary.dir.deleteFile(io, version ++ "/docx/extra.py");
     try temporary.dir.createDir(io, version ++ "/extra", directoryPermissions());
     try std.testing.expectError(error.BasicSkillChanged, publish(io, temporary.dir));
+}
+
+test "basic Office prepared source returns its complete owned canonical allocation" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const prepared = try prepare(std.testing.allocator, std.testing.io, root);
+    defer std.testing.allocator.free(prepared);
+    try std.testing.expect(std.fs.path.isAbsolute(prepared));
+    const opened = try std.Io.Dir.cwd().openDir(std.testing.io, prepared, .{});
+    opened.close(std.testing.io);
 }

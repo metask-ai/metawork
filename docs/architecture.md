@@ -149,6 +149,7 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 | --- | --- | --- | --- |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
+| `office_component_validation` | Windows 二级 | Application Office 安装 worker 使用公开 OS API 观察目标卷可用量，并以无 UI、仅本地缓存的 Authenticode policy 校验固定运行时入口；组件发布 authority 始终是主包固定的完整归档摘要，不从签名接受任意组件 | SDK 提供等价磁盘容量与 Windows 签名校验，且通过同一安装验收 |
 | `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；入口在启动子进程前加入并关闭临时 Job 引用。只用于安装自检和产品文档预览，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消与物理静止观测，并通过同一 Windows 验收 |
 | `external_link_handoff` | 一级 | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
@@ -156,6 +157,8 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 `external_link_handoff` 只允许三种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
+
+`office_component_validation` 只由 Application 安装事务消费，不访问 SDK 私有 context，也不向 Product、Bridge 或 Renderer 暴露系统 handle。磁盘检查使用调用方可用字节；签名检查在阶段目录和最终版本目录均执行，禁止弹出 UI、联网补取证书或将失败降级为成功。精确下载来源、摘要与接受格式由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 定义。
 
 `office_process_tree` 只补当前 SDK 未公开的 Windows Job 能力。Application worker 保留唯一长期 Job handle，组件入口只临时打开、验证 kill-on-close 且禁止 breakaway 的 Job、加入自身并在创建 Python 前关闭临时 handle。Host 硬杀由 OS 关闭最后引用并终止整树；显式失败、取消与超时则先由唯一标准库 child owner kill/wait 根进程，再终止 Job 并观测 active process 数归零，最后 join 有界 stdout/stderr reader。不能先等待仍被子进程占用的管道再请求终止。清理无法证实时必须返回失败，调用方不得发布结果或删除仍可能使用的组件和预览资源。该 seam 不维护窗口或 Native Runtime 状态，不修改 SDK 源码，也不成为通用进程服务。
 
