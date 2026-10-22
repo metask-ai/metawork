@@ -129,4 +129,23 @@ test("component sources refuse stale requirements, missing wheels, duplicates an
     writeFileSync(path.join(scratch, wheelPath), JSON.stringify(lock));
     assert.throws(() => officeComponentSources(scratch), /Office/u);
   }
+  for (const excludedFileIds of [
+    ["a", "A"],
+    ["../escape"],
+    Array.from({ length: 33 }, (_, i) => `file${i}`),
+    null,
+  ]) {
+    restore();
+    const file = path.join(
+      scratch,
+      "build_support/office-runtime.windows-x64.sources.json",
+    );
+    const sources = JSON.parse(readFileSync(file, "utf8"));
+    sources.libreoffice.excludedFileIds = excludedFileIds;
+    writeFileSync(file, JSON.stringify(sources));
+    assert.throws(
+      () => officeComponentSources(scratch),
+      /MSI source exclusions/u,
+    );
+  }
 });

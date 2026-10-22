@@ -62,6 +62,17 @@ export function officeComponentSources(root) {
     throw new Error(
       "Office wheel lock does not cover every pinned requirement",
     );
+  const excluded = sources.libreoffice.excludedFileIds;
+  if (
+    !Array.isArray(excluded) ||
+    excluded.length > 32 ||
+    new Set(excluded.map((name) => name.toLowerCase())).size !==
+      excluded.length ||
+    excluded.some((name) => !/^[A-Za-z0-9_.-]+$/u.test(name))
+  )
+    throw new Error(
+      "Office MSI source exclusions must be explicit bounded file identities",
+    );
   for (const item of [
     ...Object.values(sources).filter((value) => typeof value === "object"),
     ...wheels.wheels,

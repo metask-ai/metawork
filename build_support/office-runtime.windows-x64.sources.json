@@ -6,7 +6,19 @@
     "url": "https://ftp.osuosl.org/pub/tdf/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi",
     "sha256": "c6298b10cfa1748bcbedad94c62ce771e240e5021bfd6d7a967cd571b04b5312",
     "bytes": 374870016,
-    "pythonDirectory": "python-core-3.13.15"
+    "pythonDirectory": "python-core-3.13.15",
+    "excludedFileIds": [
+      "concrt140.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "msvcp140.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "msvcp140_1.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "msvcp140_2.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "msvcp140_atomic_wait.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "msvcp140_codecvt_ids.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "vccorlib140.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "vcruntime140.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "vcruntime140_1.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3",
+      "vcruntime140_threads.dll_arm64.DFEFC2FE_EEE6_424C_841B_D4E66F0C84A3"
+    ]
   },
   "node": {
     "version": "24.19.0",
@@ -25,5 +37,11 @@
     "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE",
     "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
     "bytes": 4301
+  },
+  "bootstrapPython": {
+    "version": "3.13.15",
+    "url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip",
+    "sha256": "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf",
+    "bytes": 11009825
   }
 }

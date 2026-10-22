@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -94,6 +95,9 @@ if (
   throw new Error(
     "Office workflows require an entry or authoring package not supplied by this producer",
   );
+// Builder tooling is not an installed-runtime dependency. Fail before creating
+// a multi-gigabyte staging tree if the explicitly selected builder lacks pip.
+await run(python, ["-I", "-m", "pip", "--version"], "Office builder pip");
 mkdirSync(cache, { recursive: true });
 
 async function fileDigest(filename) {
@@ -193,19 +197,30 @@ const stage = path.join(
 );
 mkdirSync(stage, { recursive: true });
 console.log(`Preparing Office component: ${stage}`);
+const msiScratch = `${stage}.msi-scratch`;
+mkdirSync(msiScratch);
 await run(
-  "msiexec.exe",
+  python,
   [
-    "/a",
+    "-I",
+    "-S",
+    "-B",
+    "-X",
+    "utf8",
+    path.join(root, "src/app/office_bootstrap/msi.py"),
     msi,
-    "/qn",
-    "/norestart",
-    `TARGETDIR=${path.join(stage, "engine")}`,
-    "/l*v",
-    `${stage}.msi.log`,
+    path.join(stage, "engine"),
+    msiScratch,
+    String(sources.libreoffice.bytes),
+    sources.libreoffice.sha256,
+    ...sources.libreoffice.excludedFileIds.flatMap((name) => [
+      "--exclude",
+      name,
+    ]),
   ],
-  "Office administrative extraction",
+  "Office read-only MSI extraction",
 );
+rmdirSync(msiScratch); // empty only, after the isolated extractor has exited
 await run(
   python,
   [

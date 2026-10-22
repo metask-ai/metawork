@@ -29,7 +29,7 @@ def layout(root, node_zip, font, font_license):
     program = root / "engine/program"
     python = root / "python"
     if python.exists() or not (program / "soffice.com").is_file():
-        raise ValueError("Layout requires a fresh, administratively extracted Office tree")
+        raise ValueError("Layout requires a fresh, read-only extracted Office tree")
     shutil.copytree(program / source["libreoffice"]["pythonDirectory"], python)
     # The MSI's app-local Microsoft runtime is required even on machines which
     # have never installed Office or the VC runtime globally.

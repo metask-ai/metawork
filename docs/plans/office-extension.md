@@ -95,9 +95,9 @@ MetaWork 将 Office 文档处理作为用户可选安装的官方扩展能力。
 
 公共来源路线的输入采用供应商原有格式：LibreOffice MSI、Node ZIP、Python wheel ZIP、npm tar.gz 和原始字体/许可证；不要求把这些公共资源先重新上传为一份 MetaWork 完整归档。现有完整组件 tar.gz producer 用于构建期组装、生成最终清单和行为验收，不作为第二条正式客户端下载 fallback。
 
-主包 Zig 完成首阶段的下载、身份和签名检查、MSI/Node 提取及自有适配资源展开，不能在组件 Python 存在前调用它。MSI 行政提取必须在普通用户、无全局 Office/解释器的干净 Windows 上证明不需要交互提权、不安装系统 Office、不修改全局环境；未通过前不开放此安装路线。优先消费已批准的成熟平台能力，所需 SDK 缺口必须按现有架构登记，不能借 bootstrap 增加任意进程或系统 effect authority。
+主包 Zig 完成首阶段下载、身份和签名检查，并有界展开官方便携 Python 与自有安装适配资源；不能在该解释器存在且通过认证前运行 Python。便携 Python 仅用于本次安装，来源及摘要由主包固定，结束后清理，不成为第二套常驻文档引擎。它调用 Windows 只读 MSI 数据库和进程内 CAB 解压 API 提取 LibreOffice，不运行 MSI action、custom action、msiexec 或安装服务；仍需在普通用户、无全局 Office/解释器的干净 Windows 上验证不提权、不安装系统 Office、不修改全局环境。优先消费已批准的成熟平台能力，所需 SDK 缺口必须按现有架构登记，不能借 bootstrap 增加任意进程或系统 effect authority。
 
-验证后的私有 Python 可承担后续 wheel 和 tar.gz 的有界离线展开；不下载 pip/npm bootstrap，不执行包内安装脚本、源码构建或远端命令。npm 的固定 transitive placement 与 Python 包布局由 producer 的唯一清单生成，不在客户端维护第二个依赖求解器。提取和本地组装仍满足：
+验证后的便携 Python 可承担后续 Node ZIP、wheel 和 tar.gz 的有界离线展开；不下载 pip/npm bootstrap，不执行包内安装脚本、源码构建或远端命令。npm 的固定 transitive placement 与 Python 包布局由 producer 的唯一清单生成，不在客户端维护第二个依赖求解器。提取和本地组装仍满足：
 
 - 压缩量、展开量、成员数、metadata、路径长度和深度均有明确上限，实际写出量计数；多源有聚合预算；
 - 拒绝绝对路径、路径越界、碰撞、特殊文件和不需要的硬链接；

@@ -74,13 +74,13 @@ Office 重依赖由独立组件 producer 构建，不进入主程序 runtime sta
 node scripts/build-office-component.mjs --python <absolute-builder-python> --output <new-absolute-output.tar.gz>
 ```
 
-构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node 和私有中文字体的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包，以独立的 lock 和禁用安装脚本的 `npm ci` 构建。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。
+构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node、私有中文字体以及公开来源 bootstrap 所用临时便携 Python 的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包，以独立的 lock 和禁用安装脚本的 `npm ci` 构建。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。临时便携 Python 不进入完整组件的常驻运行时，固定来源不等于客户端已支持该 bootstrap。
 
 公开源的独立资格检查入口为 `node scripts/check-office-public-sources.mjs`。它与 producer 共用根 lock 的 JavaScript 闭包选择，只从固定 HTTPS 地址逐项 GET，以实际读取字节校验 SHA-256 或根 npm lock 的 SHA-512，不接受动态重定向、依赖解析或安装脚本，不保存和执行下载内容。LibreOffice 来源固定官方公开镜像的直取地址，不能把下载路由的临时跳转结果当作客户端信任输入。结果写入 `.zig-cache/office-public-source-verification.json`，包括实际下载量和每项通过情况；HEAD 可达或 Content-Length 不构成字节身份通过证据。
 
 该检查只证明公开来源的下载字节，不表示客户端已支持从多个公开源本地组装，也不替代签名、安装、普通权限或干净机器验收。客户端下载 authority 仍以本节下文当前发布输入为准；公共来源安装改造尚未接入时，不能以供应商来源直接启用正式组件。
 
-供应商输入必须通过摘要与适用的 Authenticode 校验；MSI 只行政提取到新的 staging 目录，保留许可证和运行所需的 app-local Microsoft 库。组件入口拥有解释器和引擎进程树，组件内的私有字体由引擎加载。默认要求签署 MetaWork 自有入口并立即验证；显式 `--signing none` 仅产生开发组件，不能作为正式分发通过证据。签名身份与工具继续遵守上文的[签名边界](#签名边界)。
+供应商输入必须通过摘要与适用的 Authenticode 校验；MSI 通过 Windows 只读数据库 API 和进程内 CAB API 提取到新的 staging 目录，不运行 MSI action、custom action、msiexec 或安装服务，保留许可证和运行所需的 app-local Microsoft 库。提取器在隔离子进程中运行，不能把其临时工作目录切换用于桌面主进程。MSI source 目录只映射到自有根内，不使用目标系统目录属性；CAB 成员须与有界 File 表逐项一致，实际大小、未知/重复成员、路径碰撞或额外介质均拒绝。输入锁拒绝写入与替换，并重新核验实际源字节。x64 输入仅按 sources 中的精确 File identity 排除重复目标的 ARM64 运行库；不以覆盖顺序选择架构，也不建立通用 MSI 条件求值器。组件入口拥有解释器和引擎进程树，组件内的私有字体由引擎加载。默认要求签署 MetaWork 自有入口并立即验证；显式 `--signing none` 仅产生开发组件，不能作为正式分发通过证据。签名身份与工具继续遵守上文的[签名边界](#签名边界)。
 
 入口支持两种明确的生命周期 owner：模型经 Shell 调用时由入口保留整树 Job；Application 的安装自检和产品预览通过私有 Host Job 协议，在任何子进程启动前加入应用的随机 Job 并释放临时 Job handle。不得在 Host 退出后由组件长期保留该 handle。Native 能力边界见[高层架构](architecture.md#35-native-sdk)，Host 取消、超时、输出预算和物理静止的证据须独立于入口自有 Job 验收。
 
