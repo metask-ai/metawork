@@ -17,6 +17,7 @@ const CoreProbe = struct {
     original: sdk.Api,
     changed_schema: bool = false,
     legacy_tools: bool = false,
+    legacy_host_count: usize = 0,
     report: [8192]u8 = undefined,
     report_len: usize = 0,
     description: [8192]u8 = undefined,
@@ -37,15 +38,16 @@ const CoreProbe = struct {
     fn create(config: ?*const sdk.types.RuntimeConfigV1, plugins: ?*const sdk.types.RuntimePluginConfigV1, output: ?*?*sdk.types.RuntimeHandle, diagnostic: ?*sdk.types.OwnedBytesV1) callconv(.c) u32 {
         var copy = config.?.*;
         if (active.legacy_tools) {
-            copy.host_tools = null;
-            copy.host_tool_count = 0;
+            copy.host_tools = if (active.legacy_host_count == 0) null else copy.host_tools;
+            copy.host_tool_count = active.legacy_host_count;
             return active.original.runtime().create()(&copy, plugins, output, diagnostic);
         }
         if (active.changed_schema) {
-            std.debug.assert(copy.host_tool_count == 1);
-            var tool = copy.host_tools.?[0];
+            std.debug.assert(copy.host_tool_count == 2);
+            var tools = [_]sdk.types.HostToolV1{ copy.host_tools.?[0], copy.host_tools.?[1] };
+            const tool = &tools[0];
             tool.input_schema_json = sdk.bytesView("{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"maxLength\":1000}},\"required\":[\"prompt\"],\"additionalProperties\":false}");
-            copy.host_tools = @ptrCast(&tool);
+            copy.host_tools = &tools;
             return active.original.runtime().create()(&copy, plugins, output, diagnostic);
         }
         return active.original.runtime().create()(config, plugins, output, diagnostic);
@@ -54,9 +56,9 @@ const CoreProbe = struct {
         var copy = config.?.*;
         var host = copy.host.?.*;
         if (active.legacy_tools) {
-            std.debug.assert(host.allowed_tool_count == 11);
+            std.debug.assert(host.allowed_tool_count == 12);
             std.debug.assert(std.mem.eql(u8, sdk.borrowedBytes(host.allowed_tools.?[10]) catch "", "GenerateImage"));
-            host.allowed_tool_count -= 1;
+            host.allowed_tool_count -= 2 - active.legacy_host_count;
             copy.host = &host;
         }
         return active.original.session().create()(runtime, &copy, callbacks, output, diagnostic);
@@ -372,16 +374,17 @@ const RestoreBytes = struct {
     }
 };
 
-fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
+fn checkpointTools(old_host_count: usize, grant: bool, changed_schema: bool) !void {
     var h: Harness = undefined;
     try h.init("restore", .{});
     defer h.deinit();
     var legacy_probe: CoreProbe = undefined;
-    if (!old_image) {
+    if (old_host_count < 2) {
         try h.runtime.shutdown();
         h.runtime.deinit();
         try legacy_probe.init(false);
         legacy_probe.legacy_tools = true;
+        legacy_probe.legacy_host_count = old_host_count;
         h.runtime = try agent.Runtime.initWithApi(std.testing.io, std.testing.allocator, &legacy_probe.api, .{ .max_sessions = 2 });
     }
     const session = try h.session(.default, false);
@@ -431,7 +434,7 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
     defer described.deinit();
     // Changing only GenerateImage's schema does not invalidate an unrelated
     // built-in Write grant. Host tools cannot have persisted Session grants.
-    const changed = !old_image and grant;
+    const changed = old_host_count < 2 and grant;
     try std.testing.expectEqual(if (changed) agent.CheckpointRestoreHealth.degraded else .complete, restored.report.health);
     try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), restored.report.invalidated_permission_rules);
     try std.testing.expectEqual(@as(u32, if (grant and !changed) 1 else 0), restored.report.restored_permission_rules);
@@ -458,13 +461,13 @@ fn checkpointTools(old_image: bool, grant: bool, changed_schema: bool) !void {
 }
 
 test "GenerateImage canonical checkpoint invalidates changed tool authority and preserves unchanged grants" {
-    try checkpointTools(false, true, false);
-    try checkpointTools(true, true, false);
-    try checkpointTools(true, true, true);
+    try checkpointTools(0, true, false);
+    try checkpointTools(2, true, false);
+    try checkpointTools(2, true, true);
 }
 
 test "GenerateImage legacy checkpoint without grants restores complete and requires fresh approval" {
-    try checkpointTools(false, false, false);
+    try checkpointTools(0, false, false);
 }
 
 test "GenerateImage accept_edits still requires once-only Host approval" {
@@ -708,7 +711,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         .binding = .{ .endpoint = &endpoint, .model = &model, .credential = &credential, .output = h.sink.output() },
         .transport = first.transport(),
     };
-    const id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, input);
+    const id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, input, null);
     @memset(&endpoint, 'x');
     @memset(&model, 'x');
     @memset(&credential, 0);
@@ -727,7 +730,7 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
 
     // Explicit unavailability also overrides the Session's synthetic fixture
     // source. Neither the previous production input nor the fixture is reused.
-    var missing: Work = .{ .session = session, .id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, null) };
+    var missing: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, null, null) };
     const missing_thread = try std.Thread.spawn(.{}, Work.run, .{&missing});
     missing_thread.join();
     defer missing.result.?.deinit();
@@ -742,11 +745,11 @@ test "GenerateImage per-Run input freezes borrowed data and effects and never in
         },
         .transport = second.transport(),
     };
-    const cancelled = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, next);
+    const cancelled = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null);
     try session.cancelPreparedRun(cancelled);
     try std.testing.expect(session.run_image == null);
     try std.testing.expectEqual(@as(usize, 0), second.calls.load(.acquire));
-    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, next) };
+    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithTools(.{ .text = "Generate the fixture image." }, next, null) };
     const renewed_thread = try std.Thread.spawn(.{}, Work.run, .{&renewed});
     renewed_thread.join();
     defer renewed.result.?.deinit();
@@ -1590,4 +1593,265 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     var snapshot: [256 * 1024]u8 = undefined;
     const json = try control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);
+}
+
+test "DeliverFile previous GenerateImage-only checkpoints restore without recreating file authority" {
+    try checkpointTools(1, false, false);
+    try checkpointTools(1, true, false);
+}
+
+const DeliveryReader = struct {
+    root: []const u8,
+    main_thread_id: std.Thread.Id,
+    entered: std.atomic.Value(bool) = .init(false),
+    hold: bool = false,
+
+    fn input(self: *@This()) agent.FileDeliveryInput {
+        return .{ .context = self, .inspect_fn = inspect };
+    }
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.entered.store(true, .release);
+        if (self.hold) {
+            while (!cancelled.load(.acquire)) std.Thread.yield() catch {};
+            return .{ .failed = .cancelled };
+        }
+        const value = @import("app_output_file").inspect(std.testing.io, .{ .workspace_root = self.root, .relative_path = path, .main_thread_id = self.main_thread_id }, cancelled) catch |err| return .{ .failed = switch (err) {
+            error.FileNotFound => .missing,
+            error.Cancelled => .cancelled,
+            else => .read_failed,
+        } };
+        return .{ .verified = .{ .size_bytes = value.size_bytes, .sha256 = value.sha256 } };
+    }
+};
+
+test "DeliverFile canonical Core checks actual Workspace bytes and sends one trusted receipt to Product ingress" {
+    var h: Harness = undefined;
+    try h.init("delivery", .{});
+    defer h.deinit();
+    const session = try h.session(.full_access, false);
+    const content = "verified document bytes";
+    const file = try h.tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    try file.writeStreamingAll(std.testing.io, content);
+    file.close(std.testing.io);
+    var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
+    for (0..3) |index| {
+        if (index == 2) try h.tmp.dir.deleteFile(std.testing.io, "result.docx");
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, if (index == 1) null else reader.input());
+        var work: Work = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        thread.join();
+        defer work.result.?.deinit();
+        try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
+        var records: usize = 0;
+        var results: usize = 0;
+        while (h.runtime.takeEvent()) |value| {
+            var event = value;
+            defer event.deinit();
+            if (event.delivered_file) |receipt| {
+                records += 1;
+                try std.testing.expectEqual(id, event.run_id);
+                try std.testing.expectEqualStrings("result.docx", receipt.pathView());
+                try std.testing.expectEqual(content.len, receipt.size_bytes);
+                var expected: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(content, &expected, .{});
+                try std.testing.expectEqualSlices(u8, &expected, &receipt.sha256);
+                try std.testing.expect(std.mem.indexOf(u8, event.json, "delivered_file") == null);
+            }
+            if (event.event.value == .known and event.event.value.known == .tool_result and
+                std.mem.eql(u8, event.event.value.known.tool_result.name, "DeliverFile"))
+            {
+                results += 1;
+                const result = event.event.value.known.tool_result;
+                try std.testing.expectEqual(index != 0, result.is_error);
+                try std.testing.expect(std.mem.indexOf(u8, result.content, switch (index) {
+                    0 => "verified_for_delivery",
+                    1 => "unavailable",
+                    else => "missing",
+                }) != null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (index == 0) 1 else 0), records);
+        try std.testing.expectEqual(@as(usize, 1), results);
+        try std.testing.expect(session.run_delivery == null);
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
+    }
+}
+
+test "DeliverFile canonical Core cancellation joins file callbacks on stop close and shutdown" {
+    for (0..3) |action| {
+        var h: Harness = undefined;
+        try h.init("delivery", .{});
+        defer h.deinit();
+        const session = try h.session(.full_access, false);
+        var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId(), .hold = true };
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input());
+        var work: Work = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        defer {
+            if (!work.done.load(.acquire)) _ = session.requestTermination(id, .{ .interrupted = .user_cancel }) catch {};
+            thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        for (0..20_000) |_| {
+            if (reader.entered.load(.acquire) or work.done.load(.acquire)) break;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        try std.testing.expect(reader.entered.load(.acquire));
+        switch (action) {
+            0 => _ = try session.requestTermination(id, .{ .interrupted = .user_cancel }),
+            1 => try session.close(.session_close),
+            else => try h.runtime.shutdown(),
+        }
+        for (0..20_000) |_| {
+            if (work.done.load(.acquire)) break;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(session.run_delivery == null);
+        for (session.delivery_calls) |call| try std.testing.expect(call == null);
+        for (session.delivery_receipts) |receipt| try std.testing.expect(receipt == null);
+        while (h.runtime.takeEvent()) |value| {
+            var event = value;
+            defer event.deinit();
+            try std.testing.expect(event.delivered_file == null);
+        }
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
+    }
+}
+
+test "DeliverFile canonical Core approval gates file reads and refuses Session grants" {
+    for ([_]agent.PermissionChoice{ .allow_once, .deny_once }) |choice| {
+        var h: Harness = undefined;
+        try h.init("delivery", .{});
+        defer h.deinit();
+        const session = try h.session(.accept_edits, false);
+        const file = try h.tmp.dir.createFile(std.testing.io, "result.docx", .{});
+        try file.writeStreamingAll(std.testing.io, "approved bytes");
+        file.close(std.testing.io);
+        var reader: DeliveryReader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() };
+        const id = try session.prepareRunWithTools(.{ .text = "Explicitly deliver the fixture file." }, null, reader.input());
+        var work: Work = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        defer {
+            if (!work.done.load(.acquire)) _ = session.requestTermination(id, .{ .interrupted = .user_cancel }) catch {};
+            thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        var previous: ?u64 = null;
+        var answers: usize = 0;
+        for (0..20_000) |_| {
+            if (work.done.load(.acquire)) break;
+            if (session.pendingUiRequest()) |request| if (previous == null or previous.? != request) {
+                try std.testing.expect(!reader.entered.load(.acquire));
+                try std.testing.expectError(error.InvalidUiResponse, session.respondPermission(id, request, .allow_session));
+                try session.respondPermission(id, request, choice);
+                previous = request;
+                answers += 1;
+            };
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), answers);
+        try std.testing.expectEqual(choice == .allow_once, reader.entered.load(.acquire));
+        var receipts: usize = 0;
+        while (h.runtime.takeEvent()) |value| {
+            var event = value;
+            defer event.deinit();
+            if (event.delivered_file != null) receipts += 1;
+        }
+        try std.testing.expectEqual(@as(usize, if (choice == .allow_once) 1 else 0), receipts);
+    }
+}
+
+const ProductDeliveryEffect = struct {
+    reader: DeliveryReader,
+    released: usize = 0,
+    fn prepare(context: *anyopaque, authority: image_product.fixture_api.product_workspace.TaskAuthority) ?image_product.task_api.OwnedFileDelivery {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, self.reader.root, authority.canonical_root)) return null;
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return DeliveryReader.inspect(&self.reader, path, cancelled);
+    }
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.released += 1;
+    }
+};
+
+test "DeliverFile canonical Product registers real Core receipt and restores its metadata from actual history" {
+    var h: Harness = undefined;
+    try h.init("delivery", .{});
+    defer h.deinit();
+    try h.runtime.shutdown();
+    h.runtime.deinit();
+    h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
+    const content = "explicit delivered file bytes";
+    const file = try h.tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    try file.writeStreamingAll(std.testing.io, content);
+    file.close(std.testing.io);
+    var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
+    defer history.deinit();
+    var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
+    defer checkpoints.deinit();
+    var configuration = image_product.fixture_api.productControlConfiguration();
+    configuration.task_persistence = image_product.History.port(&history);
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    configuration.directories.canonical_user_home = h.root;
+    const limits: image_product.control_api.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 };
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    var control_live = true;
+    defer if (control_live) {
+        control.stopCustomProviders();
+        control.deinit();
+    };
+    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir };
+    try control.startCustomProviders(h.root, effects.vault());
+    try image_product.configureDialogue(&control, h.fixture.provider_endpoint, false);
+    var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
+    control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
+    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual });
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const id = try control.runTask(task_id, .{ .text = "Explicitly deliver the finished file." });
+    try image_product.finish(&control, task_id, id, null);
+    const task = control.task_runtime.find(task_id).?;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expectEqualStrings("result.docx", run.outputs[0].?.locator);
+    try std.testing.expectEqual(content.len, run.outputs[0].?.size_bytes);
+    const receipt_id = run.outputs[0].?.id;
+    const digest = run.outputs[0].?.sha256;
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(content, &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, &digest);
+    try std.testing.expect(run.outputs[1] == null);
+    try std.testing.expect(run.file_delivery == null);
+    try std.testing.expectEqual(@as(usize, 1), delivery.released);
+    try std.testing.expect(task.durable.checkpoint != null);
+    control.setFileDeliveryPreparation(null);
+    control.stopCustomProviders();
+    control.shutdownExecutor();
+    try control.drainAgentEvents();
+    control.deinit();
+    control_live = false;
+    const saved = (try history.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "file_delivery") == null);
+    configuration.task_persistence.restored_bytes = saved;
+    control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
+    control_live = true;
+    const restored = control.task_runtime.find(task_id).?;
+    try std.testing.expect(!restored.runtime.hasAttachedSession());
+    const recovered = &restored.durable.runs[0].?;
+    try std.testing.expect(recovered.file_delivery == null);
+    try std.testing.expectEqualStrings("result.docx", recovered.outputs[0].?.locator);
+    try std.testing.expectEqualSlices(u8, &receipt_id, &recovered.outputs[0].?.id);
+    try std.testing.expectEqualSlices(u8, &digest, &recovered.outputs[0].?.sha256);
+    try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
 }

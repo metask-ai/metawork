@@ -946,6 +946,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
     cases.addImport("image_output", modules.image_output);
+    cases.addImport("app_output_file", modules.output_file);
     cases.addImport("models_coordinator", modules.models_coordinator);
     cases.addImport("metawork_account", modules.account);
     cases.addImport("product_models_metask", modules.models_metask);
@@ -2124,6 +2125,8 @@ fn wireAgentCore(
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
+    app.addImport("app_output_file", output_file);
+    app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);
     app.addImport(
         "product_schedule_persistence",

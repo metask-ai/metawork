@@ -9,6 +9,18 @@ pub const schema =
 ;
 pub const max_receipts_per_run = 8;
 pub const result_bytes = 4096;
+pub const max_active_calls = 2;
+
+/// Frozen Workspace file capability. The Application owner stays alive until
+/// Run callbacks and Product event drain are quiescent; no aggregate is borrowed.
+pub const Input = struct {
+    context: *anyopaque,
+    inspect_fn: *const fn (*anyopaque, []const u8, *const std.atomic.Value(bool)) Inspection,
+};
+pub const Inspection = union(enum) {
+    verified: struct { size_bytes: u64, sha256: [32]u8 },
+    failed: Failure,
+};
 
 pub const Receipt = struct {
     pub const tool_name = name;
@@ -50,15 +62,23 @@ pub fn validatePath(path: []const u8) !void {
     }
 }
 
+const PathText = struct {
+    value: []const u8,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !PathText {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+        return .{ .value = try std.json.innerParse([]const u8, allocator, source, options) };
+    }
+};
+
 pub fn pathArgument(allocator: std.mem.Allocator, arguments: []const u8) ![]u8 {
     if (arguments.len > Receipt.max_path_bytes * 6 + 64) return error.InvalidArguments;
-    const parsed = std.json.parseFromSlice(struct { path: []const u8 }, allocator, arguments, .{
+    const parsed = std.json.parseFromSlice(struct { path: PathText }, allocator, arguments, .{
         .duplicate_field_behavior = .@"error",
         .max_value_len = Receipt.max_path_bytes,
-    }) catch return error.InvalidArguments;
+    }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArguments;
     defer parsed.deinit();
-    try validatePath(parsed.value.path);
-    return allocator.dupe(u8, parsed.value.path);
+    try validatePath(parsed.value.path.value);
+    return allocator.dupe(u8, parsed.value.path.value);
 }
 
 pub fn result(buffer: []u8, outcome: Outcome) ![]const u8 {
@@ -78,7 +98,7 @@ pub fn result(buffer: []u8, outcome: Outcome) ![]const u8 {
 }
 
 test "delivery arguments cannot supply authority, a receipt, absolute paths or aliases" {
-    for ([_][]const u8{ "{}", "{\"path\":\"../x\"}", "{\"path\":\"C:/x\"}", "{\"path\":\"/x\"}", "{\"path\":\"a//b\"}", "{\"path\":\"a:stream\"}", "{\"path\":\"x\",\"sha256\":\"fake\"}", "{\"path\":\"a\",\"path\":\"b\"}" }) |value|
+    for ([_][]const u8{ "{}", "{\"path\":[97]}", "{\"path\":97}", "{\"path\":null}", "{\"path\":\"../x\"}", "{\"path\":\"C:/x\"}", "{\"path\":\"/x\"}", "{\"path\":\"a//b\"}", "{\"path\":\"a:stream\"}", "{\"path\":\"x\",\"sha256\":\"fake\"}", "{\"path\":\"a\",\"path\":\"b\"}" }) |value|
         try std.testing.expectError(error.InvalidArguments, pathArgument(std.testing.allocator, value));
     const path = try pathArgument(std.testing.allocator, "{\"path\":\"成果/final report.docx\"}");
     defer std.testing.allocator.free(path);
@@ -96,4 +116,14 @@ test "delivery receipts are bounded values and success promises verification rat
     try std.testing.expect(std.mem.indexOf(u8, bytes, "verified_for_delivery") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "18446744073709551615") != null);
     try std.testing.expectError(error.InvalidReceipt, Receipt.init(@splat(0), "file", 0, @splat(0)));
+}
+
+fn argumentAllocationCase(allocator: std.mem.Allocator) !void {
+    const path = try pathArgument(allocator, "{\"path\":\"report.docx\"}");
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("report.docx", path);
+}
+
+test "delivery argument allocation failures remain capacity failures and release partial state" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, argumentAllocationCase, .{});
 }

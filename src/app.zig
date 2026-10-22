@@ -3,6 +3,9 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
+const output_file = @import("app_output_file");
+const product_task = @import("metawork_product_task");
+const product_workspace = @import("metawork_product_workspace");
 const product_control = @import("metawork_product_control");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
@@ -59,6 +62,49 @@ const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 // exhaust the pool.
 const host_worker_count = 16;
 const product_snapshot_capacity = bridge_api.snapshot_max_bytes;
+
+const FrozenFileDelivery = struct {
+    io: std.Io,
+    main_thread_id: std.Thread.Id,
+    root: []u8,
+
+    fn prepare(io: std.Io, main_thread_id: std.Thread.Id, root: []const u8) ?product_task.OwnedFileDelivery {
+        if (std.Thread.getCurrentId() != main_thread_id) return null;
+        const allocator = std.heap.c_allocator;
+        const owned = allocator.dupe(u8, root) catch return null;
+        const self = allocator.create(FrozenFileDelivery) catch {
+            allocator.free(owned);
+            return null;
+        };
+        self.* = .{ .io = io, .main_thread_id = main_thread_id, .root = owned };
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+        const self: *FrozenFileDelivery = @ptrCast(@alignCast(context));
+        const value = output_file.inspect(self.io, .{
+            .workspace_root = self.root,
+            .relative_path = path,
+            .main_thread_id = self.main_thread_id,
+        }, cancelled) catch |err| return .{ .failed = switch (err) {
+            error.Cancelled, error.Canceled => .cancelled,
+            error.FileNotFound => .missing,
+            error.OutputTooLarge => .too_large,
+            error.OutputChanged => .changed,
+            error.InvalidOutputPath, error.InvalidWorkspaceRoot, error.NotRegularOutput, error.AccessDenied, error.SymLinkLoop, error.MainThreadFileEffect => .restricted,
+            else => .read_failed,
+        } };
+        return .{ .verified = .{ .size_bytes = value.size_bytes, .sha256 = value.sha256 } };
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *FrozenFileDelivery = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        std.heap.c_allocator.free(self.root);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
@@ -90,6 +136,11 @@ const App = struct {
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
     single_instance: ?*app_single_instance.Coordinator = null,
     office_component: ?*office_component_coordinator.Coordinator = null,
+
+    fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *App = @ptrCast(@alignCast(context));
+        return FrozenFileDelivery.prepare(self.io, self.main_thread_id, authority.canonical_root);
+    }
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -236,6 +287,7 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -897,4 +949,38 @@ fn cancelOfficeOperation(context: *anyopaque, id: u64) product_control.OfficeAdm
     const control = app.control orelse return .{ .reason = .unavailable };
     const office = app.office_component orelse return .{ .reason = .unavailable };
     return office.cancel(control.officeManagement(), id);
+}
+
+test "Application file delivery freezes Workspace root and keeps all file reads off main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const file = try tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    try file.writeStreamingAll(std.testing.io, "abc");
+    file.close(std.testing.io);
+    var delivery = FrozenFileDelivery.prepare(std.testing.io, std.Thread.getCurrentId(), root).?;
+    defer delivery.deinit();
+    @memset(root, 'x');
+    var cancelled = std.atomic.Value(bool).init(false);
+    try std.testing.expectEqual(.restricted, delivery.input.inspect_fn(delivery.input.context, "result.docx", &cancelled).failed);
+    const Work = struct {
+        input: agent.FileDeliveryInput,
+        cancelled: *std.atomic.Value(bool),
+        outcome: ?agent.FileDeliveryInspection = null,
+        fn run(self: *@This()) void {
+            self.outcome = self.input.inspect_fn(self.input.context, "result.docx", self.cancelled);
+        }
+    };
+    var work: Work = .{ .input = delivery.input, .cancelled = &cancelled };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    thread.join();
+    try std.testing.expectEqual(@as(u64, 3), work.outcome.?.verified.size_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("abc", &digest, .{});
+    try std.testing.expectEqualSlices(u8, &digest, &work.outcome.?.verified.sha256);
+    cancelled.store(true, .release);
+    const stopped = try std.Thread.spawn(.{}, Work.run, .{&work});
+    stopped.join();
+    try std.testing.expectEqual(.cancelled, work.outcome.?.failed);
 }

@@ -24,6 +24,7 @@ const ModelBinding = model_binding.ModelBinding;
 const session_runtime = @import("session/runtime.zig");
 const image_generation = @import("image_generation.zig");
 const generate_image = @import("generate_image.zig");
+const deliver_file = @import("agent_file_delivery");
 const image_http = @import("agent_http_transport");
 
 pub const ImageGenerationTestOptions = struct {
@@ -57,8 +58,10 @@ const RunImage = struct {
 };
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
-pub const FileDeliveryReceipt = @import("agent_file_delivery").Receipt;
-pub const max_file_deliveries_per_run = @import("agent_file_delivery").max_receipts_per_run;
+pub const FileDeliveryReceipt = deliver_file.Receipt;
+pub const FileDeliveryInput = deliver_file.Input;
+pub const FileDeliveryInspection = deliver_file.Inspection;
+pub const max_file_deliveries_per_run = deliver_file.max_receipts_per_run;
 pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
 pub const Status = sdk.Status;
@@ -73,8 +76,11 @@ pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
 
 /// Trusted effects for the fixed Host tool, independent of model arguments.
 /// A same-named MCP or built-in tool does not inherit this description.
-pub fn imageGenerationPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
-    return if (namespace == .host and std.mem.eql(u8, name, generate_image.name)) generate_image.description else null;
+pub fn hostToolPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
+    if (namespace != .host) return null;
+    if (std.mem.eql(u8, name, generate_image.name)) return generate_image.description;
+    if (std.mem.eql(u8, name, deliver_file.name)) return deliver_file.description;
+    return null;
 }
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
@@ -636,6 +642,10 @@ pub const Session = struct {
     image_sends: usize = 0,
     image_receipts: [image_generation.production_limits.sends_per_run]?image_generation.Receipt = @splat(null),
     image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
+    run_delivery: ?FileDeliveryInput = null,
+    delivery_attempts: usize = 0,
+    delivery_receipts: [deliver_file.max_receipts_per_run]?FileDeliveryReceipt = @splat(null),
+    delivery_calls: [deliver_file.max_active_calls]?*std.atomic.Value(bool) = @splat(null),
     id: u64,
     provider_id: []u8,
     protocol: Protocol,
@@ -732,15 +742,16 @@ pub const Session = struct {
             };
         };
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedImage(input, &image);
+        return self.prepareRunOwnedTools(input, &image, null);
     }
 
     /// Freeze one Host-resolved image configuration with the Run. A null input
     /// explicitly means unavailable; no Session fixture/default is consulted.
-    pub fn prepareRunWithImage(
+    pub fn prepareRunWithTools(
         self: *Session,
         input: RunInput,
         image_input: ?ImageGenerationRunInput,
+        delivery_input: ?FileDeliveryInput,
     ) (Error || std.mem.Allocator.Error)!u64 {
         var image: ?RunImage = if (image_input) |value| .{
             .binding = image_generation.OwnedBinding.init(self.agent_runtime.allocator, value.binding) catch |err|
@@ -748,10 +759,10 @@ pub const Session = struct {
             .transport = value.transport,
         } else null;
         defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
-        return self.prepareRunOwnedImage(input, &image);
+        return self.prepareRunOwnedTools(input, &image, delivery_input);
     }
 
-    fn prepareRunOwnedImage(self: *Session, input: RunInput, image: *?RunImage) (Error || std.mem.Allocator.Error)!u64 {
+    fn prepareRunOwnedTools(self: *Session, input: RunInput, image: *?RunImage, delivery: ?FileDeliveryInput) (Error || std.mem.Allocator.Error)!u64 {
         var owned_input = try OwnedRunInput.init(
             self.agent_runtime.allocator,
             input,
@@ -798,11 +809,16 @@ pub const Session = struct {
         std.debug.assert(self.abort_calls_in_progress == 0);
         std.debug.assert(self.input_calls_in_progress == 0);
         for (self.image_calls) |call| std.debug.assert(call == null);
+        for (self.delivery_calls) |call| std.debug.assert(call == null);
+        std.debug.assert(self.run_delivery == null);
         std.debug.assert(self.run_image == null);
         self.run_image = image.*;
         image.* = null;
         self.image_sends = 0;
         @memset(&self.image_receipts, null);
+        self.run_delivery = delivery;
+        self.delivery_attempts = 0;
+        @memset(&self.delivery_receipts, null);
         self.input_ready = false;
         self.input_window_started = false;
         self.submitted_inputs = .{};
@@ -2019,7 +2035,7 @@ pub const Session = struct {
         var completed_input = self.run_input.?;
         self.run_input = null;
         completed_input.deinit(self.agent_runtime.allocator);
-        self.clearRunImageLocked();
+        self.clearRunToolsLocked();
         var stop_reason: ?sdk.StopReason = null;
         var raw_stop_reason_code: ?u32 = null;
         var failure: ?TerminalFailure = null;
@@ -2123,7 +2139,7 @@ pub const Session = struct {
             input.deinit(self.agent_runtime.allocator);
             self.run_input = null;
         }
-        self.clearRunImageLocked();
+        self.clearRunToolsLocked();
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
@@ -2160,7 +2176,7 @@ pub const Session = struct {
             input.deinit(self.agent_runtime.allocator);
             self.run_input = null;
         }
-        self.clearRunImageLocked();
+        self.clearRunToolsLocked();
         if (self.terminal_diagnostic) |buffer| {
             self.agent_runtime.allocator.free(buffer);
             self.terminal_diagnostic = null;
@@ -2358,21 +2374,20 @@ pub const Session = struct {
         self.image_fixture_binding = owned;
     }
 
-    fn clearRunImageLocked(self: *Session) void {
+    fn clearRunToolsLocked(self: *Session) void {
         for (self.image_calls) |call| std.debug.assert(call == null);
+        for (self.delivery_calls) |call| std.debug.assert(call == null);
         if (self.run_image) |*image| image.deinit(self.agent_runtime.allocator);
         self.run_image = null;
+        self.run_delivery = null;
     }
 
     fn imageLimits(self: *const Session) image_generation.Limits {
         return if (self.agent_runtime.image_test) |options| options.limits else image_generation.production_limits;
     }
 
-    pub fn executeImage(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
-        const result_out = out orelse return wire.HOST_FATAL;
-        result_out.* = emptyOwnedBytes();
-        const identity = sdk.validateRunContext(raw_run) catch return wire.HOST_FATAL;
+    fn retainHostCallback(runtime: *Runtime, raw_run: ?*const wire.RunContextV1) ?*Session {
+        const identity = sdk.validateRunContext(raw_run) catch return null;
         runtime.sessions_mutex.lockUncancelable(runtime.io);
         var retained: ?*Session = null;
         for (runtime.sessions) |entry| {
@@ -2386,7 +2401,14 @@ pub const Session = struct {
             }
         }
         runtime.sessions_mutex.unlock(runtime.io);
-        const self = retained orelse return wire.HOST_FATAL;
+        return retained;
+    }
+
+    pub fn executeImage(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
+        const result_out = out orelse return wire.HOST_FATAL;
+        result_out.* = emptyOwnedBytes();
+        const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
         defer self.releaseCoreCallback();
         // Keep working and result capacity in one reservation through publication.
         // Allocate the owned result before sending or committing anything.
@@ -2492,6 +2514,126 @@ pub const Session = struct {
             watchdog.join();
         }
         return image_generation.perform(runtime.allocator, transport, &image.binding, prompt, limits, &call);
+    }
+
+    const DeliveryResultHeader = struct { allocation_len: usize };
+    const delivery_capacity_result = "{\"status\":\"capacity\"}";
+
+    pub fn executeDelivery(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
+        const result_out = out orelse return wire.HOST_FATAL;
+        result_out.* = emptyOwnedBytes();
+        const self = retainHostCallback(runtime, raw_run) orelse return wire.HOST_FATAL;
+        defer self.releaseCoreCallback();
+        const previous = runtime.delivery_results_outstanding.fetchAdd(1, .acq_rel);
+        if (previous >= runtime.sessions.len * deliver_file.max_receipts_per_run) {
+            _ = runtime.delivery_results_outstanding.fetchSub(1, .acq_rel);
+            result_out.* = .{ .ptr = @constCast(delivery_capacity_result.ptr), .len = delivery_capacity_result.len };
+            return wire.HOST_FAILED;
+        }
+        var transferred = false;
+        defer if (!transferred) {
+            _ = runtime.delivery_results_outstanding.fetchSub(1, .acq_rel);
+        };
+        const allocation_len = @sizeOf(DeliveryResultHeader) + deliver_file.result_bytes;
+        const allocation = runtime.allocator.alloc(u8, allocation_len) catch {
+            result_out.* = .{ .ptr = @constCast(delivery_capacity_result.ptr), .len = delivery_capacity_result.len };
+            return wire.HOST_FAILED;
+        };
+        defer if (!transferred) runtime.allocator.free(allocation);
+        const outcome = self.performDelivery(arguments);
+        const encoded = deliver_file.result(allocation[@sizeOf(DeliveryResultHeader)..], outcome) catch return wire.HOST_FATAL;
+        std.mem.bytesAsValue(DeliveryResultHeader, allocation[0..@sizeOf(DeliveryResultHeader)]).* = .{ .allocation_len = allocation_len };
+        result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
+        transferred = true;
+        return if (outcome == .verified) wire.HOST_OK else wire.HOST_FAILED;
+    }
+
+    pub fn releaseDeliveryResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
+        const result_out = out orelse return;
+        const ptr = result_out.ptr orelse return;
+        if (ptr != delivery_capacity_result.ptr) {
+            const base = ptr - @sizeOf(DeliveryResultHeader);
+            const header = std.mem.bytesAsValue(DeliveryResultHeader, base[0..@sizeOf(DeliveryResultHeader)]).*;
+            runtime.allocator.free(base[0..header.allocation_len]);
+            std.debug.assert(runtime.delivery_results_outstanding.fetchSub(1, .acq_rel) > 0);
+        }
+        result_out.* = emptyOwnedBytes();
+    }
+
+    fn performDelivery(self: *Session, arguments: wire.BytesViewV1) deliver_file.Outcome {
+        const runtime = self.agent_runtime;
+        const bytes = sdk.borrowedBytes(arguments) catch return .{ .failed = .invalid_arguments };
+        const path = deliver_file.pathArgument(runtime.allocator, bytes) catch |err|
+            return .{ .failed = if (err == error.OutOfMemory) .capacity else .invalid_arguments };
+        defer runtime.allocator.free(path);
+        self.lock();
+        if (self.state == .closing or self.state == .closed or self.termination_signal != null) {
+            self.unlock();
+            return .{ .failed = .cancelled };
+        }
+        const input = self.run_delivery orelse {
+            self.unlock();
+            return .{ .failed = .unavailable };
+        };
+        var cancelled = std.atomic.Value(bool).init(false);
+        var slot: ?usize = null;
+        for (self.delivery_calls, 0..) |call, index| if (call == null) {
+            slot = index;
+            break;
+        };
+        if (slot == null or self.delivery_attempts >= deliver_file.max_receipts_per_run) {
+            self.unlock();
+            return .{ .failed = .capacity };
+        }
+        self.delivery_calls[slot.?] = &cancelled;
+        self.delivery_attempts += 1;
+        self.unlock();
+        defer {
+            self.lock();
+            self.delivery_calls[slot.?] = null;
+            self.unlock();
+        }
+        var id: [16]u8 = undefined;
+        std.Io.randomSecure(runtime.io, &id) catch return .{ .failed = .read_failed };
+        if (std.mem.allEqual(u8, &id, 0)) return .{ .failed = .read_failed };
+        const inspected = input.inspect_fn(input.context, path, &cancelled);
+        self.lock();
+        defer self.unlock();
+        if (cancelled.load(.acquire) or self.termination_signal != null) return .{ .failed = .cancelled };
+        const checked = switch (inspected) {
+            .failed => |failure| return .{ .failed = failure },
+            .verified => |value| value,
+        };
+        const receipt = FileDeliveryReceipt.init(id, path, checked.size_bytes, checked.sha256) catch return .{ .failed = .invalid_arguments };
+        for (&self.delivery_receipts) |*entry| if (entry.* == null) {
+            entry.* = receipt;
+            return .{ .verified = receipt };
+        };
+        return .{ .failed = .capacity };
+    }
+
+    fn takeDeliveredFile(self: *Session, event: sdk.DecodedCoreEvent) ?FileDeliveryReceipt {
+        const result = switch (event) {
+            .known => |value| switch (value) {
+                .tool_result => |value_result| value_result,
+                else => return null,
+            },
+            .unknown => return null,
+        };
+        if (result.is_error or !std.mem.eql(u8, result.name, deliver_file.name)) return null;
+        self.lock();
+        defer self.unlock();
+        for (&self.delivery_receipts) |*entry| {
+            const receipt = entry.* orelse continue;
+            var buffer: [deliver_file.result_bytes]u8 = undefined;
+            const expected = deliver_file.result(&buffer, .{ .verified = receipt }) catch unreachable;
+            if (!std.mem.eql(u8, expected, result.content)) continue;
+            entry.* = null;
+            return receipt;
+        }
+        return null;
     }
 
     fn takeGeneratedImagePath(self: *Session, event: sdk.DecodedCoreEvent) !?[]u8 {
@@ -2603,6 +2745,7 @@ pub const Session = struct {
         };
         var envelope = OwnedCoreEvent{
             .generated_image_path = generated_image_path,
+            .delivered_file = self.takeDeliveredFile(parsed.value),
             .session_id = self.id,
             .run_id = run_id,
             .encoded_bytes = encoded.len,
@@ -2913,6 +3056,7 @@ pub const Session = struct {
 fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
     if (self.termination_signal == null) self.termination_signal = signal;
     for (self.image_calls) |call| if (call) |active| active.cancellation.request();
+    for (self.delivery_calls) |call| if (call) |active| active.store(true, .release);
 }
 
 fn isRunProgressState(state: SessionState) bool {
@@ -3285,4 +3429,30 @@ test "generated image attestation requires one matching committed Host receipt" 
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings(receipt.pathView(), path);
     try std.testing.expect((try session.takeGeneratedImagePath(event)) == null);
+}
+
+test "delivery attestation consumes only the exact successful Host receipt once" {
+    var runtime: Runtime = undefined;
+    runtime.io = std.testing.io;
+    var session: Session = undefined;
+    session.agent_runtime = &runtime;
+    session.mutex = .init;
+    session.delivery_receipts = @splat(null);
+    const receipt = try FileDeliveryReceipt.init(@splat(1), "outputs/final.docx", 123, @splat(2));
+    var buffer: [deliver_file.result_bytes]u8 = undefined;
+    const content = try deliver_file.result(&buffer, .{ .verified = receipt });
+    var event: sdk.DecodedCoreEvent = .{ .known = .{ .tool_result = .{ .id = "call", .name = deliver_file.name, .input = "{}", .content = content, .is_error = false } } };
+    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    session.delivery_receipts[0] = receipt;
+    event.known.tool_result.name = "Read";
+    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    event.known.tool_result.name = deliver_file.name;
+    event.known.tool_result.is_error = true;
+    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    event.known.tool_result.is_error = false;
+    event.known.tool_result.content = "forged receipt";
+    try std.testing.expect(session.takeDeliveredFile(event) == null);
+    event.known.tool_result.content = content;
+    try std.testing.expectEqualStrings(receipt.pathView(), session.takeDeliveredFile(event).?.pathView());
+    try std.testing.expect(session.takeDeliveredFile(event) == null);
 }

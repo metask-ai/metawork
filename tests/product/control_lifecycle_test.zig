@@ -3353,7 +3353,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 11), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 12), fake_core.last_restored_allowed_tool_count);
 
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
@@ -10748,6 +10748,9 @@ test "Office component management keeps ordinary Task admission independent from
     input.workspace_root = root;
     input.trust = .explicitly_trusted;
     const task = try workbench.createTask(input);
+    // This assertion is about Office readiness, not saturation by the Task's
+    // asynchronous initial catalog jobs. Keep that independent prerequisite explicit.
+    try waitInitialTaskCatalog(&workbench, task);
     _ = try workbench.runTask(task, .{ .text = "ordinary text while the Office environment is not installed" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     office.progress(install.operation_id.?, .{ .phase = .downloading, .bytes = 50, .total = 100 });
@@ -10758,4 +10761,57 @@ test "Office component management keeps ordinary Task admission independent from
     try std.testing.expect(office.view().actions.install);
     workbench.beginShutdown();
     try std.testing.expect(office.begin(.install, office.view().generation).reason.? == .shutting_down);
+}
+
+const DeliveryAdmissionProbe = struct {
+    calls: usize = 0,
+    released: usize = 0,
+    workspace_id: u64 = 0,
+    workspace_epoch: u64 = 0,
+    fn prepare(context: *anyopaque, authority: fixture.product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.workspace_id = authority.id;
+        self.workspace_epoch = authority.epoch;
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+    fn inspect(_: *anyopaque, _: []const u8, _: *const std.atomic.Value(bool)) lifecycle.FileDeliveryInspection {
+        @panic("this admission lifecycle case must not read files");
+    }
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.released += 1;
+    }
+};
+
+test "file delivery Run authority survives preparation changes until worker and event drain quiesce" {
+    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+    defer scenario.deinit();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    var probe: DeliveryAdmissionProbe = .{};
+    scenario.control.setFileDeliveryPreparation(.{ .context = &probe, .prepare_fn = DeliveryAdmissionProbe.prepare });
+    defer scenario.control.setFileDeliveryPreparation(null);
+    fake_core.rearmControlled();
+    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "explicit file delivery" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const run = &task.durable.runs[1].?;
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(task.durable.workspace_id, probe.workspace_id);
+    try std.testing.expectEqual(task.durable.workspace_epoch, probe.workspace_epoch);
+    scenario.control.setFileDeliveryPreparation(null);
+    try std.testing.expectEqual(@as(*anyopaque, &probe), run.file_delivery.?.input.context);
+    fake_core.releaseControlled();
+    for (0..5000) |_| {
+        scenario.control.syncLifecycle();
+        if (!task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    try std.testing.expectEqual(@as(usize, 0), probe.released);
+    try std.testing.expect(run.file_delivery != null);
+    try settleInputScenario(scenario);
+    try std.testing.expect(run.file_delivery == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.released);
 }

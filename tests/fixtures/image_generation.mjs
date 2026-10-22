@@ -45,7 +45,8 @@ if (mode === "read-large") {
   let crc = 0xffffffff;
   for (const byte of chunk.subarray(4, -4)) {
     crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    for (let bit = 0; bit < 8; bit++)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
   }
   chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, chunk.length - 4);
   png = Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]);
@@ -147,9 +148,15 @@ const server = createServer(async (request, response) => {
     }
     if (request.url !== "/v1/messages") throw Error("unexpected target");
     const encoded = JSON.stringify(payload);
-    const explicitImageRead = mode === "read-large" && payload.messages.some((message) =>
-      Array.isArray(message.content) && message.content.some((part) => part.type === "tool_use" && part.name === "Read"),
-    );
+    const explicitImageRead =
+      mode === "read-large" &&
+      payload.messages.some(
+        (message) =>
+          Array.isArray(message.content) &&
+          message.content.some(
+            (part) => part.type === "tool_use" && part.name === "Read",
+          ),
+      );
     if (
       encoded.includes("synthetic-image-key") ||
       (!explicitImageRead && encoded.includes(png.toString("base64")))
@@ -176,14 +183,48 @@ const server = createServer(async (request, response) => {
       ? last.content.filter((part) => part.type === "tool_result")
       : [];
     const images = results.flatMap((result) =>
-      Array.isArray(result.content) ? result.content.filter((part) => part.type === "image") : [],
+      Array.isArray(result.content)
+        ? result.content.filter((part) => part.type === "image")
+        : [],
     );
     for (const image of images) {
-      if (mode !== "read-large" || image.source?.media_type !== "image/png" ||
-          !Buffer.from(image.source.data, "base64").equals(png)) throw Error("model image mismatch");
+      if (
+        mode !== "read-large" ||
+        image.source?.media_type !== "image/png" ||
+        !Buffer.from(image.source.data, "base64").equals(png)
+      )
+        throw Error("model image mismatch");
       trace({ kind: "model_image", bytes: png.length });
     }
-    trace({ kind: "provider", schema: declaration?.input_schema, results: images.length ? "[image result verified]" : results });
+    trace({
+      kind: "provider",
+      schema: declaration?.input_schema,
+      results: images.length ? "[image result verified]" : results,
+    });
+    if (mode === "delivery") {
+      const delivery = payload.tools.find(
+        (tool) => tool.name === "DeliverFile",
+      );
+      if (
+        !delivery ||
+        JSON.stringify(Object.keys(delivery.input_schema.properties)) !==
+          '["path"]' ||
+        delivery.input_schema.additionalProperties !== false ||
+        JSON.stringify(delivery.input_schema.required) !== '["path"]'
+      )
+        throw Error("delivery schema");
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(
+        results.length
+          ? protocolTextSse("anthropic", "delivery fixture completed")
+          : protocolToolSse(
+              "anthropic",
+              payload.messages.length,
+              "DeliverFile",
+              { path: "result.docx" },
+            ),
+      );
+    }
     if (
       restoreProbe &&
       results.length === 0 &&
@@ -264,11 +305,17 @@ const server = createServer(async (request, response) => {
         body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
       }
     } else if (mode === "read-large" && seen === 1) {
-      const text = typeof results[0].content === "string" ? results[0].content : results[0].content.find((part) => part.type === "text").text;
+      const text =
+        typeof results[0].content === "string"
+          ? results[0].content
+          : results[0].content.find((part) => part.type === "text").text;
       const saved = JSON.parse(text);
-      body = saved.status === "saved"
-        ? protocolToolSse("anthropic", seen + 1, "Read", { file_path: join(dirname(tracePath), saved.path) })
-        : protocolTextSse("anthropic", "fixture completed");
+      body =
+        saved.status === "saved"
+          ? protocolToolSse("anthropic", seen + 1, "Read", {
+              file_path: join(dirname(tracePath), saved.path),
+            })
+          : protocolTextSse("anthropic", "fixture completed");
     } else body = protocolTextSse("anthropic", "fixture completed");
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(body);

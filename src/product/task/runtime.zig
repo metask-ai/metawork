@@ -362,6 +362,7 @@ pub const OperationEffects = struct {
     /// Caller owns until a Run record is installed; preparation consumes it.
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
+    file_delivery: ?*?task_state.OwnedFileDelivery = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
     model_target: ?models_contract.SourceCandidateInput = null,
     text: TextProjection,
@@ -2320,7 +2321,8 @@ pub const Runtime = struct {
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
-        const run_id = try access.prepareRunWithImage(agent_input, image);
+        const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -2334,6 +2336,10 @@ pub const Runtime = struct {
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
+            owned.* = null;
+        }
+        if (effects.file_delivery) |owned| {
+            run_record.file_delivery = owned.*;
             owned.* = null;
         }
 
@@ -2728,7 +2734,7 @@ pub const Runtime = struct {
         const intent = intent_writer.buffered();
         if (std.mem.trim(u8, intent, " \t\r\n").len == 0) return error.ReviewIntentUnavailable;
         const context = latestReviewContext(run);
-        const constraints = if (agent.imageGenerationPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
+        const constraints = if (agent.hostToolPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
             const start = writer.end;
             try writer.print("{s}\n{s}", .{ review_constraints, effects });
             break :blk writer.buffered()[start..];
@@ -3889,16 +3895,16 @@ pub const Runtime = struct {
         return result;
     }
 
-    /// Image effects and projection scrub credentials outlive both execution
+    /// Frozen tool effects and projection scrub credentials outlive execution
     /// and event drain. Worker leases also cover automatic title production.
-    pub fn releaseQuiescentImages(self: *Runtime, effects: ReleaseEffects) void {
+    pub fn releaseQuiescentRunEffects(self: *Runtime, effects: ReleaseEffects) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 if (run.event_stream_finalized and run.automatic_title.state.load(.acquire) != .running)
-                    releaseImageExecution(run, effects);
+                    releaseRunEffects(run, effects);
             }
         }
     }
@@ -5799,7 +5805,7 @@ pub const Runtime = struct {
         result.durable_changed = closes.durable_changed or result.durable_changed;
         // Checkpoint/close reconciliation above can retire the final lease on
         // this very pass. Do not retain the scrub credential until another wake.
-        self.releaseQuiescentImages(effects.release);
+        self.releaseQuiescentRunEffects(effects.release);
         return result;
     }
 };
@@ -6904,11 +6910,15 @@ fn releaseExecutionValueNoFail(
     execution.deinit();
 }
 
-fn releaseImageExecution(run: *task_state.RunRecord, effects: ReleaseEffects) void {
+fn releaseRunEffects(run: *task_state.RunRecord, effects: ReleaseEffects) void {
     if (run.image_execution) |*image| {
         effects.redactAll(image.candidate.input().bearer);
         image.deinit();
         run.image_execution = null;
+    }
+    if (run.file_delivery) |*delivery| {
+        delivery.deinit();
+        run.file_delivery = null;
     }
 }
 
@@ -7467,6 +7477,7 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     var clean = effects;
     clean.model_target = null;
     clean.image_execution = null;
+    clean.file_delivery = null;
     return clean;
 }
 
@@ -8059,7 +8070,7 @@ fn deinitRun(
     run: *task_state.RunRecord,
 ) void {
     std.debug.assert(run.checkpoint.lease == null);
-    releaseImageExecution(run, effects);
+    releaseRunEffects(run, effects);
     releaseAutomaticTitle(&run.automatic_title);
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);

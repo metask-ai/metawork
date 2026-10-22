@@ -13,7 +13,7 @@
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
+7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage`、`DeliverFile` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
@@ -194,9 +194,13 @@ PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 
 
 ### Host tools
 
-普通 Runtime 固定注册 `GenerateImage`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account 或 Models 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`；只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
+普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
+
+`DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
+
+Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才一次性消费该回执，以独立 sideband 交给 Product 的成果登记入口；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
 
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。

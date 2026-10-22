@@ -14,6 +14,8 @@ pub const max_provider_id_bytes = model_binding.max_provider_id_bytes;
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const FileDeliveryReceipt = session_impl.FileDeliveryReceipt;
+pub const FileDeliveryInput = session_impl.FileDeliveryInput;
+pub const FileDeliveryInspection = session_impl.FileDeliveryInspection;
 pub const max_file_deliveries_per_run = session_impl.max_file_deliveries_per_run;
 pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;
@@ -25,7 +27,7 @@ pub const PermissionDecisionSource = session_impl.PermissionDecisionSource;
 pub const PermissionCallbackOutcome = session_impl.PermissionCallbackOutcome;
 pub const PermissionProvenance = session_impl.PermissionProvenance;
 pub const PermissionToolNamespace = session_impl.PermissionToolNamespace;
-pub const imageGenerationPermissionContext = session_impl.imageGenerationPermissionContext;
+pub const hostToolPermissionContext = session_impl.hostToolPermissionContext;
 pub const RunState = session_impl.RunState;
 pub const RunStatePhase = session_impl.RunStatePhase;
 pub const ParsedPermissionRequest = session_impl.ParsedPermissionRequest;

@@ -1311,6 +1311,7 @@ pub const Runtime = struct {
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
+    file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -4275,7 +4276,10 @@ pub const Runtime = struct {
         const image_workspace = try self.workspace.taskRunAuthority(workspace.id, workspace.epoch);
         var image = self.prepareRunImage(image_workspace);
         defer if (image) |*value| value.deinit();
+        var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(image_workspace) else null;
+        defer if (delivery) |*value| value.deinit();
         run_effects.image_execution = &image;
+        run_effects.file_delivery = &delivery;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
         var run = try self.task_runtime.startRun(
             task.id(),
@@ -5206,7 +5210,10 @@ pub const Runtime = struct {
         var operation_effects = self.taskRuntimeOperationEffects();
         var image = self.prepareRunImage(workspace);
         defer if (image) |*value| value.deinit();
+        var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(workspace) else null;
+        defer if (delivery) |*value| value.deinit();
         operation_effects.image_execution = &image;
+        operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (staged.borrow != null) {
             acceptance_context = .{
@@ -9987,6 +9994,10 @@ pub const Runtime = struct {
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
         self.image_run_preparation = preparation;
+    }
+
+    pub fn setFileDeliveryPreparation(self: *Runtime, preparation: ?control_ports.FileDeliveryPreparation) void {
+        self.file_delivery_preparation = preparation;
     }
 
     fn prepareRunImage(self: *Runtime, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
@@ -21448,7 +21459,9 @@ test "Outputs persist through real history restore and sanitized locators lose f
 }
 
 test "late credential discovery revokes Output locators in current and durable projections" {
-    var control = try testRuntime();
+    var storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &storage };
+    var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
     var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer envelope.deinit();
@@ -21459,11 +21472,8 @@ test "late credential discovery revokes Output locators in current and durable p
     try std.testing.expect(!run.outputs[0].?.redacted);
     control.redactAllProductProjectionsNoFail("late-secret");
     try std.testing.expect(run.outputs[0].?.redacted);
-    const wires = try std.testing.allocator.alloc(task_persistence.TaskWire, 1);
-    wires[0] = try task_persistence.projectTask(std.testing.allocator, task, null);
-    defer {
-        task_persistence.deinitTaskWires(std.testing.allocator, wires);
-        std.testing.allocator.free(wires);
-    }
-    try std.testing.expectEqualStrings("", wires[0].runs[0].outputs[0].locator);
+    try TestSupport.commitTaskHistory(&control);
+    var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[0].locator);
 }

@@ -758,11 +758,22 @@ pub const OutputRecord = struct {
     redacted: bool = false,
 };
 
+pub const OwnedFileDelivery = struct {
+    input: agent.FileDeliveryInput,
+    release_fn: *const fn (*anyopaque) void,
+
+    pub fn deinit(self: *OwnedFileDelivery) void {
+        self.release_fn(self.input.context);
+        self.* = undefined;
+    }
+};
+
 pub const RunRecord = struct {
     /// Projection invalidation only; never persisted or supplied to AgentCore.
     projection_content_version: u64 = 1,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
+    file_delivery: ?OwnedFileDelivery = null,
 
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,

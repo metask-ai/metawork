@@ -122,6 +122,16 @@ pub const ImageRunPreparation = struct {
     }
 };
 
+/// Main-thread preparation only; the result retains one frozen file effect.
+pub const FileDeliveryPreparation = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedFileDelivery,
+
+    pub fn prepare(self: FileDeliveryPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        return self.prepare_fn(self.context, authority);
+    }
+};
+
 pub const AgentEventConsumer = struct {
     context: *anyopaque,
     drain_fn: *const fn (*anyopaque) anyerror!void,

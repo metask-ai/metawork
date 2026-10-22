@@ -266,7 +266,7 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏直接列出 canonical snapshot 中 owning Workspace 仍被投影的全部 Task，不提供全局 Workspace 切换器；每个 Task 的路径由自身上下文决定，后台请求不能因路径不同而从导航中消失。已移除 Workspace 的历史 Task 仍由 Workbench 保存，但随 Workspace 退出活动导航，重新授权恢复同一稳定 Workspace identity 后才重新出现；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
-- 中间区域只按产品 Run exchange 组织内容，不按 raw Tool callback 或 AgentCore event 构造时间线。主区可以展示 typed Tool 摘要，但不展示 Tool input/progress/result、usage、Run ID、raw AgentCore event 或 chain-of-thought。Renderer 只消费 typed `output/activity/tools`，不把可见回复提升为 Delivery、Output artifact 或最终成果；完成、失败、中断与恢复动作只依据独立 canonical outcome/cause；
+- 中间区域只按产品 Run exchange 组织内容，不按 raw Tool callback 或 AgentCore event 构造时间线。主区可以展示 typed Tool 摘要，但不展示 Tool input/progress/result、usage、Run ID、raw AgentCore event 或 chain-of-thought。Renderer 只消费 typed `output/activity/tools`，不把可见回复提升为 Delivery、Output artifact 或最终成果；明确成果交付通过固定 Host 工具校验已有 Workspace 文件，其回执与最小历史记录分别遵守 [AgentCore 集成契约](agentcore-integration.md)和 [Product 架构](product-architecture.md)，不以普通文件引用或文件变化推断交付。完成、失败、中断与恢复动作只依据独立 canonical outcome/cause；
 - 用户可以持续编辑并发送有效消息，Task 先接收，再决定就绪文本插话、等待或下一轮；内部执行阶段不能拒绝普通发送。Skill、附件与非就绪阶段也使用同一入口，保持顺序。Core 插话仍只支持普通文本 Run 的文本，在后续边界采纳，不中断模型流或工具，也不保证本轮采纳；文本不能替代权限或请求回答。正常 completed 且可信收尾后的确定未采纳后缀复用一次合并接续，超限、停止、失败、未知或取消不接续；新消息不混入该来源批次，按 Task 队首顺序处理。安全气泡与执行记录保持逐条关联，不重复正文，不从历史恢复执行。生命周期、wire 和交互分别由 Product、Bridge 和 UI 真源定义；
 - Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Task 历史或 AgentCore；
 - Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new` 与 `/compact`，前者打开既有 New task draft action，后者触发 Workbench-owned typed maintenance action；不注册 `/model`、`/status`、`/goal`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
@@ -369,7 +369,7 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 
 ```text
 Automatic Workspace 或经原生 picker 授权的 Manual Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
-→ 文本流 → Agent-owned 固定 built-in 集合与 GenerateImage → 当前 `approval_required` compatibility permission
+→ 文本流 → Agent-owned 固定工具集合 → 当前 `approval_required` compatibility permission
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 
