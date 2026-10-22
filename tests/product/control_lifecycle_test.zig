@@ -10717,3 +10717,45 @@ test "Office source replacement keeps Task catalog pinned until explicit idle re
     try std.testing.expect(second.references.load(.acquire) > 1);
     try std.testing.expectEqual(@as(usize, 1), (try workbench.taskCatalog(task)).skills.len);
 }
+
+test "Office component management keeps ordinary Task admission independent from environment installation" {
+    fake_core.reset();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = root;
+    configuration.office_component = .{ .supported = true, .available = true, .offered = .{ .identity = @splat(1), .download_bytes = 100, .installed_bytes = 300 } };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const office = workbench.officeManagement();
+    const original_revision = workbench.currentRevision();
+    const check = office.begin(.check, office.view().generation);
+    try std.testing.expect(check.accepted);
+    try std.testing.expect(workbench.currentRevision() > original_revision);
+    try std.testing.expect(office.complete(check.operation_id.?, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .succeeded }));
+    const install = office.begin(.install, office.view().generation);
+    try std.testing.expect(install.accepted);
+    try std.testing.expect(office.attempt(install.operation_id.?) != null);
+    var input = productControlTaskInput();
+    input.workspace_root = root;
+    input.trust = .explicitly_trusted;
+    const task = try workbench.createTask(input);
+    _ = try workbench.runTask(task, .{ .text = "ordinary text while the Office environment is not installed" });
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    office.progress(install.operation_id.?, .{ .phase = .downloading, .bytes = 50, .total = 100 });
+    try std.testing.expect(office.cancel(office.view().generation, install.operation_id.?).accepted);
+    try std.testing.expect(office.attempt(install.operation_id.?).?.cancelRequested());
+    try std.testing.expect(office.complete(install.operation_id.?, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .cancelled }));
+    try std.testing.expect(office.view().current == null);
+    try std.testing.expect(office.view().actions.install);
+    workbench.beginShutdown();
+    try std.testing.expect(office.begin(.install, office.view().generation).reason.? == .shutting_down);
+}

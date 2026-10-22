@@ -6,7 +6,8 @@ const archive = @import("office_component_archive");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 4) return error.UsageArchiveMetadataAndExistingParent;
+    const installed = args.len == 5 and std.mem.eql(u8, args[1], "--installed");
+    if (args.len != 4 and !installed) return error.UsageArchiveMetadataAndExistingParent;
     const raw = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], allocator, .limited(16 * 1024));
     const Metadata = struct {
         schema: u32,
@@ -27,17 +28,19 @@ pub fn main(init: std.process.Init) !void {
     _ = try std.fmt.hexToBytes(&sha256, metadata.sha256);
     const parent = try std.Io.Dir.cwd().openDir(init.io, args[3], .{ .iterate = true, .follow_symlinks = false });
     defer parent.close(init.io);
-    const input = try std.Io.Dir.cwd().openFile(init.io, args[1], .{});
-    defer input.close(init.io);
-    var buffer: [64 * 1024]u8 = undefined;
-    var reader = input.reader(init.io, &buffer);
-    const result = try archive.unpack(allocator, init.io, &reader.interface, parent, "component", .{
-        .sha256 = sha256,
-        .archive_bytes = metadata.bytes,
-        .unpacked_bytes = metadata.unpackedBytes,
-        .files = metadata.files,
-        .target = metadata.target,
-    }, .{}, .{});
+    const expected: archive.Expected = .{ .sha256 = sha256, .archive_bytes = metadata.bytes, .unpacked_bytes = metadata.unpackedBytes, .files = metadata.files, .target = metadata.target };
+    const result = if (installed) verified: {
+        if (args[4].len != 64) return error.InvalidManifestIdentity;
+        var pinned_manifest: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&pinned_manifest, args[4]);
+        break :verified try archive.verifyInstalled(allocator, init.io, parent, expected, pinned_manifest, .{}, .{});
+    } else unpacked: {
+        const input = try std.Io.Dir.cwd().openFile(init.io, args[1], .{});
+        defer input.close(init.io);
+        var buffer: [64 * 1024]u8 = undefined;
+        var reader = input.reader(init.io, &buffer);
+        break :unpacked try archive.unpack(allocator, init.io, &reader.interface, parent, "component", expected, .{}, .{});
+    };
     const manifest_digest = std.fmt.bytesToHex(result.manifest_sha256, .lower);
     var output_buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);

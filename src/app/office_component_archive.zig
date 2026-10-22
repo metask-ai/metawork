@@ -229,10 +229,123 @@ fn extract(allocator: std.mem.Allocator, io: std.Io, input: *std.Io.Reader, dest
     source.digest.final(&compressed_hash);
     if (source.count != expected.archive_bytes or !std.mem.eql(u8, &compressed_hash, &expected.sha256)) return error.ComponentDigest;
     if (files != expected.files or unpacked != expected.unpacked_bytes or manifest_bytes.items.len == 0) return error.ComponentContents;
-    const parsed = try std.json.parseFromSlice(Manifest, temporary, manifest_bytes.items, .{ .allocate = .alloc_always, .max_value_len = 1024 });
+    const manifest_digest = try verifyManifest(temporary, manifest_bytes.items, expected, files, unpacked, &members);
+    return .{ .files = files, .unpacked_bytes = unpacked, .manifest_sha256 = manifest_digest };
+}
+
+/// Verifies an installed tree against main-pinned manifest identity before any
+/// executable or Skill resource is consumed. It never installs or deletes files.
+pub fn verifyInstalled(allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir, expected: Expected, manifest_sha256: [32]u8, limits: Limits, observer: Observer) !Summary {
+    if (expected.unpacked_bytes == 0 or expected.unpacked_bytes > limits.unpacked_bytes or expected.files == 0 or expected.files > limits.members) return error.ComponentBudget;
+    const before = try directory.stat(io);
+    if (before.kind != .directory) return error.ComponentContents;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+    var manifest_file = try directory.openFile(io, "office-runtime.json", .{ .follow_symlinks = false, .resolve_beneath = true });
+    defer manifest_file.close(io);
+    if (builtin.os.tag == .windows) manifest_file.flags.nonblocking = true;
+    const manifest_before = try manifest_file.stat(io);
+    if (manifest_before.kind != .file or manifest_before.size == 0 or manifest_before.size > limits.manifest_bytes or manifest_before.size > limits.metadata_bytes) return error.ComponentManifest;
+    const bytes = try temporary.alloc(u8, @intCast(manifest_before.size));
+    try observer.check(.{ .compressed_bytes = 0, .unpacked_bytes = 0, .files = 0 });
+    if (try manifest_file.readPositionalAll(io, bytes, 0) != bytes.len) return error.ComponentChanged;
+    const manifest_after = try manifest_file.stat(io);
+    if (!stableFile(manifest_before, manifest_after)) return error.ComponentChanged;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    if (!std.mem.eql(u8, &digest, &manifest_sha256)) return error.ComponentManifestIdentity;
+    var scan: InstalledScan = .{ .allocator = temporary, .io = io, .limits = limits, .expected = expected, .observer = observer, .metadata = bytes.len };
+    try scan.walk(directory, "");
+    const actual_manifest = scan.members.get("office-runtime.json") orelse return error.ComponentManifest;
+    if (!std.mem.eql(u8, &actual_manifest.sha256, &digest)) return error.ComponentChanged;
+    if (scan.files != expected.files or scan.unpacked != expected.unpacked_bytes) return error.ComponentContents;
+    _ = try verifyManifest(temporary, bytes, expected, scan.files, scan.unpacked, &scan.members);
+    const after = try directory.stat(io);
+    if (!stableFile(before, after)) return error.ComponentChanged;
+    return .{ .files = scan.files, .unpacked_bytes = scan.unpacked, .manifest_sha256 = digest };
+}
+
+fn stableFile(before: std.Io.File.Stat, after: std.Io.File.Stat) bool {
+    return before.kind == after.kind and before.inode == after.inode and before.size == after.size and before.mtime.nanoseconds == after.mtime.nanoseconds;
+}
+
+const InstalledScan = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    expected: Expected,
+    limits: Limits,
+    observer: Observer,
+    members: std.StringHashMapUnmanaged(Seen) = .empty,
+    metadata: usize,
+    files: usize = 0,
+    unpacked: u64 = 0,
+
+    fn observe(self: *InstalledScan) !void {
+        try self.observer.check(.{ .compressed_bytes = 0, .unpacked_bytes = self.unpacked, .files = self.files });
+    }
+
+    fn walk(self: *InstalledScan, directory: std.Io.Dir, prefix: []const u8) anyerror!void {
+        var iterator = directory.iterate();
+        while (try iterator.next(self.io)) |entry| {
+            try self.observe();
+            const path = if (prefix.len == 0) try self.allocator.dupe(u8, entry.name) else try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, entry.name });
+            try checkPath(path);
+            if (self.members.count() >= self.limits.members) return error.MemberBudget;
+            self.metadata += path.len;
+            if (self.metadata > self.limits.metadata_bytes) return error.MetadataBudget;
+            const lower = try std.ascii.allocLowerString(self.allocator, path);
+            const inserted = try self.members.getOrPut(self.allocator, lower);
+            if (inserted.found_existing) return error.ComponentPathCollision;
+            inserted.value_ptr.* = .{ .directory = entry.kind == .directory, .bytes = 0, .sha256 = @splat(0) };
+            switch (entry.kind) {
+                .directory => {
+                    const before = try directory.statFile(self.io, entry.name, .{ .follow_symlinks = false });
+                    if (before.kind != .directory) return error.ComponentChanged;
+                    const child = try directory.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false });
+                    defer child.close(self.io);
+                    if (!stableFile(before, try child.stat(self.io))) return error.ComponentChanged;
+                    try self.walk(child, path);
+                    const after = try directory.statFile(self.io, entry.name, .{ .follow_symlinks = false });
+                    if (!stableFile(before, after)) return error.ComponentChanged;
+                },
+                .file => {
+                    if (std.mem.endsWith(u8, lower, ".pyc") or std.mem.endsWith(u8, lower, ".pdb")) return error.ComponentDebugResource;
+                    var file = try directory.openFile(self.io, entry.name, .{ .follow_symlinks = false, .resolve_beneath = true });
+                    defer file.close(self.io);
+                    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+                    const before = try file.stat(self.io);
+                    if (before.kind != .file or before.size > self.limits.member_bytes) return error.ComponentMember;
+                    if (before.size > self.expected.unpacked_bytes -| self.unpacked) return error.UnpackedBudget;
+                    var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+                    var buffer: [64 * 1024]u8 = undefined;
+                    var offset: u64 = 0;
+                    while (offset < before.size) {
+                        try self.observe();
+                        const count: usize = @intCast(@min(buffer.len, before.size - offset));
+                        if (try file.readPositionalAll(self.io, buffer[0..count], offset) != count) return error.ComponentChanged;
+                        hash.update(buffer[0..count]);
+                        offset += count;
+                        self.unpacked += count;
+                    }
+                    if (!stableFile(before, try file.stat(self.io))) return error.ComponentChanged;
+                    const member = self.members.getPtr(lower).?; // recursion can grow and relocate the map
+                    member.bytes = before.size;
+                    member.sha256 = hash.finalResult();
+                    self.files += 1;
+                    if (self.files > self.expected.files) return error.ComponentContents;
+                },
+                else => return error.ComponentLink,
+            }
+        }
+    }
+};
+
+fn verifyManifest(temporary: std.mem.Allocator, bytes: []const u8, expected: Expected, files: usize, unpacked: u64, members: *std.StringHashMapUnmanaged(Seen)) ![32]u8 {
+    const parsed = try std.json.parseFromSlice(Manifest, temporary, bytes, .{ .allocate = .alloc_always, .max_value_len = 1024, .duplicate_field_behavior = .@"error" });
     const manifest = parsed.value;
     if (manifest.schema != 1 or !std.mem.eql(u8, manifest.target, expected.target) or manifest.files.len + 1 != files or
-        manifest.payloadBytes != unpacked - manifest_bytes.items.len) return error.ComponentManifest;
+        manifest.payloadBytes != unpacked - bytes.len) return error.ComponentManifest;
     for (manifest.files) |entry| {
         try checkPath(entry.path);
         if (std.mem.eql(u8, entry.path, "office-runtime.json")) return error.ComponentManifest;
@@ -241,12 +354,11 @@ fn extract(allocator: std.mem.Allocator, io: std.Io, input: *std.Io.Reader, dest
         if (entry.sha256.len != 64) return error.ComponentManifest;
         _ = std.fmt.hexToBytes(&digest, entry.sha256) catch return error.ComponentManifest;
         if (actual.directory or actual.bytes != entry.bytes or !std.mem.eql(u8, &actual.sha256, &digest)) return error.ComponentManifest;
-        // A duplicate manifest path can never consume the same member twice.
         actual.directory = true;
     }
-    var manifest_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(manifest_bytes.items, &manifest_digest, .{});
-    return .{ .files = files, .unpacked_bytes = unpacked, .manifest_sha256 = manifest_digest };
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
 }
 
 fn checkPath(name: []const u8) !void {
@@ -357,4 +469,52 @@ test "component cancellation, byte and member budgets clean only their own parti
     reader = .fixed(@embedFile("office_component_archive_fixtures/valid.tar.gz"));
     try std.testing.expectError(error.ComponentDigest, unpack(std.testing.allocator, io, &reader, temporary.dir, "digest", wrong, .{}, .{}));
     try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(io, "digest", .{}));
+}
+
+test "installed component verification binds all actual files and never repairs changed resources" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var input: std.Io.Reader = .fixed(@embedFile("office_component_archive_fixtures/valid.tar.gz"));
+    const expected = try fixtureExpected("valid");
+    const summary = try unpack(std.testing.allocator, std.testing.io, &input, temporary.dir, "component", expected, .{}, .{});
+    const root = try temporary.dir.openDir(std.testing.io, "component", .{ .iterate = true });
+    defer root.close(std.testing.io);
+    const verified = try verifyInstalled(std.testing.allocator, std.testing.io, root, expected, summary.manifest_sha256, .{}, .{});
+    try std.testing.expectEqual(summary, verified);
+    var wrong_manifest = summary.manifest_sha256;
+    wrong_manifest[0] ^= 1;
+    try std.testing.expectError(error.ComponentManifestIdentity, verifyInstalled(std.testing.allocator, std.testing.io, root, expected, wrong_manifest, .{}, .{}));
+    try root.writeFile(std.testing.io, .{ .sub_path = "payload.bin", .data = "changed" });
+    try std.testing.expectError(error.ComponentManifest, verifyInstalled(std.testing.allocator, std.testing.io, root, expected, summary.manifest_sha256, .{}, .{}));
+    const changed = try root.readFileAlloc(std.testing.io, "payload.bin", std.testing.allocator, .limited(8));
+    defer std.testing.allocator.free(changed);
+    try std.testing.expectEqualStrings("changed", changed);
+    try root.writeFile(std.testing.io, .{ .sub_path = "payload.bin", .data = "runtime" });
+    try root.writeFile(std.testing.io, .{ .sub_path = "extra", .data = "" });
+    try std.testing.expectError(error.ComponentContents, verifyInstalled(std.testing.allocator, std.testing.io, root, expected, summary.manifest_sha256, .{}, .{}));
+}
+
+test "installed verification walks nested handles and respects cancellation before consumption" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "nested");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "nested/payload.bin", .data = "runtime" });
+    const manifest = try std.mem.replaceOwned(u8, std.testing.allocator, @embedFile("office_component_archive_fixtures/valid.manifest.json"), "payload.bin", "nested/payload.bin");
+    defer std.testing.allocator.free(manifest);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "office-runtime.json", .data = manifest });
+    var expected = try fixtureExpected("valid");
+    expected.unpacked_bytes = manifest.len + 7;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(manifest, &digest, .{});
+    const root = try temporary.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer root.close(std.testing.io);
+    _ = try verifyInstalled(std.testing.allocator, std.testing.io, root, expected, digest, .{}, .{});
+    const Stop = struct {
+        fn check(_: ?*anyopaque, _: Progress) bool {
+            return false;
+        }
+    };
+    try std.testing.expectError(error.Cancelled, verifyInstalled(std.testing.allocator, std.testing.io, root, expected, digest, .{}, .{ .observe_fn = Stop.check }));
+    const present = try temporary.dir.statFile(std.testing.io, "nested/payload.bin", .{});
+    try std.testing.expectEqual(@as(u64, 7), present.size);
 }

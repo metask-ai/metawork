@@ -1,5 +1,5 @@
 //! Process-local ownership of installed Office resources. Only the Application
-//! owner thread changes this registry or performs filesystem cleanup. Catalog,
+//! owner thread changes this registry; a joined worker performs filesystem cleanup. Catalog,
 //! execution and preview references never become Task/Session persistence.
 const std = @import("std");
 const agent = @import("metawork_agent");
@@ -11,6 +11,7 @@ pub const Version = struct {
     skill_root: []u8,
     references: std.atomic.Value(usize) = .init(1),
     retired: bool = false,
+    removing: bool = false,
 
     pub fn lifetime(self: *Version) agent.CatalogSourceLifetime {
         return .{ .context = self, .retain_fn = retain, .release_fn = release };
@@ -117,18 +118,30 @@ pub const Registry = struct {
         return false;
     }
 
-    /// Owner-thread effect, after zero references; a callback can never race a
-    /// zero count back to life. Errors retain the entry for an explicit retry.
-    pub fn collect(self: *Registry) !usize {
-        var removed: usize = 0;
-        for (&self.entries) |*entry| if (entry.*) |version| {
-            if (!version.retired or version.references.load(.acquire) != 0) continue;
-            try self.store.removeRetired(version.record);
-            self.destroy(version);
-            entry.* = null;
-            removed += 1;
+    /// Owner-thread admission only: no filesystem work on the Native loop.
+    /// The returned version stays owned until the deletion worker has joined.
+    pub fn claimRetired(self: *Registry) ?*Version {
+        for (self.entries) |entry| if (entry) |version| {
+            if (!version.retired or version.removing or version.references.load(.acquire) != 0) continue;
+            version.removing = true;
+            return version;
         };
-        return removed;
+        return null;
+    }
+
+    /// Consume one joined worker's result. A failed removal retains its entry
+    /// for an explicit retry. Zero references cannot race back into existence.
+    pub fn finishRemoval(self: *Registry, target: *Version, removed: bool) void {
+        std.debug.assert(self.contains(target) and target.removing and target.references.load(.acquire) == 0);
+        target.removing = false;
+        if (!removed) return;
+        for (&self.entries) |*entry| {
+            if (entry.* != target) continue;
+            self.destroy(target);
+            entry.* = null;
+            return;
+        }
+        unreachable;
     }
 
     /// Product/Agent jobs and processes must already have joined. Shutdown only
@@ -136,7 +149,7 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) !void {
         for (self.entries) |entry| if (entry) |version| {
             const owned: usize = if (version.retired) 0 else 1;
-            if (version.references.load(.acquire) != owned) return error.ComponentReferencesOutstanding;
+            if (version.removing or version.references.load(.acquire) != owned) return error.ComponentReferencesOutstanding;
         };
         for (self.entries) |entry| if (entry) |version| self.destroy(version);
         self.* = undefined;
@@ -153,6 +166,21 @@ pub const Registry = struct {
         self.allocator.destroy(version);
     }
 };
+
+// Test composition runs the same claim -> filesystem effect -> joined receipt
+// synchronously. Production uses its dedicated bounded component worker.
+fn fixtureCollect(registry: *Registry) !usize {
+    var removed: usize = 0;
+    while (registry.claimRetired()) |version| {
+        registry.store.removeRetired(version.record) catch |failure| {
+            registry.finishRemoval(version, false);
+            return failure;
+        };
+        registry.finishRemoval(version, true);
+        removed += 1;
+    }
+    return removed;
+}
 
 fn fixtureVersion(store: *component.Store, identity: u8) !component.Record {
     const record: component.Record = .{ .install_id = @splat(identity), .archive_sha256 = @splat(7) };
@@ -235,20 +263,20 @@ test "canonical Session restore capture and execution pin protect the old physic
     try fixtureCurrent(&store, second_record);
     registry.activate(second);
     try std.testing.expect(registry.cleanupPending());
-    try std.testing.expectEqual(@as(usize, 0), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 0), try fixtureCollect(&registry));
     try runtime.releaseSkillCatalog(acquisition.lease);
     catalog_owned = false;
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
     session_owned = false;
-    try std.testing.expectEqual(@as(usize, 0), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 0), try fixtureCollect(&registry));
     try std.testing.expectError(error.CatalogLeasesOutstanding, runtime.shutdown());
     try captured.deinit();
     captured_owned = false;
-    try std.testing.expectEqual(@as(usize, 0), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 0), try fixtureCollect(&registry));
     execution.deinit();
     try std.testing.expectError(error.CatalogResourceLimit, first.lifetime().retain());
-    try std.testing.expectEqual(@as(usize, 1), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 1), try fixtureCollect(&registry));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(std.testing.io, first_path, .{}));
     try std.testing.expect(!registry.cleanupPending());
     const kept = try std.Io.Dir.cwd().openDir(std.testing.io, second.directory, .{});
@@ -273,15 +301,19 @@ test "retired component cleanup never deletes canonical current and shutdown ref
     registry.activate(version);
     registry.useBasic();
     preview.deinit();
+    const removing = registry.claimRetired().?;
+    try std.testing.expect(registry.claimRetired() == null);
+    try std.testing.expectError(error.ComponentReferencesOutstanding, registry.deinit());
+    registry.finishRemoval(removing, false);
     try fixtureCurrent(&store, record);
-    try std.testing.expectError(error.ComponentStillCurrent, registry.collect());
+    try std.testing.expectError(error.ComponentStillCurrent, fixtureCollect(&registry));
     var inconsistent = record;
     inconsistent.archive_sha256[0] ^= 1;
     try fixtureCurrent(&store, inconsistent);
-    try std.testing.expectError(error.ComponentStillCurrent, registry.collect());
+    try std.testing.expectError(error.ComponentStillCurrent, fixtureCollect(&registry));
     try std.testing.expect(registry.cleanupPending());
     try store.directory.deleteFile(std.testing.io, "current.json");
-    try std.testing.expectEqual(@as(usize, 1), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 1), try fixtureCollect(&registry));
 }
 
 test "concurrent component consumers release without callback cleanup or zero-count resurrection" {
@@ -326,13 +358,13 @@ test "concurrent component consumers release without callback cleanup or zero-co
         started += 1;
     }
     registry.useBasic();
-    try std.testing.expectEqual(@as(usize, 0), try registry.collect());
+    try std.testing.expectEqual(@as(usize, 0), try fixtureCollect(&registry));
     gate.store(true, .release);
     var removed: usize = 0;
-    for (0..100) |_| removed += try registry.collect();
+    for (0..100) |_| removed += try fixtureCollect(&registry);
     for (threads) |thread| thread.join();
     started = 0;
-    removed += try registry.collect();
+    removed += try fixtureCollect(&registry);
     try std.testing.expectEqual(@as(usize, 1), removed);
     try std.testing.expect(!failed.load(.acquire));
     try std.testing.expect(!registry.cleanupPending());

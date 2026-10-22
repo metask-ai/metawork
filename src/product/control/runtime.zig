@@ -1,4 +1,5 @@
 const std = @import("std");
+const office_component = @import("product_office_component");
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
@@ -373,6 +374,8 @@ pub const SkillMutationResult = skill_runtime.MutationResult;
 pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
 
+pub const OfficeComponentConfiguration = office_component.Configuration;
+
 pub const Configuration = struct {
     run_clock: task_runtime.RunClock = .{},
     change_notifier: ChangeNotifier = .{},
@@ -391,6 +394,7 @@ pub const Configuration = struct {
     skill_enablement: SkillEnablementConfiguration = .{},
     skill_sources: skill_runtime.SourceConfiguration = .{},
     builtin_skill_root: ?[]const u8 = null,
+    office_component: OfficeComponentConfiguration = .{},
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
@@ -1044,6 +1048,39 @@ pub const FileChangeDiffAdmission = union(enum) {
     immediate: FileChangeDiffReason,
 };
 
+fn controlOfficeView(context: *anyopaque) office_component.View {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.officeComponentView();
+}
+fn controlOfficeBegin(context: *anyopaque, kind: office_component.Kind, generation: u64) office_component.Admission {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.beginOfficeOperation(kind, generation);
+}
+fn controlOfficeAttempt(context: *anyopaque, id: u64) ?*office_component.Attempt {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.officeAttempt(id);
+}
+fn controlOfficeCancel(context: *anyopaque, generation: u64, id: u64) office_component.Admission {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.cancelOfficeOperation(generation, id);
+}
+fn controlOfficeProgress(context: *anyopaque, id: u64, progress: office_component.Progress) void {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    self.reportOfficeProgress(id, progress);
+}
+fn controlOfficeComplete(context: *anyopaque, id: u64, completion: office_component.Completion) bool {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.completeOfficeOperation(id, completion);
+}
+fn controlOfficeResources(context: *anyopaque, capacity: bool, cleanup_pending: bool) void {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    self.setOfficeResourceFacts(capacity, cleanup_pending);
+}
+fn controlOfficeSource(context: *anyopaque, root: ?[]const u8, lifetime: ?lifecycle.CatalogSourceLifetime) !bool {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.replaceBuiltinSkillSource(.{ .root = root, .lifetime = lifetime });
+}
+
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
 const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
@@ -1192,6 +1229,7 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
+    office: office_component.State,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1558,6 +1596,7 @@ pub const Runtime = struct {
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
         var control: Runtime = .{
+            .office = office_component.State.init(configuration.office_component),
             .allocator = allocator,
             .io = io,
             .agent_runtime = agent_runtime,
@@ -3544,6 +3583,50 @@ pub const Runtime = struct {
         return self.skill.personalCatalogProjection();
     }
 
+    pub fn officeManagement(self: *Runtime) control_ports.OfficeManagement {
+        return .{ .context = self, .view_fn = controlOfficeView, .begin_fn = controlOfficeBegin, .attempt_fn = controlOfficeAttempt, .cancel_fn = controlOfficeCancel, .progress_fn = controlOfficeProgress, .complete_fn = controlOfficeComplete, .resources_fn = controlOfficeResources, .source_fn = controlOfficeSource };
+    }
+
+    pub fn officeComponentView(self: *const Runtime) office_component.View {
+        return self.office.view();
+    }
+
+    pub fn beginOfficeOperation(self: *Runtime, kind: office_component.Kind, expected_generation: u64) office_component.Admission {
+        if (self.shutting_down) return .{ .reason = .shutting_down };
+        self.syncLifecycle();
+        if (kind != .cleanup and self.skill.reconciliationPending()) return .{ .reason = .busy };
+        const result = self.office.begin(kind, expected_generation);
+        if (result.changed) self.bumpRevision();
+        return result;
+    }
+
+    pub fn officeAttempt(self: *Runtime, id: u64) ?*office_component.Attempt {
+        const operation = self.office.operation orelse return null;
+        return if (operation.id == id) &self.office.attempt else null;
+    }
+
+    pub fn cancelOfficeOperation(self: *Runtime, expected_generation: u64, id: u64) office_component.Admission {
+        const result = self.office.cancel(expected_generation, id);
+        if (result.changed) self.bumpRevision();
+        return result;
+    }
+
+    pub fn reportOfficeProgress(self: *Runtime, id: u64, progress: office_component.Progress) void {
+        if (self.office.progress(id, progress)) self.bumpRevision();
+    }
+
+    pub fn completeOfficeOperation(self: *Runtime, id: u64, completion: office_component.Completion) bool {
+        const applied = self.office.finish(id, completion);
+        if (applied) self.bumpRevision();
+        return applied;
+    }
+
+    pub fn setOfficeResourceFacts(self: *Runtime, installation_capacity: bool, cleanup_pending: bool) void {
+        const capacity_changed = self.office.setInstallationCapacity(installation_capacity);
+        const cleanup_changed = self.office.setCleanupPending(cleanup_pending);
+        if (capacity_changed or cleanup_changed) self.bumpRevision();
+    }
+
     pub fn replaceBuiltinSkillSource(self: *Runtime, source: skill_runtime.BuiltinSource) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -4957,6 +5040,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.office.beginShutdown();
         self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {

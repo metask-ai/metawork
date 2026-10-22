@@ -187,6 +187,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-product-office-component", .root_module = test_modules.product_office_component },
         .{ .name = "metawork-app-models-coordinator", .root_module = test_modules.models_coordinator },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -257,6 +258,8 @@ pub fn build(b: *std.Build) void {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_office_component)
+            b.step("test-office-component-state", "Run optional Office product-state tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -592,6 +595,7 @@ const WiredModules = struct {
     product_attachment: *std.Build.Module,
     product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
+    product_office_component: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
     product_control_attachment_staging: *std.Build.Module,
@@ -1879,12 +1883,18 @@ fn wireAgentCore(
         "metawork_product_models_contract",
         models_contract,
     );
+    const product_office_component = b.createModule(.{
+        .root_source_file = b.path("src/product/control/office_component.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const product_control_ports = b.createModule(.{
         .root_source_file = b.path("src/product/control/ports.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_control_ports.addImport("metawork_agent", agent);
+    product_control_ports.addImport("product_office_component", product_office_component);
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_models_contract", models_contract);
     product_control_ports.addImport("product_models_ports", models_ports);
@@ -1931,6 +1941,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("product_office_component", product_office_component);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);
@@ -2091,6 +2102,7 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
+    app.addImport("product_office_component", product_office_component);
     app.addImport("models_coordinator", models_coordinator);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
@@ -2202,6 +2214,7 @@ fn wireAgentCore(
         .product_attachment = product_attachment,
         .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
+        .product_office_component = product_office_component,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
         .product_control_attachment_staging = attachment_staging,
@@ -2324,6 +2337,7 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool
         .link_libc = link_libc,
     });
     store.addImport("office_process", process);
+    store.addImport("product_office_component", existingImport(app, "product_office_component"));
     store.addImport("office_component_windows", existingImport(app, "office_component_windows"));
     const install = b.addExecutable(.{ .name = "office-component-install", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_component_install.zig"),

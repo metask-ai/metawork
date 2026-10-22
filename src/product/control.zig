@@ -45,6 +45,7 @@ pub const SkillSourceBrand = runtime_impl.SkillSourceBrand;
 pub const PermissionChoice = runtime_impl.PermissionChoice;
 pub const UiResponse = runtime_impl.UiResponse;
 pub const Configuration = runtime_impl.Configuration;
+pub const OfficeComponentConfiguration = runtime_impl.OfficeComponentConfiguration;
 pub const Runtime = runtime_impl.Runtime;
 pub const ViewRequest = runtime_impl.ViewRequest;
 pub const projection_step_bytes = runtime_impl.projection_step_bytes;

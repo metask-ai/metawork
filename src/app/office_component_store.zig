@@ -8,8 +8,9 @@ const process = @import("office_process");
 const platform = @import("office_component_windows");
 
 pub const Release = @import("office_component_contract.zig").Release;
+pub const Identity = @import("office_component_contract.zig").Identity;
 
-pub const Phase = enum { preparing, downloading, unpacking, verifying, testing, publishing, finalizing, activating, cleaning };
+pub const Phase = @import("product_office_component").Phase;
 pub const Progress = struct { phase: Phase, bytes: u64 = 0, total: u64 = 0 };
 pub const Observer = struct {
     context: ?*anyopaque = null,
@@ -34,14 +35,14 @@ pub const Validation = struct {
     context: ?*anyopaque = null,
     parent_environment: ?*const std.process.Environ.Map = null,
     available_fn: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror!u64 = available,
-    test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, Release, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
+    test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, Identity, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
 
     fn available(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) !u64 {
         return platform.availableBytes(allocator, path);
     }
 
-    fn testComponent(self: Validation, allocator: std.mem.Allocator, io: std.Io, release: Release, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
-        if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, release, path, scratch, cancellation);
+    fn testComponent(self: Validation, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
+        if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, identity, path, scratch, cancellation);
         const environment = self.parent_environment orelse return .rejected;
         verifyRuntime(allocator, io, path, scratch, environment, cancellation) catch |failure| return switch (failure) {
             error.JobTerminationFailed, error.JobObservationFailed, error.JobDidNotSettle => .cleanup_incomplete,
@@ -50,8 +51,8 @@ pub const Validation = struct {
         return .ready;
     }
 
-    fn check(self: Validation, allocator: std.mem.Allocator, io: std.Io, release: Release, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation, preserve: *bool) !void {
-        switch (self.testComponent(allocator, io, release, path, scratch, cancellation)) {
+    fn check(self: Validation, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation, preserve: *bool) !void {
+        switch (self.testComponent(allocator, io, identity, path, scratch, cancellation)) {
             .ready => {},
             .rejected => return if (cancellation.requested.load(.acquire)) error.Cancelled else error.ComponentValidationFailed,
             .cleanup_incomplete => {
@@ -163,17 +164,16 @@ pub const Store = struct {
         const reserve: u64 = 64 * 1024 * 1024;
         const space = try validation.available_fn(validation.context, self.allocator, self.root);
         if (space < release.expected.archive_bytes + release.expected.unpacked_bytes + reserve) return error.InsufficientComponentSpace;
-        var record: Record = .{ .archive_sha256 = release.expected.sha256, .install_id = undefined };
-        try std.Io.randomSecure(self.io, &record.install_id);
+        const record = try self.preparePending(release.expected.sha256);
         const stage_name = std.fmt.bytesToHex(record.install_id, .lower);
         const stage_path = try std.fs.path.join(self.allocator, &.{ self.root, "staging", &stage_name });
         defer self.allocator.free(stage_path);
-        try self.writeRecord("pending", record);
+        var stage_owned = false;
         var published = false;
         var preserve = false;
-        return self.perform(release, source, validation, observer, cancellation, record, &stage_name, stage_path, &published, &preserve) catch |failure| {
+        return self.perform(release, source, validation, observer, cancellation, record, &stage_name, stage_path, &stage_owned, &published, &preserve) catch |failure| {
             if (!preserve) {
-                try removeDirectory(self.io, self.stages, &stage_name);
+                if (stage_owned) try removeDirectory(self.io, self.stages, &stage_name);
                 if (published) {
                     var name: [32]u8 = undefined;
                     try removeDirectory(self.io, self.versions, record.versionName(&name));
@@ -185,8 +185,81 @@ pub const Store = struct {
         };
     }
 
-    fn perform(self: *Store, release: Release, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, record: Record, stage_name: []const u8, stage_path: []const u8, published: *bool, preserve: *bool) !Receipt {
+    /// Startup/retry validation of the exact canonical record. The manifest pin
+    /// comes from the main, including an explicitly retained older identity.
+    pub fn verifyCurrent(self: *Store, identity: Identity, record: Record, validation: Validation, observer: Observer, cancellation: *const process.Cancellation) !Receipt {
+        try identity.validate();
+        if (!std.mem.eql(u8, &identity.expected.sha256, &record.archive_sha256)) return error.ComponentNotAccepted;
+        if (try self.readRecord("pending.json") != null) return error.ComponentRecoveryRequired;
+        try self.assertCurrent(record);
+        try observer.update(cancellation, .{ .phase = .verifying, .total = identity.expected.unpacked_bytes });
+        var name: [32]u8 = undefined;
+        const root = try self.versions.openDir(self.io, record.versionName(&name), .{ .iterate = true, .follow_symlinks = false });
+        defer root.close(self.io);
+        const before = try root.stat(self.io);
+        var state: ContentsObserver = .{ .observer = observer, .cancellation = cancellation, .expected = identity.expected.unpacked_bytes, .phase = .verifying };
+        _ = try archive.verifyInstalled(self.allocator, self.io, root, identity.expected, identity.manifest_sha256, .{}, .{ .context = &state, .observe_fn = ContentsObserver.update });
+        try self.assertCurrent(record);
+        try observer.update(cancellation, .{ .phase = .testing });
+        if (try validation.available_fn(validation.context, self.allocator, self.root) < 64 * 1024 * 1024) return error.InsufficientComponentSpace;
+        // This distinct pending identity owns only a check's temporary stage,
+        // never the installed target. Existing crash recovery can clean it
+        // precisely without rescanning, replaying, or adopting a version.
+        const temporary = try self.preparePending(identity.expected.sha256);
+        const stage_name = std.fmt.bytesToHex(temporary.install_id, .lower);
+        var owned = false;
+        var preserve = false;
+        const result = self.testCurrent(identity, record, validation, observer, cancellation, &stage_name, &owned, &preserve, before);
+        return result catch |failure| {
+            if (!preserve) {
+                if (owned) try removeDirectory(self.io, self.stages, &stage_name);
+                try self.deleteKnownFile("pending.json");
+            }
+            return failure;
+        };
+    }
+
+    fn testCurrent(self: *Store, identity: Identity, record: Record, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, stage_name: []const u8, owned: *bool, preserve: *bool, before: std.Io.File.Stat) !Receipt {
         try self.stages.createDir(self.io, stage_name, .default_dir);
+        owned.* = true;
+        const stage = try self.stages.openDir(self.io, stage_name, .{ .follow_symlinks = false });
+        var opened = true;
+        defer if (opened) stage.close(self.io);
+        try stage.createDir(self.io, "scratch", .default_dir);
+        const scratch = try std.fs.path.join(self.allocator, &.{ self.root, "staging", stage_name, "scratch" });
+        defer self.allocator.free(scratch);
+        const path = try self.versionPath(record);
+        defer self.allocator.free(path);
+        try validation.check(self.allocator, self.io, identity, path, scratch, cancellation, preserve);
+        try observer.update(cancellation, .{ .phase = .cleaning });
+        try self.assertCurrent(record);
+        var name: [32]u8 = undefined;
+        const after = try self.versions.statFile(self.io, record.versionName(&name), .{ .follow_symlinks = false });
+        if (after.kind != .directory or after.inode != before.inode) return error.ComponentChanged;
+        stage.close(self.io);
+        opened = false;
+        return .{ .record = record, .cleanup_pending = !self.cleanupCommitted(stage_name) };
+    }
+
+    fn assertCurrent(self: *Store, record: Record) !void {
+        const current_record = try self.current() orelse return error.ComponentChanged;
+        if (!current_record.eql(record)) return error.ComponentChanged;
+    }
+
+    fn preparePending(self: *Store, digest: [32]u8) !Record {
+        var record: Record = .{ .archive_sha256 = digest, .install_id = undefined };
+        try std.Io.randomSecure(self.io, &record.install_id);
+        const name = std.fmt.bytesToHex(record.install_id, .lower);
+        for ([_]std.Io.Dir{ self.stages, self.versions }) |parent| {
+            if (parent.statFile(self.io, &name, .{ .follow_symlinks = false })) |_| return error.ComponentIdentityCollision else |failure| if (failure != error.FileNotFound) return failure;
+        }
+        try self.writeRecord("pending", record);
+        return record;
+    }
+
+    fn perform(self: *Store, release: Release, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, record: Record, stage_name: []const u8, stage_path: []const u8, stage_owned: *bool, published: *bool, preserve: *bool) !Receipt {
+        try self.stages.createDir(self.io, stage_name, .default_dir);
+        stage_owned.* = true;
         const stage = try self.stages.openDir(self.io, stage_name, .{ .follow_symlinks = false });
         var stage_open = true;
         defer if (stage_open) stage.close(self.io);
@@ -204,10 +277,10 @@ pub const Store = struct {
             if (try validation.available_fn(validation.context, self.allocator, self.root) < release.expected.unpacked_bytes + 64 * 1024 * 1024)
                 return error.InsufficientComponentSpace;
             try observer.update(cancellation, .{ .phase = .unpacking });
-            var state: UnpackObserver = .{ .observer = observer, .cancellation = cancellation, .expected = release.expected.unpacked_bytes };
+            var state: ContentsObserver = .{ .observer = observer, .cancellation = cancellation, .expected = release.expected.unpacked_bytes };
             var buffer: [64 * 1024]u8 = undefined;
             var input = file.reader(self.io, &buffer);
-            const summary = try archive.unpack(self.allocator, self.io, &input.interface, stage, "component", release.expected, .{}, .{ .context = &state, .observe_fn = UnpackObserver.update });
+            const summary = try archive.unpack(self.allocator, self.io, &input.interface, stage, "component", release.expected, .{}, .{ .context = &state, .observe_fn = ContentsObserver.update });
             if (!std.mem.eql(u8, &summary.manifest_sha256, &release.manifest_sha256)) return error.ComponentManifestIdentity;
         }
         try observer.update(cancellation, .{ .phase = .verifying });
@@ -217,7 +290,7 @@ pub const Store = struct {
         const scratch = try std.fs.path.join(self.allocator, &.{ stage_path, "scratch" });
         defer self.allocator.free(scratch);
         try observer.update(cancellation, .{ .phase = .testing });
-        try validation.check(self.allocator, self.io, release, component, scratch, cancellation, preserve);
+        try validation.check(self.allocator, self.io, release.identity(), component, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .publishing });
         var name: [32]u8 = undefined;
         try stage.renamePreserve("component", self.versions, record.versionName(&name), self.io);
@@ -225,7 +298,7 @@ pub const Store = struct {
         try observer.update(cancellation, .{ .phase = .finalizing });
         const final_path = try self.versionPath(record);
         defer self.allocator.free(final_path);
-        try validation.check(self.allocator, self.io, release, final_path, scratch, cancellation, preserve);
+        try validation.check(self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .activating });
         if (observer.activate_fn) |activate| if (!activate(observer.context)) return error.Cancelled;
         self.writeRecord("current", record) catch |failure| {
@@ -356,14 +429,15 @@ const DownloadSink = struct {
     }
 };
 
-const UnpackObserver = struct {
+const ContentsObserver = struct {
     observer: Observer,
     cancellation: *const process.Cancellation,
     expected: u64,
+    phase: Phase = .unpacking,
 
     fn update(context: ?*anyopaque, progress: archive.Progress) bool {
-        const self: *UnpackObserver = @ptrCast(@alignCast(context.?));
-        self.observer.update(self.cancellation, .{ .phase = .unpacking, .bytes = progress.unpacked_bytes, .total = self.expected }) catch return false;
+        const self: *ContentsObserver = @ptrCast(@alignCast(context.?));
+        self.observer.update(self.cancellation, .{ .phase = self.phase, .bytes = progress.unpacked_bytes, .total = self.expected }) catch return false;
         return true;
     }
 };
@@ -450,7 +524,7 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(context.?));
         return self.space;
     }
-    fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: Release, path: []const u8, _: []const u8, _: *const process.Cancellation) ValidationResult {
+    fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: Identity, path: []const u8, _: []const u8, _: *const process.Cancellation) ValidationResult {
         const self: *Fixture = @ptrCast(@alignCast(context.?));
         self.validations += 1;
         if (self.reject_on_validation == self.validations) return .rejected;
@@ -641,4 +715,43 @@ test "component recovery rejects conflicting identities for the same current dir
     const preserved = try store.versions.openDir(std.testing.io, receipt.record.versionName(&name), .{});
     preserved.close(std.testing.io);
     try std.testing.expect(try store.readRecord("pending.json") != null);
+}
+
+test "current Office validation uses only main identity and journals private selftest scratch" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    const release = try Fixture.release();
+    const installed = try store.install(release, fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const checked = try store.verifyCurrent(release.identity(), installed.record, fixture.platformValidation(), fixture.observer(), &cancellation);
+    try std.testing.expect(!checked.cleanup_pending);
+    try std.testing.expect(checked.record.eql(installed.record));
+    try std.testing.expect((try store.current()).?.eql(installed.record));
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+    var foreign = release.identity();
+    foreign.expected.sha256[0] ^= 1;
+    const previous_validations = fixture.validations;
+    try std.testing.expectError(error.ComponentNotAccepted, store.verifyCurrent(foreign, installed.record, fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectEqual(previous_validations, fixture.validations);
+    fixture.validation = .cleanup_incomplete;
+    try std.testing.expectError(error.ComponentProcessesOutstanding, store.verifyCurrent(release.identity(), installed.record, fixture.platformValidation(), fixture.observer(), &cancellation));
+    const pending = (try store.readRecord("pending.json")).?;
+    try std.testing.expect(!pending.sameDirectory(installed.record));
+    // Recovery is explicitly called after the caller proves quiescence.
+    try store.recover();
+    try std.testing.expect((try store.current()).?.eql(installed.record));
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+    fixture.validation = .ready;
+    const path = try store.versionPath(installed.record);
+    defer std.testing.allocator.free(path);
+    const version = try std.Io.Dir.cwd().openDir(std.testing.io, path, .{});
+    defer version.close(std.testing.io);
+    try version.writeFile(std.testing.io, .{ .sub_path = "payload.bin", .data = "changed" });
+    const validations = fixture.validations;
+    try std.testing.expectError(error.ComponentManifest, store.verifyCurrent(release.identity(), installed.record, fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectEqual(validations, fixture.validations);
+    try std.testing.expect(try store.readRecord("pending.json") == null);
 }

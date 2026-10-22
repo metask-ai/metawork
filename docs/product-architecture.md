@@ -245,6 +245,14 @@ Automatic 的 Skill query authority 来自 owning interactive Task 的可用 Ses
 
 管理资产关联必须同时证明 query purpose、provider、固定 source identity/scope 与 invocation，不能仅凭同名 winner 借用外部来源的健康、policy 或文件权限。管理记录与同名 external winner 可同时存在。验证 job 绑定 install identity、operation、scope/epoch 和 request generation；普通刷新不得完成 pending transaction，取消只清理匹配的 active verification，不丢弃 durable pending。发布验证还必须核对授权目标的实际 package 与 candidate 摘要；卸载验证证明该精确管理目标不存在，不要求其他来源的同名 Skill 一并消失。
 
+#### 可选 Office 组件
+
+Product Control 拥有唯一 Office 组件的可用版本事实、操作准入、进度、取消决策、持久化健康和清理待办；该对象不是通用拓展平台。基础 Skill 的发现不依赖组件就绪，组件操作不占用 Task 的 active operation，也不阻止普通 Task、附件接收或现有 Run。当前可用版本与本次安装结果分开：更新失败不能覆盖仍被验证为可用的旧版本。被信任的旧身份、下载与执行的固定信任入口由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 定义。
+
+组件 mutation 校验当前 generation 和唯一 active operation；取消还绑定精确 operation id。worker 只借用该次稳定 Attempt，其原子 gate 决定取消与激活的唯一胜者，不调用 Product Runtime。进度和完成结果回到 owner 线程接纳并推进产品 revision；stale completion 不消费新 attempt，陈旧或倒退进度不改写事实。current 提交的已知事实不因晚到取消回滚；Application 必须 join worker 并完成已验证来源 handoff，才能发布相应可用事实。安装自检、物理删除及其有界 IO 都由独立 Application worker 执行，不占用普通文件预览 lane 或 Native 主线程。
+
+持久化结果不确定冻结组件 mutation，只允许显式重新观察 canonical 状态，不重放下载或工具。进程物理静止无法证实时进一步要求重启，当前进程不能用普通重试取得清理 authority。资源容量不足只关闭新安装，不阻止已授权的清理或移除；引用只保留在进程内。组件 schema、原子发布及精确恢复由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 唯一承载。
+
 ### 2.5 MCP authority
 
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。

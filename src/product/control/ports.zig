@@ -3,6 +3,7 @@
 //! coordinators; these values are callback-scoped and must not enter jobs.
 
 const std = @import("std");
+const office_component = @import("product_office_component");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -267,3 +268,54 @@ pub const ScheduleHost = struct {
 
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
+
+pub const OfficeView = office_component.View;
+pub const OfficeRelease = office_component.Release;
+pub const OfficeCurrent = office_component.Current;
+pub const OfficeKind = office_component.Kind;
+pub const OfficePhase = office_component.Phase;
+pub const OfficeReason = office_component.Reason;
+pub const OfficeOutcome = office_component.Outcome;
+pub const OfficeAdmission = office_component.Admission;
+pub const OfficeAttempt = office_component.Attempt;
+pub const OfficeCompletion = office_component.Completion;
+pub const OfficeProgress = office_component.Progress;
+
+/// Owner-thread only; never copied into a component worker. Only the returned
+/// Attempt may be borrowed by that worker, until its matching join/completion.
+pub const OfficeManagement = struct {
+    context: *anyopaque,
+    view_fn: *const fn (*anyopaque) OfficeView,
+    begin_fn: *const fn (*anyopaque, OfficeKind, u64) OfficeAdmission,
+    attempt_fn: *const fn (*anyopaque, u64) ?*OfficeAttempt,
+    cancel_fn: *const fn (*anyopaque, u64, u64) OfficeAdmission,
+    progress_fn: *const fn (*anyopaque, u64, OfficeProgress) void,
+    complete_fn: *const fn (*anyopaque, u64, OfficeCompletion) bool,
+    resources_fn: *const fn (*anyopaque, bool, bool) void,
+    source_fn: *const fn (*anyopaque, ?[]const u8, ?agent.CatalogSourceLifetime) anyerror!bool,
+
+    pub fn view(self: OfficeManagement) OfficeView {
+        return self.view_fn(self.context);
+    }
+    pub fn begin(self: OfficeManagement, kind: OfficeKind, generation: u64) OfficeAdmission {
+        return self.begin_fn(self.context, kind, generation);
+    }
+    pub fn attempt(self: OfficeManagement, id: u64) ?*OfficeAttempt {
+        return self.attempt_fn(self.context, id);
+    }
+    pub fn cancel(self: OfficeManagement, generation: u64, id: u64) OfficeAdmission {
+        return self.cancel_fn(self.context, generation, id);
+    }
+    pub fn progress(self: OfficeManagement, id: u64, value: OfficeProgress) void {
+        self.progress_fn(self.context, id, value);
+    }
+    pub fn complete(self: OfficeManagement, id: u64, value: OfficeCompletion) bool {
+        return self.complete_fn(self.context, id, value);
+    }
+    pub fn resources(self: OfficeManagement, capacity: bool, cleanup_pending: bool) void {
+        self.resources_fn(self.context, capacity, cleanup_pending);
+    }
+    pub fn source(self: OfficeManagement, root: ?[]const u8, lifetime: ?agent.CatalogSourceLifetime) !bool {
+        return self.source_fn(self.context, root, lifetime);
+    }
+};

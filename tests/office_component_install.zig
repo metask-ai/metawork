@@ -42,11 +42,14 @@ pub fn main(init: std.process.Init) !void {
     try store.recover();
     var context: Context = .{ .archive_path = args[1], .environment = init.environ_map };
     const cancellation: office.Cancellation = .{};
-    const receipt = store.install(release, .{ .context = &context, .read_fn = Context.read }, .{
-        .context = &context,
-        .parent_environment = init.environ_map,
-        .test_fn = if (dev) Context.developmentWitness else null,
-    }, .{ .context = &context, .observe_fn = Context.progress }, &cancellation) catch |failure| {
+    const validation: component.Validation = .{ .context = &context, .parent_environment = init.environ_map, .test_fn = if (dev) Context.developmentWitness else null };
+    const observer: component.Observer = .{ .context = &context, .observe_fn = Context.progress };
+    const checking = std.mem.eql(u8, args[1], "--check-current");
+    const operation = if (checking)
+        store.verifyCurrent(release.identity(), (try store.current()) orelse return error.MissingQualificationCurrent, validation, observer, &cancellation)
+    else
+        store.install(release, .{ .context = &context, .read_fn = Context.read }, validation, observer, &cancellation);
+    const receipt = operation catch |failure| {
         const pending = try store.current();
         var output_buffer: [1024]u8 = undefined;
         var output = std.Io.File.stdout().writer(init.io, &output_buffer);
@@ -85,7 +88,7 @@ const Context = struct {
         _ = try reader.interface.streamRemaining(writer);
     }
 
-    fn developmentWitness(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: component.Release, root: []const u8, scratch: []const u8, cancellation: *const office.Cancellation) component.ValidationResult {
+    fn developmentWitness(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: component.Identity, root: []const u8, scratch: []const u8, cancellation: *const office.Cancellation) component.ValidationResult {
         const self: *Context = @ptrCast(@alignCast(context.?));
         // Explicit local qualification: the development entry must really be
         // unsigned, while every vendor anchor still needs Windows trust.
