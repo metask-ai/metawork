@@ -71,9 +71,11 @@ pub const Context = struct {
     operation_identity: ?[16]u8 = null,
 };
 
+const PagePaths = struct { input: []const u8, output: []const u8, width: u16 = 1280 };
 pub const Command = union(enum) {
     selftest,
-    render: struct { input: []const u8, output: []const u8, width: u16 = 1280 },
+    render: PagePaths,
+    preview: PagePaths,
     text: struct { input: []const u8, output: []const u8 },
 };
 
@@ -91,6 +93,12 @@ pub const Output = struct {
     }
 };
 
+/// A failure cause cannot prove that the process tree has stopped. Callers
+/// must preserve owned files and version leases when quiescent is false,
+/// including for unfamiliar observation or termination errors.
+pub const Failure = struct { cause: anyerror, quiescent: bool };
+pub const Outcome = union(enum) { completed: Output, failed: Failure };
+
 /// Worker-only. Caller must keep the selected component version pinned through
 /// this call, and may delete output/staging resources only after it returns.
 /// Any cleanup uncertainty is explicit and must prevent publication/deletion.
@@ -102,6 +110,23 @@ pub fn run(
     context: Context,
     timeout_ms: u32,
     cancellation: *const Cancellation,
+) Outcome {
+    var quiescent = true;
+    const output = runOwned(allocator, io, component_root, command, context, timeout_ms, cancellation, &quiescent) catch |cause|
+        return .{ .failed = .{ .cause = cause, .quiescent = quiescent } };
+    std.debug.assert(quiescent);
+    return .{ .completed = output };
+}
+
+fn runOwned(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    component_root: []const u8,
+    command: Command,
+    context: Context,
+    timeout_ms: u32,
+    cancellation: *const Cancellation,
+    quiescent: *bool,
 ) !Output {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
     if (!validPath(component_root) or !validPath(context.scratch_root) or timeout_ms == 0 or timeout_ms > 300_000) return error.InvalidOfficeRequest;
@@ -119,7 +144,12 @@ pub fn run(
     try environment.put("TMP", context.scratch_root);
     try environment.put("TEMP", context.scratch_root);
     try environment.put("TMPDIR", context.scratch_root);
-    var job = if (context.operation_identity) |identity| try windows.Job.operation(identity, false) else try windows.Job.init(io);
+    var job = (if (context.operation_identity) |identity| windows.Job.operation(identity, false) else windows.Job.init(io)) catch |failure| {
+        // A collision can belong to an earlier still-live operation. Never
+        // claim its namespace is quiet merely because this call did not spawn.
+        if (failure == error.JobInUse) quiescent.* = false;
+        return failure;
+    };
     defer job.deinit();
     const entry = try std.fs.path.join(allocator, &.{ component_root, "bin", "office.exe" });
     defer allocator.free(entry);
@@ -137,10 +167,10 @@ pub fn run(
             arguments[3..6].* = .{ "text", paths.input, paths.output };
             break :value 6;
         },
-        .render => |paths| value: {
+        .render, .preview => |paths| value: {
             if (!validPath(paths.input) or !validPath(paths.output) or paths.width < 128 or paths.width > 2048)
                 return error.InvalidOfficeRequest;
-            arguments[3..8].* = .{ "render", paths.input, paths.output, "--width", try std.fmt.bufPrint(&width_buffer, "{d}", .{paths.width}) };
+            arguments[3..8].* = .{ @tagName(command), paths.input, paths.output, "--width", try std.fmt.bufPrint(&width_buffer, "{d}", .{paths.width}) };
             break :value 8;
         },
     };
@@ -153,6 +183,7 @@ pub fn run(
         .cwd = .{ .path = context.scratch_root },
         .environ_map = &environment,
     });
+    quiescent.* = false;
     defer child.kill(io);
     const stdout = child.stdout.?;
     const stderr = child.stderr.?;
@@ -165,19 +196,20 @@ pub fn run(
     defer std.crypto.secureZero(u8, &out.bytes);
     defer std.crypto.secureZero(u8, &err.bytes);
     const out_thread = std.Thread.spawn(.{}, Capture.read, .{&out}) catch |failure| {
-        try stop(io, &child, &job, null, null);
+        try stop(io, &child, &job, null, null, quiescent);
         return failure;
     };
     const err_thread = std.Thread.spawn(.{}, Capture.read, .{&err}) catch |failure| {
-        try stop(io, &child, &job, out_thread, null);
+        try stop(io, &child, &job, out_thread, null, quiescent);
         return failure;
     };
     const term = monitor(io, &child, &job, &out, &err, started, timeout_ms, cancellation) catch |failure| {
-        try stop(io, &child, &job, out_thread, err_thread);
+        try stop(io, &child, &job, out_thread, err_thread, quiescent);
         return failure;
     };
     out_thread.join();
     err_thread.join();
+    quiescent.* = true;
     const out_bytes = try allocator.dupe(u8, out.bytes[0..out.len]);
     errdefer {
         std.crypto.secureZero(u8, out_bytes);
@@ -189,13 +221,14 @@ pub fn run(
 // std.process.run cancels its pipe batch before killing the child; a live
 // Windows writer can keep that cancellation blocked. Keep one root owner and
 // bounded readers instead: terminate/join the root and Job before joining I/O.
-fn stop(io: std.Io, child: *std.process.Child, job: *windows.Job, out: ?std.Thread, err: ?std.Thread) !void {
+fn stop(io: std.Io, child: *std.process.Child, job: *windows.Job, out: ?std.Thread, err: ?std.Thread, quiescent: *bool) !void {
     child.kill(io);
     const cleanup = job.terminateAndWait(io);
     cleanup catch job.deinit(); // closing the sole handle also kills descendants
     if (out) |thread| thread.join();
     if (err) |thread| thread.join();
     try cleanup;
+    quiescent.* = true;
 }
 
 const Capture = struct {
@@ -267,8 +300,12 @@ test "Office Application requests are absolute and cancellation precedes any spa
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     const context: Context = .{ .parent_environment = &environment, .scratch_root = "C:\\scratch" };
-    try std.testing.expectError(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "relative", .selftest, context, 1000, &cancellation));
-    try std.testing.expectError(error.Cancelled, run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, context, 1000, &cancellation));
+    const invalid = run(std.testing.allocator, std.testing.io, "relative", .selftest, context, 1000, &cancellation).failed;
+    try std.testing.expect(invalid.cause == error.InvalidOfficeRequest);
+    try std.testing.expect(invalid.quiescent);
+    const cancelled = run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, context, 1000, &cancellation).failed;
+    try std.testing.expect(cancelled.cause == error.Cancelled);
+    try std.testing.expect(cancelled.quiescent);
 }
 
 test {

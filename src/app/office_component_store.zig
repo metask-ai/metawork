@@ -47,7 +47,7 @@ pub const Validation = struct {
         if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, stage, identity, path, scratch, cancellation);
         const environment = self.parent_environment orelse return .rejected;
         verifyComponent(allocator, io, stage, path, scratch, environment, self.operation_identity, cancellation) catch |failure| return switch (failure) {
-            error.JobInUse, error.JobTerminationFailed, error.JobObservationFailed, error.JobDidNotSettle => .cleanup_incomplete,
+            error.ComponentProcessesOutstanding => .cleanup_incomplete,
             else => .rejected,
         };
         return .ready;
@@ -606,7 +606,7 @@ fn verifyComponent(allocator: std.mem.Allocator, io: std.Io, stage: ValidationSt
         try platform.verifySignature(allocator, path);
     }
     if (stage == .authentication) return;
-    var result = try process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation_identity = operation_identity }, 120_000, cancellation);
+    var result = try selftestOutput(process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation_identity = operation_identity }, 120_000, cancellation));
     defer result.deinit(allocator);
     if (result.term != .exited or result.term.exited != 0) return error.ComponentSelftestFailed;
     const Status = struct { schema: u32, status: []const u8, python: []const u8, node: []const u8, font: []const u8 };
@@ -614,6 +614,19 @@ fn verifyComponent(allocator: std.mem.Allocator, io: std.Io, stage: ValidationSt
     defer parsed.deinit();
     if (parsed.value.schema != 1 or !std.mem.eql(u8, parsed.value.status, "success") or
         parsed.value.python.len == 0 or parsed.value.node.len == 0 or !std.mem.eql(u8, parsed.value.font, "Noto Sans CJK SC")) return error.ComponentSelftestFailed;
+}
+
+fn selftestOutput(outcome: process.Outcome) !process.Output {
+    return switch (outcome) {
+        .completed => |output| output,
+        .failed => |failure| if (failure.quiescent) failure.cause else error.ComponentProcessesOutstanding,
+    };
+}
+
+test "selftest cleanup authority follows physical quiescence, not a failure-name allowlist" {
+    try std.testing.expectError(error.ComponentProcessesOutstanding, selftestOutput(.{ .failed = .{ .cause = error.UnfamiliarIoFailure, .quiescent = false } }));
+    try std.testing.expectError(error.UnfamiliarIoFailure, selftestOutput(.{ .failed = .{ .cause = error.UnfamiliarIoFailure, .quiescent = true } }));
+    try std.testing.expectError(error.ComponentProcessesOutstanding, selftestOutput(.{ .failed = .{ .cause = error.Cancelled, .quiescent = false } }));
 }
 
 fn verifyPe(io: std.Io, path: []const u8) !void {

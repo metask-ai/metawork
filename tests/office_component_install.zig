@@ -106,9 +106,12 @@ const Context = struct {
                 }
             }
             if (stage == .authentication) return .ready;
-            var result = office.run(allocator, io, root, .selftest, .{ .parent_environment = self.environment, .scratch_root = scratch }, 120_000, cancellation) catch |problem| {
-                std.debug.print("Qualification selftest failed: {s}\n", .{@errorName(problem)});
-                return .cleanup_incomplete;
+            var result = switch (office.run(allocator, io, root, .selftest, .{ .parent_environment = self.environment, .scratch_root = scratch }, 120_000, cancellation)) {
+                .completed => |output| output,
+                .failed => |problem| {
+                    std.debug.print("Qualification selftest failed: {s}\n", .{@errorName(problem.cause)});
+                    return if (problem.quiescent) .rejected else .cleanup_incomplete;
+                },
             };
             defer result.deinit(allocator);
             if (result.term == .exited and result.term.exited == 0) return .ready;

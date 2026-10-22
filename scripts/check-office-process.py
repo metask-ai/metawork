@@ -63,9 +63,12 @@ class OfficeProcess(unittest.TestCase):
         (self.root / "pids.json").unlink(missing_ok=True)
         (self.root / "go").unlink(missing_ok=True)
 
-    def start(self, source, timeout=15000, cancel=0):
+    def start(self, source, timeout=15000, cancel=0, operation=None, preview=None):
         self.script.write_text(source, encoding="utf-8")
-        process = subprocess.Popen([str(HOST), str(self.root), str(timeout), str(cancel)],
+        assert operation is None or preview is None
+        process = subprocess.Popen([str(HOST), str(self.root), str(timeout), str(cancel),
+                                    *([operation] if operation is not None else []),
+                                    *([str(path) for path in preview] if preview is not None else [])],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         self.addCleanup(self.stop, process)
         return process
@@ -75,10 +78,13 @@ class OfficeProcess(unittest.TestCase):
             process.kill()
         process.communicate(timeout=10)
 
-    def finish(self, process):
+    def finish(self, process, require_quiet=True):
         stdout, stderr = process.communicate(timeout=12)
         self.assertEqual(process.returncode, 0, stderr)
-        return json.loads(stdout)
+        result = json.loads(stdout)
+        if require_quiet:
+            self.assertIs(result["quiescent"], True)
+        return result
 
     def tree(self, suffix="time.sleep(60)\n", **options):
         process = self.start(TREE + suffix, **options)
@@ -106,6 +112,14 @@ class OfficeProcess(unittest.TestCase):
         result = self.finish(self.start("import json,sys;print(json.dumps(sys.argv[1:]));raise SystemExit(7)"))
         self.assertEqual(result["term"], {"exited": 7})
         self.assertEqual(json.loads(result["stdout"]), ["selftest"])
+
+    def test_fixed_preview_request_preserves_unicode_paths_and_uses_the_same_process_owner(self):
+        source = self.root / "原稿 输入.docx"
+        output = self.root / "预览 pages"
+        result = self.finish(self.start("import json,sys;print(json.dumps(sys.argv[1:]))",
+                                        preview=(source, output)))
+        self.assertEqual(result["term"], {"exited": 0})
+        self.assertEqual(json.loads(result["stdout"]), ["preview", str(source), str(output), "--width", "1280"])
 
     def test_host_environment_and_temporary_files_are_scoped_to_its_transaction(self):
         source = "import json,os,tempfile;print(json.dumps({'cwd':os.getcwd(),'temp':tempfile.gettempdir(),'ambient':os.environ.get('METAWORK_QUALIFICATION_SECRET')}))"
@@ -174,6 +188,24 @@ class OfficeProcess(unittest.TestCase):
             self.assertEqual(result.stdout, b"")
         finally:
             kernel.CloseHandle(job)
+
+    def test_existing_operation_job_does_not_grant_scratch_cleanup_authority(self):
+        operation = uuid.uuid4().hex
+        name = "Local\\MetaWork.Office.Op." + operation
+        job = kernel.CreateJobObjectW(None, name)
+        self.assertTrue(job, ctypes.get_last_error())
+        scratch = self.root.parent / (".host-" + operation)
+        try:
+            result = self.finish(self.start("raise RuntimeError('must not execute')", operation=operation),
+                                 require_quiet=False)
+            self.assertEqual(result, {"failure": "JobInUse", "quiescent": False})
+            self.assertTrue(scratch.is_dir(), "Unknown scope must retain its owned scratch")
+        finally:
+            kernel.CloseHandle(job)
+            # No child was started. The test now owns and has closed the only
+            # previously existing Job handle; only an empty directory is removed.
+            if scratch.exists():
+                scratch.rmdir()
 
     def test_standalone_shell_entry_regressions(self):
         subprocess.run([sys.executable, str(ROOT / "scripts/check-office-launcher.py"), str(self.root)], check=True, timeout=60)
