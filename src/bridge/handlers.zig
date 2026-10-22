@@ -1215,3 +1215,98 @@ test "Output action strict payload accepts only scoped identities and known acti
         } else |_| {}
     }
 }
+
+const DocumentTargetKind = enum { output, fileReference };
+pub const DocumentTarget = struct {
+    kind: struct {
+        value: DocumentTargetKind,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const text = try WireText.jsonParse(allocator, source, options);
+            return .{ .value = std.meta.stringToEnum(DocumentTargetKind, text.value) orelse return error.UnexpectedToken };
+        }
+    },
+    id: WireText,
+    pub fn selector(self: DocumentTarget) !product_control.DocumentPreviewSelector {
+        return switch (self.kind.value) {
+            .output => .{ .output = try parseOutputId(self.id.value) },
+            .fileReference => if (self.id.value.len != 0 and self.id.value.len <= 128) .{ .reference = self.id.value } else error.InvalidBridgePayload,
+        };
+    }
+};
+pub const DocumentOpen = struct { generation: WireId, previewId: WireId, taskId: WireId, runId: WireId, target: DocumentTarget };
+pub const DocumentKey = struct { generation: WireId, previewId: WireId };
+pub const DocumentReadKey = struct { generation: WireId, previewId: WireId, token: WireText, securityEpoch: WireId, readId: WireId };
+pub const DocumentChunk = struct { generation: WireId, previewId: WireId, token: WireText, securityEpoch: WireId, readId: WireId, offset: WireId };
+pub const DocumentRead = struct { generation: WireId, previewId: WireId, token: WireText, securityEpoch: WireId, readId: WireId, selection: DocumentSelection };
+pub const DocumentSelection = struct {
+    value: product_control.DocumentPreviewRequest,
+    const OptionalId = struct {
+        present: bool = false,
+        value: u64 = 0,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            return .{ .present = true, .value = (try WireId.jsonParse(allocator, source, options)).value };
+        }
+        fn bounded(self: OptionalId, maximum: u64) !u64 {
+            if (!self.present or self.value == 0 or self.value > maximum) return error.InvalidNumber;
+            return self.value;
+        }
+    };
+    const Fields = struct {
+        kind: WireText,
+        page: OptionalId = .{},
+        sheet: OptionalId = .{},
+        row: OptionalId = .{},
+        column: OptionalId = .{},
+        rows: OptionalId = .{},
+        columns: OptionalId = .{},
+    };
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const raw = try std.json.innerParse(Fields, allocator, source, options);
+        if (std.mem.eql(u8, raw.kind.value, "page")) {
+            if (raw.sheet.present or raw.row.present or raw.column.present or raw.rows.present or raw.columns.present) return error.UnexpectedToken;
+            return .{ .value = .{ .page = @intCast(try raw.page.bounded(100) - 1) } };
+        }
+        if (!std.mem.eql(u8, raw.kind.value, "region") or raw.page.present) return error.UnexpectedToken;
+        const sheet = try raw.sheet.bounded(64);
+        const row = try raw.row.bounded(10000);
+        const column = try raw.column.bounded(256);
+        const rows = try raw.rows.bounded(100);
+        const columns = try raw.columns.bounded(20);
+        if (rows * columns > 500 or row + rows > 10001 or column + columns > 257) return error.InvalidNumber;
+        return .{ .value = .{ .region = .{ .sheet = @intCast(sheet), .row = @intCast(row), .column = @intCast(column), .rows = @intCast(rows), .columns = @intCast(columns) } } };
+    }
+};
+
+pub fn validateDocumentToken(value: []const u8) !void {
+    if (value.len != 48) return error.InvalidBridgePayload;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.InvalidBridgePayload;
+}
+
+test "document preview payload is strict and selects identity without paths" {
+    var valid = try parsePayload(DocumentOpen, "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"output\",\"id\":\"03030303030303030303030303030303\"}}");
+    defer valid.deinit();
+    _ = try valid.value.target.selector();
+    inline for (.{
+        "{\"generation\":[49],\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"fileReference\",\"id\":\"ref\"}}",
+        "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"path\",\"id\":\"C:/secret\"}}",
+        "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"fileReference\",\"id\":\"ref\"},\"path\":\"C:/secret\"}",
+    }) |invalid| {
+        if (parsePayload(DocumentOpen, invalid)) |value| {
+            var accepted = value;
+            accepted.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+test "document selection has bounded canonical wire coordinates" {
+    var valid = try parsePayload(DocumentSelection, "{\"kind\":\"region\",\"sheet\":\"1\",\"row\":\"1\",\"column\":\"1\",\"rows\":\"25\",\"columns\":\"20\"}");
+    defer valid.deinit();
+    try std.testing.expectEqual(@as(u16, 25), valid.value.value.region.rows);
+    inline for (.{ "{\"kind\":\"page\",\"page\":1}", "{\"kind\":\"page\",\"page\":\"0\"}", "{\"kind\":\"page\",\"page\":\"01\"}", "{\"kind\":\"region\",\"sheet\":\"1\",\"row\":\"1\",\"column\":\"1\",\"rows\":\"100\",\"columns\":\"20\"}" }) |invalid| {
+        if (parsePayload(DocumentSelection, invalid)) |value| {
+            var accepted = value;
+            accepted.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}

@@ -17,9 +17,10 @@ const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
+const document_preview = @import("document_preview.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 10;
+const async_product_handler_count = 13;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -255,6 +256,7 @@ pub const Dispatcher = struct {
     };
 
     control: ?*product_control.Runtime,
+    documents: document_preview.Controller,
     account_commands: account_contract.AccountCommandSink,
     custom_provider_commands: models_contract.CommandSink,
     platform: Platform,
@@ -304,6 +306,7 @@ pub const Dispatcher = struct {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
             .control = control,
+            .documents = .{ .allocator = allocator, .control = control, .platform = .{ .context = platform.context, .random_fn = platform.random_fn, .emit_fn = platform.emit_fn, .start_timer_fn = platform.start_timer_fn, .cancel_timer_fn = platform.cancel_timer_fn } },
             .account_commands = account_commands,
             .custom_provider_commands = custom_provider_commands,
             .platform = platform,
@@ -316,6 +319,7 @@ pub const Dispatcher = struct {
     pub fn deinit(self: *Dispatcher) void {
         self.callbacks.stopIngress();
         self.callbacks.assertQuiescent();
+        self.documents.settle();
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
@@ -354,6 +358,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
+            .{ .name = commands.read_document_chunk, .function = readDocumentChunk },
+            .{ .name = commands.release_document_read, .function = releaseDocumentRead },
             .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
@@ -476,6 +482,9 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
         self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
+        self.registered_async_handlers[10] = .{ .name = commands.open_document, .context = self, .invoke_fn = openDocument };
+        self.registered_async_handlers[11] = .{ .name = commands.read_document, .context = self, .invoke_fn = readDocument };
+        self.registered_async_handlers[12] = .{ .name = commands.close_document, .context = self, .invoke_fn = closeDocument };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -501,6 +510,7 @@ pub const Dispatcher = struct {
     pub fn detachProductControl(self: *Dispatcher) void {
         if (self.control) |control| control.cancelSnapshot();
         self.mcp_management_host = null;
+        self.documents.control = null;
         self.control = null;
     }
 
@@ -514,6 +524,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.documents.disconnect();
         self.cancelOutputConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
@@ -560,6 +571,10 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
+        if (timer_id == document_preview.timer_id) {
+            self.drainDocumentPreviews();
+            return true;
+        }
         if (timer_id == output_timer_id) {
             if (self.control) |control| control.drainOutputChecks(self.outputCheckSink());
             self.updateOutputTimer();
@@ -684,6 +699,7 @@ pub const Dispatcher = struct {
         if (self.control) |control| control.cancelSnapshot();
         self.cancelPreviewConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
+        self.documents.connect(.{ .generation = generation, .window_id = invocation.source.window_id });
         self.preview_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
@@ -1084,6 +1100,87 @@ pub const Dispatcher = struct {
             entry.* = null;
             respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
         };
+    }
+
+    pub fn documentPreviewSink(self: *Dispatcher) product_control.DocumentPreviewSink {
+        return self.documents.sink();
+    }
+    pub fn drainDocumentPreviews(self: *Dispatcher) void {
+        self.documents.drain();
+        if (self.documents.transport_failed) {
+            self.documents.transport_failed = false;
+            self.breakConnection();
+        }
+    }
+    pub fn settleDocumentPreviewsForShutdown(self: *Dispatcher) void {
+        self.documents.settle();
+    }
+    fn documentConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64) !document_preview.Connection {
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        if (generation == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        return .{ .generation = generation, .window_id = invocation.source.window_id };
+    }
+    fn openDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.openDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn openDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentOpen, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.open(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn readDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.readDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn readDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentRead, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.read(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn closeDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.closeDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn closeDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentKey, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.close(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn readDocumentChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentChunk, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        return self.documents.chunk(connection, parsed.value, output);
+    }
+    fn releaseDocumentRead(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentReadKey, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        return self.documents.releaseRead(connection, parsed.value, output);
     }
 
     fn requirePreviewKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, preview_text: []const u8) !struct { generation: u64, preview_id: u64 } {
@@ -8273,4 +8370,75 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());
+}
+
+test "registered document commands use the connection and native deadline lane" {
+    const Host = struct {
+        starts: usize = 0,
+        invalidations: usize = 0,
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(context: ?*anyopaque, _: u64, name: []const u8, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, name, document_preview.event_name)) self.invalidations += 1;
+        }
+        fn timer(context: ?*anyopaque, id: u64, _: u64, _: bool) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (id == document_preview.timer_id) self.starts += 1;
+        }
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 7);
+            return true;
+        }
+    };
+    const Capture = struct {
+        calls: usize = 0,
+        bytes: ?[]u8 = null,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.bytes) |old| std.testing.allocator.free(old);
+            self.bytes = try std.testing.allocator.dupe(u8, bytes);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.bytes) |bytes| std.testing.allocator.free(bytes);
+        }
+    };
+    var effect: product_control.TestSupport.DocumentEffect = .{ .main_thread = std.Thread.getCurrentId(), .text = "safe body" };
+    var control = try product_control.TestSupport.documentPreviewFixture(&effect);
+    defer control.deinit();
+    var host: Host = .{};
+    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = &host, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .random_fn = Host.random, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    defer boundary.deinit();
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var response: [1024]u8 = undefined;
+    _ = try native.registry.find(commands.connect).?.invoke_fn(&boundary, .{ .request = .{ .id = "connect-doc", .command = commands.connect, .payload = "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &response);
+    var capture: Capture = .{};
+    defer capture.deinit();
+    const responder: native_sdk.bridge.AsyncResponder = .{ .context = &capture, .source = .{ .origin = "zero://app", .window_id = 3 }, .respond_fn = Capture.receive };
+    const payload = "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"output\",\"id\":\"03030303030303030303030303030303\"}}";
+    try native.async_registry.find(commands.open_document).?.invoke_fn(&boundary, .{ .request = .{ .id = "doc", .command = commands.open_document, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, responder);
+    for (0..5000) |_| {
+        try std.testing.expect(boundary.onTimer(document_preview.timer_id));
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, capture.calls);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes.?, "\"sourceVersion\"") != null);
+    try std.testing.expectEqual(1, host.starts);
+    product_control.TestSupport.expireDocumentPreview(&control);
+    for (0..5000) |_| {
+        _ = boundary.onTimer(document_preview.timer_id);
+        if (effect.releases != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, effect.releases);
+    try std.testing.expectEqual(1, host.invalidations);
+    try std.testing.expect(!control.documentPreviewNeedsWake());
 }

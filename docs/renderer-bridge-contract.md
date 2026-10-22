@@ -171,6 +171,26 @@ Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给�
 
 Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
+## Document preview commands
+
+文档会话在固定 revision 1 内原位开放独立 `metawork.documents.*` command，不改变上述五字段 File Preview 请求。Office 运行时未就绪时返回 `unavailable`；新接口只在 Host 准入成功后提供正文检查完成的分页或只读网格，不调用模型，不在 Renderer 解析 Office/PDF 原件。协议开放不代表全部格式和 Renderer 交互已验收，范围与证据分别由产品需求和验证规范拥有。
+
+`metawork.documents.open` 为异步 command，精确接收 `{ generation, previewId, taskId, runId, target: { kind, id } }`。前四项是非零 canonical decimal u64 string；`target.kind` 只允许 `output | fileReference`，output id 是非零 32 位小写十六进制，fileReference id 是 1–128 bytes。Host 仅在精确 Task/Run 内解析目标。Renderer 不提交路径、URL、组件身份、摘要、引擎参数或任意范围。previewId 在本连接内单调递增；关闭尚未完成的同编号 open 后，迟到 open 不得重新创建资源。刷新由关闭旧会话后使用新 previewId 打开完成。
+
+open ready 精确返回 `{ state: "ready", generation, previewId, token, securityEpoch, sourceVersion, sourceBytes, idleMs, lifetimeMs, format, kind, pageCount, sheets, omissions, textScope }`。token 为 24 随机字节的小写十六进制；securityEpoch 是非零 canonical u64 string。sourceVersion 是实际冻结源的 64 位小写 SHA-256，sourceBytes 是正 canonical u64 string，二者只作版本描述，不授予读取权限。`format = docx | xlsx | pptx`；`kind = pages | grid`。pages 有 1–100 页且 sheets 为空；grid 仅用于 XLSX，pageCount 为零。工作表精确为 `{ index, name, hidden, rows, columns }`，index 从一连续编号，最大 64；name 至多 512 UTF-8 bytes，rows/columns 为不超过 10000/256 的非负整数。`omissions` 是不重复的已登记未显示对象名，最多 16 项；当前封闭集合是 `external_hyperlinks | merged_cells | conditional_formatting | data_validation | charts | images | pivot_tables | comments`。`textScope` 当前精确为 `ooxml_xml_text_and_attributes_without_ocr`，不携带原始提取文本。
+
+`metawork.documents.read` 为异步 command，精确接收 `{ generation, previewId, token, securityEpoch, readId, selection }`。readId 是每个会话内单调递增的正 canonical u64 string，只有实际接纳的读取消费该编号。selection 精确为 `{ kind: "page", page }` 或 `{ kind: "region", sheet, row, column, rows, columns }`；全部坐标采用正 canonical u64 string，从一编号。page 不超过 100；region 的 sheet/row/column 不超过 64/10000/256，rows/columns 不超过 100/20，面积不超过 500，范围不可越出上述上限。每个文档只有一个在途读取或尚未释放的页面传输。
+
+page ready 精确返回 `{ state: "ready", kind: "page", readId, securityEpoch, transferMs: "15000", image: { mediaType: "image/png", sizeBytes, chunkBytes: "262143", width, height } }`；一页最多 10 MiB、4000000 pixels。region ready 精确返回 `{ state: "ready", kind: "region", readId, securityEpoch, sheet, row, column, rows, columns, cells }`，响应坐标为普通安全整数。cells 只含区域内已存在的单元格，按 row/column 严格递增，空单元格隐含；每项精确为 `{ row, column, formula, value, display, formatCode, formatSupported, bold, italic, alignment }`。formula/alignment 为 nullable string；value 为 null 或 `{ kind: "number" | "text" | "boolean" | "date" | "duration" | "error", text }`。字符串各最多 32 KiB，单次投影还受 Host 的总编码预算约束，超限明确返回 limit，不能静默丢项。网格只呈现已保存的结果，不触发重算。
+
+`metawork.documents.readImageChunk` 为同步 command，精确接收 `{ generation, previewId, token, securityEpoch, readId, offset }`。offset 是 canonical u64 string，必须连续；每块最多 262143 字节，ready 精确返回 `{ state: "ready", readId, offset, bytes, dataBase64 }`，各整数仍为 canonical u64 string。一次页读取在 worker 核验源后持有不可变字节，分块运输复核当前 Product authority、security 和 connection/window grant，不在主线程重新打开源文件。`metawork.documents.releaseRead` 为同步 command，精确接收上述对象去掉 offset，ready 精确返回 `{ state: "ready", readId, released: true }`；它只释放已交付页面的传输缓冲，不关闭文档。在途读取返回 busy，取消在途操作使用 close。旧 readId 不得释放新页面。
+
+`metawork.documents.close` 为异步 command，精确接收 `{ generation, previewId }`，允许 token 尚未返回时取消。只有物理清理完成或从未创建时返回 `{ state: "ready", generation, previewId, released: true }`；清理不确定返回 `{ state: "restart_required", generation, previewId, released: false }` 并保留物理配额和组件引用。其余非 ready 结果统一且精确为 `{ state }`，封闭状态为 `busy | missing | restricted | stale_security | unavailable | unsupported | changed | limit | cancelled | expired | restart_required | error`，不得携带正文、页面或网格。close 的 restart_required 使用带 released 的上述专用形状。
+
+会话 token 绑定 connection/window、Task/Run 目标、源快照、组件及安全代次。Host 最多持有两个物理资源，使用独立单 worker/有界队列。准备期限 150 秒、读取期限 30 秒、页面传输总期限 15 秒，会话闲置期限 120 秒、总期限 900 秒；idleMs/lifetimeMs 分别精确返回 `"120000"`/`"900000"`。Bridge 使用独立 Native periodic timer 驱动到期与分步检查，不能仅依赖新请求来清理。连接替换、Task/目标/组件/安全失效、关闭、期限与 shutdown 都撤销交付；原有 File Preview worker 不承担转换。
+
+撤销并收口后，Host 向所属 window 发出 `metawork:document-preview-invalidated`，payload 精确为 `{ generation, previewId, token, reason }`，reason 使用上述非 ready 状态。Renderer 必须丢弃匹配会话的旧内容及迟到响应；连接和安全代次变化也必须主动清空本地内容。Renderer 还须根据发送请求的本地单调时刻计算保守期限，不能按迟到响应的接收时刻延长授权；不得把 sourceVersion 当作跨会话缓存 authority。事件投递失败或无法建立期限唤醒时撤销会话并解除连接，不能保留无期限 grant。
+
 ## File changes diff command
 
 `metawork.files.diff` 是 revision 1 command catalog 中的异步 command，不出现在同步 handler registry。request 精确为 `{ "taskId": "17", "runId": "23", "fileChangeId": "task:17:run:23:change:1" }`；三个字段均不可省略，Task/Run 必须是 canonical decimal `u64`，change id 必须是 1–128 bytes opaque identity。Renderer 不提交路径、artifact locator、digest、range 或读取上限；Host 只在精确 Task + Run 内解析 change id。

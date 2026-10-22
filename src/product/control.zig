@@ -61,6 +61,7 @@ pub const OutputCheckKind = runtime_impl.OutputCheckKind;
 pub const OutputCheckResult = runtime_impl.OutputCheckResult;
 pub const OutputCheckSink = runtime_impl.OutputCheckSink;
 pub const OutputFileAuthorityError = runtime_impl.OutputFileAuthorityError;
+pub const DocumentPreviewLimits = runtime_impl.DocumentPreviewLimits;
 pub const DocumentPreviewInput = runtime_impl.DocumentPreviewInput;
 pub const DocumentPreviewRequest = runtime_impl.DocumentPreviewRequest;
 pub const DocumentPreviewSelector = runtime_impl.DocumentPreviewSelector;

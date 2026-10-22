@@ -15,6 +15,7 @@ const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const output_check = @import("output_check.zig");
 const document_sessions = @import("product_document_preview_session");
+pub const DocumentPreviewLimits = document_sessions.Limits;
 pub const DocumentPreviewInput = document_sessions.contract.Input;
 pub const DocumentPreviewRequest = document_sessions.contract.Request;
 pub const DocumentPreviewSelector = document_sessions.Selector;
@@ -1846,6 +1847,9 @@ pub const Runtime = struct {
     }
     pub fn documentPreviewNeedsWake(self: *const Runtime) bool {
         return self.documents.needsWake();
+    }
+    pub fn documentPreviewResourceReleased(self: *const Runtime, id: u64) bool {
+        return if (self.documents.lane) |lane| !lane.hasResource(id) else true;
     }
     pub fn shutdownDocumentPreviews(self: *Runtime) void {
         self.documents.shutdown() catch std.log.warn("document preview shutdown retained physical resources", .{});
@@ -10392,6 +10396,15 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const OutputFileEffect = OutputCheckHarness;
+    pub const DocumentEffect = DocumentRuntimeHarness;
+    pub fn documentPreviewFixture(effect: *DocumentEffect) !Runtime {
+        var control = try testRuntime();
+        errdefer control.deinit();
+        testDocumentOffice(&control);
+        try recordTestOutput(&control, @splat(3), "report.docx");
+        control.setDocumentPreviewPreparation(.{ .context = effect, .prepare_fn = DocumentRuntimeHarness.factory });
+        return control;
+    }
     pub const OutputSaveEffect = OutputSaveHarness;
     pub fn bindOutputSaveEffect(control: *Runtime, effect: *OutputSaveEffect) void {
         effect.bind(control);
@@ -10408,6 +10421,11 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn filePreviewFixture(root: []const u8) !Runtime {
         return testImagePreviewRuntime(root);
+    }
+    pub fn expireDocumentPreview(control: *Runtime) void {
+        for (control.documents.slots) |entry| if (entry) |session| {
+            session.touched.nanoseconds -= (@as(i96, DocumentPreviewLimits.idle_ms) + 1) * std.time.ns_per_ms;
+        };
     }
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
@@ -22310,6 +22328,7 @@ test "document target freezes receipt identity and ordinary references without b
     @constCast(original.locator)[0] = 'i';
 }
 const DocumentRuntimeHarness = struct {
+    cleanup_failure: bool = false,
     main_thread: std.Thread.Id,
     text: []const u8,
     cleaned: bool = false,
@@ -22319,7 +22338,7 @@ const DocumentRuntimeHarness = struct {
     last: document_sessions.State = .failed,
     active: bool = true,
     const pages = [_]document_sessions.contract.Page{.{ .file = "page-0001.png", .bytes = 4, .sha256 = "2" ** 64, .width = 1280, .height = 1656 }};
-    const manifest: document_sessions.contract.Manifest = .{ .schema = 1, .format = .docx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "2" ** 64 }, .textScope = "fixture_without_ocr", .omissions = &.{}, .kind = .pages, .pages = @constCast(&pages) };
+    const manifest: document_sessions.contract.Manifest = .{ .schema = 1, .format = .docx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "2" ** 64 }, .textScope = "ooxml_xml_text_and_attributes_without_ocr", .omissions = &.{}, .kind = .pages, .pages = @constCast(&pages) };
     fn get(context: *anyopaque) *DocumentRuntimeHarness {
         return @ptrCast(@alignCast(context));
     }
@@ -22344,6 +22363,7 @@ const DocumentRuntimeHarness = struct {
     fn cleanup(context: *anyopaque) !void {
         const self = get(context);
         std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
+        if (self.cleanup_failure) return error.PreviewRestartRequired;
         self.cleaned = true;
     }
     fn release(context: *anyopaque) void {

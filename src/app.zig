@@ -383,10 +383,12 @@ const App = struct {
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
                 control.drainOutputChecks(dispatcher.outputCheckSink());
+                dispatcher.drainDocumentPreviews();
                 control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
                 dispatcher.settleAttachmentStagingForShutdown();
                 dispatcher.settleFilePreviewsForShutdown();
                 dispatcher.settleOutputActionsForShutdown();
+                dispatcher.settleDocumentPreviewsForShutdown();
                 dispatcher.settleFileChangeDiffsForShutdown();
             }
         }
@@ -460,6 +462,7 @@ const App = struct {
                             dispatcher.filePreviewSink(),
                         );
                         control.drainOutputChecks(dispatcher.outputCheckSink());
+                        dispatcher.drainDocumentPreviews();
                         control.drainAttachmentStagingCompletions(
                             dispatcher.attachmentStagingSink(),
                         );

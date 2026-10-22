@@ -188,6 +188,10 @@ pub const Lane = struct {
         for (self.sessions) |slot| if (slot != null) return true;
         return false;
     }
+    pub fn hasResource(self: *const Lane, id: u64) bool {
+        self.main();
+        return self.find(id) != null;
+    }
     pub fn needsRestart(self: *const Lane) bool {
         for (self.sessions) |slot| if (slot) |session| {
             if (session.poisoned) return true;

@@ -3,6 +3,14 @@
 const std = @import("std");
 const physical = @import("product_document_preview");
 pub const contract = physical.contract;
+pub const Limits = struct {
+    pub const prepare_ms = 150_000;
+    pub const read_ms = 30_000;
+    pub const transfer_ms = 15_000;
+    pub const idle_ms = 120_000;
+    pub const lifetime_ms = 900_000;
+    pub const chunk_bytes = 262143;
+};
 pub const Selector = union(enum) { output: [16]u8, reference: []const u8 };
 pub const Target = struct {
     allocator: std.mem.Allocator,
@@ -149,7 +157,7 @@ pub const Sessions = struct {
         const taken = session.held orelse return error.MissingPreview;
         const bytes = taken.read.?.value.page;
         if (offset != session.next_offset or offset >= bytes.len) return error.InvalidOffset;
-        const end = offset + @min(262143, bytes.len - offset);
+        const end = offset + @min(Limits.chunk_bytes, bytes.len - offset);
         session.next_offset = end;
         session.touched = .now(self.lane.?.io, .awake);
         return bytes[offset..end];
@@ -172,9 +180,9 @@ pub const Sessions = struct {
     }
     fn expired(self: *const Sessions, session: *const Session) bool {
         const now: std.Io.Timestamp = .now(self.lane.?.io, .awake);
-        return session.created.durationTo(now).toMilliseconds() >= 900_000 or
-            (if (session.pending) |pending| pending.started.durationTo(now).toMilliseconds() >= (if (pending.request == null) @as(i64, 150_000) else 30_000) else session.touched.durationTo(now).toMilliseconds() >= 120_000) or
-            (if (session.held_at) |start| start.durationTo(now).toMilliseconds() >= 15_000 else false);
+        return session.created.durationTo(now).toMilliseconds() >= Limits.lifetime_ms or
+            (if (session.pending) |pending| pending.started.durationTo(now).toMilliseconds() >= (if (pending.request == null) @as(i64, Limits.prepare_ms) else Limits.read_ms) else session.touched.durationTo(now).toMilliseconds() >= Limits.idle_ms) or
+            (if (session.held_at) |start| start.durationTo(now).toMilliseconds() >= Limits.transfer_ms else false);
     }
     /// The caller supplies a real periodic wake while sessions are live. Work
     /// is bounded per drain; incomplete scans explicitly request another wake.

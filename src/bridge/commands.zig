@@ -50,6 +50,11 @@ pub const output_action_cancel = "metawork.outputs.cancel";
 pub const preview_file = "metawork.files.preview";
 pub const read_preview_image = "metawork.files.preview.readImageChunk";
 pub const release_preview = "metawork.files.preview.release";
+pub const open_document = "metawork.documents.open";
+pub const read_document = "metawork.documents.read";
+pub const read_document_chunk = "metawork.documents.readImageChunk";
+pub const release_document_read = "metawork.documents.releaseRead";
+pub const close_document = "metawork.documents.close";
 pub const diff_file = "metawork.files.diff";
 pub const begin_attachment_add = "metawork.attachments.beginAdd";
 pub const append_attachment_add = "metawork.attachments.appendAdd";
@@ -160,6 +165,11 @@ pub const product = [_][]const u8{
     preview_file,
     read_preview_image,
     release_preview,
+    open_document,
+    read_document,
+    read_document_chunk,
+    release_document_read,
+    close_document,
     diff_file,
     begin_attachment_add,
     append_attachment_add,

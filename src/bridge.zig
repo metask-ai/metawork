@@ -119,4 +119,5 @@ test {
     std.testing.refAllDecls(snapshot_delivery_impl);
     std.testing.refAllDecls(@import("bridge/snapshot_contract.zig"));
     std.testing.refAllDecls(dispatcher_impl);
+    std.testing.refAllDecls(@import("bridge/document_preview.zig"));
 }

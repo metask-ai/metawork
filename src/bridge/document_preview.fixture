@@ -1,0 +1,85 @@
+{
+  "open": {
+    "state": "ready",
+    "generation": "1",
+    "previewId": "2",
+    "token": "070707070707070707070707070707070707070707070707",
+    "securityEpoch": "1",
+    "sourceVersion": "0202020202020202020202020202020202020202020202020202020202020202",
+    "sourceBytes": "42",
+    "idleMs": "120000",
+    "lifetimeMs": "900000",
+    "format": "docx",
+    "kind": "pages",
+    "pageCount": 1,
+    "sheets": [],
+    "omissions": [],
+    "textScope": "ooxml_xml_text_and_attributes_without_ocr"
+  },
+  "page": {
+    "state": "ready",
+    "kind": "page",
+    "readId": "1",
+    "securityEpoch": "1",
+    "transferMs": "15000",
+    "image": {
+      "mediaType": "image/png",
+      "sizeBytes": "4",
+      "chunkBytes": "262143",
+      "width": 1280,
+      "height": 1656
+    }
+  },
+  "region": {
+    "state": "ready",
+    "kind": "region",
+    "readId": "2",
+    "securityEpoch": "1",
+    "sheet": 1,
+    "row": 1,
+    "column": 1,
+    "rows": 10,
+    "columns": 5,
+    "cells": [
+      {
+        "row": 1,
+        "column": 1,
+        "formula": "=1+1",
+        "value": {
+          "kind": "number",
+          "text": "2"
+        },
+        "display": "2",
+        "formatCode": "0",
+        "formatSupported": true,
+        "bold": false,
+        "italic": false,
+        "alignment": null
+      }
+    ]
+  },
+  "chunk": {
+    "state": "ready",
+    "readId": "1",
+    "offset": "0",
+    "bytes": "4",
+    "dataBase64": "cGFnZQ=="
+  },
+  "close": {
+    "state": "ready",
+    "generation": "1",
+    "previewId": "2",
+    "released": true
+  },
+  "releaseRead": {
+    "state": "ready",
+    "readId": "1",
+    "released": true
+  },
+  "invalidated": {
+    "generation": "1",
+    "previewId": "2",
+    "token": "070707070707070707070707070707070707070707070707",
+    "reason": "expired"
+  }
+}
