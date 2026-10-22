@@ -749,6 +749,15 @@ pub const OwnedImageExecution = struct {
     }
 };
 
+pub const OutputRecord = struct {
+    id: [16]u8,
+    /// Owned projection bytes; a redacted locator is never usable or persisted.
+    locator: []u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+    redacted: bool = false,
+};
+
 pub const RunRecord = struct {
     /// Projection invalidation only; never persisted or supplied to AgentCore.
     projection_content_version: u64 = 1,
@@ -834,6 +843,7 @@ pub const RunRecord = struct {
     /// Null is reserved for history written before typed File Changes existed.
     file_change_observation: ?FileChangeObservation = null,
     file_changes: []?FileChangeView = &.{},
+    outputs: [agent.max_file_deliveries_per_run]?OutputRecord = @splat(null),
     file_changes_known_loss: bool = false,
     pending_file_change_artifacts: u32 = 0,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
@@ -1364,6 +1374,7 @@ pub fn recordDependencyContractFailure(run: *RunRecord) bool {
 pub const EventProjectionError = std.mem.Allocator.Error || error{
     ProjectionCapacity,
     ToolCapacity,
+    InvalidDeliveryReceipt,
 };
 pub const EventApplyError = EventProjectionError || error{
     NoSuchRun,
@@ -1381,6 +1392,7 @@ pub const TextProjectionResult = struct {
 /// performs memory mechanics and never retains Task, Run, or Agent values.
 pub const EventProjection = struct {
     context: *anyopaque,
+    record_output_fn: ?*const fn (*anyopaque, *RunRecord, *const agent.FileDeliveryReceipt) EventProjectionError!void = null,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
     max_tool_field_bytes: usize,
@@ -1617,9 +1629,10 @@ pub fn applyEvent(
         return error.NoSuchRun;
     if (run.event_stream_finalized) return .late_terminal;
     const event = switch (envelope.event.value) {
-        .unknown => return .unknown,
+        .unknown => return if (envelope.delivered_file != null) error.InvalidDeliveryReceipt else .unknown,
         .known => |known| known,
     };
+    if (envelope.delivered_file != null and event != .tool_result) return error.InvalidDeliveryReceipt;
     var durable_boundary = false;
     switch (event) {
         .prompt_manifest => return .unchanged,
@@ -1715,6 +1728,9 @@ pub fn applyEvent(
             _ = setObservedActivity(run, .{ .executing_tools = .{} });
         },
         .tool_result => |result| {
+            if (envelope.delivered_file != null and
+                (result.is_error or !std.mem.eql(u8, result.name, agent.FileDeliveryReceipt.tool_name)))
+                return error.InvalidDeliveryReceipt;
             const tool = try projection.findOrCreateTool(
                 run,
                 result.id,
@@ -1744,6 +1760,10 @@ pub fn applyEvent(
                 task.durable.id,
                 run.generation,
             );
+            if (envelope.delivered_file) |*receipt| {
+                const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
+                try record(projection.context, run, receipt);
+            }
             const running = runningToolCount(run.tools);
             _ = setObservedActivity(
                 run,

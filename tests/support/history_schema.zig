@@ -283,6 +283,10 @@ fn query(allocator: std.mem.Allocator, database: sql.Database, statement: []cons
 }
 
 pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire) !Batch {
+    // This isolated SQL experiment is not the production framed history owner.
+    // Reject newer records before allocating, never silently discard Outputs.
+    for (state.tasks) |task| for (task.runs) |run|
+        if (run.outputs.len != 0) return error.UnsupportedOutputRecords;
     try validateState(allocator, state);
     var batch = Batch{ .allocator = allocator };
     try writeState(&batch, state);
@@ -551,6 +555,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.usage.cache_creation_input_tokens = try row.u("cache_creation_input_tokens");
     v.tools = &.{};
     v.file_changes = if (v.file_change_observation == null) null else &.{};
+    v.outputs = &.{};
     return v;
 }
 
@@ -678,7 +683,8 @@ comptime {
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 24) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
-    if (std.meta.fields(wire.RunWire).len != 31) @compileError("Review every history SQL field mapping after RunWire changes");
+    // outputs are deliberately unsupported above; production retains them in MWTF.
+    if (std.meta.fields(wire.RunWire).len != 32) @compileError("Review every history SQL field mapping after RunWire changes");
     // batch.json/row.json preserve the full typed input, including its reading anchor.
     if (std.meta.fields(wire.AdditionalInputWire).len != 11) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");

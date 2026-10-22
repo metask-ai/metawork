@@ -3636,6 +3636,7 @@ pub const Runtime = struct {
             .replace_text_fn = replaceEventText,
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
+            .record_output_fn = recordEventOutput,
             .record_file_changes_fn = recordEventFileChanges,
         };
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
@@ -6026,6 +6027,9 @@ fn redactTaskProjection(
                 redacted = effects.redact(from, credential) or redacted;
             change.redacted = redacted or change.redacted;
         }
+        for (&run.outputs) |*output_entry| if (output_entry.*) |*output| {
+            output.redacted = effects.redact(output.locator, credential) or output.redacted;
+        };
         if (task_state.terminalPayload(run)) |terminal| {
             const mutable = @constCast(terminal);
             mutable.diagnostic_redacted = effects.redact(
@@ -6318,6 +6322,40 @@ fn findOrCreateEventTool(
         .redacted = owned_name.redacted or owned_input.redacted,
     };
     return &run_record.tools[slot].?;
+}
+
+fn recordEventOutput(
+    raw_context: *anyopaque,
+    run: *task_state.RunRecord,
+    receipt: *const agent.FileDeliveryReceipt,
+) task_state.EventProjectionError!void {
+    receipt.validate() catch return error.InvalidDeliveryReceipt;
+    const context: *EventContext = @ptrCast(@alignCast(raw_context));
+    var empty: ?*?task_state.OutputRecord = null;
+    for (&run.outputs) |*entry| {
+        if (entry.*) |*existing| {
+            if (!std.mem.eql(u8, &existing.id, &receipt.id)) continue;
+            if (existing.size_bytes != receipt.size_bytes or
+                !std.mem.eql(u8, &existing.sha256, &receipt.sha256) or
+                (!existing.redacted and !std.mem.eql(u8, existing.locator, receipt.pathView())))
+                return error.InvalidDeliveryReceipt;
+            return;
+        } else if (empty == null) empty = entry;
+    }
+    const slot = empty orelse return error.ToolCapacity;
+    const path = try context.effects.text.project(
+        receipt.pathView(),
+        agent.FileDeliveryReceipt.max_path_bytes,
+        &run.redactionSecrets(),
+        0,
+    );
+    slot.* = .{
+        .id = receipt.id,
+        .locator = path.value,
+        .size_bytes = receipt.size_bytes,
+        .sha256 = receipt.sha256,
+        .redacted = path.redacted or path.truncated,
+    };
 }
 
 fn replaceEventFileReferences(
@@ -8029,6 +8067,8 @@ fn deinitRun(
     for (run.file_changes) |*entry| if (entry.*) |*change|
         deinitFileChange(self, effects, change);
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
+    for (run.outputs) |entry| if (entry) |output|
+        releaseProjectedSlice(self, effects, output.locator);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     self.discardInputPayloads(run);

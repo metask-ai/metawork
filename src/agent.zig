@@ -13,6 +13,8 @@ const provider_probe = @import("agent_provider_probe");
 pub const max_provider_id_bytes = model_binding.max_provider_id_bytes;
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
+pub const FileDeliveryReceipt = session_impl.FileDeliveryReceipt;
+pub const max_file_deliveries_per_run = session_impl.max_file_deliveries_per_run;
 pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;
 pub const PermissionRequest = session_impl.PermissionRequest;

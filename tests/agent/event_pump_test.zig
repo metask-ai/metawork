@@ -157,3 +157,29 @@ test "event pump waits for a slow consumer and fails at the hard deadline" {
     var third = pump.takeFair().?;
     third.deinit();
 }
+
+test "delivery sideband uses event byte admission and transport retains only original Core JSON" {
+    const encoded = "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1}}";
+    var envelope = try pumpEnvelope(1, 1, encoded);
+    const Receipt = std.meta.Child(@TypeOf(envelope.delivered_file));
+    envelope.delivered_file = try Receipt.init(@splat(1), "result.docx", 42, @splat(2));
+    const owned_bytes = encoded.len + @sizeOf(Receipt);
+    try std.testing.expectEqual(owned_bytes, envelope.ownedBytes());
+    var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
+        .max_event_bytes = owned_bytes - 1,
+        .global_count = 2,
+        .global_bytes = owned_bytes * 2,
+        .global_control_reserved_count = 0,
+        .global_control_reserved_bytes = 0,
+        .per_session_count = 2,
+        .per_session_bytes = owned_bytes * 2,
+        .per_session_control_reserved_count = 0,
+        .per_session_control_reserved_bytes = 0,
+        .session_slots = 1,
+    });
+    defer pump.deinit();
+    try std.testing.expectError(error.EventTooLarge, pump.enqueue(envelope));
+    var transport = envelope.takeJson();
+    defer transport.deinit();
+    try std.testing.expectEqualStrings(encoded, transport.json);
+}

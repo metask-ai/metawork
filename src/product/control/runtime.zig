@@ -66,6 +66,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     RunCapacity,
     CompactCapacity,
     ToolCapacity,
+    InvalidDeliveryReceipt,
     InvalidOutputSegment,
     InvalidInputAdoption,
     SnapshotTooLarge,
@@ -21374,4 +21375,95 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
         try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
         for (control.view_blocks) |slot| try std.testing.expect(slot == null);
     }
+}
+
+test "Outputs require trusted delivery sideband and reject conflicting or excessive receipts" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const encoded = "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expect(run.outputs[0] == null);
+    const baseline_bytes = control.projection_bytes;
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
+    try control.applyEvent(&envelope);
+    try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
+    try std.testing.expectEqual(@as(u64, 42), run.outputs[0].?.size_bytes);
+    const admitted_bytes = control.projection_bytes;
+    try std.testing.expectEqual(baseline_bytes + "成果/final.docx".len, admitted_bytes);
+    try control.applyEvent(&envelope);
+    try std.testing.expectEqual(admitted_bytes, control.projection_bytes);
+    try std.testing.expect(run.outputs[1] == null);
+    envelope.delivered_file.?.size_bytes += 1;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&envelope));
+    envelope.delivered_file.?.size_bytes -= 1;
+    envelope.delivered_file.?.path_len = 513;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&envelope));
+    for (1..lifecycle.max_file_deliveries_per_run) |index| {
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(@intCast(index + 1)), "next.xlsx", index, @splat(3));
+        try control.applyEvent(&envelope);
+    }
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(99), "overflow.pptx", 1, @splat(4));
+    try std.testing.expectError(error.ToolCapacity, control.applyEvent(&envelope));
+    var wrong_tool = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"read-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"file\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer wrong_tool.deinit();
+    wrong_tool.delivered_file = envelope.delivered_file;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&wrong_tool));
+}
+
+test "Outputs persist through real history restore and sanitized locators lose file authority" {
+    var storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &storage };
+    {
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+        defer control.deinit();
+        var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+        defer envelope.deinit();
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
+        try control.applyEvent(&envelope);
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "SECRET-KEY/final.xlsx", 100, @splat(4));
+        try control.applyEvent(&envelope);
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(run.outputs[1].?.redacted);
+        try TestSupport.commitTaskHistory(&control);
+        try std.testing.expect(history.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, storage[0..history.len], "SECRET-KEY") == null);
+        var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+        defer decoded.deinit();
+        try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[1].locator);
+    }
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = history.capability(storage[0..history.len]),
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+    });
+    defer restored.deinit();
+    const run = &restored.task_runtime.find(3).?.durable.runs[0].?;
+    try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(2))), &run.outputs[0].?.sha256);
+    try std.testing.expect(run.outputs[1].?.redacted);
+    try std.testing.expectEqualStrings("", run.outputs[1].?.locator);
+    try std.testing.expect(run.outputs[2] == null);
+}
+
+test "late credential discovery revokes Output locators in current and durable projections" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "late-secret/report.docx", 42, @splat(2));
+    try control.applyEvent(&envelope);
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expect(!run.outputs[0].?.redacted);
+    control.redactAllProductProjectionsNoFail("late-secret");
+    try std.testing.expect(run.outputs[0].?.redacted);
+    const wires = try std.testing.allocator.alloc(task_persistence.TaskWire, 1);
+    wires[0] = try task_persistence.projectTask(std.testing.allocator, task, null);
+    defer {
+        task_persistence.deinitTaskWires(std.testing.allocator, wires);
+        std.testing.allocator.free(wires);
+    }
+    try std.testing.expectEqualStrings("", wires[0].runs[0].outputs[0].locator);
 }

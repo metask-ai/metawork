@@ -204,6 +204,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
+        .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
@@ -582,6 +583,7 @@ const WiredModules = struct {
     image_container: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
+    agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
     agent_provider_probe: *std.Build.Module,
@@ -1116,12 +1118,18 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_permission_review.addImport("agent_completion", agent_completion);
+    const agent_file_delivery = b.createModule(.{
+        .root_source_file = b.path("src/agent/deliver_file.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const event_sink = b.createModule(.{
         .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     event_sink.addImport("metask_agentcore", sdk);
+    event_sink.addImport("agent_file_delivery", agent_file_delivery);
     const event_pump = b.createModule(.{
         .root_source_file = b.path("src/agent/event_pump.zig"),
         .target = target,
@@ -1193,6 +1201,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     session.addImport("metask_agentcore", sdk);
+    session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
@@ -2215,6 +2224,7 @@ fn wireAgentCore(
         .image_container = image_container,
         .product_permission_review = product_permission_review,
         .agent_session = session,
+        .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,
         .agent_provider_probe = agent_provider_probe,

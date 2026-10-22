@@ -57,6 +57,8 @@ const RunImage = struct {
 };
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
+pub const FileDeliveryReceipt = @import("agent_file_delivery").Receipt;
+pub const max_file_deliveries_per_run = @import("agent_file_delivery").max_receipts_per_run;
 pub const MultimodalInputLimits = multimodal.InputLimits;
 pub const multimodal_input_limits = multimodal.input_limits;
 pub const Status = sdk.Status;
