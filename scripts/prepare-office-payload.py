@@ -66,7 +66,7 @@ def layout(root, node_zip, font, font_license):
         "Exact producer sources are included in sources/.\n", encoding="utf-8")
     tools = root / "tools"
     tools.mkdir()
-    for name in ("office.py", "node.mjs", "document_text.py"):
+    for name in ("office.py", "node.mjs", "document_text.py", "document_preview.py"):
         shutil.copyfile(REPO / "src/product/skill/office_runtime" / name, tools / name)
     shutil.copyfile(REPO / "src/product/control/resources/archive.py", tools / "office_archive.py")
     shutil.copyfile(REPO / "src/product/skill/assets/xlsx/scripts/office/formulas.py", tools / "spreadsheet_checks.py")

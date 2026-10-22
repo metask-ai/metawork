@@ -267,7 +267,8 @@ def convert(engine, source, staged, command, expected_formulas=None):
     raise ValueError("Unknown conversion command")
 
 
-def render(engine, source, output, width):
+def render(engine, source, output, width, *, max_pages=MAX_PAGES,
+           byte_budget=OUTPUT_BYTES, page_byte_budget=OUTPUT_BYTES):
     document = engine.load(source)
     expected_slides = document.DrawPages.Count if source.suffix.lower() == ".pptx" else None
     if source.suffix.lower() != ".pdf":
@@ -275,11 +276,11 @@ def render(engine, source, output, width):
         engine.pdf(document, pdf, source.suffix.lower())
         document = engine.load(pdf)
     count = document.DrawPages.Count
-    if count < 1 or count > MAX_PAGES:
+    if count < 1 or count > max_pages:
         raise ValueError("Document page budget exceeded")
     if expected_slides is not None and count != expected_slides:
         raise ValueError("Presentation rendering lost slide pages")
-    remaining = OUTPUT_BYTES
+    remaining = byte_budget
     pages = []
     for index in range(count):
         page = document.DrawPages.getByIndex(index)
@@ -294,7 +295,7 @@ def render(engine, source, output, width):
                 FilterData=engine.uno.Any("[]com.sun.star.beans.PropertyValue",
                                          engine.properties(PixelWidth=width, PixelHeight=height)))):
             raise RuntimeError("Office page export failed")
-        remaining -= bounded_file(path, remaining)
+        remaining -= bounded_file(path, min(remaining, page_byte_budget))
         pages.append({"file": filename, "width": width, "height": height,
                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {"schema": 1, "pages": pages}
@@ -317,13 +318,17 @@ def run(args):
     # Staging is on the destination volume; nothing is published until engine
     # shutdown and content checks finish. A failed attempt owns this whole tree.
     with operation_scratch(output.parent) as scratch:
-        staged = scratch / ("result" + output.suffix if args.command != "render" else "pages")
+        staged = scratch / ("pages" if args.command in ("render", "preview") else "result" + output.suffix)
         with checked_input(source) as (input_copy, before):
             expected_formulas = None
             if args.command == "recalc":
                 from spreadsheet_checks import _formulas
                 expected_formulas = _formulas(input_copy)
-            if args.command == "text":
+            if args.command == "preview":
+                from document_preview import prepare
+                details = prepare(input_copy, staged, args.width,
+                                  lambda: Engine(scratch), render)
+            elif args.command == "text":
                 from document_text import extract
                 details = extract(input_copy, staged)
             else:
@@ -414,7 +419,7 @@ def main():
         finally:
             watchdog.cancel()
     parser = argparse.ArgumentParser(description="MetaWork Office component")
-    parser.add_argument("command", choices=("accept", "recalc", "pdf", "render", "text", "selftest"))
+    parser.add_argument("command", choices=("accept", "recalc", "pdf", "render", "text", "preview", "selftest"))
     parser.add_argument("input", nargs="?")
     parser.add_argument("output", nargs="?")
     parser.add_argument("--timeout", type=float, default=120)
