@@ -59,6 +59,9 @@ class SourceText(ContentHandler):
         for value in attrs.values():
             self.append(self.attributes, value + "\n")
         local = self.stack[-1]
+        content_type = attrs.get("ContentType", "").lower()
+        if any(kind in content_type for kind in ("vbaproject", "oleobject", "image/svg+xml")):
+            raise ValueError("Preview contains an unsupported content type")
         if local == "Relationship" and attrs.get("TargetMode") == "External":
             if not attrs.get("Type", "").endswith("/hyperlink"):
                 raise ValueError("Preview cannot load external document resources")

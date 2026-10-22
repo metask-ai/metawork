@@ -23,6 +23,7 @@ import zipfile
 
 from openpyxl import Workbook
 from PIL import Image
+from defusedxml.common import DefusedXmlException
 
 parser = argparse.ArgumentParser()
 parser.add_argument("component", type=Path)
@@ -181,12 +182,14 @@ await deck.writeFile({fileName:process.argv[2]});
         for index, (name, content) in enumerate([
             ("word/_rels/document.xml.rels", '<Relationships><Relationship Type="image" TargetMode="External" Target="https://example.invalid/image.png"/></Relationships>'),
             ("word/document.xml", '<!DOCTYPE doc [<!ENTITY x "secret">]><doc>&x;</doc>'),
+            ("[Content_Types].xml", '<Types><Override ContentType="application/vnd.ms-office.vbaProject"/></Types>'),
+            ("[Content_Types].xml", '<Types><Override ContentType="image/svg+xml"/></Types>'),
             ("word/embeddings/object.bin", "object"),
         ]):
             source = self.root / f"rejected-{index}.docx"
             with zipfile.ZipFile(source, "w") as archive:
                 archive.writestr(name, content)
-            with self.assertRaises(Exception):
+            with self.assertRaises((ValueError, DefusedXmlException)):
                 preview.source_text(source)
 
     def test_embedded_chart_workbook_is_bounded_and_its_text_is_scanned(self):
