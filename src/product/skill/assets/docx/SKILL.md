@@ -9,7 +9,7 @@ description: Create, read, edit, revise, and manage comments in Word documents. 
 
 Skill resource directory: `${CLAUDE_SKILL_DIR}`
 
-Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy..
+Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy.
 
 Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
 
@@ -27,13 +27,7 @@ A .docx file is a ZIP archive containing XML files.
 | Create new document | Use `docx-js` - see Creating New Documents below |
 | Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
-### Converting .doc to .docx
-
-Legacy `.doc` files must be converted before editing:
-
-```bash
-python scripts/office/soffice.py --headless --convert-to docx document.doc
-```
+Legacy `.doc` files, encrypted documents and user document macros are outside this Skill's supported workflow. Explain the limitation rather than presenting an unverified conversion as supported.
 
 ### Reading Content
 

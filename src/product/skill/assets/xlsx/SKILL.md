@@ -1,19 +1,21 @@
 ---
 name: xlsx
-description: Create, read, edit, clean, format, calculate, and convert spreadsheets. Use for .xlsx, .xlsm, .csv, .tsv, Excel, formulas, charts, tabular data, financial models, and spreadsheet deliverables. Do not use for Word documents or Google Sheets API integration.
+description: Create, read, edit, clean, format, calculate, and convert spreadsheets. Use for .xlsx, .csv, .tsv, Excel, formulas, charts, tabular data, financial models, and spreadsheet deliverables. Do not use for Word documents or Google Sheets API integration.
 ---
 
 # Execution environment
 
 Skill resource directory: `${CLAUDE_SKILL_DIR}`
 
-Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy..
+Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy.
 
 Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
 
 Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during spreadsheet processing.
 
 Python 3.10+ with `pandas` and `openpyxl` is required for the workflows below. LibreOffice (`soffice`) is additionally required for formula recalculation. XML helpers require `defusedxml` and `lxml`.
+
+Legacy `.xls`, macro-enabled workbooks and encrypted files are outside the supported workflow. Before passing an existing XLSX to pandas or openpyxl, use the bundled `scripts/office/archive.py` `checked_copy` context manager and pass its yielded path to the library. It checks all archive payloads and holds the same private bytes until the library finishes; do not check one path and then load the original path. Save edits to a separate workspace output, close the workbook inside the context, then recalculate and verify the output as needed. The examples below assume this checked input preparation for existing files. CSV and TSV are ordinary text inputs, not ZIP files.
 
 # Requirements for Outputs
 

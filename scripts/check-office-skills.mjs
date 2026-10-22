@@ -13,8 +13,10 @@ import {
   localOfficeEnvironment,
   officeEnvironmentPath,
 } from "./office-environment.mjs";
+import { officeWorkflowInventory } from "./office-workflows.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+officeWorkflowInventory(root);
 if (!existsSync(officeEnvironmentPath(root)))
   throw new Error(
     "Prepare the local Office environment before running this check.",

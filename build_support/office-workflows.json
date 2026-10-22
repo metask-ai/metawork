@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "skills": [
+    {
+      "id": "docx",
+      "guides": ["SKILL.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/soffice.py",
+        "scripts/office/validate.py",
+        "scripts/accept_changes.py",
+        "scripts/comment.py"
+      ],
+      "workflows": [
+        {
+          "id": "read",
+          "tools": ["pandoc"],
+          "pythonPackages": ["defusedxml"]
+        },
+        {
+          "id": "create",
+          "nodePackages": ["docx"],
+          "pythonPackages": ["defusedxml", "lxml"]
+        },
+        {
+          "id": "edit-and-comment",
+          "pythonPackages": ["defusedxml", "lxml"]
+        },
+        {
+          "id": "accept-revisions",
+          "tools": ["soffice"]
+        },
+        {
+          "id": "render-and-pdf",
+          "tools": ["soffice", "pdftoppm"]
+        }
+      ]
+    },
+    {
+      "id": "xlsx",
+      "guides": ["SKILL.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/soffice.py",
+        "scripts/recalc.py"
+      ],
+      "workflows": [
+        {
+          "id": "read-create-edit",
+          "pythonPackages": ["pandas", "openpyxl", "defusedxml", "lxml"]
+        },
+        {
+          "id": "recalculate",
+          "tools": ["soffice"],
+          "pythonPackages": ["openpyxl", "defusedxml"]
+        }
+      ]
+    },
+    {
+      "id": "pptx",
+      "guides": ["SKILL.md", "editing.md", "pptxgenjs.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/soffice.py",
+        "scripts/office/validate.py",
+        "scripts/thumbnail.py",
+        "scripts/add_slide.py",
+        "scripts/clean.py"
+      ],
+      "workflows": [
+        {
+          "id": "read",
+          "pythonPackages": ["markitdown", "python-pptx"]
+        },
+        {
+          "id": "create",
+          "nodePackages": ["pptxgenjs"],
+          "pythonPackages": ["defusedxml", "lxml"]
+        },
+        {
+          "id": "edit",
+          "pythonPackages": ["defusedxml", "lxml"]
+        },
+        {
+          "id": "thumbnail-and-pdf",
+          "tools": ["soffice", "pdftoppm"],
+          "pythonPackages": ["pillow", "defusedxml"]
+        }
+      ]
+    }
+  ]
+}
