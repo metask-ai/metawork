@@ -87,6 +87,7 @@ pub const CatalogProjection = catalog.Projection;
 pub const CatalogLease = catalog.Lease;
 pub const CatalogAcquisition = catalog.Acquisition;
 pub const CatalogQuery = catalog.Query;
+pub const CatalogSourceLifetime = catalog.SourceLifetime;
 pub const CatalogSource = catalog.Source;
 pub const CatalogQueryTarget = catalog.QueryTarget;
 pub const McpCatalogProjection = mcp_catalog.Projection;

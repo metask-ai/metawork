@@ -21,6 +21,27 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+const CatalogSourceTracker = struct {
+    references: std.atomic.Value(usize) = .init(1),
+    deny: bool = false,
+
+    fn lifetime(self: *@This()) lifecycle.CatalogSourceLifetime {
+        return .{ .context = self, .retain_fn = retain, .release_fn = release };
+    }
+
+    fn retain(context: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.deny) return false;
+        _ = self.references.fetchAdd(1, .monotonic);
+        return true;
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.debug.assert(self.references.fetchSub(1, .acq_rel) > 1);
+    }
+};
+
 test "GenerateImage fixture initializer uses the same fixed tool as product init" {
     const Http = struct {
         fn perform(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
@@ -1413,6 +1434,8 @@ test "Catalog leases copy descriptors and block Runtime destroy until exactly-on
 }
 
 test "canonical AgentCore resolves additional Skill sources conflicts and Workspace precedence" {
+    var source: CatalogSourceTracker = .{};
+    defer std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire)) catch unreachable;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     for ([_][]const u8{ "home", "workspace", "source-a/review", "source-b/review" }) |dir|
@@ -1446,6 +1469,7 @@ test "canonical AgentCore resolves additional Skill sources conflicts and Worksp
         .canonical_user_home = home,
         .target = .{ .workspace = .{ .canonical_root = root, .epoch = "sources" } },
         .additional_sources = sources[0..1],
+        .source_lifetime = source.lifetime(),
     };
     var first = try runtime.querySkillCatalog(query);
     defer first.projection.deinit();
@@ -1492,6 +1516,7 @@ test "canonical AgentCore resolves additional Skill sources conflicts and Worksp
 
 test "captured Skill restore inputs retain the exact lease policy and Runtime shutdown fence" {
     fake_core.reset();
+    var source: CatalogSourceTracker = .{};
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });
     defer {
         runtime.shutdown() catch unreachable;
@@ -1502,7 +1527,9 @@ test "captured Skill restore inputs retain the exact lease policy and Runtime sh
     var acquisition = try runtime.querySkillCatalog(.{
         .canonical_user_home = root,
         .target = .{ .workspace = .{ .canonical_root = root, .epoch = "restore-inputs" } },
+        .source_lifetime = source.lifetime(),
     });
+    try std.testing.expectEqual(@as(usize, 2), source.references.load(.acquire));
     const expected = try std.testing.allocator.dupe(u8, acquisition.projection.skills[0].skill_id);
     defer std.testing.allocator.free(expected);
     const session = try runtime.createSession(.{
@@ -1528,8 +1555,39 @@ test "captured Skill restore inputs retain the exact lease policy and Runtime sh
     try std.testing.expectEqual(@as(usize, 1), restored.policy.granted_skill_ids.len);
     try std.testing.expectEqualStrings(expected, restored.policy.granted_skill_ids[0]);
     try std.testing.expectError(error.CatalogLeasesOutstanding, runtime.shutdown());
+    try std.testing.expectEqual(@as(usize, 2), source.references.load(.acquire));
     try captured.deinit();
+    try std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), fake_core.catalog_releases);
+    try runtime.shutdown();
+}
+
+test "catalog source pin refusal rolls back acquisition and a consumed Core release error unpins once" {
+    fake_core.reset();
+    var source: CatalogSourceTracker = .{ .deny = true };
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const query: lifecycle.CatalogQuery = .{
+        .canonical_user_home = root,
+        .target = .{ .workspace = .{ .canonical_root = root, .epoch = "source-pin" } },
+        .source_lifetime = source.lifetime(),
+    };
+    try std.testing.expectError(error.CatalogResourceLimit, runtime.querySkillCatalog(query));
+    try std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fake_core.catalog_releases);
+    source.deny = false;
+    var acquired = try runtime.querySkillCatalog(query);
+    defer acquired.projection.deinit();
+    try std.testing.expectEqual(@as(usize, 2), source.references.load(.acquire));
+    fake_core.catalog_release_failures = 1;
+    try std.testing.expectError(error.CatalogReleaseFailed, runtime.releaseSkillCatalog(acquired.lease));
+    try std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), fake_core.catalog_releases);
     try runtime.shutdown();
 }
 
@@ -1851,6 +1909,7 @@ test "Catalog invalid sources fail before Core and management rejects project so
 
 test "Catalog additional source allocation failures release all owners and leave Runtime reusable" {
     fake_core.reset();
+    var source: CatalogSourceTracker = .{};
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const runtime = try lifecycle.Runtime.initWithApi(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 });
     defer {
@@ -1863,6 +1922,7 @@ test "Catalog additional source allocation failures release all owners and leave
         .canonical_user_home = root,
         .target = .{ .workspace = .{ .canonical_root = root, .epoch = "allocation-failures" } },
         .additional_sources = &.{.{ .canonical_root = root, .scope = .user, .source_instance_id = "source" }},
+        .source_lifetime = source.lifetime(),
     };
     for (0..256) |offset| {
         failing.fail_index = failing.alloc_index + offset;
@@ -1875,11 +1935,13 @@ test "Catalog additional source allocation failures release all owners and leave
             try std.testing.expect(failing.has_induced_failure);
             try std.testing.expectEqual(fake_core.catalog_queries, fake_core.catalog_releases);
             try std.testing.expectEqual(fake_core.catalog_queries, fake_core.buffer_releases);
+            try std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire));
             continue;
         };
         failing.fail_index = std.math.maxInt(usize);
         defer acquisition.projection.deinit();
         try runtime.releaseSkillCatalog(acquisition.lease);
+        try std.testing.expectEqual(@as(usize, 1), source.references.load(.acquire));
         try std.testing.expect(offset > 0);
         try std.testing.expectEqual(fake_core.catalog_queries, fake_core.catalog_releases);
         try std.testing.expectEqual(fake_core.catalog_queries, fake_core.buffer_releases);

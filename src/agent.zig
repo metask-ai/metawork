@@ -81,6 +81,7 @@ pub const CatalogProjection = session_impl.CatalogProjection;
 pub const CatalogLease = session_impl.CatalogLease;
 pub const CatalogAcquisition = session_impl.CatalogAcquisition;
 pub const CatalogQuery = session_impl.CatalogQuery;
+pub const CatalogSourceLifetime = session_impl.CatalogSourceLifetime;
 pub const CatalogSource = session_impl.CatalogSource;
 pub const CatalogQueryTarget = session_impl.CatalogQueryTarget;
 pub const McpCatalogProjection = session_impl.McpCatalogProjection;
