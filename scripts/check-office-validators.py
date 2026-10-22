@@ -45,6 +45,17 @@ class OriginalReaders(unittest.TestCase):
         self.assertEqual(validator.count_paragraphs_in_original(), 1)
         self.assertEqual(_get_authors_from_docx(self.original), {"Alice": 1})
 
+    def test_schema_reads_xml_declared_encoding_instead_of_windows_locale(self):
+        xml = '''<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body><w:p><w:r><w:t>中文验收</w:t></w:r></w:p></w:body></w:document>'''
+        target = self.modified / "word/document.xml"
+        validator = DOCXSchemaValidator(self.modified)
+        for encoding in ("utf-8", "utf-16"):
+            with self.subTest(encoding=encoding):
+                target.write_bytes(f'<?xml version="1.0" encoding="{encoding}"?>{xml}'.encode(encoding))
+                valid, errors = validator._validate_single_file_xsd(target, self.modified)
+                self.assertTrue(valid, errors)
+
     def test_all_original_readers_reject_traversal(self):
         self.original_zip([("word/document.xml", XML), ("../escape", b"bad")])
         validator = DOCXSchemaValidator(self.modified, self.original)
