@@ -9,6 +9,7 @@ const releases = @import("office_component_release.zig");
 const versions = @import("office_component_versions.zig");
 const download = @import("office_component_download.zig");
 const process = @import("office_process");
+const preview = @import("office_preview.zig");
 
 pub const Notify = struct { context: *anyopaque, notify_fn: *const fn (*anyopaque) void };
 const SourceAction = enum { keep, basic, verified };
@@ -55,6 +56,25 @@ pub const Coordinator = struct {
     pub fn configuration(self: *const Coordinator) !model.Configuration {
         const offered = try self.input.release();
         return .{ .supported = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64, .available = true, .offered = if (offered) |release| .{ .identity = release.expected.sha256, .download_bytes = release.expected.archive_bytes, .installed_bytes = release.expected.unpacked_bytes } else null };
+    }
+
+    /// Main-only capture of an already verified current version. IO and
+    /// process work start later on the preview lane, never during admission.
+    pub fn previewResource(self: *Coordinator, product: ports.OfficeManagement, main_thread: std.Thread.Id, data_root: []const u8, input: preview.Input, operation: [16]u8) !preview.Resource {
+        if (std.Thread.getCurrentId() != main_thread) return error.WrongPreviewThread;
+        const current = product.view();
+        const version = self.registry.current orelse return error.OfficePreviewUnavailable;
+        if (self.closing or current.health != .ready or current.current == null or current.current.?.state != .ready or
+            version.retired or version.removing or !std.mem.eql(u8, &current.current.?.identity, &version.record.archive_sha256))
+            return error.OfficePreviewUnavailable;
+        var pin = try version.pin();
+        errdefer pin.deinit();
+        return preview.Resource.init(self.allocator, self.io, main_thread, self.environment, data_root, .{ .root = version.directory, .identity = version.record.archive_sha256, .context = version, .release_fn = releasePreviewVersion }, input, operation);
+    }
+
+    fn releasePreviewVersion(context: *anyopaque) void {
+        var pin: versions.Pin = .{ .version = @ptrCast(@alignCast(context)) };
+        pin.deinit();
     }
 
     pub fn begin(self: *Coordinator, product: ports.OfficeManagement, kind: ports.OfficeKind, generation: u64) ports.OfficeAdmission {
@@ -493,6 +513,19 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     try std.testing.expectEqual(model.Outcome.succeeded, product.state.terminal.?.outcome);
     const installed = (try coordinator.store.current()).?;
     const pointer = coordinator.registry.current.?;
+    const references = pointer.references.load(.acquire);
+    const preview_input: preview.Input = .{ .root = root, .relative = "not-created.docx", .expected = .{ .size_bytes = 3, .sha256 = @splat(1) } };
+    var resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4));
+    try std.testing.expectEqual(references + 1, pointer.references.load(.acquire));
+    try resource.deinit(); // no IO occurred; the deliberately absent source is not opened
+    try std.testing.expectEqual(references, pointer.references.load(.acquire));
+    var unsupported = preview_input;
+    unsupported.relative = "input.pdf";
+    try std.testing.expectError(error.UnsupportedPreview, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, unsupported, @splat(4)));
+    try std.testing.expectEqual(references, pointer.references.load(.acquire));
+    product.state.current.?.identity[0] ^= 1;
+    try std.testing.expectError(error.OfficePreviewUnavailable, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4)));
+    product.state.current.?.identity[0] ^= 1;
     effects.reject.store(true, .release);
     try std.testing.expect(coordinator.begin(product.port(), .repair, product.state.generation).accepted);
     try testDrain(coordinator, product.port());

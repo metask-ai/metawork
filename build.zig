@@ -2185,6 +2185,7 @@ fn wireAgentCore(
     });
     office_process.addImport("office_process_windows", existingImport(app, "office_process_windows"));
     app.addImport("office_process", office_process);
+    app.addImport("image_container", image_container);
     @import("build_support/office_component_release.zig").bind(b, app);
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);
@@ -2375,6 +2376,25 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.B
     }) });
     host.root_module.addImport("office_process", process);
     b.step("build-office-process-probe", "Build the real Application Office lifecycle qualifier").dependOn(&b.addInstallArtifact(host, .{}).step);
+    const preview = b.createModule(.{
+        .root_source_file = b.path("src/app/office_preview.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    });
+    preview.addImport("office_process", process);
+    preview.addImport("app_output_file", existingImport(app, "app_output_file"));
+    preview.addImport("image_container", existingImport(app, "image_container"));
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "office-preview-resource", .root_module = preview })).step);
+    const preview_host = b.addExecutable(.{ .name = "office-preview-resource", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_preview_resource.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    preview_host.root_module.addImport("office_preview", preview);
+    preview_host.root_module.addImport("office_process", process);
+    b.step("build-office-preview-resource", "Build the owned Application preview resource qualifier").dependOn(&b.addInstallArtifact(preview_host, .{}).step);
     const store = b.createModule(.{
         .root_source_file = b.path("src/app/office_component_store.zig"),
         .target = app.resolved_target,

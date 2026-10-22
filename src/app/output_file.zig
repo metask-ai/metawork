@@ -313,7 +313,8 @@ fn openScopedFile(io: std.Io, root: std.Io.Dir, path: []const u8) !std.Io.File {
     });
 }
 
-fn openRoot(io: std.Io, path: []const u8) !std.Io.Dir {
+/// Application filesystem effects share the same no-follow ancestor walk.
+pub fn openRoot(io: std.Io, path: []const u8) !std.Io.Dir {
     var parts = std.fs.path.componentIterator(path);
     const volume = parts.root() orelse return error.InvalidWorkspaceRoot;
     var current = try std.Io.Dir.openDirAbsolute(io, volume, .{ .access_sub_paths = true, .follow_symlinks = false });
