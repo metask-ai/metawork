@@ -10647,3 +10647,73 @@ test "image Run duplicate bearer ownership does not revoke the Renderer on admis
         try std.testing.expectEqual(epoch + 1, scenario.control.projectionSecurityEpoch());
     }
 }
+
+test "Office source replacement keeps Task catalog pinned until explicit idle refresh" {
+    const Source = struct {
+        references: std.atomic.Value(usize) = .init(1),
+        fn retain(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.references.fetchAdd(1, .monotonic);
+            return true;
+        }
+        fn release(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(self.references.fetchSub(1, .acq_rel) > 1);
+        }
+        fn lifetime(self: *@This()) lifecycle.CatalogSourceLifetime {
+            return .{ .context = self, .retain_fn = retain, .release_fn = release };
+        }
+    };
+    fake_core.reset();
+    var first: Source = .{};
+    var second: Source = .{};
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    try temporary.dir.createDirPath(std.testing.io, "office-a");
+    try temporary.dir.createDirPath(std.testing.io, "office-b");
+    const root_a = try temporary.dir.realPathFileAlloc(std.testing.io, "office-a", std.testing.allocator);
+    defer std.testing.allocator.free(root_a);
+    const root_b = try temporary.dir.realPathFileAlloc(std.testing.io, "office-b", std.testing.allocator);
+    defer std.testing.allocator.free(root_b);
+    var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement_store.deinit();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{
+        .directories = .{ .canonical_user_home = home },
+        .skill_enablement = .{ .file_store = &enablement_store },
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+    });
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    try std.testing.expect(try workbench.replaceBuiltinSkillSource(.{ .root = root_a, .lifetime = first.lifetime() }));
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    const workspace = try workbench.openWorkspace(input);
+    const catalog = try waitCatalogReady(&workbench, workspace);
+    const task = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), 1, workbench.newTaskAdmissionView().active_selection_revision, null, catalog.revision, catalog.selection_revision, .{ .interactive = null });
+    try settleWorkspaceSkillQueries(&workbench, workspace);
+    try std.testing.expect(try workbench.replaceBuiltinSkillSource(.{ .root = root_b, .lifetime = second.lifetime() }));
+    try settleWorkspaceSkillQueries(&workbench, workspace);
+    // Both scope catalogs have switched. The original Session alone still
+    // retains its original Core catalog and therefore the first component.
+    try std.testing.expect(first.references.load(.acquire) > 1);
+    try std.testing.expect(second.references.load(.acquire) > 1);
+    try workbench.refreshTaskCatalog(task, try workbench.taskBindingEpoch(task));
+    try std.testing.expectEqual(@as(usize, 1), first.references.load(.acquire));
+    try std.testing.expect(second.references.load(.acquire) > 1);
+    try std.testing.expectEqual(@as(usize, 1), (try workbench.taskCatalog(task)).skills.len);
+}

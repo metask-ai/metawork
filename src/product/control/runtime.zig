@@ -3544,6 +3544,17 @@ pub const Runtime = struct {
         return self.skill.personalCatalogProjection();
     }
 
+    pub fn replaceBuiltinSkillSource(self: *Runtime, source: skill_runtime.BuiltinSource) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const changed = try self.skill.replaceBuiltinSource(source, self.skillProjectionBudget());
+        if (changed) {
+            _ = self.syncSkillCatalogsNoFail();
+            self.bumpRevision();
+        }
+        return changed;
+    }
+
     pub fn refreshSkillCatalog(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();

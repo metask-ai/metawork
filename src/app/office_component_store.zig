@@ -73,8 +73,12 @@ pub const Record = struct {
         return buffer;
     }
 
+    pub fn sameDirectory(self: Record, other: Record) bool {
+        return std.mem.eql(u8, &self.install_id, &other.install_id);
+    }
+
     fn eql(self: Record, other: Record) bool {
-        return std.mem.eql(u8, &self.install_id, &other.install_id) and std.mem.eql(u8, &self.archive_sha256, &other.archive_sha256);
+        return self.sameDirectory(other) and std.mem.eql(u8, &self.archive_sha256, &other.archive_sha256);
     }
 };
 pub const Receipt = struct { record: Record, cleanup_pending: bool };
@@ -117,11 +121,21 @@ pub const Store = struct {
         return std.fs.path.join(self.allocator, &.{ self.root, "versions", record.versionName(&name) });
     }
 
+    /// Only a process-local version owner that has observed zero references may
+    /// call this. Current/pending facts still protect publication and recovery.
+    pub fn removeRetired(self: *Store, record: Record) !void {
+        if (try self.current()) |active| if (active.sameDirectory(record)) return error.ComponentStillCurrent;
+        if (try self.readRecord("pending.json")) |pending| if (pending.sameDirectory(record)) return error.ComponentTransactionActive;
+        var name: [32]u8 = undefined;
+        try removeDirectory(self.io, self.versions, record.versionName(&name));
+    }
+
     /// Explicit recovery after startup/worker quiescence only. It never retries
     /// download, execution or activation. Canonical readback decides ownership.
     pub fn recover(self: *Store) !void {
         const committed = try self.current();
         if (try self.readRecord("pending.json")) |pending| {
+            if (committed) |value| if (value.sameDirectory(pending) and !value.eql(pending)) return error.ComponentStoreCorrupt;
             const adopted = if (committed) |value| value.eql(pending) else false;
             if (!adopted) {
                 var name: [32]u8 = undefined;
@@ -608,4 +622,23 @@ test "Office recovery refuses noncanonical record identities instead of cleaning
     const raw = "{\"schema\":1,\"installId\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"archiveSha256\":\"" ++ "a" ** 64 ++ "\"}";
     try store.directory.writeFile(std.testing.io, .{ .sub_path = "pending.json", .data = raw });
     try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
+}
+
+test "component recovery rejects conflicting identities for the same current directory" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    const receipt = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    var conflict = receipt.record;
+    conflict.archive_sha256[0] ^= 1;
+    try store.writeRecord("pending", conflict);
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
+    try std.testing.expect((try store.current()).?.eql(receipt.record));
+    var name: [32]u8 = undefined;
+    const preserved = try store.versions.openDir(std.testing.io, receipt.record.versionName(&name), .{});
+    preserved.close(std.testing.io);
+    try std.testing.expect(try store.readRecord("pending.json") != null);
 }

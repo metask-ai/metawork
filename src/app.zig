@@ -802,6 +802,7 @@ test {
     _ = @import("app/office_component_archive.zig");
     _ = @import("office_process");
     _ = @import("app/office_component_store.zig");
+    _ = @import("app/office_component_versions.zig");
     _ = @import("app/office_component_release.zig");
     _ = @import("app/office_component_download.zig");
     std.testing.refAllDecls(basic_office_skills);
