@@ -9871,3 +9871,61 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     min-height: 44px;
   }
 }
+
+.run-outputs {
+  margin-block: 16px;
+  min-width: 0;
+}
+.run-outputs-title {
+  margin: 0 0 8px;
+  color: var(--ui-content-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.run-outputs-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.run-output {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface-panel);
+}
+.run-output-icon {
+  flex: 0 0 20px;
+  padding-top: 2px;
+  color: var(--ui-content-muted);
+  font-size: 18px;
+}
+.run-output-content {
+  min-width: 0;
+}
+.run-output-name,
+.run-output-path,
+.run-output-meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.run-output-name {
+  color: var(--ui-content-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.run-output-path {
+  margin-top: 4px;
+  color: var(--ui-content-muted);
+  font-size: 12px;
+}
+.run-output-meta {
+  margin-top: 4px;
+  color: var(--ui-content-muted);
+  font-size: 12px;
+}

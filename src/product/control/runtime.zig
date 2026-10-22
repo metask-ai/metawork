@@ -515,7 +515,9 @@ const skill_snapshot_structure = skill_runtime.Runtime.snapshotStructureBounds()
 const skill_asset_snapshot_overhead = skill_snapshot_structure.asset;
 const skill_source_settings_snapshot_bytes: usize = 1024;
 const skill_source_discovery_snapshot_bytes: usize = 1024;
-const run_snapshot_overhead: usize = 1024;
+// Output identities, decimal sizes and object syntax are fixed overhead;
+// locator bytes already belong to the globally bounded text projection.
+const run_snapshot_overhead: usize = 1024 + 128 * lifecycle.max_file_deliveries_per_run;
 const commentary_segment_snapshot_overhead: usize = 3;
 const compact_snapshot_overhead: usize = 512;
 const catalog_snapshot_overhead: usize = 256;
@@ -6674,7 +6676,7 @@ pub const Runtime = struct {
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
         writer.writeByte('{') catch return error.SnapshotTooLarge;
         if (include_revision) writer.print("\"revision\":\"{d}\",", .{self.revision}) catch return error.SnapshotTooLarge;
-        writer.print("\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":true,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             task_persistence_ready,
             @tagName(self.task_persistence_health),
             self.taskHistoryRecoveryAvailable(),
@@ -21476,4 +21478,39 @@ test "late credential discovery revokes Output locators in current and durable p
     var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
     defer decoded.deinit();
     try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[0].locator);
+}
+
+test "delivered Output projection matches the strict Renderer fixture without exposing file authority" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.delivered_output, .{});
+    defer expected.deinit();
+    const row = expected.value.object;
+    var id: [16]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, row.get("id").?.string);
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, row.get("displayPath").?.string, 42, @splat(2));
+    try control.applyEvent(&envelope);
+    var storage: [96 * 1024]u8 = undefined;
+    const raw = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
+    defer parsed.deinit();
+    const output = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, output, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.delivered_output, " \r\n\t"), encoded);
+    try std.testing.expectEqual(@as(usize, 4), output.object.count());
+    try std.testing.expect(output.object.get("locator") == null);
+    try std.testing.expect(output.object.get("sha256") == null);
+    // Even an inconsistent stale flag must not expose a newly known credential.
+    const record = &control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?;
+    @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
+    try std.testing.expect(!record.redacted);
+    const safe = try control.writeAggregateFixture(&storage);
+    var redacted = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, safe, .{});
+    defer redacted.deinit();
+    const hidden = redacted.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
+    try std.testing.expect(hidden.object.get("redacted").?.bool);
+    try std.testing.expectEqualStrings("", hidden.object.get("displayPath").?.string);
 }

@@ -2005,6 +2005,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "delivered_output", @embedFile("frontend/src/bridge/__fixtures__/delivered-output.fixture"));
     product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));

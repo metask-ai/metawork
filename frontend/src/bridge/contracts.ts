@@ -712,6 +712,13 @@ export type RunActivity =
 
 export type ConversationCoverage = "included" | "excluded";
 
+export type DeliveredOutputView = {
+  id: string;
+  displayPath: string;
+  sizeBytes: string;
+  redacted: boolean;
+};
+
 export type RunView = {
   submission: InputSubmission | null;
   elapsedMs: string | null;
@@ -740,6 +747,7 @@ export type RunView = {
   };
   tools: ToolView[];
   fileChanges: RunFileChanges | null;
+  outputs: DeliveredOutputView[];
 };
 
 export type ConversationContext = {

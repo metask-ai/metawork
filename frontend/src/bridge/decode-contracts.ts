@@ -11,6 +11,7 @@ import {
   booleanValue,
   arrayValue,
   wireId,
+  u64WireInteger,
   positiveWireId,
   positiveU64WireId,
   numberValue,
@@ -2575,6 +2576,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "usage",
     "tools",
     "fileChanges",
+    "outputs",
   ]);
   const executionItem = object(item.execution, `${path}.execution`, [
     "generation",
@@ -2709,7 +2711,55 @@ function decodeRun(value: unknown, path: string): RunView {
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
     fileChanges: decodeRunFileChanges(item.fileChanges, `${path}.fileChanges`),
+    outputs: decodeDeliveredOutputs(item.outputs, `${path}.outputs`),
   };
+}
+
+function decodeDeliveredOutputs(
+  value: unknown,
+  path: string,
+): RunView["outputs"] {
+  if (!Array.isArray(value) || value.length > 8)
+    fail(path, "expected bounded delivered outputs");
+  const ids = new Set<string>();
+  return value.map((raw, index) => {
+    const itemPath = `${path}[${index}]`;
+    const item = object(raw, itemPath, [
+      "id",
+      "displayPath",
+      "sizeBytes",
+      "redacted",
+    ]);
+    const id = stringValue(item.id, `${itemPath}.id`);
+    if (!/^[0-9a-f]{32}$/.test(id) || /^0+$/.test(id) || ids.has(id))
+      fail(itemPath, "invalid or repeated output identity");
+    ids.add(id);
+    const displayPath = stringValue(
+      item.displayPath,
+      `${itemPath}.displayPath`,
+    );
+    const redacted = booleanValue(item.redacted, `${itemPath}.redacted`);
+    if (
+      redacted
+        ? displayPath !== ""
+        : displayPath.length === 0 ||
+          new TextEncoder().encode(displayPath).length > 512 ||
+          /[\u0000-\u001f\u007f\\:<>"|?*]/.test(displayPath) ||
+          displayPath
+            .split("/")
+            .some(
+              (part) =>
+                !part || part === "." || part === ".." || /[. ]$/.test(part),
+            )
+    )
+      fail(itemPath, "invalid output display path");
+    return {
+      id,
+      displayPath,
+      sizeBytes: u64WireInteger(item.sizeBytes, `${itemPath}.sizeBytes`),
+      redacted,
+    };
+  });
 }
 
 function decodeRunFileChanges(

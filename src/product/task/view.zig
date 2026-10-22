@@ -776,6 +776,17 @@ pub fn writeRun(
     }
     writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
     try writeFileChanges(writer, text_projection, run);
+    writer.writeAll(",\"outputs\":[") catch return error.SnapshotTooLarge;
+    var first_output = true;
+    for (run.outputs) |entry| if (entry) |output| {
+        if (!first_output) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        first_output = false;
+        const hidden = output.redacted or text_projection.containsSensitive(output.locator);
+        writer.print("{{\"id\":\"{s}\",\"displayPath\":", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
+        try text_projection.writeJson(writer, if (hidden) "" else output.locator);
+        writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{ output.size_bytes, hidden }) catch return error.SnapshotTooLarge;
+    };
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 

@@ -4064,6 +4064,7 @@ export default function App() {
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
+                outputsEnabled={snapshot.capabilities.typedOutputs}
                 onPrepareRetry={prepareRetry}
                 onPreviewFile={openFilePreview}
                 loadFilePreview={loadFilePreview}

@@ -39,6 +39,7 @@ import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
+import { RunOutputs } from "./RunOutputs.tsx";
 import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
@@ -281,6 +282,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
+  outputsEnabled,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -304,6 +306,7 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
+  outputsEnabled: boolean;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -844,6 +847,7 @@ export function TaskContent({
                   <p>{record.reviewReason}</p>
                 </details>
               ))}
+            {outputsEnabled && <RunOutputs outputs={run.outputs} />}
             {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}

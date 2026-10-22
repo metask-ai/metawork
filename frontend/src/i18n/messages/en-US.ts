@@ -890,6 +890,9 @@ export const enUS = {
   "file_preview.state.changing":
     "The file changed while it was being read. Try again.",
   "file_preview.state.error": "File preview failed",
+  "outputs.title": "Delivered files",
+  "outputs.hidden_path": "File path hidden",
+  "outputs.delivered_size": "Delivered · {bytes} bytes",
   "file_changes.title": "File changes",
   "file_changes.file_count.one": "{fileCount} file",
   "file_changes.file_count.other": "{fileCount} files",
