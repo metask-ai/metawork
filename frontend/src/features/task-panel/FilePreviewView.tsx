@@ -1,3 +1,5 @@
+import type { DocumentPreview } from "../../bridge/document-preview.ts";
+import { DocumentPreviewView } from "./DocumentPreviewView.tsx";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useLayoutEffect, useRef } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
@@ -16,6 +18,7 @@ export type FilePreviewViewState = {
   selected: FileReferenceView;
   phase: "loading" | "settled";
   preview: FilePreview | null;
+  document?: DocumentPreview;
 };
 
 export function FilePreviewView({
@@ -53,6 +56,17 @@ export function FilePreviewView({
     );
     if (document) document.scrollTop = scrollTop;
   }, [mode, scrollTop, state.selected.id, status]);
+
+  if (state.document)
+    return (
+      <DocumentPreviewView
+        key={state.selected.id}
+        showRefreshAction={false}
+        preview={state.document}
+        title={state.selected.displayPath}
+        onRefresh={onRetry}
+      />
+    );
 
   return (
     <Tabs.Root

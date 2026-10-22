@@ -189,7 +189,7 @@ page ready 精确返回 `{ state: "ready", kind: "page", readId, securityEpoch, 
 
 会话 token 绑定 connection/window、Task/Run 目标、源快照、组件及安全代次。Host 最多持有两个物理资源，使用独立单 worker/有界队列。准备期限 150 秒、读取期限 30 秒、页面传输总期限 15 秒，会话闲置期限 120 秒、总期限 900 秒；idleMs/lifetimeMs 分别精确返回 `"120000"`/`"900000"`。Bridge 使用独立 Native periodic timer 驱动到期与分步检查，不能仅依赖新请求来清理。连接替换、Task/目标/组件/安全失效、关闭、期限与 shutdown 都撤销交付；原有 File Preview worker 不承担转换。
 
-撤销并收口后，Host 向所属 window 发出 `metawork:document-preview-invalidated`，payload 精确为 `{ generation, previewId, token, reason }`，reason 使用上述非 ready 状态。Renderer 必须丢弃匹配会话的旧内容及迟到响应；连接和安全代次变化也必须主动清空本地内容。Renderer 还须根据发送请求的本地单调时刻计算保守期限，不能按迟到响应的接收时刻延长授权；不得把 sourceVersion 当作跨会话缓存 authority。事件投递失败或无法建立期限唤醒时撤销会话并解除连接，不能保留无期限 grant。
+撤销并收口后，Host 向所属 window 发出 `metawork:document-preview-invalidated`，payload 精确为 `{ generation, previewId, token, reason }`，reason 使用上述非 ready 状态。Renderer 必须丢弃匹配会话的旧内容及迟到响应；连接和安全代次变化也必须主动清空本地内容。文档页面与普通 File Preview 图片共享 Renderer 的编码字节、像素、资源数量、单路分块接收和显式 DOM 解码准入，不另建无界页面缓存；一个文档视图只保留当前页面或区域。Renderer 还须根据发送请求的本地单调时刻计算保守期限，不能按迟到响应的接收时刻延长授权；不得把 sourceVersion 当作跨会话缓存 authority。事件投递失败或无法建立期限唤醒时撤销会话并解除连接，不能保留无期限 grant。
 
 ## File changes diff command
 

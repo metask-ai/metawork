@@ -1,3 +1,9 @@
+import { DocumentPreviewLoader } from "./document-preview.ts";
+import { PreviewImagePool } from "./preview-image-pool.ts";
+import {
+  documentInvalidatedEvent,
+  type DocumentTarget,
+} from "./document-contract.ts";
 import { FilePreviewLoader } from "./file-preview.ts";
 import { decodeOfficeComponentResult } from "./generated-wire.ts";
 import { object } from "./wire-codec.ts";
@@ -129,9 +135,17 @@ export class BridgeClient {
     | undefined;
   private nextReceiveBatch = 1n;
   private nextOutputOperation = 1n;
+  private readonly previewImages = new PreviewImagePool();
+  private stopDocumentEvents: (() => void) | undefined;
+  private readonly documents = new DocumentPreviewLoader(
+    (command, payload, timeout) => this.invoke(command, payload, timeout),
+    () => this.attachmentConnection?.generation,
+    this.previewImages,
+  );
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
     () => this.attachmentConnection?.generation,
+    this.previewImages,
   );
 
   constructor(options: BridgeClientOptions = {}) {
@@ -193,6 +207,7 @@ export class BridgeClient {
           return;
         this.viewCache.observeSecurityEpoch(notification.securityEpoch);
         this.previews.observeSecurityEpoch(notification.securityEpoch);
+        this.documents.observeSecurityEpoch(notification.securityEpoch);
         consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
@@ -214,6 +229,9 @@ export class BridgeClient {
   }
 
   async connect() {
+    this.documents.reset();
+    this.stopDocumentEvents?.();
+    this.stopDocumentEvents = undefined;
     this.previews.reset();
     this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
@@ -246,6 +264,16 @@ export class BridgeClient {
       generation: result.generation,
       ...result.attachmentInput,
     };
+    this.stopDocumentEvents = this.bridge().on<unknown>(
+      documentInvalidatedEvent,
+      (value) => {
+        try {
+          this.documents.invalidated(value);
+        } catch {
+          this.documents.rejectEvents();
+        }
+      },
+    );
     this.nextReceiveBatch = 1n;
     this.nextOutputOperation = 1n;
     return result.generation;
@@ -254,6 +282,9 @@ export class BridgeClient {
   async disconnect(generation: string) {
     this.viewCache.clear();
     if (this.attachmentConnection?.generation === generation) {
+      this.documents.reset();
+      this.stopDocumentEvents?.();
+      this.stopDocumentEvents = undefined;
       this.previews.reset();
       this.attachmentConnection = undefined;
     }
@@ -352,6 +383,15 @@ export class BridgeClient {
     } finally {
       signal.removeEventListener("abort", cancel);
     }
+  }
+
+  previewDocument(
+    taskId: string,
+    runId: string,
+    target: DocumentTarget,
+    signal?: AbortSignal,
+  ) {
+    return this.documents.open(taskId, runId, target, signal);
   }
 
   previewFile(

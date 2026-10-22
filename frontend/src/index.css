@@ -8989,6 +8989,155 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
 }
 
+.document-preview {
+  overflow: auto;
+  font-size: var(--text-sm);
+}
+
+.document-preview-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.document-preview-toolbar button,
+.document-preview-sheet select {
+  min-height: 44px;
+}
+
+.document-preview-sheet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.document-preview-sheet select {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  background: var(--ui-surface-panel);
+  color: var(--ui-content-primary);
+}
+
+.document-preview-note {
+  margin: 0;
+  padding: 8px 16px;
+  color: var(--ui-content-muted);
+  overflow-wrap: anywhere;
+}
+
+.document-preview-body {
+  min-height: 0;
+  min-width: 0;
+  flex: 1 0 auto;
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+
+.document-preview-body .file-preview-decoded {
+  display: block;
+  width: 100%;
+}
+
+.document-preview-body img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.document-preview-grid-scroll {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--ui-border);
+}
+
+.document-preview-grid {
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.document-preview-grid th,
+.document-preview-grid td {
+  min-width: 96px;
+  padding: 0;
+  border: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel);
+  text-align: left;
+}
+
+.document-preview-grid th:first-child {
+  min-width: 40px;
+  width: 40px;
+}
+
+.document-preview-grid th {
+  padding: 8px;
+  background: var(--ui-surface-panel-2);
+  font-weight: 500;
+}
+
+.document-preview-grid td button {
+  display: block;
+  width: 100%;
+  min-width: 96px;
+  min-height: 44px;
+  max-width: 240px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.document-preview-grid td button[aria-pressed="true"] {
+  background: var(--ui-action-hover-surface);
+}
+
+.document-preview button:focus-visible,
+.document-preview select:focus-visible,
+.document-preview-grid-scroll:focus-visible {
+  outline: 2px solid var(--metask-primary);
+  outline-offset: -2px;
+}
+
+.document-preview-cell {
+  padding: 16px 0;
+}
+
+.document-preview-cell dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  gap: 8px 16px;
+}
+
+.document-preview-cell dd {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.run-output-preview {
+  min-width: 0;
+  margin-top: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+}
+
+.run-output-preview .document-preview {
+  height: min(640px, 70vh);
+}
+
 .task-panel-change-identity h4,
 .task-panel-change-identity small {
   overflow: hidden;

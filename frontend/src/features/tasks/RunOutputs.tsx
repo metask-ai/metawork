@@ -1,3 +1,6 @@
+import type { DocumentPreview } from "../../bridge/document-preview.ts";
+import { isOfficeDocument } from "../../bridge/document-format.ts";
+import { DocumentPreviewView } from "../task-panel/DocumentPreviewView.tsx";
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../components/ui/button.tsx";
 import type {
@@ -9,6 +12,12 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
+
+export type OutputPreviewHandler = (
+  taskId: string,
+  runId: string,
+  outputId: string,
+) => DocumentPreview;
 
 export type OutputEditResult =
   "edit_prepared" | "edit_draft_busy" | "edit_too_long" | "edit_unavailable";
@@ -26,6 +35,7 @@ export function RunOutputs({
   disabled = false,
   onAction,
   onPrepareEdit,
+  onPreview,
 }: {
   outputs: readonly DeliveredOutputView[];
   taskId?: string;
@@ -33,6 +43,7 @@ export function RunOutputs({
   disabled?: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
+  onPreview?: OutputPreviewHandler;
 }) {
   const { t } = useI18n();
   if (outputs.length === 0) return null;
@@ -49,6 +60,7 @@ export function RunOutputs({
             disabled={disabled}
             onAction={onAction}
             onPrepareEdit={onPrepareEdit}
+            onPreview={onPreview}
           />
         ))}
       </ul>
@@ -63,6 +75,7 @@ function OutputRow({
   disabled,
   onAction,
   onPrepareEdit,
+  onPreview,
 }: {
   output: DeliveredOutputView;
   taskId?: string;
@@ -70,6 +83,7 @@ function OutputRow({
   disabled: boolean;
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
+  onPreview?: OutputPreviewHandler;
 }) {
   const { locale, t } = useI18n();
   const nameId = useId();
@@ -79,12 +93,30 @@ function OutputRow({
     OutputActionState | "save_unknown" | OutputEditResult | null
   >(null);
   const active = useRef<AbortController | null>(null);
+  const [preview, setPreview] = useState<DocumentPreview | null>(null);
+  const previewRef = useRef<DocumentPreview | null>(null);
+  const previewOpener = useRef<HTMLButtonElement | null>(null);
+  const closePreview = () => {
+    void previewRef.current?.close();
+    previewRef.current = null;
+    setPreview(null);
+  };
+  const openPreview = () => {
+    if (!taskId || !runId || !onPreview || disabled || output.redacted) return;
+    closePreview();
+    const next = onPreview(taskId, runId, output.id);
+    previewRef.current = next;
+    setPreview(next);
+  };
   useEffect(() => {
+    closePreview();
     active.current?.abort();
     active.current = null;
     setPending(null);
     setState(null);
     return () => {
+      void previewRef.current?.close();
+      previewRef.current = null;
       active.current?.abort();
       active.current = null;
     };
@@ -172,6 +204,22 @@ function OutputRow({
         </p>
         {onAction && taskId && runId && (
           <div className="run-output-actions">
+            {onPreview && isOfficeDocument(output.displayPath) && (
+              <Button
+                ref={previewOpener}
+                variant="ghost"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || output.redacted}
+                aria-expanded={preview !== null}
+                onClick={() => {
+                  if (preview) closePreview();
+                  else openPreview();
+                }}
+              >
+                {t("outputs.preview")}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -238,6 +286,25 @@ function OutputRow({
                 )
               : state && t(`outputs.state.${state}`)}
           </p>
+        )}
+        {preview && !disabled && !output.redacted && (
+          <div className="run-output-preview">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                closePreview();
+                previewOpener.current?.focus();
+              }}
+            >
+              {t("outputs.close_preview")}
+            </Button>
+            <DocumentPreviewView
+              preview={preview}
+              title={output.displayPath}
+              onRefresh={openPreview}
+            />
+          </div>
         )}
       </div>
     </li>

@@ -769,10 +769,21 @@ export default function App() {
     ) => client.previewFile(taskId, runId, referenceId, options),
     [client],
   );
+  const loadDocumentPreview = useCallback(
+    (taskId: string, runId: string, referenceId: string, signal: AbortSignal) =>
+      client.previewDocument(
+        taskId,
+        runId,
+        { kind: "fileReference", id: referenceId },
+        signal,
+      ),
+    [client],
+  );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
+    loadDocumentPreview,
   );
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
@@ -3332,7 +3343,13 @@ export default function App() {
         selected: activePreview.reference,
         phase: activePreview.kind === "loading" ? "loading" : "settled",
         preview:
-          activePreview.kind === "loading" ? null : activePreview.preview,
+          activePreview.kind === "loading" || activePreview.kind === "document"
+            ? null
+            : activePreview.preview,
+        document:
+          activePreview.kind === "document"
+            ? activePreview.document
+            : undefined,
       };
   const activePanelView = taskPanel.activeTab
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
@@ -4121,6 +4138,12 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
+                onPreviewOutput={(taskId, runId, outputId) =>
+                  client.previewDocument(taskId, runId, {
+                    kind: "output",
+                    id: outputId,
+                  })
+                }
                 onOutputAction={(taskId, runId, outputId, action, signal) =>
                   client.outputAction(taskId, runId, outputId, action, signal)
                 }

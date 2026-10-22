@@ -40,7 +40,11 @@ import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
-import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
+import {
+  RunOutputs,
+  type OutputEditHandler,
+  type OutputPreviewHandler,
+} from "./RunOutputs.tsx";
 import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
@@ -286,6 +290,7 @@ export function TaskContent({
   outputsEnabled,
   onOutputAction,
   onPrepareOutputEdit,
+  onPreviewOutput,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -312,6 +317,7 @@ export function TaskContent({
   outputsEnabled: boolean;
   onOutputAction?: OutputActionHandler;
   onPrepareOutputEdit?: OutputEditHandler;
+  onPreviewOutput?: OutputPreviewHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -860,6 +866,7 @@ export function TaskContent({
                 disabled={responseDisabled || !synchronized}
                 onAction={onOutputAction}
                 onPrepareEdit={onPrepareOutputEdit}
+                onPreview={onPreviewOutput}
               />
             )}
             {fileChangesEnabled && run.fileChanges && (

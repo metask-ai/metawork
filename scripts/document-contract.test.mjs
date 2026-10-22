@@ -33,6 +33,28 @@ test("document wire fixture is accepted without exposing source text or paths", 
     /unexpected fields/,
   );
 });
+
+test("region payload observes the same aggregate string budget as Host admission", () => {
+  const cell = fixture.region.cells[0];
+  const cells = Array.from({ length: 10 }, (_, index) => ({
+    ...cell,
+    row: index + 1,
+    column: 1,
+    display: "x".repeat(16000),
+  }));
+  assert.throws(
+    () =>
+      decodeDocumentRead({
+        ...fixture.region,
+        row: 1,
+        column: 1,
+        rows: 10,
+        columns: 1,
+        cells,
+      }),
+    /region exceeds capacity/,
+  );
+});
 test("document variants, image budgets and correlation fields fail closed", () => {
   for (const value of [
     { ...fixture.open, token: "x".repeat(48) },

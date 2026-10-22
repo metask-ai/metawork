@@ -50,7 +50,7 @@ export type DocumentOpen = {
   kind: "pages" | "grid";
   pageCount: number;
   sheets: DocumentSheet[];
-  omissions: string[];
+  omissions: (typeof omissions)[number][];
   textScope: string;
 };
 export type DocumentSelection =
@@ -371,7 +371,17 @@ export function decodeDocumentRead(
   const cells = arrayValue(raw.cells, `${path}.cells`, cell);
   if (cells.length > 500) fail(path, "cell capacity exceeded");
   let position = 0;
+  let regionBytes = cells.length * 256;
   for (const item of cells) {
+    for (const value of [
+      item.formula,
+      item.display,
+      item.formatCode,
+      item.alignment,
+      item.value?.text,
+    ])
+      if (value) regionBytes += encoder.encode(value).length;
+    if (regionBytes > 128 * 1024) fail(path, "region exceeds capacity");
     const next = item.row * 257 + item.column;
     if (
       next <= position ||
