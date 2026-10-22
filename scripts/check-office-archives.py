@@ -169,6 +169,24 @@ class Archives(unittest.TestCase):
                 raise RuntimeError("consumer failed")
         self.assertFalse(output.parent.exists())
 
+    def test_checked_copy_is_the_validated_snapshot_and_is_released(self):
+        source = self.make([("word/document.xml", b"original")])
+        original = source.read_bytes()
+        with archive.checked_copy(source) as checked:
+            self.assertEqual(checked.read_bytes(), original)
+            source.write_bytes(b"changed after the snapshot")
+            self.assertEqual(archive.read_member(checked, "word/document.xml"), b"original")
+        self.assertFalse(checked.parent.exists())
+
+        source = self.make([("one", b"valid"), ("two", b"invalid CRC")])
+        data = bytearray(source.read_bytes())
+        second = data.index(b"PK\x01\x02", data.index(b"PK\x01\x02") + 1)
+        struct.pack_into("<L", data, second + 16, 0)
+        source.write_bytes(data)
+        with self.assertRaisesRegex(archive.ArchiveError, "CRC"):
+            with archive.checked_copy(source):
+                self.fail("A corrupt member must prevent handing the file to a consumer")
+
     def test_corrupt_payload_crc_and_zip64_leave_no_partial_output(self):
         source = self.make([("one", b"first"), ("two", b"second")])
         data = bytearray(source.read_bytes())

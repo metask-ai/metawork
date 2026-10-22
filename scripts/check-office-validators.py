@@ -1,5 +1,7 @@
 """Exercise original-document readers as well as the packed validation CLI."""
 import subprocess
+import dataclasses
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ OFFICE = Path(sys.argv.pop(1)).resolve()
 sys.path.insert(0, str(OFFICE))
 
 from archive import ArchiveError
+import pack as pack_module
 from helpers.simplify_redlines import _get_authors_from_docx
 from validators import DOCXSchemaValidator, RedliningValidator
 
@@ -85,6 +88,74 @@ class OriginalReaders(unittest.TestCase):
                 self.modified / "word/document.xml"), {"existing error"})
         self.assertEqual(len(observed), 1)
         self.assertFalse(observed[0].parent.exists())
+
+    def test_pack_missing_original_and_original_overwrite_are_explicit_failures(self):
+        output = self.root / "result.docx"
+        output.write_bytes(b"existing output")
+        _, message = pack_module.pack(str(self.modified), str(output), str(self.original))
+        self.assertTrue(message.startswith("Error:"), message)
+        self.assertEqual(output.read_bytes(), b"existing output")
+        self.original_zip([("word/document.xml", XML)])
+        before = self.original.read_bytes()
+        _, message = pack_module.pack(str(self.modified), str(self.original), str(self.original))
+        self.assertIn("cannot overwrite", message)
+        self.assertEqual(self.original.read_bytes(), before)
+
+    def test_pack_repairs_only_a_private_copy_and_publishes_readable_zip(self):
+        original_xml = (self.modified / "word/document.xml").read_bytes()
+        observed = []
+        def repair(private, original, suffix, infer_author):
+            observed.append(private)
+            (private / "word/document.xml").write_bytes(XML.replace(b"content", b"repaired"))
+            return True, None
+        output = self.root / "result.docx"
+        with patch.object(pack_module, "_run_validation", side_effect=repair):
+            _, message = pack_module.pack(str(self.modified), str(output))
+        self.assertTrue(message.startswith("Successfully"), message)
+        self.assertEqual((self.modified / "word/document.xml").read_bytes(), original_xml)
+        with zipfile.ZipFile(output) as packed:
+            self.assertIn(b"repaired", packed.read("word/document.xml"))
+            self.assertIsNone(packed.testzip())
+        self.assertFalse(observed[0].parent.exists())
+
+    def test_pack_validation_and_mid_write_failure_preserve_existing_output(self):
+        output = self.root / "result.docx"
+        output.write_bytes(b"existing output")
+        original_xml = (self.modified / "word/document.xml").read_bytes()
+        before = set(self.root.iterdir())
+        with patch.object(pack_module, "_run_validation", return_value=(False, "invalid")):
+            _, message = pack_module.pack(str(self.modified), str(output))
+            self.assertTrue(message.startswith("Error:"), message)
+        write = zipfile.ZipFile.write
+        def fail_after_write(archive, *args, **kwargs):
+            write(archive, *args, **kwargs)
+            raise OSError("simulated disk failure")
+        with patch.object(zipfile.ZipFile, "write", fail_after_write):
+            _, message = pack_module.pack(str(self.modified), str(output), validate=False)
+            self.assertIn("simulated disk failure", message)
+        self.assertEqual(output.read_bytes(), b"existing output")
+        self.assertEqual((self.modified / "word/document.xml").read_bytes(), original_xml)
+        self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_pack_rejects_output_inside_source_tree(self):
+        output = self.modified / "result.docx"
+        _, message = pack_module.pack(str(self.modified), str(output), validate=False)
+        self.assertTrue(message.startswith("Error:"), message)
+        self.assertFalse(output.exists())
+
+    def test_pack_rejects_work_copy_over_budget_and_original_hardlink(self):
+        output = self.root / "result.docx"
+        limits = dataclasses.replace(pack_module.DEFAULT_LIMITS, total_bytes=4)
+        with patch.object(pack_module, "DEFAULT_LIMITS", limits):
+            _, message = pack_module.pack(str(self.modified), str(output), validate=False)
+        self.assertIn("budget exceeded", message)
+        self.assertFalse(output.exists())
+        self.original_zip([("word/document.xml", XML)])
+        original = self.original.read_bytes()
+        os.link(self.original, output)
+        _, message = pack_module.pack(str(self.modified), str(output), str(self.original))
+        self.assertIn("cannot overwrite", message)
+        self.assertEqual(self.original.read_bytes(), original)
 
 
 if __name__ == "__main__":
