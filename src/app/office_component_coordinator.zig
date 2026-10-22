@@ -60,9 +60,6 @@ pub const Coordinator = struct {
     pub fn begin(self: *Coordinator, product: ports.OfficeManagement, kind: ports.OfficeKind, generation: u64) ports.OfficeAdmission {
         if (self.closing) return .{ .reason = .shutting_down };
         if (self.work != null) return .{ .reason = .busy };
-        // Removal/cleanup are connected with their distinct durable effects;
-        // they cannot masquerade as an installation or a model-side tool.
-        if (kind == .remove or kind == .cleanup) return .{ .reason = .unavailable };
         product.resources(self.registry.hasCapacity(), self.storage_cleanup_pending or self.registry.cleanupPending());
         const admission = product.begin(kind, generation);
         if (!admission.accepted) return admission;
@@ -90,7 +87,9 @@ pub const Coordinator = struct {
             work.source = testing.source;
             work.validation = testing.validation;
         };
+        if (kind == .cleanup) work.collection = self.registry.claimCollection();
         work.thread = std.Thread.spawn(.{}, Work.run, .{work}) catch {
+            if (kind == .cleanup) self.registry.finishCollection(&work.collection);
             self.allocator.destroy(work);
             _ = product.complete(id, .{ .current = before.current, .health = before.health, .cleanup_pending = before.cleanup_pending, .outcome = .failed, .reason = .resource_limit });
             return admission;
@@ -148,12 +147,15 @@ pub const Coordinator = struct {
     }
 
     fn finish(self: *Coordinator, product: ports.OfficeManagement, work: *Work) bool {
+        if (work.kind == .cleanup) self.registry.finishCollection(&work.collection);
         self.storage_cleanup_pending = work.result.completion.cleanup_pending;
         work.result.completion.cleanup_pending = self.storage_cleanup_pending or self.registry.cleanupPending();
         _ = product.complete(work.attempt.id, work.result.completion);
         product.resources(self.registry.hasCapacity(), work.result.completion.cleanup_pending);
         self.work = null;
+        const collect = !self.closing and work.kind != .cleanup and work.result.completion.outcome == .succeeded and work.result.completion.health == .ready and work.result.completion.cleanup_pending;
         self.allocator.destroy(work);
+        if (collect) _ = self.begin(product, .cleanup, product.view().generation);
         return true;
     }
 
@@ -207,6 +209,7 @@ const Work = struct {
     checked_record: ?store_impl.Record = null,
     before_record: ?store_impl.Record = null,
     result: Result,
+    collection: versions.Registry.Collection = .{},
 
     fn run(self: *Work) void {
         self.result = self.execute() catch |failure| self.failed(failure);
@@ -223,16 +226,37 @@ const Work = struct {
         try self.store.recover(); // admission excludes unresolved live processes
         self.before_record = try self.store.current();
         const observer: store_impl.Observer = .{ .context = self, .observe_fn = observe, .activate_fn = activate };
+        if (self.kind == .cleanup) {
+            for (self.collection.records[0..self.collection.count], 0..) |record, index| {
+                if (!observe(self, .{ .phase = .cleaning })) return error.Cancelled;
+                self.store.removeRetired(record) catch |failure| {
+                    if (failure == error.ComponentStillCurrent) {
+                        self.collection.results[index] = .still_current;
+                        continue;
+                    }
+                    return failure;
+                };
+                self.collection.results[index] = .removed;
+            }
+            const pending = try self.store.cleanupRetired(self.collection.protected[0..self.collection.protected_count], observer, &self.cancellation);
+            return .{ .completion = .{ .current = self.before.current, .health = .ready, .cleanup_pending = pending, .outcome = .succeeded } };
+        }
+        if (self.kind == .remove) {
+            const record = self.before_record orelse return error.ComponentChanged;
+            try self.store.removeCurrent(record, observer, &self.cancellation);
+            return .{ .completion = .{ .current = null, .health = .ready, .cleanup_pending = true, .outcome = .succeeded, .committed = true }, .source = .basic };
+        }
+        const retired = try self.store.hasRetired();
         if (self.kind == .check) {
-            const record = self.before_record orelse return .{ .completion = .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .succeeded }, .source = .basic };
+            const record = self.before_record orelse return .{ .completion = .{ .current = null, .health = .ready, .cleanup_pending = retired, .outcome = .succeeded }, .source = .basic };
             const identity = (try self.input.accepted(record.archive_sha256)) orelse return .{
-                .completion = .{ .current = .{ .identity = record.archive_sha256, .state = .incompatible }, .health = .ready, .cleanup_pending = false, .outcome = .succeeded },
+                .completion = .{ .current = .{ .identity = record.archive_sha256, .state = .incompatible }, .health = .ready, .cleanup_pending = retired, .outcome = .succeeded },
                 .record = record,
                 .source = .basic,
             };
             self.checked_record = record;
             const receipt = try self.store.verifyCurrent(identity, record, self.validation, observer, &self.cancellation);
-            return .{ .completion = .{ .current = .{ .identity = record.archive_sha256, .state = .ready }, .health = .ready, .cleanup_pending = receipt.cleanup_pending, .outcome = .succeeded }, .record = record, .source = .verified };
+            return .{ .completion = .{ .current = .{ .identity = record.archive_sha256, .state = .ready }, .health = .ready, .cleanup_pending = retired or receipt.cleanup_pending, .outcome = .succeeded }, .record = record, .source = .verified };
         }
         const release = (try self.input.release()) orelse return error.ComponentNotPublished;
         const receipt = try self.store.install(release, self.source, self.validation, observer, &self.cancellation);
@@ -241,6 +265,7 @@ const Work = struct {
 
     fn failed(self: *Work, failure: anyerror) Result {
         var result: Result = .{ .completion = .{ .current = self.before.current, .health = self.before.health, .cleanup_pending = self.before.cleanup_pending, .outcome = if (failure == error.Cancelled) .cancelled else .failed, .reason = if (failure == error.Cancelled) null else reason(failure) } };
+        if (self.kind == .cleanup and failure != error.Cancelled) result.completion.reason = .cleanup_failed;
         if (failure == error.ComponentProcessesOutstanding) {
             result.completion.health = .restart_required;
             result.completion.cleanup_pending = true;
@@ -252,7 +277,7 @@ const Work = struct {
             return result;
         }
         if (self.opened) {
-            result.completion.cleanup_pending = self.store.hasPending() catch true;
+            result.completion.cleanup_pending = (self.store.hasPending() catch true) or (self.store.hasRetired() catch true);
             if (self.checked_record) |record| {
                 result.completion.current = .{ .identity = record.archive_sha256, .state = if (isContentsFailure(failure)) .damaged else .unverified };
                 result.completion.health = if (isContentsFailure(failure) or failure == error.ComponentValidationFailed) .ready else .read_failed;
@@ -321,7 +346,8 @@ fn reason(failure: anyerror) ports.OfficeReason {
         error.ComponentCommitUnknown => .outcome_unknown,
         error.ComponentValidationFailed, error.ComponentDownloadDigest, error.ComponentManifestIdentity, error.ComponentDownloadSize => .invalid_component,
         error.ComponentNotPublished => .unpublished,
-        error.OutOfMemory => .resource_limit,
+        error.OutOfMemory, error.ComponentRetirementLimit => .resource_limit,
+        error.ComponentWriteFailed => .write_failed,
         error.ComponentStoreCorrupt, error.ComponentChanged => .unavailable,
         else => .download_failed,
     };
@@ -485,4 +511,50 @@ test "Office cancellation joins a blocked transfer before clearing its exact sta
     try std.testing.expectEqual(model.Outcome.cancelled, product.state.terminal.?.outcome);
     try std.testing.expect(try coordinator.store.current() == null);
     try std.testing.expect(!try coordinator.store.hasPending());
+}
+
+test "Office update and removal keep catalog-pinned versions until the independent cleanup worker joins" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var effects: TestEffects = .{};
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    defer coordinator.destroy() catch unreachable;
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
+    defer coordinator.shutdown(product.port());
+    _ = coordinator.begin(product.port(), .check, product.state.generation);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(coordinator.begin(product.port(), .install, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    const old = coordinator.registry.current.?;
+    var pin = try old.pin();
+    defer pin.deinit();
+    const old_record = old.record;
+    try std.testing.expect(coordinator.begin(product.port(), .repair, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(product.state.cleanup_pending);
+    var old_name: [32]u8 = undefined;
+    _ = try coordinator.store.versions.statFile(std.testing.io, old_record.versionName(&old_name), .{});
+    const current_record = coordinator.registry.current.?.record;
+    try std.testing.expect(!current_record.sameDirectory(old_record));
+    try std.testing.expect(coordinator.begin(product.port(), .remove, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(product.state.current == null);
+    try std.testing.expectEqualStrings(root, product.source_root[0..product.source_root_len]);
+    try std.testing.expect(try coordinator.store.current() == null);
+    var current_name: [32]u8 = undefined;
+    try std.testing.expectError(error.FileNotFound, coordinator.store.versions.statFile(std.testing.io, current_record.versionName(&current_name), .{}));
+    try std.testing.expect(product.state.cleanup_pending);
+    _ = try coordinator.store.versions.statFile(std.testing.io, &old_name, .{});
+    pin.deinit();
+    try std.testing.expect(coordinator.begin(product.port(), .cleanup, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(!product.state.cleanup_pending);
+    try std.testing.expect(!coordinator.registry.cleanupPending());
+    try std.testing.expectError(error.FileNotFound, coordinator.store.versions.statFile(std.testing.io, &old_name, .{}));
+    try std.testing.expectEqual(@as(usize, 0), (try coordinator.store.retirements()).count);
 }

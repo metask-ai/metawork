@@ -59,6 +59,15 @@ pub const Registry = struct {
     // Bounded Application resource capacity. Busy retired versions consume a
     // slot until collection; admission must reserve a slot before installation.
     pub const capacity = 128;
+    pub const Removal = enum { failed, removed, still_current };
+    pub const Collection = struct {
+        protected: [capacity]component.Record = undefined,
+        protected_count: usize = 0,
+        targets: [capacity]*Version = undefined,
+        records: [capacity]component.Record = undefined,
+        results: [capacity]Removal = @splat(.failed),
+        count: usize = 0,
+    };
 
     allocator: std.mem.Allocator,
     store: *component.Store,
@@ -142,12 +151,35 @@ pub const Registry = struct {
         return null;
     }
 
-    /// Consume one joined worker's result. A failed removal retains its entry
-    /// for an explicit retry. Zero references cannot race back into existence.
-    pub fn finishRemoval(self: *Registry, target: *Version, removed: bool) void {
+    /// Snapshot on the owner thread before the worker starts. Every tracked
+    /// entry remains protected from cold-intent sweeping; claimed zero-count
+    /// entries are removed separately and acknowledged only after join.
+    pub fn claimCollection(self: *Registry) Collection {
+        var result: Collection = .{};
+        for (self.entries) |entry| if (entry) |version| {
+            result.protected[result.protected_count] = version.record;
+            result.protected_count += 1;
+        };
+        while (self.claimRetired()) |version| {
+            result.targets[result.count] = version;
+            result.records[result.count] = version.record;
+            result.count += 1;
+        }
+        return result;
+    }
+
+    pub fn finishCollection(self: *Registry, collection: *const Collection) void {
+        for (collection.targets[0..collection.count], collection.results[0..collection.count]) |target, result| self.finishRemoval(target, result);
+    }
+
+    /// Consume one joined worker's result. Failure retains the entry. A retired
+    /// source can still be disk-current after failed validation: once zero,
+    /// release only bookkeeping and leave its bytes under the current guard.
+    /// Zero references cannot race back into existence.
+    pub fn finishRemoval(self: *Registry, target: *Version, result: Removal) void {
         std.debug.assert(self.contains(target) and target.removing and target.references.load(.acquire) == 0);
         target.removing = false;
-        if (!removed) return;
+        if (result == .failed) return;
         for (&self.entries) |*entry| {
             if (entry.* != target) continue;
             self.destroy(target);
@@ -186,10 +218,10 @@ fn fixtureCollect(registry: *Registry) !usize {
     var removed: usize = 0;
     while (registry.claimRetired()) |version| {
         registry.store.removeRetired(version.record) catch |failure| {
-            registry.finishRemoval(version, false);
+            registry.finishRemoval(version, .failed);
             return failure;
         };
-        registry.finishRemoval(version, true);
+        registry.finishRemoval(version, .removed);
         removed += 1;
     }
     return removed;
@@ -317,7 +349,7 @@ test "retired component cleanup never deletes canonical current and shutdown ref
     const removing = registry.claimRetired().?;
     try std.testing.expect(registry.claimRetired() == null);
     try std.testing.expectError(error.ComponentReferencesOutstanding, registry.deinit());
-    registry.finishRemoval(removing, false);
+    registry.finishRemoval(removing, .failed);
     try fixtureCurrent(&store, record);
     try std.testing.expectError(error.ComponentStillCurrent, fixtureCollect(&registry));
     var inconsistent = record;

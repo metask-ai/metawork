@@ -83,6 +83,15 @@ pub const Record = struct {
     }
 };
 pub const Receipt = struct { record: Record, cleanup_pending: bool };
+pub const Retirements = struct {
+    pub const capacity = 128;
+    records: [capacity]Record = undefined,
+    count: usize = 0,
+
+    pub fn slice(self: *const Retirements) []const Record {
+        return self.records[0..self.count];
+    }
+};
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -95,7 +104,7 @@ pub const Store = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Store {
         if (!std.fs.path.isAbsolute(path)) return error.InvalidComponentRoot;
-        const directory = try std.Io.Dir.cwd().createDirPathOpen(io, path, .{ .open_options = .{ .follow_symlinks = false } });
+        const directory = try std.Io.Dir.cwd().createDirPathOpen(io, path, .{ .open_options = .{ .iterate = true, .follow_symlinks = false } });
         errdefer directory.close(io);
         const root = try std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator);
         errdefer allocator.free(root);
@@ -126,19 +135,120 @@ pub const Store = struct {
         return std.fs.path.join(self.allocator, &.{ self.root, "versions", record.versionName(&name) });
     }
 
+    /// Component-owned deletion intents, not persisted Session references.
+    /// Only exact records are read; version directories are never discovered or
+    /// adopted by scanning. Unknown files cannot grant cleanup authority.
+    pub fn retirements(self: *Store) !Retirements {
+        var result: Retirements = .{};
+        var iterator = self.directory.iterate();
+        var entries: usize = 0;
+        while (try iterator.next(self.io)) |entry| {
+            entries += 1;
+            if (entries > 1024) return error.ComponentStoreCorrupt;
+            if (!std.mem.startsWith(u8, entry.name, "retired-")) continue;
+            if (entry.kind != .file or entry.name.len != 45 or !std.mem.endsWith(u8, entry.name, ".json")) return error.ComponentStoreCorrupt;
+            const record = try self.readRecord(entry.name) orelse return error.ComponentStoreCorrupt;
+            var name: [45]u8 = undefined;
+            if (!std.mem.eql(u8, entry.name, retiredName(record, &name))) return error.ComponentStoreCorrupt;
+            if (result.count == result.records.len) return error.ComponentRetirementLimit;
+            result.records[result.count] = record;
+            result.count += 1;
+        }
+        return result;
+    }
+
+    pub fn hasRetired(self: *Store) !bool {
+        const active = try self.current();
+        const records = try self.retirements();
+        for (records.slice()) |record| {
+            if (active) |value| if (value.sameDirectory(record)) {
+                if (!value.eql(record)) return error.ComponentStoreCorrupt;
+                continue;
+            };
+            return true;
+        }
+        return false;
+    }
+
+    /// Current removal commits before resource reclamation. The durable intent
+    /// is written first, so a crash cannot orphan a former current directory.
+    /// The caller still owns every live catalog/process pin until source handoff.
+    pub fn removeCurrent(self: *Store, record: Record, observer: Observer, cancellation: *const process.Cancellation) !void {
+        if (try self.hasPending()) return error.ComponentRecoveryRequired;
+        try self.assertCurrent(record);
+        try observer.update(cancellation, .{ .phase = .preparing });
+        try self.enqueueRetirement(record);
+        try observer.update(cancellation, .{ .phase = .activating });
+        if (observer.activate_fn) |activate| if (!activate(observer.context)) return error.Cancelled;
+        if (builtin.is_test and self.fault == .before_current_delete) return error.ComponentWriteFailed;
+        self.directory.deleteFile(self.io, "current.json") catch return error.ComponentCommitUnknown;
+        if (builtin.is_test and self.fault == .after_current_delete) return error.ComponentCommitUnknown;
+        // Readback is about the committed active fact, never a guess based on a
+        // failed delete result. An uncertain result is reconciled by a check.
+        if (try self.current() != null) return error.ComponentCommitUnknown;
+    }
+
+    /// Called only on the single component worker. The owner-thread snapshot
+    /// protects all live registry entries, including ones being separately
+    /// collected by this operation. Cold cleanup has an empty snapshot only
+    /// after acquiring Primary authority and proving process quiescence.
+    pub fn cleanupRetired(self: *Store, protected: []const Record, observer: Observer, cancellation: *const process.Cancellation) !bool {
+        const records = try self.retirements();
+        const active = try self.current();
+        for (records.slice()) |record| {
+            try observer.update(cancellation, .{ .phase = .cleaning });
+            if (active) |value| if (value.sameDirectory(record)) {
+                if (!value.eql(record)) return error.ComponentStoreCorrupt;
+                // An update/removal cancelled before commit can leave an intent
+                // for the still-current version. Remove only the intent.
+                var name: [45]u8 = undefined;
+                try self.deleteKnownFile(retiredName(record, &name));
+                continue;
+            };
+            var pinned = false;
+            for (protected) |value| if (value.sameDirectory(record)) {
+                if (!value.eql(record)) return error.ComponentStoreCorrupt;
+                pinned = true;
+                break;
+            };
+            if (!pinned) try self.removeRetired(record);
+        }
+        return self.hasRetired();
+    }
+
+    fn enqueueRetirement(self: *Store, record: Record) !void {
+        const records = try self.retirements();
+        for (records.slice()) |value| if (value.sameDirectory(record)) {
+            if (!value.eql(record)) return error.ComponentStoreCorrupt;
+            return;
+        };
+        if (records.count == Retirements.capacity) return error.ComponentRetirementLimit;
+        try self.writeRecord("retired", record);
+        var name: [45]u8 = undefined;
+        try self.directory.renamePreserve("retired.json", self.directory, retiredName(record, &name), self.io);
+    }
+
     /// Only a process-local version owner that has observed zero references may
     /// call this. Current/pending facts still protect publication and recovery.
     pub fn removeRetired(self: *Store, record: Record) !void {
         if (try self.current()) |active| if (active.sameDirectory(record)) return error.ComponentStillCurrent;
         if (try self.readRecord("pending.json")) |pending| if (pending.sameDirectory(record)) return error.ComponentTransactionActive;
+        var intent_name: [45]u8 = undefined;
+        _ = retiredName(record, &intent_name);
+        if (try self.readRecord(&intent_name)) |intent| if (!intent.eql(record)) return error.ComponentStoreCorrupt;
         var name: [32]u8 = undefined;
         try removeDirectory(self.io, self.versions, record.versionName(&name));
+        try self.deleteKnownFile(&intent_name);
     }
 
     /// Explicit recovery after startup/worker quiescence only. It never retries
     /// download, execution or activation. Canonical readback decides ownership.
     pub fn recover(self: *Store) !void {
         const committed = try self.current();
+        // Enqueue's fixed temporary record never authorizes deletion. The
+        // current pointer cannot change until its named intent was published.
+        try self.deleteKnownFile("retired.next");
+        try self.deleteKnownFile("retired.json");
         if (try self.readRecord("pending.json")) |pending| {
             if (committed) |value| if (value.sameDirectory(pending) and !value.eql(pending)) return error.ComponentStoreCorrupt;
             const adopted = if (committed) |value| value.eql(pending) else false;
@@ -305,6 +415,7 @@ pub const Store = struct {
         try validation.check(self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .activating });
         if (observer.activate_fn) |activate| if (!activate(observer.context)) return error.Cancelled;
+        if (try self.current()) |previous| try self.enqueueRetirement(previous);
         self.writeRecord("current", record) catch |failure| {
             if (failure == error.ComponentCommitUnknown) preserve.* = true;
             return failure;
@@ -314,7 +425,8 @@ pub const Store = struct {
         if (observer.observe_fn) |observe| _ = observe(observer.context, .{ .phase = .cleaning });
         stage.close(self.io);
         stage_open = false;
-        return .{ .record = record, .cleanup_pending = !self.cleanupCommitted(stage_name) };
+        const staging_clean = self.cleanupCommitted(stage_name);
+        return .{ .record = record, .cleanup_pending = !staging_clean or (self.hasRetired() catch true) };
     }
 
     fn cleanupCommitted(self: *Store, stage_name: []const u8) bool {
@@ -375,7 +487,15 @@ pub const Store = struct {
     }
 };
 
-const Fault = enum { none, before_current_rename, after_current_rename };
+const Fault = enum { none, before_current_rename, after_current_rename, before_current_delete, after_current_delete };
+
+fn retiredName(record: Record, buffer: *[45]u8) []const u8 {
+    const id = std.fmt.bytesToHex(record.install_id, .lower);
+    @memcpy(buffer[0..8], "retired-");
+    @memcpy(buffer[8..40], &id);
+    @memcpy(buffer[40..45], ".json");
+    return buffer;
+}
 
 fn childDirectory(io: std.Io, parent: std.Io.Dir, name: []const u8) !std.Io.Dir {
     parent.createDir(io, name, .default_dir) catch |failure| if (failure != error.PathAlreadyExists) return failure;
@@ -575,6 +695,80 @@ test "Office installation commits an independent version and current record only
     const bytes = try version.readFileAlloc(std.testing.io, "payload.bin", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("runtime", bytes);
+}
+
+test "Office retirement intents survive restart without persisting catalog references or discovering versions" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    var opened = true;
+    defer if (opened) store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    const old = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const updated = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    try std.testing.expect(updated.cleanup_pending);
+    try std.testing.expectEqual(@as(usize, 1), (try store.retirements()).count);
+    try store.versions.createDir(std.testing.io, "unregistered", .default_dir);
+    try std.testing.expect(try store.cleanupRetired(&.{old.record}, .{}, &cancellation));
+    var old_name: [32]u8 = undefined;
+    _ = try store.versions.statFile(std.testing.io, old.record.versionName(&old_name), .{});
+    store.deinit();
+    opened = false;
+    store = try fixtureStore(&temporary);
+    opened = true;
+    try store.recover();
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expectError(error.FileNotFound, store.versions.statFile(std.testing.io, &old_name, .{}));
+    try std.testing.expect((try store.current()).?.eql(updated.record));
+    _ = try store.versions.statFile(std.testing.io, "unregistered", .{});
+}
+
+test "Office removal commits a detached current while catalog-held bytes wait for explicit cleanup" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    const installed = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    fixture.gate = false;
+    try std.testing.expectError(error.Cancelled, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
+    try std.testing.expect((try store.current()).?.eql(installed.record));
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expectEqual(@as(usize, 0), (try store.retirements()).count);
+    fixture.gate = true;
+    store.fault = .before_current_delete;
+    try std.testing.expectError(error.ComponentWriteFailed, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
+    try std.testing.expect((try store.current()).?.eql(installed.record));
+    store.fault = .after_current_delete;
+    try std.testing.expectError(error.ComponentCommitUnknown, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
+    try std.testing.expect(try store.current() == null);
+    try std.testing.expect(try store.cleanupRetired(&.{installed.record}, .{}, &cancellation));
+    var name: [32]u8 = undefined;
+    _ = try store.versions.statFile(std.testing.io, installed.record.versionName(&name), .{});
+    try store.recover();
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expectError(error.FileNotFound, store.versions.statFile(std.testing.io, &name, .{}));
+}
+
+test "Office cleanup rejects conflicting intent identities and preserves current bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    const installed = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    var conflict = installed.record;
+    conflict.archive_sha256[0] ^= 1;
+    try store.enqueueRetirement(conflict);
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.hasRetired());
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.removeCurrent(installed.record, .{}, &cancellation));
+    try std.testing.expect((try store.current()).?.eql(installed.record));
+    var name: [32]u8 = undefined;
+    _ = try store.versions.statFile(std.testing.io, installed.record.versionName(&name), .{});
 }
 
 test "Office cancel across download unpack validation publication and activation leaves no adopted candidate" {

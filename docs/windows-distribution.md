@@ -95,6 +95,10 @@ Application 只有在持有本地数据目录 Primary authority 且该组件操�
 
 组件 store 的持久记录仅描述组件自身，不写入 Task 或 Session。`current.json` 与 `pending.json` 使用 schema 1、`installId`（32 位小写十六进制随机身份）及 `archiveSha256`（64 位小写十六进制）；固定 `.next` 文件是机械临时文件，不授予身份。阶段目录为 `staging/<installId>`，最终版本目录为 `versions/<installId>`，不得覆盖既有目录。新安装与修复都使用独立身份，不原地替换仍被引用的资源。归档摘要保留在记录中，不重复拼进长运行时路径，以避免供应商 Windows loader 的路径限制。
 
+替换或移除 current 前，必须先持久发布对应版本的删除意图 `retired-<installId>.json`，其内容采用同一 schema 1 记录。最多保留 128 个意图；同目录身份冲突、损坏记录或超出有界读取预算时拒绝继续，不猜测清理目标。固定 `retired.next`、`retired.json` 仅是意图发布的临时文件；恢复可清除它们，不能据此删除版本。意图描述组件自己的待清理资源，不保存或重建 Task/Session 引用，也不授予组件执行信任。它让重启后仍可定位旧版本，而无需扫描、收养或删除未登记目录。
+
+移除先提交 current 缺席，再由 owner 将新 catalog 来源切回基础 Skill；原有 catalog 继续持有旧资源。后台清理接收 owner 生成的进程内受保护身份快照，只有零引用的已认领条目或没有进程内引用的已登记意图才可删除；current 与 pending 的同目录保护仍必须独立检查。删除意图指向仍为 current 的版本时，只撤销意图，保留版本字节。物理删除成功后才能移除对应意图，失败与取消保留剩余工作；崩溃在两者之间时可幂等收口。启动清理仍以 Primary authority 和进程静止为前提，不能将内存引用丢失本身视为外层 Shell 进程已退出的证明。
+
 pending 必须先于阶段写入；只有最终位置验证完成后才能提交 current。取消先等待进程与下载真正静止，再删除本次未提交资源；进程静止无法证实则保留事务并明确失败。current 提交后到达的取消不能撤销已提交事实；清理失败如实表示待清理。原子替换后的持久化结果不确定时保留 pending 与候选目录，禁止猜测回滚。恢复只在启动或 worker 已静止时读取 canonical current/pending：已提交候选予以保留，未提交候选只清理 pending 精确登记的目录，不扫描或收养未登记目录，不重放下载、自检或激活。旧版本最终清理由进程内 catalog lease、执行进程及预览 handle 的引用拥有者决定，安装事务不得自行删除旧版本。 Application 资源 owner 持有每个候选或当前版本的本地引用；退休时只消费自己的引用，catalog 回调和进程/预览 pin 只原子增减计数。零引用不可重新取得；registry owner 只选择零引用的清理候选，物理删除在独立有界 Application worker 内执行，join 后 owner 才消费结果并释放条目，避免在 Native loop 删除整套运行时。current 或 pending 指向同一安装目录时必须拒绝，即使记录摘要不一致。清理失败保留待清理条目，shutdown 在外部引用未静止时不得销毁 bookkeeping。这些引用不写入磁盘；本地记录冲突不能授予清理 authority。
 
 机械事务测试与开发组件安装验证不表示正式签名发布、公开下载服务、干净机器或应用 UI 已通过验收。实际发布仍须通过完整的目标平台分发验证。
