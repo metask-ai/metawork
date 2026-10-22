@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   createReadStream,
@@ -24,7 +23,10 @@ import {
   windowsVerifyArguments,
 } from "./package-windows.mjs";
 import { runChild } from "./run-child-process.mjs";
-import { officeComponentSources } from "./office-component-sources.mjs";
+import {
+  officeComponentSources,
+  queryOfficeAuthoring,
+} from "./office-component-sources.mjs";
 import { officeWorkflowInventory } from "./office-workflows.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -264,64 +266,11 @@ await run(
   environment,
 );
 
-// npm's public dependency selector reads the installed, root-lock-verified
-// graph. It includes each selected package's real transitive placement rather
-// than copying the checkout's unrelated desktop and SDK dependencies.
-const where = spawnSync("where.exe", ["npm.cmd"], {
-  encoding: "utf8",
-  windowsHide: true,
-});
-if (where.status !== 0)
-  throw new Error("npm is required by the component producer");
-const npm = path.join(
-  path.dirname(where.stdout.trim().split(/\r?\n/u)[0]),
-  "node_modules/npm/bin/npm-cli.js",
-);
-if (!existsSync(npm)) throw new Error("Cannot locate npm's public CLI");
-const query = spawnSync(
-  process.execPath,
-  [npm, "query", "#docx, #pptxgenjs, #docx *, #pptxgenjs *"],
-  {
-    cwd: root,
-    encoding: "utf8",
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: 30000,
-    windowsHide: true,
-  },
-);
-if (query.status !== 0)
-  throw new Error("Cannot read the authoring dependency closure");
-const lock = JSON.parse(
-  readFileSync(path.join(root, "package-lock.json"), "utf8"),
-);
-const pins = JSON.parse(
-  readFileSync(path.join(root, "package.json"), "utf8"),
-).devDependencies;
-const authoring = {
-  name: "@metawork/office-authoring",
-  version: "1.0.0",
-  private: true,
-  dependencies: { docx: pins.docx, pptxgenjs: pins.pptxgenjs },
-};
-const packages = {
-  "": {
-    name: authoring.name,
-    version: authoring.version,
-    dependencies: authoring.dependencies,
-  },
-};
-for (const selected of JSON.parse(query.stdout)) {
-  const entry = lock.packages[selected.location];
-  if (
-    !entry ||
-    entry.version !== selected.version ||
-    !entry.integrity ||
-    !selected.location.startsWith("node_modules/")
-  )
-    throw new Error("Installed Office dependency disagrees with the root lock");
-  const { dev, devOptional, ...production } = entry;
-  packages[selected.location] = production;
-}
+const {
+  npm,
+  manifest: authoring,
+  lock: authoringLock,
+} = queryOfficeAuthoring(root);
 const authoringDirectory = path.join(stage, "authoring");
 mkdirSync(authoringDirectory);
 writeFileSync(
@@ -330,17 +279,7 @@ writeFileSync(
 );
 writeFileSync(
   path.join(authoringDirectory, "package-lock.json"),
-  JSON.stringify(
-    {
-      name: authoring.name,
-      version: authoring.version,
-      lockfileVersion: 3,
-      requires: true,
-      packages,
-    },
-    null,
-    2,
-  ) + "\n",
+  JSON.stringify(authoringLock, null, 2) + "\n",
 );
 await run(
   process.execPath,
