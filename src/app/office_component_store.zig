@@ -113,6 +113,10 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    pub fn hasPending(self: *Store) !bool {
+        return try self.readRecord("pending.json") != null;
+    }
+
     pub fn current(self: *Store) !?Record {
         return self.readRecord("current.json");
     }

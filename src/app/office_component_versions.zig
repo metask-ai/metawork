@@ -74,9 +74,22 @@ pub const Registry = struct {
     /// release identity. Merely finding a directory is never installation proof.
     pub fn trackValidated(self: *Registry, record: component.Record) !*Version {
         var slot: ?usize = null;
-        for (self.entries, 0..) |entry, index| {
-            if (entry) |version| {
-                if (version.record.sameDirectory(record)) return error.ComponentVersionAlreadyTracked;
+        for (&self.entries, 0..) |*entry, index| {
+            if (entry.*) |version| {
+                if (!version.record.sameDirectory(record)) continue;
+                if (!std.mem.eql(u8, &version.record.archive_sha256, &record.archive_sha256)) return error.ComponentStoreCorrupt;
+                if (version.removing) return error.ComponentRemovalActive;
+                if (!version.retired) return version;
+                // A fresh complete validation may reacquire ownership while
+                // old catalogs still hold this exact resource. Never resurrect
+                // zero: replace only its quiescent bookkeeping allocation.
+                if (Version.retain(version)) {
+                    version.retired = false;
+                    return version;
+                }
+                self.destroy(version);
+                entry.* = null;
+                slot = index;
             } else if (slot == null) slot = index;
         }
         const index = slot orelse return error.ComponentVersionLimit;
@@ -297,7 +310,7 @@ test "retired component cleanup never deletes canonical current and shutdown ref
     var preview = try version.pin();
     defer preview.deinit();
     try std.testing.expectError(error.ComponentReferencesOutstanding, registry.deinit());
-    try std.testing.expectError(error.ComponentVersionAlreadyTracked, registry.trackValidated(record));
+    try std.testing.expectEqual(version, try registry.trackValidated(record));
     registry.activate(version);
     registry.useBasic();
     preview.deinit();

@@ -119,6 +119,7 @@ pub const State = struct {
     pub fn view(self: *const State) View {
         const idle = self.available and self.supported and !self.shutting_down and self.operation == null and self.generation != std.math.maxInt(u64);
         const mutable = idle and self.health == .ready;
+        const needs_check = if (self.current) |current| current.state == .damaged or current.state == .unverified else false;
         const is_current = if (self.current) |installed| if (self.offered) |offered| std.mem.eql(u8, &installed.identity, &offered.identity) else false else false;
         return .{
             .generation = self.generation,
@@ -134,7 +135,7 @@ pub const State = struct {
                 .install = mutable and self.installation_capacity and self.offered != null and !is_current,
                 .repair = mutable and self.installation_capacity and self.offered != null and self.current != null,
                 .remove = mutable and self.current != null,
-                .retry = idle and self.health != .ready and self.health != .restart_required,
+                .retry = idle and (self.health != .ready or needs_check) and self.health != .restart_required,
                 .cleanup = mutable and self.cleanup_pending,
                 .cancel = if (self.operation) |operation| !self.shutting_down and operation.kind != .check and !operation.cancelling and (operation.kind == .cleanup or @intFromEnum(operation.phase) < @intFromEnum(Phase.activating)) else false,
             },
@@ -161,7 +162,7 @@ pub const State = struct {
             },
             .remove => if (self.current == null) return .{ .reason = .not_installed },
             .cleanup => if (!self.cleanup_pending) return .{ .reason = .nothing_to_clean },
-            .check => if (self.health == .ready) return .{ .reason = .not_needed },
+            .check => if (self.health == .ready and !self.view().actions.retry) return .{ .reason = .not_needed },
         }
         const id = self.next_operation;
         self.next_operation += 1;

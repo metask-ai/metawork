@@ -28,6 +28,7 @@ const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const basic_office_skills = @import("app/basic_office_skills.zig");
+const office_component_coordinator = @import("app/office_component_coordinator.zig");
 const app_platform = @import("app/platform.zig");
 const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
@@ -88,6 +89,7 @@ const App = struct {
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
     single_instance: ?*app_single_instance.Coordinator = null,
+    office_component: ?*office_component_coordinator.Coordinator = null,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -195,6 +197,10 @@ const App = struct {
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
+        if (self.office_component) |office| {
+            const port = control_storage.officeManagement();
+            _ = office.begin(port, .check, port.view().generation);
+        }
         try self.platform.installScheduleHost(control_storage.scheduleHost());
         self.mcp_management = mcp_management_coordinator.Coordinator.init(
             std.heap.c_allocator,
@@ -291,6 +297,8 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.control) |control| control.beginShutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
+        if (self.control) |control| if (self.office_component) |office|
+            office.shutdown(control.officeManagement());
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.account_started) if (self.account_coordinator) |coordinator|
             coordinator.beginShutdown();
@@ -367,6 +375,9 @@ const App = struct {
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
                 self.drainAgentEvents();
+                if (self.control) |control| {
+                    if (self.office_component) |office| _ = office.drain(control.officeManagement());
+                }
                 if (self.control) |control|
                     if (self.dispatcher) |dispatcher| {
                         control.drainFilePreviewCompletions(
@@ -638,6 +649,8 @@ pub fn run(init: std.process.Init) !void {
             coordinator.deinit();
             app.mcp_oauth_refresh = null;
         }
+        if (app.control_initialized) if (app.office_component) |office|
+            office.shutdown(control.officeManagement());
         if (app.control_initialized) control.shutdownExecutor();
         if (app.agent_runtime) |runtime| {
             const shutdown_complete = if (app.agent_shutdown)
@@ -661,6 +674,25 @@ pub fn run(init: std.process.Init) !void {
             }
             runtime.deinit();
         }
+        if (app.office_component) |office| {
+            office.destroy() catch |failure| std.log.err("Office component references did not settle: {s}", .{@errorName(failure)});
+            app.office_component = null;
+        }
+    }
+    if (@import("builtin").os.tag == .windows and @import("builtin").cpu.arch == .x86_64) {
+        const root = try std.fs.path.join(std.heap.c_allocator, &.{ paths_state.dataDir(), "office", "windows-x64" });
+        defer std.heap.c_allocator.free(root);
+        const office = try office_component_coordinator.Coordinator.create(
+            std.heap.c_allocator,
+            init.io,
+            root,
+            init.environ_map,
+            @import("office_release_input").json,
+            builtin_skill_root,
+            .{ .context = &app.platform, .notify_fn = notifyOfficeComponent },
+        );
+        app.office_component = office;
+        app.control_configuration.office_component = try office.configuration();
     }
     var account_http = metask_http_transport.Adapter{
         .allocator = std.heap.c_allocator,
@@ -803,6 +835,7 @@ test {
     _ = @import("office_process");
     _ = @import("app/office_component_store.zig");
     _ = @import("app/office_component_versions.zig");
+    _ = @import("app/office_component_coordinator.zig");
     _ = @import("app/office_component_release.zig");
     _ = @import("app/office_component_download.zig");
     std.testing.refAllDecls(basic_office_skills);
@@ -840,4 +873,8 @@ test "automation Models vault is bounded, overwrites securely, and deletes idemp
         vault.secret[0.."short".len],
     );
     try port.delete(generated);
+}
+
+fn notifyOfficeComponent(context: *anyopaque) void {
+    _ = app_platform.Adapter.notifyMainLoop(context);
 }
