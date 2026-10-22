@@ -1,7 +1,9 @@
 """Private Windows Office component controller, invoked by bin/office.exe only.
 
-The native entry owns all descendants. A bounded watchdog ends this controller
-on a blocked UNO call; the entry then closes its job and kills the whole tree.
+The native entry joins a lifetime Job before starting this controller. Its owner
+is the entry for Shell calls, or Application for hosted preview/selftest calls.
+A bounded watchdog ends this controller on a blocked UNO call; the owner then
+terminates the tree and verifies physical quiet before returning.
 No system Office, user Python or user profile is selected by this executable.
 """
 import argparse
@@ -126,6 +128,8 @@ class Engine:
 
     def __enter__(self):
         profile = (self.directory / "profile").as_uri()
+        shared_cache = self.directory / "shared-packages"
+        shared_cache.mkdir()
         pipe = "metawork-office-" + uuid.uuid4().hex
         os.environ["URE_BOOTSTRAP"] = (PROGRAM / "fundamental.ini").as_uri()
         os.environ["UserInstallation"] = profile
@@ -144,12 +148,21 @@ class Engine:
 
         self.uno = uno
         self.interaction = AbortInteraction()
+        environment = dict(os.environ)
+        environment.update(PYTHONDONTWRITEBYTECODE="1", SAL_DISABLE_OPENCL="1")
+        environment.pop("SC_FORCE_CALCULATION", None)
+        # LibreOffice's shared-package writability probe and OpenCL test can
+        # transiently write into a writable installation. Keep package caches
+        # in this operation and use deterministic CPU calculation. See the
+        # pinned engine's dp_manager.cxx and desktop/source/app/opencl.cxx.
         self.process = subprocess.Popen([
             str(PROGRAM / "soffice.com"), f"-env:UserInstallation={profile}",
+            f"-env:UNO_SHARED_PACKAGES_CACHE={shared_cache.as_uri()}",
             "--headless", "--norestore", "--nodefault", "--nofirststartwizard",
             f"--accept=pipe,name={pipe};urp;StarOffice.ServiceManager",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW)
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            env=environment)
         local = uno.getComponentContext()
         resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
         deadline = time.monotonic() + 15

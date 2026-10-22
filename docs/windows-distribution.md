@@ -78,6 +78,10 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 
 供应商输入必须通过摘要与适用的 Authenticode 校验；MSI 只行政提取到新的 staging 目录，保留许可证和运行所需的 app-local Microsoft 库。组件入口拥有解释器和引擎进程树，组件内的私有字体由引擎加载。默认要求签署 MetaWork 自有入口并立即验证；显式 `--signing none` 仅产生开发组件，不能作为正式分发通过证据。签名身份与工具继续遵守上文的[签名边界](#签名边界)。
 
+入口支持两种明确的生命周期 owner：模型经 Shell 调用时由入口保留整树 Job；Application 的安装自检和产品预览通过私有 Host Job 协议，在任何子进程启动前加入应用的随机 Job 并释放临时 Job handle。不得在 Host 退出后由组件长期保留该 handle。Native 能力边界见[高层架构](architecture.md#35-native-sdk)，Host 取消、超时、输出预算和物理静止的证据须独立于入口自有 Job 验收。
+
+发布的组件目录是不可变资源；运行期的 profile、缓存和临时结果不得写回其中。引擎内嵌 Python 的字节码写入须被禁止，shared package cache 使用每次操作的临时目录，计算使用 CPU 路径，避免驱动自检和锁文件修改安装资源。不能只在打包前删除缓存来掩盖运行期修改。producer 在自检前后核对完整目录 inventory；引擎行为回归也必须验证操作没有增删或修改组件资源。归档校验仍独立执行，不因自检通过而省略。
+
 组件归档为 `tar.gz`，tar 使用 USTAR；当前 Windows producer 不生成链接或特殊成员，不包含字节码缓存、PDB 或安装器副本。归档根的 `office-runtime.json` 使用 schema 1，固定 `target`，以 `files` 列出相对 `path`、实际 `bytes` 和 `sha256`；`payloadBytes` 是清单自身之外所列文件的总字节。归档旁的机器结果记录完整压缩摘要、压缩量和含清单的实际展开量。构建完成前必须重新流式读取完整归档，检查实际成员与清单一致及 gzip CRC，不能只核对构建目录。容量与成员预算由 producer 检查拥有；安装器的受限解包验收仍需独立完成。
 
 这些 producer 来源不授予客户端任意下载 authority。正式客户端须由主包固定其接受的组件发布身份、来源和完整归档摘要；组件内引擎或解释器安全更新因此需要同步发布主包信任信息。主包升级不自动下载用户尚未启用的 Office 组件。完整 Skill 工作流、安装事务、签名后位置与干净机器验收通过前，不得将开发归档登记为可安装的正式组件。

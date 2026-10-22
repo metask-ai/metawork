@@ -4,8 +4,10 @@ import {
   createReadStream,
   createWriteStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -26,6 +28,27 @@ import { officeComponentSources } from "./office-component-sources.mjs";
 import { officeWorkflowInventory } from "./office-workflows.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function componentInventory(directory) {
+  const entries = new Map();
+  function visit(filename) {
+    const status = lstatSync(filename, { bigint: true });
+    entries.set(
+      path.relative(directory, filename),
+      `${status.mode}:${status.size}:${status.mtimeNs}`,
+    );
+    if (status.isDirectory()) {
+      for (const name of readdirSync(filename))
+        visit(path.join(filename, name));
+    } else if (!status.isFile()) {
+      throw new Error(
+        "Office component self-test inventory contains a special entry",
+      );
+    }
+  }
+  visit(directory);
+  return entries;
+}
 const cache = path.join(root, ".zig-cache/office-component-sources");
 const options = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -371,12 +394,21 @@ writeFileSync(
   path.join(stage, "sources/build.json"),
   JSON.stringify({ schema: 1, signing }, null, 2) + "\n",
 );
+const immutableBefore = componentInventory(stage);
 await run(
   launcher,
   ["selftest"],
   "Office isolated offline self-test",
   environment,
 );
+const immutableAfter = componentInventory(stage);
+if (
+  immutableBefore.size !== immutableAfter.size ||
+  [...immutableBefore].some(
+    ([name, identity]) => immutableAfter.get(name) !== identity,
+  )
+)
+  throw new Error("Office self-test changed the immutable component directory");
 await run(
   python,
   [

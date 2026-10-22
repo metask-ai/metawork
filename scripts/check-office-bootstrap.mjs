@@ -14,23 +14,21 @@ if (
   );
 const cache = path.join(root, ".zig-cache/office-bootstrap-qualification");
 mkdirSync(cache, { recursive: true });
-const executable = path.join(cache, "office-bootstrap.exe");
+const parent = mkdtempSync(path.join(cache, "run-"));
 await runChild(
   "zig",
   [
-    "build-exe",
-    "--dep",
-    "office_component_archive",
-    "-Mroot=tests/office_component_bootstrap.zig",
-    "-Moffice_component_archive=src/app/office_component_archive.zig",
-    "-lc",
-    "-O",
-    "ReleaseSafe",
-    `-femit-bin=${executable}`,
+    "build",
+    "office-bootstrap",
+    "-Doptimize=ReleaseSafe",
+    "--",
+    process.argv[2],
+    process.argv[2] + ".json",
+    parent,
   ],
   {
     cwd: root,
-    label: "Office native bootstrap qualification build",
+    label: "Office native bootstrap actual archive",
     timeoutMs: null,
     env: {
       ...process.env,
@@ -39,16 +37,6 @@ await runChild(
         ".zig-cache/office-bootstrap-global",
       ),
     },
-  },
-);
-const parent = mkdtempSync(path.join(cache, "run-"));
-await runChild(
-  executable,
-  [process.argv[2], process.argv[2] + ".json", parent],
-  {
-    cwd: root,
-    label: "Office native bootstrap actual archive",
-    timeoutMs: null,
   },
 );
 console.log(

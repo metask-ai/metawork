@@ -9,6 +9,7 @@ from ctypes import wintypes
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -139,6 +140,7 @@ def add_revisions(original, output):
 class OfficeEngine(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.component_before = cls.component_inventory()
         base = ROOT / ".zig-cache/office-engine-regression"
         base.mkdir(parents=True, exist_ok=True)
         cls.temporary = tempfile.TemporaryDirectory(prefix="验收 文档 ", dir=base)
@@ -158,7 +160,20 @@ class OfficeEngine(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.temporary.cleanup()
+        try:
+            after = cls.component_inventory()
+            changed = sorted(name for name in cls.component_before.keys() | after.keys()
+                             if cls.component_before.get(name) != after.get(name))
+            if changed:
+                raise AssertionError(f"Immutable component changed during engine workflows: {changed[:8]}")
+        finally:
+            cls.temporary.cleanup()
+
+    @classmethod
+    def component_inventory(cls):
+        return {path.relative_to(COMPONENT).as_posix():
+                (stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns)
+                for path in COMPONENT.rglob("*") for info in [path.lstat()]}
 
     def invoke(self, command, source, output, *options, success=True):
         source = self.root / source

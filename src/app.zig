@@ -800,6 +800,7 @@ test "MCP Application composition imports the startup owner" {
 
 test {
     _ = @import("app/office_component_archive.zig");
+    _ = @import("app/office_process.zig");
     std.testing.refAllDecls(basic_office_skills);
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);

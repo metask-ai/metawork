@@ -5,12 +5,22 @@
 #include <stdio.h>
 #include <wchar.h>
 
-/* Office's process lifetime owns this non-inheritable job handle. Keeping it
+/* Standalone Office calls own this non-inheritable job handle. Keeping it
  * armed until process teardown also covers TerminateProcess on this entrypoint.
  * This is an Office component executable, not a Host process service. */
 static HANDLE office_job;
 static wchar_t command[32768];
 static size_t used;
+
+static int host_job_name(const wchar_t *name) {
+    const wchar_t *prefix = L"Local\\MetaWork.Office.";
+    size_t length = wcslen(prefix);
+    if (wcslen(name) != length + 32 || wcsncmp(name, prefix, length)) return 0;
+    for (size_t i = length; i < length + 32; ++i)
+        if (!((name[i] >= L'0' && name[i] <= L'9') ||
+              (name[i] >= L'a' && name[i] <= L'f'))) return 0;
+    return 1;
+}
 
 static int put(wchar_t value) {
     if (used + 1 >= sizeof(command) / sizeof(command[0])) return 0;
@@ -81,21 +91,44 @@ int wmain(int argc, wchar_t **argv) {
     HeapFree(GetProcessHeap(), 0, search);
     if (!environment_ready) return fail("cannot prepare component DLL path");
 
-    office_job = CreateJobObjectW(NULL, NULL);
-    if (!office_job) return fail("cannot create Office job");
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-    if (!SetInformationJobObject(office_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
-        !AssignProcessToJobObject(office_job, GetCurrentProcess())) {
+    int first_argument = 1;
+    int hosted = argc > 1 && !wcscmp(argv[1], L"--host-job");
+    if (hosted) {
+        if (argc < 4 || !host_job_name(argv[2])) return fail("invalid Host job reference");
+        first_argument = 3;
+        office_job = OpenJobObjectW(JOB_OBJECT_ASSIGN_PROCESS | JOB_OBJECT_QUERY, FALSE, argv[2]);
+        if (!office_job) return fail("Host Office job is unavailable");
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+        if (!QueryInformationJobObject(office_job, JobObjectExtendedLimitInformation,
+                &limits, sizeof(limits), NULL) ||
+            !(limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) ||
+            (limits.BasicLimitInformation.LimitFlags &
+                (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) ||
+            !AssignProcessToJobObject(office_job, GetCurrentProcess())) {
+            CloseHandle(office_job);
+            return fail("cannot join Host Office job");
+        }
+        /* The Host is the lifetime owner. No component process may keep the
+         * job alive after the Host dies. Join before starting any child. */
         CloseHandle(office_job);
-        return fail("cannot own Office process tree");
+        office_job = NULL;
+    } else {
+        office_job = CreateJobObjectW(NULL, NULL);
+        if (!office_job) return fail("cannot create Office job");
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        if (!SetInformationJobObject(office_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
+            !AssignProcessToJobObject(office_job, GetCurrentProcess())) {
+            CloseHandle(office_job);
+            return fail("cannot own Office process tree");
+        }
     }
 
     if (!argument(python) || !argument(L"-I") || !argument(L"-S") || !argument(L"-B") ||
         !argument(L"-X") || !argument(L"utf8") || !argument(script))
         return fail("component command exceeds capacity");
-    for (int i = 1; i < argc; ++i)
+    for (int i = first_argument; i < argc; ++i)
         if (!argument(argv[i])) return fail("Office arguments exceed capacity");
     command[used] = 0;
 
@@ -118,6 +151,9 @@ int wmain(int argc, wchar_t **argv) {
     BOOL exited = GetExitCodeProcess(child.hProcess, &exit_code);
     CloseHandle(child.hProcess);
     if (!exited) return fail("cannot observe component Python exit");
+    /* Hosted calls are joined and checked by Application, which owns the only
+     * long-lived job handle. The standalone Shell path checks its own job. */
+    if (hosted) return (int)exit_code;
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
     ULONGLONG deadline = GetTickCount64() + 2000;
     for (;;) {
