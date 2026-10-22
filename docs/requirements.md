@@ -398,7 +398,7 @@ Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改与文档预览仍须完成各自验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改入口在检查后准备同 Task 普通草稿，由用户手动发送，不代表文档已修改；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

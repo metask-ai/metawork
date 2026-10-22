@@ -900,6 +900,16 @@ export const enUS = {
   "outputs.state.target_changed":
     "The selected destination changed. Choose it again.",
   "outputs.state.cleanup_failed": "Temporary file cleanup was incomplete",
+  "outputs.edit": "Continue editing",
+  "outputs.edit_reference": "Continue editing the Workspace file {path}:",
+  "outputs.state.edit_prepared":
+    "File reference added. Enter your requested changes.",
+  "outputs.state.edit_draft_busy":
+    "Skill draft preserved. Finish the current input first.",
+  "outputs.state.edit_too_long":
+    "The draft is near its limit and was preserved.",
+  "outputs.state.edit_unavailable":
+    "Cannot prepare editing now. Check the file again.",
   "outputs.check": "Check file",
   "outputs.reveal": "Show in folder",
   "outputs.cancel": "Cancel",

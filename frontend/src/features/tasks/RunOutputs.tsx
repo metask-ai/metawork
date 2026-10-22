@@ -10,18 +10,29 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 
+export type OutputEditResult =
+  "edit_prepared" | "edit_draft_busy" | "edit_too_long" | "edit_unavailable";
+export type OutputEditHandler = (
+  taskId: string,
+  runId: string,
+  outputId: string,
+) => OutputEditResult;
+type RowAction = OutputAction | "edit";
+
 export function RunOutputs({
   outputs,
   taskId,
   runId,
   disabled = false,
   onAction,
+  onPrepareEdit,
 }: {
   outputs: readonly DeliveredOutputView[];
   taskId?: string;
   runId?: string;
   disabled?: boolean;
   onAction?: OutputActionHandler;
+  onPrepareEdit?: OutputEditHandler;
 }) {
   const { t } = useI18n();
   if (outputs.length === 0) return null;
@@ -37,6 +48,7 @@ export function RunOutputs({
             runId={runId}
             disabled={disabled}
             onAction={onAction}
+            onPrepareEdit={onPrepareEdit}
           />
         ))}
       </ul>
@@ -50,20 +62,22 @@ function OutputRow({
   runId,
   disabled,
   onAction,
+  onPrepareEdit,
 }: {
   output: DeliveredOutputView;
   taskId?: string;
   runId?: string;
   disabled: boolean;
   onAction?: OutputActionHandler;
+  onPrepareEdit?: OutputEditHandler;
 }) {
   const { locale, t } = useI18n();
   const nameId = useId();
-  const [pending, setPending] = useState<OutputAction | null>(null);
+  const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [state, setState] = useState<OutputActionState | "save_unknown" | null>(
-    null,
-  );
+  const [state, setState] = useState<
+    OutputActionState | "save_unknown" | OutputEditResult | null
+  >(null);
   const active = useRef<AbortController | null>(null);
   useEffect(() => {
     active.current?.abort();
@@ -83,7 +97,7 @@ function OutputRow({
     output.sizeBytes,
     disabled,
   ]);
-  const perform = async (action: OutputAction) => {
+  const perform = async (action: RowAction) => {
     if (
       !onAction ||
       !taskId ||
@@ -103,9 +117,20 @@ function OutputRow({
         taskId,
         runId,
         output.id,
-        action,
+        action === "edit" ? "check" : action,
         controller.signal,
       );
+      if (
+        action === "edit" &&
+        result === "ready" &&
+        !controller.signal.aborted &&
+        active.current === controller
+      ) {
+        setState(
+          onPrepareEdit?.(taskId, runId, output.id) ?? "edit_unavailable",
+        );
+        return;
+      }
       if (active.current === controller)
         setState(
           controller.signal.aborted && action !== "save" ? "cancelled" : result,
@@ -174,6 +199,17 @@ function OutputRow({
             >
               {t("outputs.save")}
             </Button>
+            {onPrepareEdit && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={() => void perform("edit")}
+              >
+                {t("outputs.edit")}
+              </Button>
+            )}
             {pending && (
               <Button
                 variant="ghost"

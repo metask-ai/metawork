@@ -1,3 +1,4 @@
+import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -109,6 +110,7 @@ import {
 import {
   newTaskDraftStorageId,
   prepareRetryDraft,
+  prepareOutputEditDraft,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
 import {
@@ -953,6 +955,16 @@ export default function App() {
   const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
     newTaskDraftActive || Boolean(activeTask?.inputAcceptance.available);
+  const outputEditContext = useRef({
+    task: activeTask,
+    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
+    audience: attachmentAudience.current,
+  });
+  outputEditContext.current = {
+    task: activeTask,
+    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
+    audience: attachmentAudience.current,
+  };
   const taskOperationInFlight = Boolean(
     activeTask?.activeOperation ||
     inputContinuation ||
@@ -2793,6 +2805,50 @@ export default function App() {
     );
   }
 
+  const outputEditAudience = attachmentAudience.current;
+  function prepareOutputEdit(
+    taskId: string,
+    runId: string,
+    outputId: string,
+  ): OutputEditResult {
+    const current = outputEditContext.current;
+    if (
+      current.audience !== outputEditAudience ||
+      !current.allowed ||
+      current.task?.id !== taskId ||
+      composerDraftScopeRef.current !== `task:${taskId}`
+    )
+      return "edit_unavailable";
+    const output = current.task.runs
+      .find((run) => run.id === runId)
+      ?.outputs.find((record) => record.id === outputId);
+    if (!output || output.redacted) return "edit_unavailable";
+    const draft = taskDrafts.currentDraft(taskId);
+    if (!draft) return "edit_unavailable";
+    const prepared = prepareOutputEditDraft(
+      draft,
+      t("outputs.edit_reference", { path: JSON.stringify(output.displayPath) }),
+    );
+    if (prepared.kind === "preserved") return "edit_draft_busy";
+    if (prepared.kind === "too_long") return "edit_too_long";
+    if (!taskDrafts.commitDraft(taskId, prepared.draft))
+      return "edit_unavailable";
+    composerDraftRef.current = prepared.draft;
+    window.requestAnimationFrame(() => {
+      const latest = outputEditContext.current;
+      if (
+        latest.audience === outputEditAudience &&
+        latest.allowed &&
+        latest.task?.id === taskId
+      ) {
+        const input = composer.current;
+        input?.focus();
+        input?.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+    return "edit_prepared";
+  }
+
   function prepareRetry(input: RunInputView) {
     if (!activeTask || !taskCanCompose) return;
     if (input.kind === "skill") {
@@ -4067,6 +4123,11 @@ export default function App() {
                 outputsEnabled={snapshot.capabilities.typedOutputs}
                 onOutputAction={(taskId, runId, outputId, action, signal) =>
                   client.outputAction(taskId, runId, outputId, action, signal)
+                }
+                onPrepareOutputEdit={
+                  taskCanCompose && !newTaskDraftActive
+                    ? prepareOutputEdit
+                    : undefined
                 }
                 onPrepareRetry={prepareRetry}
                 onPreviewFile={openFilePreview}

@@ -204,3 +204,102 @@ test("Save transport failure after cancel does not claim the destination was unt
   );
   assert.equal(screen.queryByText("Operation cancelled"), null);
 });
+
+test("Continue editing waits for the scoped Host check before preparing a draft and never submits", async () => {
+  let complete;
+  const checks = [];
+  const prepared = [];
+  render(
+    view({
+      onAction: async (...args) => {
+        checks.push(args);
+        return new Promise((resolve) => {
+          complete = resolve;
+        });
+      },
+      onPrepareEdit: (...args) => {
+        prepared.push(args);
+        return "edit_prepared";
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  assert.deepEqual(checks[0].slice(0, 4), ["3", "7", output.id, "check"]);
+  assert.deepEqual(prepared, []);
+  complete("ready");
+  await screen.findByText(
+    "File reference added. Enter your requested changes.",
+  );
+  assert.deepEqual(prepared, [["3", "7", output.id]]);
+  assert.equal(checks.length, 1);
+});
+test("Continue editing preserves a conflicting draft and cannot prepare a changed source", async () => {
+  let result = "changed";
+  let preparations = 0;
+  render(
+    view({
+      onAction: async () => result,
+      onPrepareEdit: () => {
+        preparations++;
+        return "edit_draft_busy";
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  await screen.findByText("Changed since delivery");
+  assert.equal(preparations, 0);
+  result = "ready";
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  await screen.findByText(
+    "Skill draft preserved. Finish the current input first.",
+  );
+  assert.equal(preparations, 1);
+});
+test("Continue editing discards a late check after switching Tasks or disabling the source", async () => {
+  let complete;
+  let signal;
+  let preparations = 0;
+  const onAction = async (_t, _r, _o, _a, s) => {
+    signal = s;
+    return new Promise((resolve) => {
+      complete = resolve;
+    });
+  };
+  const onPrepareEdit = () => {
+    preparations++;
+    return "edit_prepared";
+  };
+  const mounted = render(view({ onAction, onPrepareEdit }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
+  assert.equal(signal.aborted, true);
+  complete("ready");
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null));
+  assert.equal(preparations, 0);
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  mounted.rerender(
+    view({ taskId: "4", disabled: true, onAction, onPrepareEdit }),
+  );
+  assert.equal(signal.aborted, true);
+  complete("ready");
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null));
+  assert.equal(preparations, 0);
+  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  mounted.rerender(
+    view({
+      taskId: "4",
+      onAction,
+      onPrepareEdit,
+      outputs: [{ ...output, redacted: true, displayPath: "" }],
+    }),
+  );
+  assert.equal(signal.aborted, true);
+  complete("ready");
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null));
+  assert.equal(preparations, 0);
+  assert.equal(
+    screen.getByRole("button", { name: "Continue editing" }).disabled,
+    true,
+  );
+});

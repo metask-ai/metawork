@@ -221,6 +221,8 @@ function renderCompletedSurface(
     conversationCoverage = "included",
     outputs = [],
     outputsEnabled = false,
+    onOutputAction,
+    onPrepareOutputEdit,
   } = {},
 ) {
   const task = {
@@ -299,6 +301,8 @@ function renderCompletedSurface(
         responseDisabled: false,
         fileChangesEnabled: false,
         outputsEnabled,
+        onOutputAction,
+        onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
@@ -1281,4 +1285,32 @@ test("Task shows only explicit delivered Output records and hides redacted paths
   });
   assert.match(hidden, /File path hidden/);
   assert.doesNotMatch(hidden, /年度报告|results\//);
+});
+
+test("Task passes the continue-edit action to its delivered files only when preparation is available", () => {
+  const options = {
+    outputs: [
+      {
+        id: "01".repeat(16),
+        displayPath: "results/report.docx",
+        sizeBytes: "42",
+        redacted: false,
+      },
+    ],
+    outputsEnabled: true,
+    onOutputAction: async () => "ready",
+  };
+  const withoutPreparation = renderCompletedSurface(
+    "Done",
+    undefined,
+    [],
+    options,
+  );
+  assert.match(withoutPreparation, />Check file</);
+  assert.doesNotMatch(withoutPreparation, />Continue editing</);
+  const available = renderCompletedSurface("Done", undefined, [], {
+    ...options,
+    onPrepareOutputEdit: () => "edit_prepared",
+  });
+  assert.match(available, />Continue editing</);
 });
