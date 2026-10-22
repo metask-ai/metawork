@@ -19,6 +19,16 @@ Conversions accept a new output path and never overwrite it. A nonzero exit, mis
 
 Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
 
+## Explicit file delivery
+
+Validate and reopen the PPTX, verify slide order, notes and requested changes, and inspect the rendered slides for overflow and clipping. State any checks you could not perform. Host file verification does not establish document quality.
+
+After checking the final file, call the Host tool `DeliverFile` with arguments `{"path":"results/presentation.pptx"}`, using the actual Task Workspace-relative path with forward slashes. This is a tool call, not a Shell command or text to print. Submit only the finished files requested by the user; keep unpacked XML, scripts, temporary files and preview images as working material unless explicitly requested.
+
+Observe the actual tool result. `verified_for_delivery` confirms the Host checked the bytes and issued a receipt; the Task Outputs record determines registration. If the tool is unavailable or fails, report that delivery was not confirmed. A Markdown path or Shell output cannot register an Output. Describe the changes and any remaining limitations after the real result.
+
+Do not change a file after submitting it; finish further edits and checks before submitting the new result. A read-only analysis can end with a conversational answer and does not require a new file.
+
 ## Quick Reference
 
 | Task | Guide |

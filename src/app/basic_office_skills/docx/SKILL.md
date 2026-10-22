@@ -16,5 +16,6 @@ When working with a prepared component:
 - Preserve styles, numbering, relationships and section properties. Keep revision acceptance separate from merely hiding revision marks.
 - Validate the package and inspect every rendered page, including table breaks, Chinese text, images and page numbering. State any unsupported features or unverified layout.
 - Deliver the actual checked output file and describe its changes. Do not present a Markdown draft or a renamed file as a generated DOCX.
+- After the final file is checked, follow the complete Skill to call the Host tool `DeliverFile` with its Workspace-relative path. Observe the actual result; a Markdown path is not a registered Output, and Host byte verification is not a document quality check. Without the prepared component, continue to provide guidance rather than claiming a file was produced or delivered.
 
 Legacy .doc, macros, encrypted documents and perfect fidelity of complex layouts are outside this workflow's initial scope.

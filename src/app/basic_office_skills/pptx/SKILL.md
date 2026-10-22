@@ -17,5 +17,6 @@ When working with a prepared component:
 - Preserve relationships, image aspect ratios and editable structure as the task requires. Avoid accidental loss of notes or hidden slides.
 - Validate the package and render every slide, including hidden slides when checking completeness. Inspect text overflow, clipping, alignment, contrast, charts and Chinese glyphs; do not infer visual correctness from XML validation alone.
 - Deliver the actual checked presentation and explain changes and limitations. Markdown slide text or exported images alone are not an editable PPTX.
+- After the final file is checked, follow the complete Skill to call the Host tool `DeliverFile` with its Workspace-relative path. Observe the actual result; a Markdown path is not a registered Output, and Host byte verification is not a document quality check. Without the prepared component, continue to provide guidance rather than claiming a file was produced or delivered.
 
 Legacy .ppt, macros, encrypted presentations and perfect fidelity of complex layouts are outside this workflow's initial scope.

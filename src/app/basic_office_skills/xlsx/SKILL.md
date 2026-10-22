@@ -17,5 +17,6 @@ When working with a prepared component:
 - Recalculate through the component's sole engine. Check both formula expressions and resulting caches; preserving a formula string does not prove its value is current. Report unsupported formulas or calculation errors.
 - Check totals and representative edge cases independently, then inspect layout, charts, labels and print pages where relevant.
 - Deliver the actual checked workbook and explain changes, data sources and remaining limitations. Plain CSV is a separate text format and does not preserve workbook formulas, styles or multiple sheets.
+- After the final file is checked, follow the complete Skill to call the Host tool `DeliverFile` with its Workspace-relative path. Observe the actual result; a Markdown path is not a registered Output, and Host byte verification is not a document quality check. Without the prepared component, continue to provide guidance rather than claiming a file was produced or delivered.
 
 Legacy .xls, macros, encrypted workbooks and perfect fidelity of complex layouts are outside this workflow's initial scope.
