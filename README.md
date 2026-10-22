@@ -39,7 +39,7 @@ npm run dev
 
 ### 本地开发 Office Skills
 
-Windows 开发态显式选择准备好的独立 Office 组件后，`npm run dev` 才加载其中的 Word、Excel 和 PowerPoint Skills；普通开发启动不下载 Office 依赖，也不改写 Task 的解释器环境：
+Windows 默认提供 Word、Excel 和 PowerPoint 的轻量基础 Skills，包含工作方法和环境准备说明。实际执行需要独立 Office 组件；开发态显式选择准备好的组件后，`npm run dev` 使用其中的完整指引和资源。普通启动不下载 Office 依赖，也不改写 Task 的解释器环境：
 
 ```bash
 npm run office:setup -- --component /absolute/path/to/prepared-office-component

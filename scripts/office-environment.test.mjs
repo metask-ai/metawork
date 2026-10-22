@@ -46,7 +46,7 @@ function fixture(t) {
   return { root, filename, config };
 }
 
-test("unprepared Office preserves environment and exposes no placeholder builtins", (t) => {
+test("unprepared Office leaves the Application default basic Skill source intact", (t) => {
   const { root } = fixture(t);
   const inherited = {
     PATH: "ambient",

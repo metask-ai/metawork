@@ -40,7 +40,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
 
-编译安装器前，runtime stage 必须通过主包资源检查，不得混入 Office Skill、Python、Node 或 Office 引擎等独立组件资源。最终安装器完成签名及身份检查后，还必须通过对应 target 的主包体积检查；超限或缺少有效基线均使 package 失败。基线安装器身份、摘要、实际字节和允许增量由 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 唯一拥有，检查完整安装器，不以单个 executable 或源码目录大小代替。Office 组件与主包分别计量，不得通过把重依赖放进低压缩率或高压缩率资源来规避主包边界。
+编译安装器前，runtime stage 必须通过主包资源检查，不得混入完整 Office Skill 资源树、Python、Node 或 Office 引擎等独立组件资源。[产品需求](requirements.md#53-task)规定的基础 Skill 只有随程序编译的有界方法文本，不含脚本、校验 schema 或重依赖；Application 在本地数据目录按内容版本发布，不覆盖已有版本。最终安装器完成签名及身份检查后，还必须通过对应 target 的主包体积检查；超限或缺少有效基线均使 package 失败。基线安装器身份、摘要、实际字节和允许增量由 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 唯一拥有，检查完整安装器，不以单个 executable 或源码目录大小代替。Office 组件与主包分别计量，不得通过把重依赖放进低压缩率或高压缩率资源来规避主包边界。
 
 交互式安装验收还必须覆盖两条路径：拒绝关闭正在运行的旧 Host 时安装取消且旧 Host 保持运行；允许关闭时旧 Host 完全退出后才安装新文件，安装完成后不自动重启应用。
 

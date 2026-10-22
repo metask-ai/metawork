@@ -138,9 +138,15 @@ appEnvironment.PATH =
       ].join(path.delimiter)
     : "/usr/bin:/bin";
 
-const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
-  ? ["docx", "pptx", "xlsx"]
-  : [];
+const builtinSkillNames =
+  process.platform === "win32" || process.env.METAWORK_LOCAL_SKILL_ROOT
+    ? ["docx", "pptx", "xlsx"]
+    : [];
+const basicOfficeOnly = process.env.METAWORK_BASIC_OFFICE_ONLY === "1";
+if (basicOfficeOnly) {
+  assert.equal(process.platform, "win32");
+  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
+}
 const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
@@ -568,8 +574,8 @@ desktopVertical: try {
       "Workspace Skill catalog",
     );
   let catalogSnapshot = await readCatalog();
-  if (process.env.METAWORK_LOCAL_SKILL_ROOT) {
-    for (const name of ["docx", "xlsx", "pptx"]) {
+  if (builtinSkillNames.length > 0) {
+    for (const name of builtinSkillNames) {
       const office = catalogSnapshot.catalog.skills.find(
         (item) => item.invocationName === name,
       );
@@ -578,8 +584,15 @@ desktopVertical: try {
       assert.equal(office.enabled, true);
     }
     process.stdout.write(
-      "Local Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
+      "Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
     );
+  }
+  if (basicOfficeOnly) {
+    await stopApplication("basic Office catalog verification complete");
+    process.stdout.write(
+      "Basic Office desktop catalog passed without a selected Office environment.\n",
+    );
+    break desktopVertical;
   }
   if (
     !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||

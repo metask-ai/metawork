@@ -27,6 +27,7 @@ const mcp_bridge_adapter = @import("app/mcp_bridge_adapter.zig");
 const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
+const basic_office_skills = @import("app/basic_office_skills.zig");
 const app_platform = @import("app/platform.zig");
 const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
@@ -472,11 +473,6 @@ pub fn run(init: std.process.Init) !void {
     });
     defer app.platform.deinit();
     defer app.automation.deinit();
-    const builtin_skill_root = if (product_identity.artifact_kind != .release) root: {
-        const root = init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT") orelse break :root null;
-        break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, root, std.heap.c_allocator);
-    } else null;
-    defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
         const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
@@ -517,6 +513,17 @@ pub fn run(init: std.process.Init) !void {
         app.single_instance = null;
         single_instance_state.deinit();
     }
+
+    const builtin_skill_root: ?[]u8 = root: {
+        if (product_identity.artifact_kind != .release) {
+            if (init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT")) |configured|
+                break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, configured, std.heap.c_allocator);
+        }
+        if (@import("builtin").os.tag == .windows)
+            break :root try basic_office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir());
+        break :root null;
+    };
+    defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
 
     const frontend_asset_root = if (init.environ_map.get(frontend.url_env) == null)
         try frontend.resolveAssetRoot(init.io, std.heap.c_allocator)
@@ -793,6 +800,7 @@ test "MCP Application composition imports the startup owner" {
 
 test {
     _ = @import("app/office_component_archive.zig");
+    std.testing.refAllDecls(basic_office_skills);
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(models_automation_vault);
