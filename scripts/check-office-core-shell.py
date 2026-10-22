@@ -51,6 +51,9 @@ kernel.WaitForSingleObject.restype = wintypes.DWORD
 kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
 kernel.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+kernel.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel.OpenJobObjectW.restype = wintypes.HANDLE
+kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
 
 
 def descendants(parent):
@@ -125,6 +128,12 @@ def rejected_scopes(scratch, resource_root):
                                 cwd=scratch, capture_output=True, timeout=5)
         assert result.returncode != 0 and not marker.exists(), "case-alias"
         variants["case-alias"] = None
+        (scratch / "host.scope").write_bytes(valid)
+        result = subprocess.run([str(resource_root / "bin/office.exe"), "python", "-c",
+                                 "from pathlib import Path;Path(" + repr(str(marker)) + ").write_text('executed')"],
+                                cwd=scratch, capture_output=True, timeout=5)
+        assert result.returncode != 0 and not marker.exists(), "missing-version-owner"
+        variants["missing-version-owner"] = None
         print(json.dumps({"scenario": "invalid-host-scopes", "result": "passed", "cases": list(variants)}), flush=True)
     finally:
         sibling.kill()
@@ -231,9 +240,11 @@ def qualify(executable, environment, scratch, resource_root, mode):
     script = "& " + " ".join("'" + value.replace("'", "''") + "'" for value in arguments)
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     Provider.tool_command = "powershell -NoProfile -NonInteractive -EncodedCommand " + encoded
-    host = subprocess.Popen([str(executable)], cwd=scratch, env=environment,
+    operation_environment = dict(environment, METAWORK_OFFICE_CORE_INSTALL_ID=resource_root.name)
+    host = subprocess.Popen([str(executable)], cwd=scratch, env=operation_environment,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     handles = []
+    control_child = None
     try:
         scope = scope_record(host.pid)
         deadline = time.monotonic() + 10
@@ -266,6 +277,21 @@ def qualify(executable, environment, scratch, resource_root, mode):
         if mode == "abort":
             host.stdin.write(b"a")
             host.stdin.flush()
+        elif mode == "retire":
+            # Positive control in the same job hierarchy: assignment succeeds
+            # before sealing, so the later refusal observes the changed limit.
+            job = kernel.OpenJobObjectW(1, False, "Local\\MetaWork.Office.Version." + resource_root.name)
+            assert job
+            control_child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
+            handle = kernel.OpenProcess(0x100000 | 0x1000 | 0x0101, False, control_child.pid)
+            assert handle
+            handles.append(("assignment-control-python.exe", handle))
+            try:
+                assert kernel.AssignProcessToJobObject(job, handle) != 0
+            finally:
+                kernel.CloseHandle(job)
+            host.stdin.write(b"q")
+            host.stdin.flush()
         else:
             host.kill()
         deadline = time.monotonic() + 8
@@ -275,6 +301,44 @@ def qualify(executable, environment, scratch, resource_root, mode):
             time.sleep(.01)
         alive = [name for name, handle in handles if kernel.WaitForSingleObject(handle, 0) != 0]
         assert not alive, f"{mode}: physical process handles still running: {alive}"
+        if mode == "retire":
+            deadline = time.monotonic() + 8
+            while not (scratch / "version.sealed").exists() and time.monotonic() < deadline:
+                assert host.poll() is None
+                time.sleep(.01)
+            assert (scratch / "version.sealed").exists()
+            # A valid new caller still cannot enter the sealed version while
+            # reclamation holds its reservation. No model or source pin is used.
+            (scratch / "host.scope").write_bytes(scope_record(os.getpid()))
+            marker = scratch / "sealed-must-not-execute"
+            result = subprocess.run([str(resource_root / "bin/office.exe"), "python", "-c",
+                                     "from pathlib import Path;Path(" + repr(str(marker)) + ").write_text('executed')"],
+                                    cwd=scratch, capture_output=True, timeout=5)
+            assert result.returncode != 0 and not marker.exists()
+            # Check the kernel limit as well as the launcher's preflight: a
+            # caller that read the old limits before sealing still cannot join.
+            job = kernel.OpenJobObjectW(1, False, "Local\\MetaWork.Office.Version." + resource_root.name)
+            assert job
+            outsider = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(20)"])
+            outsider_handle = kernel.OpenProcess(0x100000 | 0x1000 | 0x0101, False, outsider.pid)
+            assert outsider_handle
+            try:
+                assert kernel.AssignProcessToJobObject(job, outsider_handle) == 0
+            finally:
+                kernel.CloseHandle(outsider_handle)
+                kernel.CloseHandle(job)
+                if outsider.poll() is None:
+                    outsider.kill()
+                outsider.wait(timeout=5)
+            entry = resource_root / "bin/office.exe"
+            retired_entry = resource_root / "bin/office.retired.exe"
+            assert resource_root.resolve().is_relative_to(scratch.resolve())
+            entry.rename(retired_entry)
+            retired_entry.rename(entry)
+            host.stdin.write(b"x")
+            host.stdin.flush()
+            host.wait(timeout=10)
+            assert host.returncode == 0
         if mode == "abort":
             host.wait(timeout=10)
             assert host.returncode == 0, host.stderr.read().decode(errors="replace")
@@ -295,6 +359,10 @@ def qualify(executable, environment, scratch, resource_root, mode):
                 kernel.WaitForSingleObject(handle, 5000)
             kernel.CloseHandle(handle)
         stdout, stderr = host.communicate(timeout=10)
+        if control_child is not None:
+            if control_child.poll() is None:
+                control_child.kill()
+            control_child.wait(timeout=5)
         if stderr:
             print(stderr.decode(errors="replace"), file=sys.stderr, flush=True)
 
@@ -322,7 +390,7 @@ try:
         links.append(link)
     rejected_scopes(scratch, resource_root)
     failures = []
-    for scenario in ("abort", "host-hard-kill"):
+    for scenario in ("abort", "host-hard-kill", "retire"):
         try:
             qualify(executable, environment, scratch, resource_root, scenario)
         except Exception as failure:

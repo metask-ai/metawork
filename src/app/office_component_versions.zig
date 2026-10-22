@@ -4,6 +4,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const component = @import("office_component_store.zig");
+const process = @import("office_process");
 
 pub const Version = struct {
     record: component.Record,
@@ -12,6 +13,7 @@ pub const Version = struct {
     references: std.atomic.Value(usize) = .init(1),
     retired: bool = false,
     removing: bool = false,
+    scope: ?process.ResourceScope = null,
 
     pub fn lifetime(self: *Version) agent.CatalogSourceLifetime {
         return .{ .context = self, .retain_fn = retain, .release_fn = release };
@@ -83,6 +85,8 @@ pub const Registry = struct {
     /// release identity. Merely finding a directory is never installation proof.
     pub fn trackValidated(self: *Registry, record: component.Record) !*Version {
         var slot: ?usize = null;
+        var scope: ?process.ResourceScope = null;
+        errdefer if (scope) |*owned| owned.deinit();
         for (&self.entries, 0..) |*entry, index| {
             if (entry.*) |version| {
                 if (!version.record.sameDirectory(record)) continue;
@@ -96,6 +100,12 @@ pub const Registry = struct {
                     version.retired = false;
                     return version;
                 }
+                scope = version.scope;
+                version.scope = null;
+                if (scope) |*owned| if (owned.sealed) {
+                    owned.deinit();
+                    scope = null;
+                };
                 self.destroy(version);
                 entry.* = null;
                 slot = index;
@@ -107,7 +117,10 @@ pub const Registry = struct {
         const skill_root = try std.fs.path.join(self.allocator, &.{ directory, "skills" });
         errdefer self.allocator.free(skill_root);
         const version = try self.allocator.create(Version);
-        version.* = .{ .record = record, .directory = directory, .skill_root = skill_root };
+        errdefer self.allocator.destroy(version);
+        if (scope == null and @import("builtin").os.tag == .windows) scope = try process.ResourceScope.initVersion(record.install_id);
+        version.* = .{ .record = record, .directory = directory, .skill_root = skill_root, .scope = scope };
+        scope = null;
         self.entries[index] = version;
         return version;
     }
@@ -206,6 +219,7 @@ pub const Registry = struct {
     }
 
     fn destroy(self: *Registry, version: *Version) void {
+        if (version.scope) |*scope| scope.deinit();
         self.allocator.free(version.skill_root);
         self.allocator.free(version.directory);
         self.allocator.destroy(version);
@@ -217,6 +231,7 @@ pub const Registry = struct {
 fn fixtureCollect(registry: *Registry) !usize {
     var removed: usize = 0;
     while (registry.claimRetired()) |version| {
+        if (version.scope) |*scope| try scope.settle(std.testing.io);
         registry.store.removeRetired(version.record) catch |failure| {
             registry.finishRemoval(version, .failed);
             return failure;
@@ -228,7 +243,9 @@ fn fixtureCollect(registry: *Registry) !usize {
 }
 
 fn fixtureVersion(store: *component.Store, identity: u8) !component.Record {
-    const record: component.Record = .{ .install_id = @splat(identity), .archive_sha256 = @splat(7) };
+    var record: component.Record = .{ .install_id = undefined, .archive_sha256 = @splat(7) };
+    try std.Io.randomSecure(std.testing.io, &record.install_id);
+    record.install_id[0] = identity;
     var name: [32]u8 = undefined;
     try store.versions.createDirPath(std.testing.io, record.versionName(&name));
     const directory = try store.versions.openDir(std.testing.io, &name, .{});
@@ -359,6 +376,25 @@ test "retired component cleanup never deletes canonical current and shutdown ref
     try std.testing.expect(registry.cleanupPending());
     try store.directory.deleteFile(std.testing.io, "current.json");
     try std.testing.expectEqual(@as(usize, 1), try fixtureCollect(&registry));
+}
+
+test "fresh validation never republishes a sealed execution scope" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try component.Store.open(std.testing.allocator, std.testing.io, root);
+    defer store.deinit();
+    var registry: Registry = .{ .allocator = std.testing.allocator, .store = &store };
+    defer registry.deinit() catch unreachable;
+    const record = try fixtureVersion(&store, 17);
+    const original = try registry.trackValidated(record);
+    registry.discardCandidate(original);
+    try original.scope.?.settle(std.testing.io);
+    const validated = try registry.trackValidated(record);
+    try std.testing.expect(!validated.scope.?.sealed);
+    registry.activate(validated);
 }
 
 test "concurrent component consumers release without callback cleanup or zero-count resurrection" {

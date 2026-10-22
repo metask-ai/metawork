@@ -36,6 +36,12 @@ fn require(status: u32, diagnostic: wire.OwnedBytesV1) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    const identity_text = init.environ_map.get("METAWORK_OFFICE_CORE_INSTALL_ID") orelse return error.MissingFixtureIdentity;
+    if (identity_text.len != 32) return error.InvalidFixtureIdentity;
+    var identity: [16]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&identity, identity_text);
+    var version = try office.ResourceScope.initVersion(identity);
+    defer version.deinit();
     const scope = try office.hostScope();
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = "host.scope", .data = &scope });
     const api = try core.Api.discover();
@@ -84,6 +90,16 @@ pub fn main(init: std.process.Init) !void {
         thread.join();
     };
     try input.interface.readSliceAll(&command);
+    if (command[0] == 'q') {
+        try version.settle(init.io);
+        thread.join();
+        joined = true;
+        if (run.status != wire.STATUS_OK) return error.OfficeRunFailed;
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = "version.sealed", .data = "quiet" });
+        try input.interface.readSliceAll(&command);
+        if (command[0] != 'x') return error.InvalidQualificationCommand;
+        return;
+    }
     if (command[0] != 'a') return error.InvalidQualificationCommand;
     // An abort call can overlap run_input under the public ABI. Join before any
     // later Session call, including destroy, as the contract requires.

@@ -13,9 +13,62 @@ pub fn hostScope() ![24]u8 {
     return windows.hostScope();
 }
 
+/// Office's installed-version or pending-operation kernel lifetime. Catalog bookkeeping owns the sole
+/// long-lived handle; the component joins and closes its temporary handle before
+/// creating children. A sealed deletion reservation rejects new executions.
+pub const ResourceScope = struct {
+    job: if (builtin.os.tag == .windows) windows.Job else void,
+    sealed: bool = false,
+
+    pub fn initVersion(identity: [16]u8) !ResourceScope {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        return .{ .job = try windows.Job.version(identity, false) };
+    }
+
+    pub fn initOperation(identity: [16]u8) !ResourceScope {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        return .{ .job = try windows.Job.operation(identity, false) };
+    }
+
+    pub fn reserveVersionDeletion(io: std.Io, identity: [16]u8, cancellation: *const Cancellation) !ResourceScope {
+        return reserve(io, identity, cancellation, false);
+    }
+
+    pub fn reserveOperationDeletion(io: std.Io, identity: [16]u8, cancellation: *const Cancellation) !ResourceScope {
+        return reserve(io, identity, cancellation, true);
+    }
+
+    fn reserve(io: std.Io, identity: [16]u8, cancellation: *const Cancellation, operation: bool) !ResourceScope {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        const start: std.Io.Timestamp = .now(io, .awake);
+        while (true) {
+            if (cancellation.requested.load(.acquire)) return error.Cancelled;
+            const job = (if (operation) windows.Job.operation(identity, true) else windows.Job.version(identity, true)) catch |failure| {
+                if (failure != error.JobInUse) return failure;
+                if (start.durationTo(.now(io, .awake)).toMilliseconds() >= 5000) return error.ComponentProcessesOutstanding;
+                try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }, io);
+                continue;
+            };
+            return .{ .job = job, .sealed = true };
+        }
+    }
+
+    pub fn settle(self: *ResourceScope, io: std.Io) !void {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        try self.job.seal();
+        self.sealed = true;
+        try self.job.terminateAndWait(io);
+    }
+
+    pub fn deinit(self: *ResourceScope) void {
+        if (builtin.os.tag == .windows) self.job.deinit();
+    }
+};
+
 pub const Context = struct {
     parent_environment: *const std.process.Environ.Map,
     scratch_root: []const u8,
+    operation_identity: ?[16]u8 = null,
 };
 
 pub const Command = union(enum) {
@@ -66,7 +119,7 @@ pub fn run(
     try environment.put("TMP", context.scratch_root);
     try environment.put("TEMP", context.scratch_root);
     try environment.put("TMPDIR", context.scratch_root);
-    var job = try windows.Job.init(io);
+    var job = if (context.operation_identity) |identity| try windows.Job.operation(identity, false) else try windows.Job.init(io);
     defer job.deinit();
     const entry = try std.fs.path.join(allocator, &.{ component_root, "bin", "office.exe" });
     defer allocator.free(entry);

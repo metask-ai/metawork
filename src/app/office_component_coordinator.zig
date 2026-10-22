@@ -230,6 +230,7 @@ const Work = struct {
         if (self.kind == .cleanup) {
             for (self.collection.records[0..self.collection.count], 0..) |record, index| {
                 if (!observe(self, .{ .phase = .cleaning })) return error.Cancelled;
+                if (self.collection.targets[index].scope) |*scope| scope.settle(self.io) catch return error.ComponentProcessesOutstanding;
                 self.store.removeRetired(record) catch |failure| {
                     if (failure == error.ComponentStillCurrent) {
                         self.collection.results[index] = .still_current;
@@ -239,7 +240,7 @@ const Work = struct {
                 };
                 self.collection.results[index] = .removed;
             }
-            const pending = try self.store.cleanupRetired(self.collection.protected[0..self.collection.protected_count], observer, &self.cancellation);
+            const pending = try self.store.cleanupRetired(self.collection.protected[0..self.collection.protected_count], observer, &self.cancellation, .{ .context = self, .remove_fn = removeCold });
             return .{ .completion = .{ .current = self.before.current, .health = .ready, .cleanup_pending = pending, .outcome = .succeeded } };
         }
         if (self.kind == .remove) {
@@ -262,6 +263,13 @@ const Work = struct {
         const release = (try self.input.release()) orelse return error.ComponentNotPublished;
         const receipt = try self.store.install(release, self.source, self.validation, observer, &self.cancellation);
         return .{ .completion = .{ .current = .{ .identity = receipt.record.archive_sha256, .state = .ready }, .health = .ready, .cleanup_pending = receipt.cleanup_pending, .outcome = .succeeded, .committed = true }, .record = receipt.record, .source = .verified };
+    }
+
+    fn removeCold(context: ?*anyopaque, store: *store_impl.Store, record: store_impl.Record) !void {
+        const self: *Work = @ptrCast(@alignCast(context.?));
+        var reservation = try process.ResourceScope.reserveVersionDeletion(self.io, record.install_id, &self.cancellation);
+        defer reservation.deinit();
+        try store.removeRetired(record);
     }
 
     fn failed(self: *Work, failure: anyerror) Result {
@@ -558,4 +566,61 @@ test "Office update and removal keep catalog-pinned versions until the independe
     try std.testing.expect(!coordinator.registry.cleanupPending());
     try std.testing.expectError(error.FileNotFound, coordinator.store.versions.statFile(std.testing.io, &old_name, .{}));
     try std.testing.expectEqual(@as(usize, 0), (try coordinator.store.retirements()).count);
+}
+
+test "cold Office cleanup preserves its intent while a version job is unresolved and succeeds after restart" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var effects: TestEffects = .{};
+    var retired: store_impl.Record = undefined;
+    // Keep an old version through update, then simulate process exit without
+    // replaying or persisting any of its catalog references.
+    {
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        defer coordinator.destroy() catch unreachable;
+        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+        var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
+        defer coordinator.shutdown(product.port());
+        _ = coordinator.begin(product.port(), .check, product.state.generation);
+        try testDrain(coordinator, product.port());
+        _ = coordinator.begin(product.port(), .install, product.state.generation);
+        try testDrain(coordinator, product.port());
+        retired = coordinator.registry.current.?.record;
+        var pin = try coordinator.registry.current.?.pin();
+        defer pin.deinit();
+        _ = coordinator.begin(product.port(), .repair, product.state.generation);
+        try testDrain(coordinator, product.port());
+        try std.testing.expect(product.state.cleanup_pending);
+    }
+    // Even an empty job with an outstanding owner must not be adopted or taken
+    // as proof of quiescence by a cold worker. It keeps both bytes and intent.
+    var unresolved = try process.ResourceScope.initVersion(retired.install_id);
+    defer unresolved.deinit();
+    for ([_]bool{ true, false }) |blocked| {
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        defer coordinator.destroy() catch unreachable;
+        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+        var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
+        defer coordinator.shutdown(product.port());
+        _ = coordinator.begin(product.port(), .check, product.state.generation);
+        try testDrain(coordinator, product.port());
+        var name: [32]u8 = undefined;
+        if (blocked) {
+            try std.testing.expectEqual(model.Health.restart_required, product.state.health);
+            try std.testing.expect(product.state.cleanup_pending);
+            try std.testing.expectEqual(@as(usize, 1), (try coordinator.store.retirements()).count);
+            _ = try coordinator.store.versions.statFile(std.testing.io, retired.versionName(&name), .{});
+            unresolved.deinit();
+        } else {
+            try std.testing.expectEqual(model.Health.ready, product.state.health);
+            try std.testing.expect(!product.state.cleanup_pending);
+            try std.testing.expectEqual(@as(usize, 0), (try coordinator.store.retirements()).count);
+            try std.testing.expectError(error.FileNotFound, coordinator.store.versions.statFile(std.testing.io, retired.versionName(&name), .{}));
+        }
+    }
 }

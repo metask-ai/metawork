@@ -16,6 +16,7 @@ static wchar_t command[32768];
 static size_t used;
 static HANDLE scope[32];
 static DWORD scope_count;
+static wchar_t version_job_name[64];
 
 /* Installed resources bind to the Primary Host that published their Skill
  * source. This is process identity, never a Task/Session/version reference.
@@ -33,6 +34,12 @@ static int bind_shell_scope(const wchar_t *component) {
     *version = 0;
     wchar_t *versions = wcsrchr(path, L'\\');
     if (!versions || _wcsicmp(versions + 1, L"versions")) return 1;
+    wchar_t identity[33];
+    const wchar_t *id = wcsrchr(component, L'\\') + 1;
+    for (size_t i = 0; i < 32; ++i)
+        identity[i] = id[i] >= L'A' && id[i] <= L'F' ? id[i] + (L'a' - L'A') : id[i];
+    identity[32] = 0;
+    if (swprintf(version_job_name, 64, L"Local\\MetaWork.Office.Version.%ls", identity) < 0) return 0;
     wmemcpy(versions + 1, L"host.scope", 11);
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -91,6 +98,11 @@ static int bind_shell_scope(const wchar_t *component) {
 static int host_job_name(const wchar_t *name) {
     const wchar_t *prefix = L"Local\\MetaWork.Office.";
     size_t length = wcslen(prefix);
+    const wchar_t *operation = L"Local\\MetaWork.Office.Op.";
+    if (!wcsncmp(name, operation, wcslen(operation))) {
+        prefix = operation;
+        length = wcslen(prefix);
+    }
     if (wcslen(name) != length + 32 || wcsncmp(name, prefix, length)) return 0;
     for (size_t i = length; i < length + 32; ++i)
         if (!((name[i] >= L'0' && name[i] <= L'9') ||
@@ -179,7 +191,7 @@ int wmain(int argc, wchar_t **argv) {
                 &limits, sizeof(limits), NULL) ||
             !(limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) ||
             (limits.BasicLimitInformation.LimitFlags &
-                (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) ||
+                (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) ||
             !AssignProcessToJobObject(office_job, GetCurrentProcess())) {
             CloseHandle(office_job);
             return fail("cannot join Host Office job");
@@ -190,6 +202,19 @@ int wmain(int argc, wchar_t **argv) {
         office_job = NULL;
     } else {
         if (!bind_shell_scope(root)) return fail("Office Shell scope is unavailable");
+        if (version_job_name[0]) {
+            HANDLE version_job = OpenJobObjectW(JOB_OBJECT_ASSIGN_PROCESS | JOB_OBJECT_QUERY, FALSE, version_job_name);
+            if (!version_job) return fail("Office version is not active");
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION version_limits = {0};
+            int joined = QueryInformationJobObject(version_job, JobObjectExtendedLimitInformation,
+                    &version_limits, sizeof(version_limits), NULL) &&
+                (version_limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) &&
+                !(version_limits.BasicLimitInformation.LimitFlags & (JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
+                    JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)) &&
+                AssignProcessToJobObject(version_job, GetCurrentProcess());
+            CloseHandle(version_job);
+            if (!joined) return fail("Office version is closing");
+        }
         office_job = CreateJobObjectW(NULL, NULL);
         if (!office_job) return fail("cannot create Office job");
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};

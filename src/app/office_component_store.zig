@@ -34,6 +34,7 @@ pub const ValidationResult = enum { ready, rejected, cleanup_incomplete };
 pub const Validation = struct {
     context: ?*anyopaque = null,
     parent_environment: ?*const std.process.Environ.Map = null,
+    operation_identity: ?[16]u8 = null,
     available_fn: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror!u64 = available,
     test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, Identity, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
 
@@ -44,8 +45,8 @@ pub const Validation = struct {
     fn testComponent(self: Validation, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
         if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, identity, path, scratch, cancellation);
         const environment = self.parent_environment orelse return .rejected;
-        verifyRuntime(allocator, io, path, scratch, environment, cancellation) catch |failure| return switch (failure) {
-            error.JobTerminationFailed, error.JobObservationFailed, error.JobDidNotSettle => .cleanup_incomplete,
+        verifyRuntime(allocator, io, path, scratch, environment, self.operation_identity, cancellation) catch |failure| return switch (failure) {
+            error.JobInUse, error.JobTerminationFailed, error.JobObservationFailed, error.JobDidNotSettle => .cleanup_incomplete,
             else => .rejected,
         };
         return .ready;
@@ -83,6 +84,10 @@ pub const Record = struct {
     }
 };
 pub const Receipt = struct { record: Record, cleanup_pending: bool };
+pub const RetiredRemoval = struct {
+    context: ?*anyopaque,
+    remove_fn: *const fn (?*anyopaque, *Store, Record) anyerror!void,
+};
 pub const Retirements = struct {
     pub const capacity = 128;
     records: [capacity]Record = undefined,
@@ -207,7 +212,7 @@ pub const Store = struct {
     /// protects all live registry entries, including ones being separately
     /// collected by this operation. Cold cleanup has an empty snapshot only
     /// after acquiring Primary authority and proving process quiescence.
-    pub fn cleanupRetired(self: *Store, protected: []const Record, observer: Observer, cancellation: *const process.Cancellation) !bool {
+    pub fn cleanupRetired(self: *Store, protected: []const Record, observer: Observer, cancellation: *const process.Cancellation, removal: RetiredRemoval) !bool {
         const records = try self.retirements();
         const active = try self.current();
         for (records.slice()) |record| {
@@ -226,7 +231,7 @@ pub const Store = struct {
                 pinned = true;
                 break;
             };
-            if (!pinned) try self.removeRetired(record);
+            if (!pinned) try removal.remove_fn(removal.context, self, record);
         }
         return self.hasRetired();
     }
@@ -265,6 +270,9 @@ pub const Store = struct {
         try self.deleteKnownFile("retired.next");
         try self.deleteKnownFile("retired.json");
         if (try self.readRecord("pending.json")) |pending| {
+            const cancellation: process.Cancellation = .{};
+            var reservation = try process.ResourceScope.reserveOperationDeletion(self.io, pending.install_id, &cancellation);
+            defer reservation.deinit();
             if (committed) |value| if (value.sameDirectory(pending) and !value.eql(pending)) return error.ComponentStoreCorrupt;
             const adopted = if (committed) |value| value.eql(pending) else false;
             if (!adopted) {
@@ -338,7 +346,9 @@ pub const Store = struct {
         const stage_name = std.fmt.bytesToHex(temporary.install_id, .lower);
         var owned = false;
         var preserve = false;
-        const result = self.testCurrent(identity, record, validation, observer, cancellation, &stage_name, &owned, &preserve, before);
+        var scoped = validation;
+        scoped.operation_identity = temporary.install_id;
+        const result = self.testCurrent(identity, record, scoped, observer, cancellation, &stage_name, &owned, &preserve, before);
         return result catch |failure| {
             if (!preserve) {
                 if (owned) try removeDirectory(self.io, self.stages, &stage_name);
@@ -387,6 +397,8 @@ pub const Store = struct {
     }
 
     fn perform(self: *Store, release: Release, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, record: Record, stage_name: []const u8, stage_path: []const u8, stage_owned: *bool, published: *bool, preserve: *bool) !Receipt {
+        var scoped = validation;
+        scoped.operation_identity = record.install_id;
         try self.stages.createDir(self.io, stage_name, .default_dir);
         stage_owned.* = true;
         const stage = try self.stages.openDir(self.io, stage_name, .{ .follow_symlinks = false });
@@ -419,7 +431,7 @@ pub const Store = struct {
         const scratch = try std.fs.path.join(self.allocator, &.{ stage_path, "scratch" });
         defer self.allocator.free(scratch);
         try observer.update(cancellation, .{ .phase = .testing });
-        try validation.check(self.allocator, self.io, release.identity(), component, scratch, cancellation, preserve);
+        try scoped.check(self.allocator, self.io, release.identity(), component, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .publishing });
         var name: [32]u8 = undefined;
         try stage.renamePreserve("component", self.versions, record.versionName(&name), self.io);
@@ -427,7 +439,7 @@ pub const Store = struct {
         try observer.update(cancellation, .{ .phase = .finalizing });
         const final_path = try self.versionPath(record);
         defer self.allocator.free(final_path);
-        try validation.check(self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
+        try scoped.check(self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .activating });
         if (observer.activate_fn) |activate| if (!activate(observer.context)) return error.Cancelled;
         if (try self.current()) |previous| try self.enqueueRetirement(previous);
@@ -581,7 +593,7 @@ const ContentsObserver = struct {
     }
 };
 
-fn verifyRuntime(allocator: std.mem.Allocator, io: std.Io, root: []const u8, scratch: []const u8, environment: *const std.process.Environ.Map, cancellation: *const process.Cancellation) !void {
+fn verifyRuntime(allocator: std.mem.Allocator, io: std.Io, root: []const u8, scratch: []const u8, environment: *const std.process.Environ.Map, operation_identity: ?[16]u8, cancellation: *const process.Cancellation) !void {
     for ([_][]const u8{ "bin/office.exe", "python/bin/python.exe", "node/node.exe", "engine/program/soffice.com" }) |relative| {
         if (cancellation.requested.load(.acquire)) return error.Cancelled;
         const path = try std.fs.path.join(allocator, &.{ root, relative });
@@ -589,7 +601,7 @@ fn verifyRuntime(allocator: std.mem.Allocator, io: std.Io, root: []const u8, scr
         try verifyPe(io, path);
         try platform.verifySignature(allocator, path);
     }
-    var result = try process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch }, 120_000, cancellation);
+    var result = try process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation_identity = operation_identity }, 120_000, cancellation);
     defer result.deinit(allocator);
     if (result.term != .exited or result.term.exited != 0) return error.ComponentSelftestFailed;
     const Status = struct { schema: u32, status: []const u8, python: []const u8, node: []const u8, font: []const u8 };
@@ -741,7 +753,7 @@ test "Office retirement intents survive restart without persisting catalog refer
     try std.testing.expect(updated.cleanup_pending);
     try std.testing.expectEqual(@as(usize, 1), (try store.retirements()).count);
     try store.versions.createDir(std.testing.io, "unregistered", .default_dir);
-    try std.testing.expect(try store.cleanupRetired(&.{old.record}, .{}, &cancellation));
+    try std.testing.expect(try store.cleanupRetired(&.{old.record}, .{}, &cancellation, fixture_removal));
     var old_name: [32]u8 = undefined;
     _ = try store.versions.statFile(std.testing.io, old.record.versionName(&old_name), .{});
     store.deinit();
@@ -749,7 +761,7 @@ test "Office retirement intents survive restart without persisting catalog refer
     store = try fixtureStore(&temporary);
     opened = true;
     try store.recover();
-    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation, fixture_removal));
     try std.testing.expectError(error.FileNotFound, store.versions.statFile(std.testing.io, &old_name, .{}));
     try std.testing.expect((try store.current()).?.eql(updated.record));
     _ = try store.versions.statFile(std.testing.io, "unregistered", .{});
@@ -766,7 +778,7 @@ test "Office removal commits a detached current while catalog-held bytes wait fo
     fixture.gate = false;
     try std.testing.expectError(error.Cancelled, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
     try std.testing.expect((try store.current()).?.eql(installed.record));
-    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation, fixture_removal));
     try std.testing.expectEqual(@as(usize, 0), (try store.retirements()).count);
     fixture.gate = true;
     store.fault = .before_current_delete;
@@ -775,11 +787,11 @@ test "Office removal commits a detached current while catalog-held bytes wait fo
     store.fault = .after_current_delete;
     try std.testing.expectError(error.ComponentCommitUnknown, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
     try std.testing.expect(try store.current() == null);
-    try std.testing.expect(try store.cleanupRetired(&.{installed.record}, .{}, &cancellation));
+    try std.testing.expect(try store.cleanupRetired(&.{installed.record}, .{}, &cancellation, fixture_removal));
     var name: [32]u8 = undefined;
     _ = try store.versions.statFile(std.testing.io, installed.record.versionName(&name), .{});
     try store.recover();
-    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expect(!try store.cleanupRetired(&.{}, .{}, &cancellation, fixture_removal));
     try std.testing.expectError(error.FileNotFound, store.versions.statFile(std.testing.io, &name, .{}));
 }
 
@@ -795,7 +807,7 @@ test "Office cleanup rejects conflicting intent identities and preserves current
     conflict.archive_sha256[0] ^= 1;
     try store.enqueueRetirement(conflict);
     try std.testing.expectError(error.ComponentStoreCorrupt, store.hasRetired());
-    try std.testing.expectError(error.ComponentStoreCorrupt, store.cleanupRetired(&.{}, .{}, &cancellation));
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.cleanupRetired(&.{}, .{}, &cancellation, fixture_removal));
     try std.testing.expectError(error.ComponentStoreCorrupt, store.removeCurrent(installed.record, .{}, &cancellation));
     try std.testing.expect((try store.current()).?.eql(installed.record));
     var name: [32]u8 = undefined;
@@ -895,6 +907,26 @@ test "Office uncertain process cleanup preserves its journal until the caller pr
     try std.testing.expect(try store.readRecord("pending.json") == null);
 }
 
+test "Office recovery preserves pending bytes while an operation job still has an owner" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    const pending = try store.preparePending(@splat(7));
+    var operation = try process.ResourceScope.initOperation(pending.install_id);
+    defer operation.deinit();
+    const stage_name = std.fmt.bytesToHex(pending.install_id, .lower);
+    try store.stages.createDir(std.testing.io, &stage_name, .default_dir);
+    try std.testing.expectError(error.ComponentProcessesOutstanding, store.recover());
+    try std.testing.expect(try store.hasPending());
+    _ = try store.stages.statFile(std.testing.io, &stage_name, .{});
+    operation.deinit();
+    try store.recover();
+    try std.testing.expect(!try store.hasPending());
+    try std.testing.expectError(error.FileNotFound, store.stages.statFile(std.testing.io, &stage_name, .{}));
+}
+
 test "Office space and validation rejection do not adopt resources, and corrupt records freeze mutation" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -984,3 +1016,9 @@ test "current Office validation uses only main identity and journals private sel
     try std.testing.expectEqual(validations, fixture.validations);
     try std.testing.expect(try store.readRecord("pending.json") == null);
 }
+
+const fixture_removal: RetiredRemoval = .{ .context = null, .remove_fn = struct {
+    fn remove(_: ?*anyopaque, store: *Store, record: Record) !void {
+        try store.removeRetired(record);
+    }
+}.remove };

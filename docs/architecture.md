@@ -150,7 +150,7 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `office_component_validation` | Windows 二级 | Application Office 安装 worker 使用公开 OS API 观察目标卷可用量，并以无 UI、仅本地缓存的 Authenticode policy 校验固定运行时入口；组件发布 authority 始终是主包固定的完整归档摘要，不从签名接受任意组件 | SDK 提供等价磁盘容量与 Windows 签名校验，且通过同一安装验收 |
-| `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；入口在启动子进程前加入并关闭临时 Job 引用。另只读当前 Host 自己的 PID 与进程创建时间，供 Office 入口绑定 Shell 生命周期。Job effect 只用于安装自检和产品文档预览，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消、物理静止观测及当前进程身份，并通过同一 Windows 验收 |
+| `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；入口在启动子进程前加入并关闭临时 Job 引用。另只读当前 Host 自己的 PID 与进程创建时间，供 Office 入口绑定 Shell 生命周期。Job effect 只用于 Office 安装自检、产品预览及受管理版本的执行持有与清理，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消、物理静止观测及当前进程身份，并通过同一 Windows 验收 |
 | `external_link_handoff` | 一级 | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 
@@ -160,7 +160,11 @@ Window compatibility 共享的 startup window identity 只能由 Application 在
 
 `office_component_validation` 只由 Application 安装事务消费，不访问 SDK 私有 context，也不向 Product、Bridge 或 Renderer 暴露系统 handle。磁盘检查使用调用方可用字节；签名检查在阶段目录和最终版本目录均执行，禁止弹出 UI、联网补取证书或将失败降级为成功。精确下载来源、摘要与接受格式由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 定义。
 
-`office_process_tree` 只补当前 SDK 未公开的 Windows Office Job 与自身进程身份能力。Application worker 保留唯一长期 Job handle，组件入口只临时打开、验证 kill-on-close 且禁止 breakaway 的 Job、加入自身并在创建 Python 前关闭临时 handle。Host 硬杀由 OS 关闭最后引用并终止整树；显式失败、取消与超时则先由唯一标准库 child owner kill/wait 根进程，再终止 Job 并观测 active process 数归零，最后 join 有界 stdout/stderr reader。不能先等待仍被子进程占用的管道再请求终止。清理无法证实时必须返回失败，调用方不得发布结果或删除仍可能使用的组件和预览资源。该 seam 不维护窗口或 Native Runtime 状态，不修改 SDK 源码，也不成为通用进程服务。
+`office_process_tree` 只补当前 SDK 未公开的 Windows Office Job 与自身进程身份能力。Application 相应资源 owner 保留唯一长期 Job handle，组件入口只临时打开、验证 kill-on-close 且禁止 breakaway 的 Job、加入自身并在创建 Python 前关闭临时 handle。Host 硬杀由 OS 关闭最后引用并终止整树；显式失败、取消与超时则先由唯一标准库 child owner kill/wait 根进程，再终止 Job 并观测 active process 数归零，最后 join 有界 stdout/stderr reader。不能先等待仍被子进程占用的管道再请求终止。清理无法证实时必须返回失败，调用方不得发布结果或删除仍可能使用的组件和预览资源。该 seam 不维护窗口或 Native Runtime 状态，不修改 SDK 源码，也不成为通用进程服务。
+
+受管理版本的 registry 持有按安装身份命名的 Office Job；入口在创建自己的调用 Job 与任何子进程前加入该版本 Job，随后关闭临时引用。版本 Job 负责资源持有与 Host 退出，入口自己的调用 Job 负责单次 Shell 范围，两者不替代 AgentCore 的外层执行。registry 只在验证后的来源发布前进行有界 kernel object 创建；终止、等待和文件删除仍在 worker，回调只维护原子引用。
+
+清理必须在零进程内引用的基础上，将对应 Job 封闭为零 active-process limit，再终止并观测 active 数归零，持有封闭的 Job 完成文件与删除意图收口后才释放。冷清理不能接管旧 Job；只允许独占创建同身份的封闭 reservation，已有对象则有界等待，超时或观测失败保留资源并报告未静止。安装 pending 的自检使用按事务身份命名的独占 Job，恢复阶段目录及未提交候选前同样取得该事务的封闭 reservation。依据 [Windows Job 对象生命周期](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)，对象要在最后 handle 关闭且关联进程终止后才销毁；不得把 Host 退出、内存引用消失或取消回执单独视为该证明。入口拒绝已封闭的 Job，OS 的零进程限制同时防止“先读取旧限制、后加入”的竞争。
 
 模型 Shell 路径仍由 AgentCore 执行，Office 入口只管理自己的子树。Application 在发布已安装 Skill 来源前，以 Primary authority 原子写出当前 Host 的 PID 和进程创建时间；组件入口只接受处于自身祖先链中且创建时间一致的 Host，并持有本次 Shell 祖先至该 Host 的 Windows process handle。启动任何子进程前确认范围仍存活，等待时同时观察子进程和这些 handle；Shell 范围或 Host 结束即退出入口，由它独占的 kill-on-close Job 终止子树。不得按可复用 PID、进程名或 Host 之上的 Explorer/终端状态判断生命周期。损坏、缺失、已过期或非祖先 Host 的记录不允许安装资源开始执行；开发树与 Application 专用 Host Job 路径不因此获得任意进程管理 authority。AgentCore 返回取消完成本身不证明 Office 后代已物理退出，版本与临时资源清理仍须独立证明静止。
 

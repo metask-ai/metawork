@@ -58,7 +58,7 @@ pub fn hostScope() ![24]u8 {
     return record;
 }
 
-pub const Error = error{ JobUnavailable, JobObservationFailed, JobTerminationFailed, JobDidNotSettle, RootObservationFailed };
+pub const Error = error{ JobUnavailable, JobInUse, JobObservationFailed, JobTerminationFailed, JobDidNotSettle, RootObservationFailed };
 
 pub const Job = struct {
     handle: HANDLE,
@@ -70,15 +70,38 @@ pub const Job = struct {
         try std.Io.randomSecure(io, &random);
         var name_buffer: [64]u8 = undefined;
         const job_name = try std.fmt.bufPrint(&name_buffer, "Local\\MetaWork.Office.{s}", .{std.fmt.bytesToHex(random, .lower)});
+        return create(job_name, false);
+    }
+
+    pub fn version(identity: [16]u8, deletion: bool) !Job {
+        var buffer: [64]u8 = undefined;
+        return create(try std.fmt.bufPrint(&buffer, "Local\\MetaWork.Office.Version.{s}", .{std.fmt.bytesToHex(identity, .lower)}), deletion);
+    }
+
+    pub fn operation(identity: [16]u8, deletion: bool) !Job {
+        var buffer: [64]u8 = undefined;
+        return create(try std.fmt.bufPrint(&buffer, "Local\\MetaWork.Office.Op.{s}", .{std.fmt.bytesToHex(identity, .lower)}), deletion);
+    }
+
+    fn create(job_name: []const u8, deletion: bool) !Job {
+        var name_buffer: [64]u8 = undefined;
+        @memcpy(name_buffer[0..job_name.len], job_name);
         var wide: [64:0]u16 = @splat(0);
         for (job_name, 0..) |character, index| wide[index] = character;
         const handle = CreateJobObjectW(null, &wide) orelse return error.JobUnavailable;
         errdefer _ = CloseHandle(handle);
-        if (GetLastError() == 183) return error.JobUnavailable; // never adopt an existing named job
+        if (GetLastError() == 183) return error.JobInUse; // never adopt an existing named job
         var limits: ExtendedLimits = .{};
         limits.basic.flags = 0x2000 | 0x0400; // KILL_ON_JOB_CLOSE, DIE_ON_UNHANDLED_EXCEPTION
+        if (deletion) limits.basic.flags |= 0x0008; // ACTIVE_PROCESS, limit zero
         if (SetInformationJobObject(handle, 9, &limits, @sizeOf(ExtendedLimits)) == 0) return error.JobUnavailable;
         return .{ .handle = handle, .name_buffer = name_buffer, .name_len = job_name.len };
+    }
+
+    pub fn seal(self: *Job) !void {
+        var limits: ExtendedLimits = .{};
+        limits.basic.flags = 0x2000 | 0x0400 | 0x0008;
+        if (SetInformationJobObject(self.handle, 9, &limits, @sizeOf(ExtendedLimits)) == 0) return error.JobUnavailable;
     }
 
     pub fn name(self: *const Job) []const u8 {
@@ -133,4 +156,19 @@ test "Office job starts empty, names are fresh, and empty termination is observa
     try std.testing.expect(!std.mem.eql(u8, first.name(), second.name()));
     try std.testing.expectEqual(@as(u32, 0), try first.active());
     try first.terminateAndWait(std.testing.io);
+}
+
+test "version cleanup reserves a sealed empty job without adopting an existing owner" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var identity: [16]u8 = undefined;
+    try std.Io.randomSecure(std.testing.io, &identity);
+    var owned = try Job.version(identity, false);
+    try std.testing.expectError(error.JobInUse, Job.version(identity, true));
+    try owned.seal();
+    try owned.terminateAndWait(std.testing.io);
+    try std.testing.expectEqual(@as(u32, 0), try owned.active());
+    owned.deinit();
+    var deletion = try Job.version(identity, true);
+    defer deletion.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try deletion.active());
 }

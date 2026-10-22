@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
-    var result = office.run(init.gpa, init.io, args[1], .selftest, .{ .parent_environment = init.environ_map, .scratch_root = scratch }, timeout, &cancellation) catch |failure| {
+    var result = office.run(init.gpa, init.io, args[1], .selftest, .{ .parent_environment = init.environ_map, .scratch_root = scratch, .operation_identity = random }, timeout, &cancellation) catch |failure| {
         try std.json.Stringify.value(.{ .failure = @errorName(failure) }, .{}, &writer.interface);
         try writer.interface.writeByte('\n');
         try writer.interface.flush();
