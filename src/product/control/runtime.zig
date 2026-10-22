@@ -981,6 +981,36 @@ fn absoluteReferenceRelativePath(
     return storage[0..relative.len];
 }
 
+/// Host-only owned input to a bounded file operation. This is a snapshot,
+/// never a lasting grant: revalidate on the main loop before publishing bytes
+/// or invoking a platform effect. No Task/Run pointers survive admission.
+pub const OutputFileTarget = struct {
+    allocator: std.mem.Allocator,
+    storage: []u8,
+    task_id: u64,
+    run_id: u64,
+    output_id: [16]u8,
+    workspace_id: u64,
+    workspace_epoch: u64,
+    security_epoch: u64,
+    workspace_root: []const u8,
+    relative_path: []const u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+
+    pub fn deinit(self: *OutputFileTarget) void {
+        self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
+pub const OutputFileAuthorityError = error{
+    UnknownOutput,
+    RestrictedOutput,
+    StaleSecurityEpoch,
+    ExecutorShuttingDown,
+};
+
 pub const FilePreviewState = file_preview.State;
 pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
 const file_preview_scan_bytes = 256 * 1024;
@@ -1705,6 +1735,64 @@ pub const Runtime = struct {
             .free_fn = freeWorkspaceStorage,
             .redact_fn = redactWorkspaceStorage,
         };
+    }
+
+    /// Main-loop admission only; does no file I/O and copies the exact trusted
+    /// record for a caller-owned, bounded asynchronous operation.
+    pub fn copyOutputFileTarget(
+        self: *const Runtime,
+        allocator: std.mem.Allocator,
+        task_id: u64,
+        run_id: u64,
+        output_id: [16]u8,
+    ) (OutputFileAuthorityError || std.mem.Allocator.Error)!OutputFileTarget {
+        const reference = try self.outputFileAuthority(task_id, run_id, output_id);
+        const storage = try allocator.alloc(u8, reference.workspace_root.len + reference.locator.len);
+        const root = storage[0..reference.workspace_root.len];
+        const locator = storage[reference.workspace_root.len..];
+        @memcpy(root, reference.workspace_root);
+        @memcpy(locator, reference.locator);
+        return .{
+            .allocator = allocator,
+            .storage = storage,
+            .task_id = task_id,
+            .run_id = run_id,
+            .output_id = reference.id,
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .security_epoch = self.projection_security_epoch,
+            .workspace_root = root,
+            .relative_path = locator,
+            .size_bytes = reference.size_bytes,
+            .sha256 = reference.sha256,
+        };
+    }
+
+    /// Must run again after worker completion, before any result becomes usable.
+    /// Content hashing separately proves the actual bytes; neither check alone
+    /// authorizes Save As, reveal, preview or a continuation input.
+    pub fn revalidateOutputFileTarget(self: *const Runtime, target: *const OutputFileTarget) OutputFileAuthorityError!void {
+        if (target.security_epoch == 0 or target.security_epoch != self.projection_security_epoch)
+            return error.StaleSecurityEpoch;
+        const current = try self.outputFileAuthority(target.task_id, target.run_id, target.output_id);
+        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
+            !std.mem.eql(u8, current.workspace_root, target.workspace_root) or
+            !std.mem.eql(u8, current.locator, target.relative_path) or
+            current.size_bytes != target.size_bytes or !std.mem.eql(u8, &current.sha256, &target.sha256))
+            return error.RestrictedOutput;
+    }
+
+    fn outputFileAuthority(self: *const Runtime, task_id: u64, run_id: u64, output_id: [16]u8) OutputFileAuthorityError!task_runtime.OutputFileReference {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+        const reference = self.task_runtime.outputFileReference(task_id, run_id, output_id) orelse return error.UnknownOutput;
+        if (reference.redacted or !self.workspace.filePreviewAuthorized(reference.workspace_id, reference.workspace_epoch, reference.workspace_root) or
+            self.containsKnownCredential(reference.locator) or self.containsKnownCredential(reference.workspace_root))
+            return error.RestrictedOutput;
+        // Persisted/projection bytes must still be a valid delivery locator.
+        _ = lifecycle.FileDeliveryReceipt.init(reference.id, reference.locator, reference.size_bytes, reference.sha256) catch
+            return error.RestrictedOutput;
+        return reference;
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -21513,4 +21601,107 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     const hidden = redacted.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
     try std.testing.expect(hidden.object.get("redacted").?.bool);
     try std.testing.expectEqualStrings("", hidden.object.get("displayPath").?.string);
+}
+
+fn recordTestOutput(control: *Runtime, id: [16]u8, path: []const u8) !void {
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-authority\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, path, 42, @splat(2));
+    try control.applyEvent(&envelope);
+}
+
+test "Output file target requires an explicit receipt in the exact owning Task and Run" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const id: [16]u8 = @splat(3);
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, id));
+    try recordTestOutput(&control, id, "results/年度报告.docx");
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, id);
+    defer target.deinit();
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
+    try std.testing.expectEqual([_]u8{2} ** 32, target.sha256);
+    try control.revalidateOutputFileTarget(&target);
+    for ([_][2]u64{ .{ 0, 7 }, .{ 4, 7 }, .{ 3, 0 }, .{ 3, 8 } }) |scope|
+        try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, scope[0], scope[1], id));
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(0)));
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(4)));
+
+    const task = &control.task_runtime.tasks[0].?;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    try std.testing.expect(target.relative_path.ptr != record.locator.ptr);
+    try std.testing.expect(target.workspace_root.ptr != task.durable.workspace_root.ptr);
+    // The worker keeps stable input, while completion must reject changed facts.
+    record.locator[0] = 'R';
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.locator[0] = 'r';
+    record.sha256[0] ^= 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.sha256[0] ^= 1;
+    record.size_bytes += 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.size_bytes -= 1;
+    task.durable.workspace_epoch += 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    task.durable.workspace_epoch -= 1;
+    try control.revalidateOutputFileTarget(&target);
+}
+
+test "Output file target rechecks revocation deletion redaction and security before use" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer target.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    task.deletion = .deleting;
+    try std.testing.expectError(error.UnknownOutput, control.revalidateOutputFileTarget(&target));
+    task.deletion = .idle;
+    record.redacted = true;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.redacted = false;
+    // A stale redacted flag cannot confer authority over a sensitive locator.
+    @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
+    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    @memcpy(record.locator, target.relative_path);
+    try control.revalidateOutputFileTarget(&target);
+    control.learnProjectionCredential("new-file-operation-security-boundary");
+    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateOutputFileTarget(&target));
+    var fresh = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer fresh.deinit();
+    try control.revalidateOutputFileTarget(&fresh);
+    control.shutting_down = true;
+    try std.testing.expectError(error.ExecutorShuttingDown, control.revalidateOutputFileTarget(&fresh));
+    control.shutting_down = false;
+    control.projection_security_epoch = 0;
+    try std.testing.expectError(error.StaleSecurityEpoch, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+}
+
+test "Output file target owns its input after the aggregate is released and handles allocation failure" {
+    const Harness = struct {
+        fn copy(allocator: std.mem.Allocator, control: *const Runtime) !void {
+            var target = try control.copyOutputFileTarget(allocator, 3, 7, @splat(3));
+            defer target.deinit();
+            try control.revalidateOutputFileTarget(&target);
+        }
+    };
+    var control = try testRuntime();
+    var live = true;
+    defer if (live) control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.copy, .{&control});
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer target.deinit();
+    control.deinit();
+    live = false;
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
 }

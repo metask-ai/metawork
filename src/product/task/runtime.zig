@@ -57,6 +57,19 @@ pub const FileReference = struct {
     range: ?FileRange,
 };
 
+/// Callback-scoped Host metadata; callers must copy before asynchronous work.
+/// A display projection or ordinary File Reference cannot create this identity.
+pub const OutputFileReference = struct {
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    id: [16]u8,
+    locator: []const u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+    redacted: bool,
+};
+
 pub const FileChangeArtifactReference = struct {
     artifact: task_state.FileChangeArtifact,
     diff_complete: bool,
@@ -3055,6 +3068,33 @@ pub const Runtime = struct {
             .protocol = run.execution_protocol,
             .model = run.execution_model,
         };
+    }
+
+    pub fn outputFileReference(
+        self: *const Runtime,
+        task_id: u64,
+        run_id: u64,
+        output_id: [16]u8,
+    ) ?OutputFileReference {
+        if (std.mem.allEqual(u8, &output_id, 0)) return null;
+        const task = self.findConst(task_id) orelse return null;
+        if (task.deletion != .idle) return null;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        for (run.outputs) |entry| {
+            const output = entry orelse continue;
+            if (!std.mem.eql(u8, &output.id, &output_id)) continue;
+            return .{
+                .workspace_id = task.durable.workspace_id,
+                .workspace_epoch = task.durable.workspace_epoch,
+                .workspace_root = task.durable.workspace_root,
+                .id = output.id,
+                .locator = output.locator,
+                .size_bytes = output.size_bytes,
+                .sha256 = output.sha256,
+                .redacted = output.redacted,
+            };
+        }
+        return null;
     }
 
     pub fn fileReference(
