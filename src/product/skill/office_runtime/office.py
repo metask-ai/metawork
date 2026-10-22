@@ -233,8 +233,18 @@ class Engine:
                     raise RuntimeError("Office engine exited unsuccessfully")
 
 
+def load_layout(engine, source):
+    static = {}
+    if source.suffix.lower() == ".xlsx":
+        from static_workbook import freeze
+        frozen = engine.directory / "static.xlsx"
+        static = freeze(source, frozen)
+        source = frozen
+    return engine.load(source), static
+
+
 def convert(engine, source, staged, command, expected_formulas=None):
-    document = engine.load(source)
+    document, layout = load_layout(engine, source) if command == "pdf" else (engine.load(source), {})
     if command == "accept":
         if source.suffix.lower() != ".docx":
             raise ValueError("Accept requires a DOCX document")
@@ -263,13 +273,13 @@ def convert(engine, source, staged, command, expected_formulas=None):
         if source.suffix.lower() not in PDF_FILTERS:
             raise ValueError("PDF export requires DOCX, XLSX or PPTX")
         engine.pdf(document, staged, source.suffix.lower())
-        return {}
+        return layout
     raise ValueError("Unknown conversion command")
 
 
 def render(engine, source, output, width, *, max_pages=MAX_PAGES,
            byte_budget=OUTPUT_BYTES, page_byte_budget=OUTPUT_BYTES):
-    document = engine.load(source)
+    document, static = load_layout(engine, source)
     expected_slides = document.DrawPages.Count if source.suffix.lower() == ".pptx" else None
     if source.suffix.lower() != ".pdf":
         pdf = engine.directory / "preview.pdf"
@@ -300,7 +310,7 @@ def render(engine, source, output, width, *, max_pages=MAX_PAGES,
                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {"schema": 1, "pages": pages}
     (output / "pages.json").write_text(json.dumps(manifest), encoding="utf-8")
-    return {"page_count": count}
+    return {"page_count": count, **static}
 
 
 def run(args):

@@ -57,6 +57,11 @@
           "id": "recalculate",
           "tools": ["office"],
           "pythonPackages": ["openpyxl", "defusedxml"]
+        },
+        {
+          "id": "render-and-pdf",
+          "tools": ["office"],
+          "pythonPackages": ["defusedxml", "lxml"]
         }
       ]
     },

@@ -79,4 +79,8 @@ python([path.join(root, "scripts/check-office-authoring.py"), component.root]);
 python([path.join(root, "scripts/check-office-engine.py"), component.root]);
 python([path.join(root, "scripts/check-office-previews.py"), component.root]);
 python([path.join(root, "scripts/check-office-pdf.py"), component.root]);
+python([
+  path.join(root, "scripts/check-office-static-workbook.py"),
+  component.root,
+]);
 console.log(`Office packaged workflows passed: ${output}`);
