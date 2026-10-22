@@ -290,6 +290,11 @@ const App = struct {
             .refresh_catalog_fn = refreshModelsCatalog,
             .reset_store_fn = resetModelsStore,
         });
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setOfficeHost(.{
+            .context = self,
+            .begin_fn = beginOfficeOperation,
+            .cancel_fn = cancelOfficeOperation,
+        });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
@@ -323,6 +328,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
             dispatcher.setModelsHost(null);
+            dispatcher.setOfficeHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -877,4 +883,18 @@ test "automation Models vault is bounded, overwrites securely, and deletes idemp
 
 fn notifyOfficeComponent(context: *anyopaque) void {
     _ = app_platform.Adapter.notifyMainLoop(context);
+}
+
+fn beginOfficeOperation(context: *anyopaque, kind: product_control.OfficeKind, generation: u64) product_control.OfficeAdmission {
+    const app: *App = @ptrCast(@alignCast(context));
+    const control = app.control orelse return .{ .reason = .unavailable };
+    const office = app.office_component orelse return .{ .reason = if (control.officeComponentView().supported) .unavailable else .unsupported_platform };
+    return office.begin(control.officeManagement(), kind, generation);
+}
+
+fn cancelOfficeOperation(context: *anyopaque, id: u64) product_control.OfficeAdmission {
+    const app: *App = @ptrCast(@alignCast(context));
+    const control = app.control orelse return .{ .reason = .unavailable };
+    const office = app.office_component orelse return .{ .reason = .unavailable };
+    return office.cancel(control.officeManagement(), id);
 }

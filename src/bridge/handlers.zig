@@ -18,6 +18,8 @@ pub const RendererBridgeConnect = struct {
 };
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
+pub const OfficeOperation = struct { expectedGeneration: []const u8 };
+pub const OfficeCancel = struct { operationId: []const u8 };
 pub const WireText = struct {
     value: []const u8,
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {

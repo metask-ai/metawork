@@ -1,4 +1,67 @@
 export const enUS = {
+  "office.title": "Office documents",
+  "office.environment": "Document environment",
+  "office.help":
+    "Basic DOCX, XLSX and PPTX Skills are included. Install the environment for local reading, editing, recalculation and previews.",
+  "office.not_available": "Unavailable",
+  "office.not_installed": "Not installed",
+  "office.ready": "Ready",
+  "office.needs_check": "Needs checking",
+  "office.working": "In progress",
+  "office.unsupported":
+    "The Office environment is currently available on Windows x64. Basic Skills remain available.",
+  "office.unavailable": "The Office environment cannot be managed right now.",
+  "office.unpublished":
+    "An installable environment is not yet published for this app version. Basic Skills are available.",
+  "office.changed": "The environment state changed. Review it and try again.",
+  "office.busy": "Another environment operation is in progress.",
+  "office.check_required": "Check the environment state before continuing.",
+  "office.finishing":
+    "The operation is finishing and can no longer be cancelled.",
+  "office.restart": "Close and reopen MetaWork to finish the pending cleanup.",
+  "office.download_failed":
+    "Download failed. Check your connection and try again.",
+  "office.invalid_component":
+    "The environment did not pass validation and was not enabled.",
+  "office.insufficient_space":
+    "There is not enough disk space to install the environment.",
+  "office.resource_limit":
+    "Resources are temporarily unavailable. Try again later.",
+  "office.write_failed":
+    "The environment state could not be saved. Check disk space and access permissions.",
+  "office.unknown":
+    "This request could not be confirmed. Review the current environment state before continuing.",
+  "office.cleanup_failed": "Cleanup is incomplete. Try again later.",
+  "office.incompatible":
+    "The installed environment is not compatible with this app version.",
+  "office.existing_tasks":
+    "New tasks use this environment. Refresh Skills in an existing task while it is idle to use it there.",
+  "office.size": "{download} download · {installed} installed",
+  "office.progress": "Environment operation progress",
+  "office.cancelling": "Cancelling and waiting for cleanup…",
+  "office.cancelled": "Operation cancelled.",
+  "office.cleanup_pending":
+    "Some resources await cleanup. Resources still in use require the sessions to end, or MetaWork to restart.",
+  "office.shared":
+    "Other MetaWork versions on this device may need to reinstall the environment after cleanup.",
+  "office.install": "Install environment",
+  "office.update": "Update environment",
+  "office.repair": "Reinstall",
+  "office.retry": "Check again",
+  "office.cleanup": "Clean up resources",
+  "office.remove": "Remove environment",
+  "office.remove_title": "Remove the Office environment?",
+  "office.remove_description":
+    "New tasks will use basic Skills. Resources still in use will be cleaned up after the sessions end or MetaWork restarts.",
+  "office.phase.preparing": "Preparing…",
+  "office.phase.downloading": "Downloading…",
+  "office.phase.unpacking": "Unpacking…",
+  "office.phase.verifying": "Verifying files…",
+  "office.phase.testing": "Checking the environment…",
+  "office.phase.publishing": "Preparing installation…",
+  "office.phase.finalizing": "Checking the installed environment…",
+  "office.phase.activating": "Enabling the environment…",
+  "office.phase.cleaning": "Cleaning up resources…",
   "common.loading": "Loading…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "Account and application menu",

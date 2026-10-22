@@ -1,8 +1,13 @@
 import {
   approvalFailureReasons,
   type TaskApprovalResultWire,
+  type OfficeComponentView,
 } from "./generated-wire.ts";
 export { approvalFailureReasons };
+export type {
+  OfficeComponentView,
+  OfficeComponentResult,
+} from "./generated-wire.ts";
 
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
@@ -1120,6 +1125,7 @@ export const emptyViewVersions: ViewVersions = {
 };
 
 export type WorkbenchSnapshot = {
+  office: OfficeComponentView;
   revision: string;
   blockVersions: ViewVersions;
   securityEpoch: string;

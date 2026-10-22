@@ -288,7 +288,7 @@ pub const OfficeManagement = struct {
     view_fn: *const fn (*anyopaque) OfficeView,
     begin_fn: *const fn (*anyopaque, OfficeKind, u64) OfficeAdmission,
     attempt_fn: *const fn (*anyopaque, u64) ?*OfficeAttempt,
-    cancel_fn: *const fn (*anyopaque, u64, u64) OfficeAdmission,
+    cancel_fn: *const fn (*anyopaque, u64) OfficeAdmission,
     progress_fn: *const fn (*anyopaque, u64, OfficeProgress) void,
     complete_fn: *const fn (*anyopaque, u64, OfficeCompletion) bool,
     resources_fn: *const fn (*anyopaque, bool, bool) void,
@@ -303,8 +303,8 @@ pub const OfficeManagement = struct {
     pub fn attempt(self: OfficeManagement, id: u64) ?*OfficeAttempt {
         return self.attempt_fn(self.context, id);
     }
-    pub fn cancel(self: OfficeManagement, generation: u64, id: u64) OfficeAdmission {
-        return self.cancel_fn(self.context, generation, id);
+    pub fn cancel(self: OfficeManagement, id: u64) OfficeAdmission {
+        return self.cancel_fn(self.context, id);
     }
     pub fn progress(self: OfficeManagement, id: u64, value: OfficeProgress) void {
         self.progress_fn(self.context, id, value);

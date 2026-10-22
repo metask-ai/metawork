@@ -16,6 +16,7 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
+import type { OfficeComponentResult } from "../bridge/contracts.ts";
 import {
   documentHasAttention,
   subscribeDocumentAttention,
@@ -1611,6 +1612,20 @@ export default function App() {
     } catch {
       await refreshSnapshot().catch(() => undefined);
       return false;
+    }
+  }
+
+  async function mutateOffice(
+    invoke: () => Promise<OfficeComponentResult>,
+  ): Promise<OfficeComponentResult | null> {
+    if (bridgeUnavailable) return null;
+    try {
+      const result = await invoke();
+      await refreshCommittedView();
+      return result;
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      return null;
     }
   }
 
@@ -3649,6 +3664,11 @@ export default function App() {
             account={snapshot.account}
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
+            office={snapshot.office}
+            onOfficeAction={(action, generation) =>
+              mutateOffice(() => client.manageOffice(action, generation))
+            }
+            onOfficeCancel={(id) => mutateOffice(() => client.cancelOffice(id))}
             customProviderCapabilities={{
               management: snapshot.capabilities.customProviderManagement,
               secretCapture: snapshot.capabilities.customProviderSecretCapture,

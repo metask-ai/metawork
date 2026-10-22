@@ -10751,7 +10751,7 @@ test "Office component management keeps ordinary Task admission independent from
     _ = try workbench.runTask(task, .{ .text = "ordinary text while the Office environment is not installed" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     office.progress(install.operation_id.?, .{ .phase = .downloading, .bytes = 50, .total = 100 });
-    try std.testing.expect(office.cancel(office.view().generation, install.operation_id.?).accepted);
+    try std.testing.expect(office.cancel(install.operation_id.?).accepted);
     try std.testing.expect(office.attempt(install.operation_id.?).?.cancelRequested());
     try std.testing.expect(office.complete(install.operation_id.?, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .cancelled }));
     try std.testing.expect(office.view().current == null);

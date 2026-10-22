@@ -1,5 +1,8 @@
 const std = @import("std");
 const office_component = @import("product_office_component");
+pub const OfficeWire = @import("product_office_view_contract");
+pub const OfficeKind = office_component.Kind;
+pub const OfficeAdmission = office_component.Admission;
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
@@ -1060,9 +1063,9 @@ fn controlOfficeAttempt(context: *anyopaque, id: u64) ?*office_component.Attempt
     const self: *Runtime = @ptrCast(@alignCast(context));
     return self.officeAttempt(id);
 }
-fn controlOfficeCancel(context: *anyopaque, generation: u64, id: u64) office_component.Admission {
+fn controlOfficeCancel(context: *anyopaque, id: u64) office_component.Admission {
     const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.cancelOfficeOperation(generation, id);
+    return self.cancelOfficeOperation(id);
 }
 fn controlOfficeProgress(context: *anyopaque, id: u64, progress: office_component.Progress) void {
     const self: *Runtime = @ptrCast(@alignCast(context));
@@ -3605,8 +3608,8 @@ pub const Runtime = struct {
         return if (operation.id == id) &self.office.attempt else null;
     }
 
-    pub fn cancelOfficeOperation(self: *Runtime, expected_generation: u64, id: u64) office_component.Admission {
-        const result = self.office.cancel(expected_generation, id);
+    pub fn cancelOfficeOperation(self: *Runtime, id: u64) office_component.Admission {
+        const result = self.office.cancel(id);
         if (result.changed) self.bumpRevision();
         return result;
     }
@@ -6705,6 +6708,8 @@ pub const Runtime = struct {
         try self.writeAccount(writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer);
+        writer.writeAll(",\"office\":") catch return error.SnapshotTooLarge;
+        std.json.Stringify.value(OfficeWire.View.from(self.office.view()), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch

@@ -31,6 +31,25 @@ export type WorkbenchAction =
 export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
+    office: {
+      generation: "1",
+      supported: false,
+      health: "unavailable",
+      offered: null,
+      current: null,
+      updateAvailable: false,
+      operation: null,
+      terminal: null,
+      cleanupPending: false,
+      actions: {
+        install: false,
+        repair: false,
+        remove: false,
+        retry: false,
+        cleanup: false,
+        cancel: false,
+      },
+    },
     revision: "0",
     blockVersions: emptyViewVersions,
     securityEpoch: "1",

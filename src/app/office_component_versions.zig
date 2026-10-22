@@ -153,6 +153,13 @@ pub const Registry = struct {
         return false;
     }
 
+    pub fn hasCollectible(self: *const Registry) bool {
+        for (self.entries) |entry| if (entry) |version| {
+            if (version.retired and !version.removing and version.references.load(.acquire) == 0) return true;
+        };
+        return false;
+    }
+
     /// Owner-thread admission only: no filesystem work on the Native loop.
     /// The returned version stays owned until the deletion worker has joined.
     pub fn claimRetired(self: *Registry) ?*Version {

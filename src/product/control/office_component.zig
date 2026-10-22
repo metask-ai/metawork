@@ -173,9 +173,8 @@ pub const State = struct {
         return .{ .accepted = true, .changed = true, .operation_id = id };
     }
 
-    pub fn cancel(self: *State, expected_generation: u64, id: u64) Admission {
+    pub fn cancel(self: *State, id: u64) Admission {
         if (self.shutting_down) return .{ .reason = .shutting_down };
-        if (expected_generation != self.generation) return .{ .reason = .stale_generation };
         const operation = self.operation orelse return .{ .reason = .too_late };
         if (operation.id != id or !self.view().actions.cancel) return .{ .reason = .too_late };
         if (!self.attempt.cancel()) {
@@ -289,7 +288,7 @@ test "failed Office update preserves independently verified current and permits 
 test "Office cancellation and activation have one winner and committed receipt wins late cancellation" {
     var cancelled = fixtureState();
     const first = cancelled.begin(.install, cancelled.generation).operation_id.?;
-    try std.testing.expect(cancelled.cancel(cancelled.generation, first).accepted);
+    try std.testing.expect(cancelled.cancel(first).accepted);
     try std.testing.expect(cancelled.attempt.cancelRequested());
     try std.testing.expect(!cancelled.attempt.beginActivation());
     try std.testing.expect(cancelled.finish(first, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .cancelled }));
@@ -297,7 +296,7 @@ test "Office cancellation and activation have one winner and committed receipt w
     var committed = fixtureState();
     const second = committed.begin(.install, committed.generation).operation_id.?;
     try std.testing.expect(committed.attempt.beginActivation());
-    const refused = committed.cancel(committed.generation, second);
+    const refused = committed.cancel(second);
     try std.testing.expect(!refused.accepted and refused.changed);
     try std.testing.expectEqual(Reason.too_late, refused.reason.?);
     try std.testing.expect(!committed.view().actions.cancel);
@@ -362,5 +361,14 @@ test "component reference capacity blocks installation without blocking release 
     const id = state.operation.?.id;
     try std.testing.expect(state.progress(id, .{ .phase = .cleaning }));
     try std.testing.expect(state.view().actions.cancel);
-    try std.testing.expect(state.cancel(state.generation, id).accepted);
+    try std.testing.expect(state.cancel(id).accepted);
+}
+
+test "Office progress cannot invalidate cancellation of the matching operation" {
+    var state = fixtureState();
+    const id = state.begin(.install, state.generation).operation_id.?;
+    try std.testing.expect(state.progress(id, .{ .phase = .downloading, .bytes = 10, .total = 100 }));
+    try std.testing.expectEqual(Reason.too_late, state.cancel(id + 1).reason.?);
+    try std.testing.expect(state.cancel(id).accepted);
+    try std.testing.expect(state.attempt.cancelRequested());
 }

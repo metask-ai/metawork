@@ -1,4 +1,5 @@
 import { FilePreviewLoader } from "./file-preview.ts";
+import { decodeOfficeComponentResult } from "./generated-wire.ts";
 import { object } from "./wire-codec.ts";
 import { decodeSendInputResult } from "./decode-contracts.ts";
 import {
@@ -334,6 +335,30 @@ export class BridgeClient {
       await this.invoke(commands.retryAutomaticWorkspaceRoot, {
         expectedGeneration,
       }),
+    );
+  }
+
+  async manageOffice(
+    action: "install" | "repair" | "remove" | "retry" | "cleanup",
+    expectedGeneration: string,
+  ) {
+    const names = {
+      install: commands.officeInstall,
+      repair: commands.officeRepair,
+      remove: commands.officeRemove,
+      retry: commands.officeRetry,
+      cleanup: commands.officeCleanup,
+    };
+    return decodeOfficeComponentResult(
+      await this.invoke(names[action], { expectedGeneration }),
+      "$",
+    );
+  }
+
+  async cancelOffice(operationId: string) {
+    return decodeOfficeComponentResult(
+      await this.invoke(commands.officeCancel, { operationId }),
+      "$",
     );
   }
 

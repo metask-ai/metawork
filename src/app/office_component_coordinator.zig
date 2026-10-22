@@ -98,8 +98,8 @@ pub const Coordinator = struct {
         return admission;
     }
 
-    pub fn cancel(self: *Coordinator, product: ports.OfficeManagement, generation: u64, id: u64) ports.OfficeAdmission {
-        const result = product.cancel(generation, id);
+    pub fn cancel(self: *Coordinator, product: ports.OfficeManagement, id: u64) ports.OfficeAdmission {
+        const result = product.cancel(id);
         if (result.accepted) if (self.work) |work| {
             if (work.attempt.id == id) work.cancellation.requested.store(true, .release);
         };
@@ -109,7 +109,16 @@ pub const Coordinator = struct {
     /// Main-loop drain; joining happens only after finished was published.
     /// No Product pointer/port enters the worker or its mailbox.
     pub fn drain(self: *Coordinator, product: ports.OfficeManagement) bool {
-        const work = self.work orelse return false;
+        const work = self.work orelse {
+            const view = product.view();
+            if (self.closing or view.health != .ready or view.operation != null or !self.registry.hasCollectible()) return false;
+            // Releasing a catalog is not a failed-effect retry. Only newly
+            // collectible resources are scheduled on an existing owner wake;
+            // explicit failures remain for user retry or restart.
+            if (view.terminal) |terminal| if (terminal.outcome == .failed) return false;
+            product.resources(self.registry.hasCapacity(), self.storage_cleanup_pending or self.registry.cleanupPending());
+            return self.begin(product, .cleanup, product.view().generation).accepted;
+        };
         if (work.takeProgress()) |progress| product.progress(work.attempt.id, progress);
         if (!work.finished.load(.acquire)) return false;
         if (!work.joined) {
@@ -385,8 +394,8 @@ const TestPort = if (builtin.is_test) struct {
         const self = cast(context);
         return if (self.state.operation != null and self.state.operation.?.id == id) &self.state.attempt else null;
     }
-    fn cancel(context: *anyopaque, generation: u64, id: u64) ports.OfficeAdmission {
-        return cast(context).state.cancel(generation, id);
+    fn cancel(context: *anyopaque, id: u64) ports.OfficeAdmission {
+        return cast(context).state.cancel(id);
     }
     fn progress(context: *anyopaque, id: u64, value: ports.OfficeProgress) void {
         _ = cast(context).state.progress(id, value);
@@ -515,7 +524,7 @@ test "Office cancellation joins a blocked transfer before clearing its exact sta
         if (started.durationTo(.now(std.testing.io, .awake)).toMilliseconds() > 10_000) return error.TestWorkerTimeout;
         try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }, std.testing.io);
     }
-    try std.testing.expect(coordinator.cancel(product.port(), product.state.generation, install.operation_id.?).accepted);
+    try std.testing.expect(coordinator.cancel(product.port(), install.operation_id.?).accepted);
     try testDrain(coordinator, product.port());
     try std.testing.expectEqual(model.Outcome.cancelled, product.state.terminal.?.outcome);
     try std.testing.expect(try coordinator.store.current() == null);
@@ -560,7 +569,7 @@ test "Office update and removal keep catalog-pinned versions until the independe
     try std.testing.expect(product.state.cleanup_pending);
     _ = try coordinator.store.versions.statFile(std.testing.io, &old_name, .{});
     pin.deinit();
-    try std.testing.expect(coordinator.begin(product.port(), .cleanup, product.state.generation).accepted);
+    try std.testing.expect(coordinator.drain(product.port()));
     try testDrain(coordinator, product.port());
     try std.testing.expect(!product.state.cleanup_pending);
     try std.testing.expect(!coordinator.registry.cleanupPending());

@@ -9799,3 +9799,75 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   justify-items: center;
   min-height: 100px;
 }
+
+.settings-office-copy {
+  min-width: 0;
+  max-width: 34rem;
+}
+.settings-office-status {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ui-content-muted);
+}
+.settings-office-status[data-ready="true"] {
+  color: var(--ui-content-success);
+}
+.settings-office-body {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 20px 20px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-content-muted);
+}
+.settings-office-body p,
+.settings-office-body small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.settings-office-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settings-office-actions:empty {
+  display: none;
+}
+.settings-office-operation {
+  display: grid;
+  gap: 8px;
+}
+.settings-office-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--ui-border);
+}
+.settings-office-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ui-action-primary);
+}
+.settings-office-body .settings-office-error,
+.settings-office-error {
+  color: var(--ui-content-error);
+}
+.settings-office-shared {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-content-muted);
+}
+@media (max-width: 640px) {
+  .settings-office .settings-row {
+    align-items: flex-start;
+  }
+  .settings-office-actions button,
+  .office-removal-dialog button {
+    min-height: 44px;
+  }
+}

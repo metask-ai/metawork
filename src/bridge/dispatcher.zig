@@ -166,6 +166,12 @@ pub const ModelsHost = struct {
     }
 };
 
+pub const OfficeHost = struct {
+    context: *anyopaque,
+    begin_fn: *const fn (*anyopaque, product_control.OfficeKind, u64) product_control.OfficeAdmission,
+    cancel_fn: *const fn (*anyopaque, u64) product_control.OfficeAdmission,
+};
+
 /// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
@@ -244,6 +250,7 @@ pub const Dispatcher = struct {
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
     models_host: ?ModelsHost = null,
+    office_host: ?OfficeHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -309,6 +316,10 @@ pub const Dispatcher = struct {
         self.models_host = host;
     }
 
+    pub fn setOfficeHost(self: *Dispatcher, host: ?OfficeHost) void {
+        self.office_host = host;
+    }
+
     /// Registers the complete product command table. Automation may change
     /// authority in controlled builds, but it does not add a parallel protocol.
     pub fn register(
@@ -368,6 +379,12 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_summary, .function = accountRefreshSummary },
             .{ .name = commands.account_open_recharge, .function = accountOpenRecharge },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
+            .{ .name = commands.office_install, .function = officeInstall },
+            .{ .name = commands.office_repair, .function = officeRepair },
+            .{ .name = commands.office_remove, .function = officeRemove },
+            .{ .name = commands.office_retry, .function = officeRetry },
+            .{ .name = commands.office_cleanup, .function = officeCleanup },
+            .{ .name = commands.office_cancel, .function = officeCancel },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
@@ -2320,6 +2337,59 @@ pub const Dispatcher = struct {
         const host = self.models_host orelse
             return encodeExecutionResult(output, .rejected(.catalog_unavailable));
         return encodeExecutionResult(output, host.refreshCatalog());
+    }
+
+    fn officeInstall(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .install);
+    }
+    fn officeRepair(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .repair);
+    }
+    fn officeRemove(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .remove);
+    }
+    fn officeRetry(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .check);
+    }
+    fn officeCleanup(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .cleanup);
+    }
+
+    fn officeBegin(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8, kind: product_control.OfficeKind) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.OfficeOperation, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = try officeId(parsed.value.expectedGeneration);
+        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.begin_fn(host.context, kind, generation) else .{ .reason = .unavailable };
+        return self.encodeOffice(output, result);
+    }
+
+    fn officeCancel(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.OfficeCancel, invocation.request.payload);
+        defer parsed.deinit();
+        const id = try officeId(parsed.value.operationId);
+        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.cancel_fn(host.context, id) else .{ .reason = .unavailable };
+        return self.encodeOffice(output, result);
+    }
+
+    fn officeId(value: []const u8) !u64 {
+        const id = try handlers.parseWireId(value);
+        if (id == 0) return error.InvalidBridgePayload;
+        return id;
+    }
+
+    fn encodeOffice(self: *Dispatcher, output: []u8, result: product_control.OfficeAdmission) ![]const u8 {
+        const control = self.control orelse return error.DispatcherUnavailable;
+        var writer = std.Io.Writer.fixed(output);
+        try std.json.Stringify.value(product_control.OfficeWire.Result.from(result, control.officeComponentView().generation), .{}, &writer);
+        return writer.buffered();
     }
 
     fn modelsResetStore(
@@ -6639,6 +6709,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
         wake_calls: usize = 0,
         account_calls: usize = 0,
         models_calls: usize = 0,
+        office_calls: usize = 0,
+        office_generation: u64 = 0,
+        office_kind: product_control.OfficeKind = .check,
         chrome_connect_calls: usize = 0,
         chrome_refresh_calls: usize = 0,
         chrome_control_calls: usize = 0,
@@ -6772,6 +6845,19 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .rejected(.invalid_provider);
         }
 
+        fn beginOffice(context: *anyopaque, kind: product_control.OfficeKind, generation: u64) product_control.OfficeAdmission {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.office_calls += 1;
+            self.office_generation = generation;
+            self.office_kind = kind;
+            return .{ .accepted = true, .operation_id = 117 };
+        }
+        fn cancelOffice(context: *anyopaque, id: u64) product_control.OfficeAdmission {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.office_calls += 1;
+            return .{ .accepted = true, .operation_id = id };
+        }
+
         fn refreshModels(context: *anyopaque) models_contract.CommandResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.models_calls += 1;
@@ -6839,6 +6925,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .refresh_catalog_fn = Harness.refreshModels,
         .reset_store_fn = Harness.resetModels,
     });
+    dispatcher.setOfficeHost(.{ .context = &harness, .begin_fn = Harness.beginOffice, .cancel_fn = Harness.cancelOffice });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -7019,6 +7106,42 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    const office_cases = [_]struct { name: []const u8, kind: product_control.OfficeKind }{
+        .{ .name = commands.office_install, .kind = .install }, .{ .name = commands.office_repair, .kind = .repair },
+        .{ .name = commands.office_remove, .kind = .remove },   .{ .name = commands.office_retry, .kind = .check },
+        .{ .name = commands.office_cleanup, .kind = .cleanup },
+    };
+    for (office_cases) |case| {
+        const handler = native_dispatcher.registry.find(case.name).?;
+        const invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "office", .command = case.name, .payload = "{\"expectedGeneration\":\"9\"}" } };
+        var foreign = invocation;
+        foreign.source.window_id += 1;
+        const before = harness.office_calls;
+        if (handler.invoke_fn(handler.context, foreign, &response)) |_| return error.ForeignOfficeCommandAllowed else |_| {}
+        try std.testing.expectEqual(before, harness.office_calls);
+        for ([_][]const u8{ "{}", "{\"expectedGeneration\":0}", "{\"expectedGeneration\":\"0\"}", "{\"expectedGeneration\":\"01\"}", "{\"expectedGeneration\":\"18446744073709551616\"}", "{\"expectedGeneration\":\"9\",\"url\":\"https://example.invalid/\"}" }) |payload| {
+            var invalid_office = invocation;
+            invalid_office.request.payload = payload;
+            if (handler.invoke_fn(handler.context, invalid_office, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
+            try std.testing.expectEqual(before, harness.office_calls);
+        }
+        _ = try handler.invoke_fn(handler.context, invocation, &response);
+        try std.testing.expectEqual(before + 1, harness.office_calls);
+        try std.testing.expectEqual(@as(u64, 9), harness.office_generation);
+        try std.testing.expectEqual(case.kind, harness.office_kind);
+    }
+    const cancel_office = native_dispatcher.registry.find(commands.office_cancel).?;
+    const cancel_invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "cancel-office", .command = commands.office_cancel, .payload = "{\"operationId\":\"117\"}" } };
+    _ = try cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &response);
+    const before_loss = harness.office_calls;
+    var tiny_office: [1]u8 = undefined;
+    try std.testing.expectError(error.WriteFailed, cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &tiny_office));
+    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
+    var redundant = cancel_invocation;
+    redundant.request.payload = "{\"operationId\":\"117\",\"expectedGeneration\":\"9\"}";
+    if (cancel_office.invoke_fn(cancel_office.context, redundant, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
+    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
+
     for ([_][]const u8{
         "{\"id\":\"open-https\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com/a?q=1#result\"}}",
         "{\"id\":\"open-http\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"http://localhost:3000/\"}}",

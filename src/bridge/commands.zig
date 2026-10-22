@@ -66,6 +66,12 @@ pub const account_retry_refresh = "metawork.account.retryRefresh";
 pub const account_refresh_summary = "metawork.account.refreshSummary";
 pub const account_open_recharge = "metawork.account.openRecharge";
 pub const models_refresh_catalog = "metawork.models.refreshCatalog";
+pub const office_install = "metawork.office.install";
+pub const office_repair = "metawork.office.repair";
+pub const office_remove = "metawork.office.remove";
+pub const office_retry = "metawork.office.retry";
+pub const office_cleanup = "metawork.office.cleanup";
+pub const office_cancel = "metawork.office.cancel";
 pub const models_reset_store = "metawork.models.resetStore";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
 pub const models_select_default = "metawork.models.selectDefault";
@@ -168,6 +174,12 @@ pub const product = [_][]const u8{
     account_refresh_summary,
     account_open_recharge,
     models_refresh_catalog,
+    office_install,
+    office_repair,
+    office_remove,
+    office_retry,
+    office_cleanup,
+    office_cancel,
     models_reset_store,
     models_configure_metask_selection,
     models_select_default,

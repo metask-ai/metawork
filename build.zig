@@ -462,9 +462,14 @@ fn addRendererWireGenerator(b: *std.Build) void {
     snapshot.addImport("product_view_encoding", encoding);
     const task_view = b.createModule(.{ .root_source_file = b.path("src/product/task/view_contract.zig"), .target = b.graph.host });
     task_view.addImport("product_view_encoding", encoding);
+    const office_model = b.createModule(.{ .root_source_file = b.path("src/product/control/office_component.zig"), .target = b.graph.host });
+    const office_view = b.createModule(.{ .root_source_file = b.path("src/product/control/office_view_contract.zig"), .target = b.graph.host });
+    office_view.addImport("product_view_encoding", encoding);
+    office_view.addImport("product_office_component", office_model);
     const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
+    module.addImport("office_view_contract", office_view);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -1888,6 +1893,13 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const office_view = b.createModule(.{
+        .root_source_file = b.path("src/product/control/office_view_contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    office_view.addImport("product_view_encoding", view_encoding);
+    office_view.addImport("product_office_component", product_office_component);
     const product_control_ports = b.createModule(.{
         .root_source_file = b.path("src/product/control/ports.zig"),
         .target = target,
@@ -1942,6 +1954,7 @@ fn wireAgentCore(
     });
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("product_office_component", product_office_component);
+    product_control_runtime.addImport("product_office_view_contract", office_view);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);

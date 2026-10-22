@@ -976,7 +976,8 @@ Account 状态只在 Workbench 的账号入口和 Account 设置中演进：`che
 
 ```text
 General
-└── Language
+├── Language
+└── Office documents
 
 Account
 ├── Account information（authenticated identity and balance; sign-in state when unauthenticated）
@@ -1002,6 +1003,10 @@ Providers（capability-gated）
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
 设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 的会话模式选择与当前值展示见[审批模式](#102-审批模式)。
+
+`General / 常规` 的 Office 文档分组说明三个基础 Skill 已内置，独立运行环境由用户主动安装。安装前展示 Host 提供的下载量与安装后占用；没有可信发布物或平台不支持时如实说明，不提供假下载入口。当前环境状态与在途操作分别呈现，更新失败不能把旧的可用环境显示为损坏。仅在 Host 给出总量时显示百分比，其余阶段显示文字；取消等待真实收口，不能点击后立即显示已取消。操作失败就地展示可恢复说明，超时只重新读取状态，不自动重发。
+
+安装、更新、重新安装、检查与清理由 Host action facts 决定是否可用，不因 Task 正在运行而整体禁用。移除使用危险动作和确认弹层，默认焦点为取消；说明新 Task 回到基础 Skill，仍被使用的资源待清理，必要时重启完成。清理与移除须提示本机其他 MetaWork 构建可能需要重新安装环境。环境就绪时说明新 Task 使用新资源、既有 Task 须在空闲时显式刷新 Skill，不宣称正在运行的 Session 已切换。该分组遵循现有设置行、错误、焦点、深浅主题及窄窗规则，不建立插件商店或通用拓展管理页面。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 

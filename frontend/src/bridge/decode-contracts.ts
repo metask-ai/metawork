@@ -1,4 +1,7 @@
-import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
+import {
+  decodeTaskApprovalResultWire,
+  decodeOfficeComponentView,
+} from "./generated-wire.ts";
 import {
   exactKeys,
   fail,
@@ -4882,6 +4885,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "permissions",
     "account",
     "models",
+    "office",
     "newTaskAdmission",
     "automaticWorkspaceRoot",
     "skillCatalog",
@@ -5590,6 +5594,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     permissions,
     account: decodeAccount(root.account, "$.account"),
     models: decodeModels(root.models, "$.models"),
+    office: decodeOfficeComponentView(root.office, "$.office"),
     newTaskAdmission: decodeNewTaskAdmission(
       root.newTaskAdmission,
       "$.newTaskAdmission",

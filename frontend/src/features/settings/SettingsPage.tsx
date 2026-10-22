@@ -21,6 +21,11 @@ import {
   accountIdentityLabel,
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import { OfficeSettings, type OfficeAction } from "./OfficeSettings.tsx";
+import type {
+  OfficeComponentView,
+  OfficeComponentResult,
+} from "../../bridge/contracts.ts";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -175,6 +180,9 @@ export function SettingsPage({
   account,
   models,
   automaticWorkspaceRoot,
+  office,
+  onOfficeAction,
+  onOfficeCancel,
   customProviderCapabilities,
   focusTarget,
   initialSection = "general",
@@ -209,6 +217,12 @@ export function SettingsPage({
   account: AccountView;
   models: ModelsView;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
+  office: OfficeComponentView;
+  onOfficeAction: (
+    action: OfficeAction,
+    generation: string,
+  ) => Promise<OfficeComponentResult | null>;
+  onOfficeCancel: (id: string) => Promise<OfficeComponentResult | null>;
   customProviderCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -1186,6 +1200,12 @@ export function SettingsPage({
                   </div>
                 </div>
               </div>
+              <OfficeSettings
+                view={office}
+                disabled={disabled}
+                onAction={onOfficeAction}
+                onCancel={onOfficeCancel}
+              />
             </section>
           )}
 
