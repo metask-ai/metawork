@@ -46,7 +46,8 @@
         "scripts/office/unpack.py",
         "scripts/office/pack.py",
         "scripts/office/soffice.py",
-        "scripts/recalc.py"
+        "scripts/recalc.py",
+        "scripts/office/formulas.py"
       ],
       "workflows": [
         {

@@ -1,0 +1,334 @@
+"""Private Windows Office component controller, invoked by bin/office.exe only.
+
+The native entry owns all descendants. A bounded watchdog ends this controller
+on a blocked UNO call; the entry then closes its job and kills the whole tree.
+No system Office, user Python or user profile is selected by this executable.
+"""
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+PROGRAM = ROOT / "engine/program"
+sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "python-packages"), str(PROGRAM)]
+sys.dont_write_bytecode = True
+
+from office_archive import checked_copy
+from defusedxml import ElementTree as ET
+
+INPUT_BYTES = 100 * 1024 * 1024
+OUTPUT_BYTES = 256 * 1024 * 1024
+MAX_PAGES = 200
+MAX_PAGE_PIXELS = 4_000_000
+WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+REVISION_ELEMENTS = {WORD_NS + name for name in (
+    "ins", "del", "moveFrom", "moveTo", "moveFromRangeStart", "moveFromRangeEnd",
+    "moveToRangeStart", "moveToRangeEnd", "rPrChange", "pPrChange", "sectPrChange",
+    "tblPrChange", "tblGridChange", "trPrChange", "tcPrChange", "numberingChange",
+    "cellIns", "cellDel", "cellMerge",
+)}
+FILTERS = {".docx": "Office Open XML Text", ".xlsx": "Calc MS Excel 2007 XML",
+           ".pptx": "Impress MS PowerPoint 2007 XML", ".pdf": "draw_pdf_import"}
+PDF_FILTERS = {".docx": "writer_pdf_Export", ".xlsx": "calc_pdf_Export",
+               ".pptx": "impress_pdf_Export"}
+
+
+def identity(path):
+    value = path.lstat()
+    if not stat.S_ISREG(value.st_mode) or value.st_size > INPUT_BYTES:
+        raise ValueError("Source must be a regular file within the input budget")
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+@contextmanager
+def checked_input(source):
+    if source.suffix.lower() not in FILTERS:
+        raise ValueError("Supported inputs are DOCX, XLSX, PPTX and PDF")
+    before = identity(source)
+    if source.suffix.lower() != ".pdf":
+        with checked_copy(source) as path:
+            with zipfile.ZipFile(path) as archive:
+                if any(name.lower().endswith("vbaproject.bin") for name in archive.namelist()):
+                    raise ValueError("Document macros are outside the Office component scope")
+            yield path, before
+    else:
+        with tempfile.TemporaryDirectory(prefix="metawork-pdf-input-") as directory:
+            path = Path(directory) / "input.pdf"
+            with source.open("rb") as input_file, path.open("xb") as output:
+                opened = os.fstat(input_file.fileno())
+                # Windows fstat/lstat ctime precision can differ. Compare the
+                # same stable handle fields as the bounded ZIP reader.
+                if (opened.st_dev, opened.st_ino, opened.st_size,
+                        opened.st_mtime_ns) != before[:4]:
+                    raise ValueError("PDF input changed before reading")
+                total = 0
+                while chunk := input_file.read(65536):
+                    total += len(chunk)
+                    if total > INPUT_BYTES:
+                        raise ValueError("PDF input byte budget exceeded")
+                    output.write(chunk)
+            with path.open("rb") as stream:
+                if stream.read(5) != b"%PDF-":
+                    raise ValueError("Input is not a PDF")
+            yield path, before
+
+
+def bounded_file(path, remaining=OUTPUT_BYTES):
+    size = path.stat().st_size
+    if size <= 0 or size > remaining:
+        raise ValueError("Missing or oversized Office result")
+    return size
+
+
+@contextmanager
+def operation_scratch(parent):
+    with tempfile.TemporaryDirectory(prefix=".metawork-office-", dir=parent) as directory:
+        scratch = Path(directory).resolve()
+        previous = tempfile.tempdir
+        # On hard kill, only this recognizable staging root can remain.
+        tempfile.tempdir = str(scratch)
+        try:
+            yield scratch
+        finally:
+            tempfile.tempdir = previous
+
+
+def revisions_remaining(path):
+    # Every Word XML part matters, including headers, notes and table properties.
+    with zipfile.ZipFile(path) as archive:
+        for name in archive.namelist():
+            if name.startswith("word/") and name.endswith(".xml"):
+                root = ET.fromstring(archive.read(name))
+                if any(element.tag in REVISION_ELEMENTS for element in root.iter()):
+                    return True
+    return False
+
+
+class Engine:
+    def __init__(self, directory):
+        self.directory = directory
+        self.documents = []
+        self.desktop = None
+        self.process = None
+
+    def __enter__(self):
+        profile = (self.directory / "profile").as_uri()
+        pipe = "metawork-office-" + uuid.uuid4().hex
+        os.environ["URE_BOOTSTRAP"] = (PROGRAM / "fundamental.ini").as_uri()
+        os.environ["UserInstallation"] = profile
+        import uno
+        import unohelper
+        from com.sun.star.task import XInteractionHandler
+
+        class AbortInteraction(unohelper.Base, XInteractionHandler):
+            def handle(self, request):
+                for continuation in request.getContinuations():
+                    abort = continuation.queryInterface(
+                        uno.getTypeByName("com.sun.star.task.XInteractionAbort"))
+                    if abort is not None:
+                        abort.select()
+                        return
+
+        self.uno = uno
+        self.interaction = AbortInteraction()
+        self.process = subprocess.Popen([
+            str(PROGRAM / "soffice.com"), f"-env:UserInstallation={profile}",
+            "--headless", "--norestore", "--nodefault", "--nofirststartwizard",
+            f"--accept=pipe,name={pipe};urp;StarOffice.ServiceManager",
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        local = uno.getComponentContext()
+        resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                self.context = resolver.resolve(f"uno:pipe,name={pipe};urp;StarOffice.ComponentContext")
+                break
+            except Exception:
+                if self.process.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("Office engine did not become ready") from None
+                time.sleep(0.05)
+        self.desktop = self.service("com.sun.star.frame.Desktop")
+        return self
+
+    def service(self, name):
+        return self.context.ServiceManager.createInstanceWithContext(name, self.context)
+
+    @staticmethod
+    def properties(**values):
+        from com.sun.star.beans import PropertyValue
+        result = []
+        for name, value in values.items():
+            prop = PropertyValue()
+            prop.Name, prop.Value = name, value
+            result.append(prop)
+        return tuple(result)
+
+    def load(self, path):
+        from com.sun.star.document.MacroExecMode import NEVER_EXECUTE
+        from com.sun.star.document.UpdateDocMode import NO_UPDATE
+        document = self.desktop.loadComponentFromURL(path.as_uri(), "_blank", 0,
+            self.properties(Hidden=True, ReadOnly=False, MacroExecutionMode=NEVER_EXECUTE,
+                            UpdateDocMode=NO_UPDATE, InteractionHandler=self.interaction,
+                            PickListEntry=False, FilterName=FILTERS[path.suffix.lower()]))
+        if document is None:
+            raise RuntimeError("Office engine could not open the document")
+        self.documents.append(document)
+        return document
+
+    def save(self, document, path, filter_name):
+        document.storeToURL(path.as_uri(), self.properties(FilterName=filter_name,
+                            Overwrite=False, InteractionHandler=self.interaction))
+        bounded_file(path)
+
+    def __exit__(self, kind, value, traceback):
+        # If shutdown blocks, the command watchdog and native job remain armed.
+        try:
+            for document in reversed(self.documents):
+                document.close(True)
+            if self.desktop is not None and not self.desktop.terminate():
+                raise RuntimeError("Office engine refused shutdown")
+        finally:
+            if self.process is not None:
+                try:
+                    code = self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError("Office engine did not settle") from None
+                if code != 0:
+                    raise RuntimeError("Office engine exited unsuccessfully")
+
+
+def convert(engine, source, staged, command):
+    document = engine.load(source)
+    if command == "accept":
+        if source.suffix.lower() != ".docx":
+            raise ValueError("Accept requires a DOCX document")
+        before = document.getRedlines().getCount()
+        engine.service("com.sun.star.frame.DispatchHelper").executeDispatch(
+            document.CurrentController.Frame, ".uno:AcceptAllTrackedChanges", "", 0, ())
+        if document.getRedlines().getCount() != 0:
+            raise RuntimeError("Tracked changes remain after acceptance")
+        engine.save(document, staged, FILTERS[".docx"])
+        with checked_copy(staged) as result:
+            if revisions_remaining(result):
+                raise RuntimeError("Saved Word XML still contains tracked changes")
+        return {"accepted_revisions": before}
+    if command == "recalc":
+        if source.suffix.lower() != ".xlsx":
+            raise ValueError("Recalc requires an XLSX workbook")
+        from spreadsheet_checks import _formulas, _check_formula_caches, _summary
+        expected = _formulas(source)
+        document.calculateAll()
+        engine.save(document, staged, FILTERS[".xlsx"])
+        with checked_copy(staged) as result:
+            if _formulas(result) != expected:
+                raise ValueError("Recalculation changed or removed workbook formulas")
+            _check_formula_caches(result)
+            return _summary(result, len(expected))
+    if command == "pdf":
+        if source.suffix.lower() not in PDF_FILTERS:
+            raise ValueError("PDF export requires DOCX, XLSX or PPTX")
+        engine.save(document, staged, PDF_FILTERS[source.suffix.lower()])
+        return {}
+    raise ValueError("Unknown conversion command")
+
+
+def render(engine, source, output, width):
+    document = engine.load(source)
+    if source.suffix.lower() != ".pdf":
+        pdf = engine.directory / "preview.pdf"
+        engine.save(document, pdf, PDF_FILTERS[source.suffix.lower()])
+        document = engine.load(pdf)
+    count = document.DrawPages.Count
+    if count < 1 or count > MAX_PAGES:
+        raise ValueError("Document page budget exceeded")
+    remaining = OUTPUT_BYTES
+    pages = []
+    for index in range(count):
+        page = document.DrawPages.getByIndex(index)
+        height = math.ceil(width * page.Height / page.Width)
+        if height < 1 or width * height > MAX_PAGE_PIXELS:
+            raise ValueError("Rendered page pixel budget exceeded")
+        filename = f"page-{index + 1:04}.png"
+        path = output / filename
+        exporter = engine.service("com.sun.star.drawing.GraphicExportFilter")
+        exporter.setSourceDocument(page)
+        if not exporter.filter(engine.properties(URL=path.as_uri(), MediaType="image/png",
+                FilterData=engine.uno.Any("[]com.sun.star.beans.PropertyValue",
+                                         engine.properties(PixelWidth=width, PixelHeight=height)))):
+            raise RuntimeError("Office page export failed")
+        remaining -= bounded_file(path, remaining)
+        pages.append({"file": filename, "width": width, "height": height,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    manifest = {"schema": 1, "pages": pages}
+    (output / "pages.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return {"page_count": count}
+
+
+def run(args):
+    source = Path(args.input).absolute()
+    output = Path(args.output).absolute()
+    if output.exists() or output.is_symlink():
+        raise ValueError("Office output must not already exist")
+    if not output.parent.is_dir():
+        raise ValueError("Office output parent must already exist")
+    expected = {"accept": ".docx", "recalc": ".xlsx", "pdf": ".pdf"}
+    if args.command in expected and output.suffix.lower() != expected[args.command]:
+        raise ValueError("Office output extension does not match the operation")
+    # Staging is on the destination volume; nothing is published until engine
+    # shutdown and content checks finish. A failed attempt owns this whole tree.
+    with operation_scratch(output.parent) as scratch:
+        staged = scratch / ("result" + output.suffix if args.command != "render" else "pages")
+        with checked_input(source) as (input_copy, before):
+            with Engine(scratch) as engine:
+                if args.command == "render":
+                    staged.mkdir()
+                    details = render(engine, input_copy, staged, args.width)
+                else:
+                    details = convert(engine, input_copy, staged, args.command)
+            if identity(source) != before:
+                raise ValueError("Source changed during Office processing; result not published")
+            # Windows rename refuses an existing destination, including a race.
+            staged.rename(output)
+    return {"status": "success", **details}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MetaWork Office component")
+    parser.add_argument("command", choices=("accept", "recalc", "pdf", "render"))
+    parser.add_argument("input")
+    parser.add_argument("output")
+    parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--width", type=int, default=1280)
+    args = parser.parse_args()
+    if os.name != "nt" or not 0 < args.timeout <= 300 or not 128 <= args.width <= 2048:
+        parser.error("Windows required; timeout must be (0, 300], width must be [128, 2048]")
+    watchdog = threading.Timer(args.timeout, lambda: os._exit(124))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        result = run(args)
+        print(json.dumps(result, ensure_ascii=True), flush=True)
+        return 0 if result["status"] == "success" else 1
+    except Exception:
+        # UNO exceptions may contain raw document paths or remote URLs.
+        print(json.dumps({"status": "failed", "error": "Office operation failed; no result published"}), flush=True)
+        return 1
+    finally:
+        watchdog.cancel()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
