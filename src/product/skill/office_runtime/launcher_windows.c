@@ -92,7 +92,7 @@ int wmain(int argc, wchar_t **argv) {
         return fail("cannot own Office process tree");
     }
 
-    if (!argument(python) || !argument(L"-I") || !argument(L"-S") ||
+    if (!argument(python) || !argument(L"-I") || !argument(L"-S") || !argument(L"-B") ||
         !argument(L"-X") || !argument(L"utf8") || !argument(script))
         return fail("component command exceeds capacity");
     for (int i = 1; i < argc; ++i)

@@ -271,6 +271,23 @@ class OfficeEngine(unittest.TestCase):
         self.invoke("accept", "corrupt.docx", "failed.docx", success=False)
         self.assertFalse((self.root / "failed.docx").exists())
 
+    def test_word_and_presentation_structured_reads_keep_context(self):
+        self.invoke("text", "revisions.docx", "word-text.json")
+        word = json.loads((self.root / "word-text.json").read_text(encoding="utf-8"))
+        self.assertEqual(word["format"], "docx")
+        body = next(part["blocks"] for part in word["parts"] if part["part"] == "word/document.xml")
+        self.assertEqual(body[1]["paragraph"], [
+            {"text": "Keep ", "revision": None}, {"text": "delete ", "revision": "del"},
+            {"text": "accepted ", "revision": "ins"}, {"text": "insert.", "revision": None},
+        ])
+        self.assertTrue(any("table" in block for block in body))
+        self.assertTrue(any(part["part"].startswith("word/header") for part in word["parts"]))
+        self.invoke("text", "sample.pptx", "presentation-text.json")
+        slides = json.loads((self.root / "presentation-text.json").read_text(encoding="utf-8"))["slides"]
+        self.assertEqual(len(slides), 2)
+        self.assertIn("第一页 First slide", slides[0]["paragraphs"])
+        self.assertIn("第二页 Second slide", slides[1]["paragraphs"])
+
     def hold_real_tree(self, process):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:

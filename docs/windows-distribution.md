@@ -1,6 +1,6 @@
 # MetaWork Windows 分发
 
-> 状态：Inno Setup 安装器、Authenticode 与发布验证的 source of truth
+> 状态：Windows 主包、Office 组件 producer、Authenticode 与发布验证的 source of truth
 
 `npm run package:windows` 是 Windows 安装 artifact 的正式工程入口，默认选择 x64；`npm run package:windows -- arm64` 选择 ARM64。每次调用只输出所选架构的一个版本化安装器：
 
@@ -65,3 +65,19 @@ signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选�
 安装器生成不等于自动更新能力；更新协议、channel、回滚和旧版本迁移不在当前入口范围内。
 
 工具能力参考 [Inno Setup 官方说明](https://jrsoftware.org/isinfo.php)、[ISCC 命令行](https://jrsoftware.org/ishelp/topic_compilercmdline.htm)和 [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)。
+
+## 独立 Office 运行时构建
+
+Office 重依赖由独立组件 producer 构建，不进入主程序 runtime stage。目前 producer 只接受 Windows x64 构建主机和 x64 组件；其可构建不表示应用已开放组件安装，也不表示 ARM64 或干净机器通过验收。
+
+```powershell
+node scripts/build-office-component.mjs --python <absolute-builder-python> --output <new-absolute-output.tar.gz>
+```
+
+构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node 和私有中文字体的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包，以独立的 lock 和禁用安装脚本的 `npm ci` 构建。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。
+
+供应商输入必须通过摘要与适用的 Authenticode 校验；MSI 只行政提取到新的 staging 目录，保留许可证和运行所需的 app-local Microsoft 库。组件入口拥有解释器和引擎进程树，组件内的私有字体由引擎加载。默认要求签署 MetaWork 自有入口并立即验证；显式 `--signing none` 仅产生开发组件，不能作为正式分发通过证据。签名身份与工具继续遵守上文的[签名边界](#签名边界)。
+
+组件归档为 `tar.gz`，tar 使用 USTAR；当前 Windows producer 不生成链接或特殊成员，不包含字节码缓存、PDB 或安装器副本。归档根的 `office-runtime.json` 使用 schema 1，固定 `target`，以 `files` 列出相对 `path`、实际 `bytes` 和 `sha256`；`payloadBytes` 是清单自身之外所列文件的总字节。归档旁的机器结果记录完整压缩摘要、压缩量和含清单的实际展开量。构建完成前必须重新流式读取完整归档，检查实际成员与清单一致及 gzip CRC，不能只核对构建目录。容量与成员预算由 producer 检查拥有；安装器的受限解包验收仍需独立完成。
+
+这些 producer 来源不授予客户端任意下载 authority。正式客户端须由主包固定其接受的组件发布身份、来源和完整归档摘要；组件内引擎或解释器安全更新因此需要同步发布主包信任信息。主包升级不自动下载用户尚未启用的 Office 组件。完整 Skill 工作流、安装事务、签名后位置与干净机器验收通过前，不得将开发归档登记为可安装的正式组件。

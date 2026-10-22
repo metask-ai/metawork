@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "target": "x86_64-windows-msvc",
+  "libreoffice": {
+    "version": "26.8.1.1",
+    "url": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/x86_64/LibreOffice_26.8.1_Win_x86-64.msi",
+    "sha256": "c6298b10cfa1748bcbedad94c62ce771e240e5021bfd6d7a967cd571b04b5312",
+    "bytes": 374870016,
+    "pythonDirectory": "python-core-3.13.15"
+  },
+  "node": {
+    "version": "24.19.0",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip",
+    "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
+    "bytes": 37304352,
+    "archiveRoot": "node-v24.19.0-win-x64"
+  },
+  "font": {
+    "version": "Sans2.004",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+    "bytes": 16437364
+  },
+  "fontLicense": {
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE",
+    "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+    "bytes": 4301
+  }
+}

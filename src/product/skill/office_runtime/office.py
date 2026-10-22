@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import runpy
 import stat
 import subprocess
 import sys
@@ -210,7 +211,7 @@ class Engine:
                     raise RuntimeError("Office engine exited unsuccessfully")
 
 
-def convert(engine, source, staged, command):
+def convert(engine, source, staged, command, expected_formulas=None):
     document = engine.load(source)
     if command == "accept":
         if source.suffix.lower() != ".docx":
@@ -229,14 +230,13 @@ def convert(engine, source, staged, command):
         if source.suffix.lower() != ".xlsx":
             raise ValueError("Recalc requires an XLSX workbook")
         from spreadsheet_checks import _formulas, _check_formula_caches, _summary
-        expected = _formulas(source)
         document.calculateAll()
         engine.save(document, staged, FILTERS[".xlsx"])
         with checked_copy(staged) as result:
-            if _formulas(result) != expected:
+            if _formulas(result) != expected_formulas:
                 raise ValueError("Recalculation changed or removed workbook formulas")
             _check_formula_caches(result)
-            return _summary(result, len(expected))
+            return _summary(result, len(expected_formulas))
     if command == "pdf":
         if source.suffix.lower() not in PDF_FILTERS:
             raise ValueError("PDF export requires DOCX, XLSX or PPTX")
@@ -284,20 +284,30 @@ def run(args):
         raise ValueError("Office output must not already exist")
     if not output.parent.is_dir():
         raise ValueError("Office output parent must already exist")
-    expected = {"accept": ".docx", "recalc": ".xlsx", "pdf": ".pdf"}
+    expected = {"accept": ".docx", "recalc": ".xlsx", "pdf": ".pdf", "text": ".json"}
     if args.command in expected and output.suffix.lower() != expected[args.command]:
         raise ValueError("Office output extension does not match the operation")
+    if args.command in ("accept", "recalc") and source.suffix.lower() != expected[args.command]:
+        raise ValueError("Office input extension does not match the operation")
     # Staging is on the destination volume; nothing is published until engine
     # shutdown and content checks finish. A failed attempt owns this whole tree.
     with operation_scratch(output.parent) as scratch:
         staged = scratch / ("result" + output.suffix if args.command != "render" else "pages")
         with checked_input(source) as (input_copy, before):
-            with Engine(scratch) as engine:
-                if args.command == "render":
-                    staged.mkdir()
-                    details = render(engine, input_copy, staged, args.width)
-                else:
-                    details = convert(engine, input_copy, staged, args.command)
+            expected_formulas = None
+            if args.command == "recalc":
+                from spreadsheet_checks import _formulas
+                expected_formulas = _formulas(input_copy)
+            if args.command == "text":
+                from document_text import extract
+                details = extract(input_copy, staged)
+            else:
+                with Engine(scratch) as engine:
+                    if args.command == "render":
+                        staged.mkdir()
+                        details = render(engine, input_copy, staged, args.width)
+                    else:
+                        details = convert(engine, input_copy, staged, args.command, expected_formulas)
             if identity(source) != before:
                 raise ValueError("Source changed during Office processing; result not published")
             # Windows rename refuses an existing destination, including a race.
@@ -305,21 +315,92 @@ def run(args):
     return {"status": "success", **details}
 
 
+def node_environment():
+    environment = dict(os.environ)
+    environment.pop("NODE_OPTIONS", None)
+    environment.pop("NODE_PATH", None)
+    return environment
+
+
+def author(command, arguments):
+    if not arguments:
+        raise ValueError("Office authoring requires a script path")
+    if command == "node":
+        return subprocess.run([str(ROOT / "node/node.exe"), "--import",
+                               (ROOT / "tools/node.mjs").as_uri(), *arguments],
+                              env=node_environment()).returncode
+    script = Path(arguments[0]).resolve(strict=True)
+    if not script.is_file():
+        raise ValueError("Office Python requires a regular script")
+    sys.argv = [str(script), *arguments[1:]]
+    # Packaged dependencies precede script-local imports. This doesn't change
+    # any Task-wide environment or the behavior of user/custom Skills.
+    sys.path.append(str(script.parent))
+    runpy.run_path(str(script), run_name="__main__")
+    return 0
+
+
+def selftest():
+    import openpyxl
+    import lxml.etree
+    import pandas
+    import PIL
+    import markitdown
+    with tempfile.TemporaryDirectory(prefix="metawork-office-selftest-") as directory:
+        root = Path(directory).resolve()
+        with Engine(root) as engine:
+            device = engine.service("com.sun.star.awt.Toolkit").createScreenCompatibleDevice(1, 1)
+            if not any(font.Name == "Noto Sans CJK SC" for font in device.getFontDescriptors()):
+                raise RuntimeError("Bundled Chinese font is not visible to the Office engine")
+            document = engine.desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0,
+                                                          engine.properties(Hidden=True))
+            engine.documents.append(document)
+            document.Text.String = "MetaWork Office 中文自检"
+            cursor = document.Text.createTextCursor()
+            cursor.gotoStart(False)
+            cursor.gotoEnd(True)
+            cursor.CharFontName = "Noto Sans CJK SC"
+            engine.save(document, root / "selftest.pdf", "writer_pdf_Export")
+            pages = root / "pages"
+            pages.mkdir()
+            if render(engine, root / "selftest.pdf", pages, 640)["page_count"] != 1:
+                raise RuntimeError("Office self-test pagination failed")
+        result = subprocess.run([str(ROOT / "node/node.exe"), "--import", (ROOT / "tools/node.mjs").as_uri(),
+            "-e", "require('docx');require('pptxgenjs');process.stdout.write(process.versions.node)"],
+            env=node_environment(), capture_output=True, text=True, timeout=15)
+        if result.returncode != 0 or result.stderr:
+            raise RuntimeError("Packaged authoring libraries are unavailable")
+        return {"status": "success", "schema": 1, "python": sys.version.split()[0],
+                "node": result.stdout, "font": "Noto Sans CJK SC"}
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("python", "node"):
+        watchdog = threading.Timer(300, lambda: os._exit(124))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            return author(sys.argv[1], sys.argv[2:])
+        finally:
+            watchdog.cancel()
     parser = argparse.ArgumentParser(description="MetaWork Office component")
-    parser.add_argument("command", choices=("accept", "recalc", "pdf", "render"))
-    parser.add_argument("input")
-    parser.add_argument("output")
+    parser.add_argument("command", choices=("accept", "recalc", "pdf", "render", "text", "selftest"))
+    parser.add_argument("input", nargs="?")
+    parser.add_argument("output", nargs="?")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--width", type=int, default=1280)
     args = parser.parse_args()
+    if args.command != "selftest" and (args.input is None or args.output is None):
+        parser.error("An input and a new output path are required")
+    if args.command == "selftest" and (args.input is not None or args.output is not None):
+        parser.error("Self-test takes no document paths")
     if os.name != "nt" or not 0 < args.timeout <= 300 or not 128 <= args.width <= 2048:
         parser.error("Windows required; timeout must be (0, 300], width must be [128, 2048]")
     watchdog = threading.Timer(args.timeout, lambda: os._exit(124))
     watchdog.daemon = True
     watchdog.start()
     try:
-        result = run(args)
+        result = selftest() if args.command == "selftest" else run(args)
         print(json.dumps(result, ensure_ascii=True), flush=True)
         return 0 if result["status"] == "success" else 1
     except Exception:
