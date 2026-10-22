@@ -171,8 +171,9 @@ pub const Resource = struct {
                 .duplicate_field_behavior = .@"error",
             });
             try validateGrid(&self.grid.?.value, metadata.sheetCount.?);
-        } else {
-            for (metadata.pages.?) |page_metadata| {
+        }
+        if (metadata.pages) |pages| {
+            for (pages) |page_metadata| {
                 try cancelled(cancellation);
                 const pixels = try self.checkedPage(directory, page_metadata);
                 self.allocator.free(pixels);
@@ -192,7 +193,7 @@ pub const Resource = struct {
     pub fn page(self: *Resource, index: usize, cancellation: *const process.Cancellation) ![]u8 {
         try self.worker();
         const metadata = try self.prepared();
-        if (metadata.kind != .pages or index >= metadata.pages.?.len) return error.InvalidPreviewRegion;
+        if (metadata.pages == null or index >= metadata.pages.?.len) return error.InvalidPreviewRegion;
         try self.checkSource(cancellation);
         try self.verifyRoot();
         const directory = try self.root.?.directory.?.openDir(self.io, "prepared", .{ .follow_symlinks = false });
@@ -643,25 +644,25 @@ fn validateManifest(value: *const Manifest, format: Format) !void {
         !std.mem.eql(u8, value.sourceText.file, "source-text.txt") or value.sourceText.bytes == 0 or value.sourceText.bytes > max_text_bytes)
         return error.InvalidPreviewManifest;
     _ = try hexDigest(value.sourceText.sha256);
-    const known = [_][]const u8{ "external_hyperlinks", "merged_cells", "conditional_formatting", "data_validation", "charts", "images", "pivot_tables", "comments" };
-    for (value.omissions, 0..) |item, index| {
-        var found = false;
-        for (known) |allowed| if (std.mem.eql(u8, item, allowed)) {
-            found = true;
-        };
-        if (!found) return error.InvalidPreviewManifest;
-        for (value.omissions[0..index]) |before| if (std.mem.eql(u8, before, item)) return error.InvalidPreviewManifest;
-    }
+    try validateOmissions(value.omissions, false);
     if (format == .xlsx) {
-        if (value.kind != .grid or value.pages != null or value.grid == null or value.sheetCount == null or value.sheetCount.? > 64 or
+        if (value.kind != .grid or value.pages == null or value.layout == null or value.grid == null or value.sheetCount == null or value.sheetCount.? > 64 or
             !std.mem.eql(u8, value.grid.?.file, "grid.json") or value.grid.?.bytes == 0 or value.grid.?.bytes > max_grid_bytes)
             return error.InvalidPreviewManifest;
         _ = try hexDigest(value.grid.?.sha256);
+        const layout = value.layout.?;
+        try validateOmissions(layout.omissions, true);
+        if (layout.state == .ready) {
+            if (value.pages.?.len == 0) return error.InvalidPreviewManifest;
+        } else if (value.pages.?.len != 0 or layout.omissions.len != 0) return error.InvalidPreviewManifest;
     } else {
-        if (value.kind != .pages or value.grid != null or value.sheetCount != null or value.pages == null or value.pages.?.len == 0 or value.pages.?.len > max_pages)
+        if (value.kind != .pages or value.layout != null or value.grid != null or value.sheetCount != null or value.pages == null or value.pages.?.len == 0)
             return error.InvalidPreviewManifest;
+    }
+    if (value.pages) |pages| {
+        if (pages.len > max_pages) return error.InvalidPreviewManifest;
         var total: u64 = 0;
-        for (value.pages.?, 0..) |page, index| {
+        for (pages, 0..) |page, index| {
             var buffer: [32]u8 = undefined;
             const name = try std.fmt.bufPrint(&buffer, "page-{d:0>4}.png", .{index + 1});
             total += page.bytes;
@@ -670,6 +671,20 @@ fn validateManifest(value: *const Manifest, format: Format) !void {
                 return error.InvalidPreviewManifest;
             _ = try hexDigest(page.sha256);
         }
+    }
+}
+fn validateOmissions(items: []const []const u8, layout: bool) !void {
+    if (items.len > 16) return error.InvalidPreviewManifest;
+    const grid_known = [_][]const u8{ "external_hyperlinks", "merged_cells", "conditional_formatting", "data_validation", "charts", "images", "pivot_tables", "comments" };
+    const layout_known = [_][]const u8{ "external_hyperlinks", "conditional_formatting", "data_validation", "defined_names", "missing_formula_caches" };
+    const known: []const []const u8 = if (layout) &layout_known else &grid_known;
+    for (items, 0..) |item, index| {
+        var found = false;
+        for (known) |allowed| if (std.mem.eql(u8, item, allowed)) {
+            found = true;
+        };
+        if (!found) return error.InvalidPreviewManifest;
+        for (items[0..index]) |before| if (std.mem.eql(u8, before, item)) return error.InvalidPreviewManifest;
     }
 }
 fn validateGrid(value: *const Grid, sheet_count: u16) !void {
@@ -714,6 +729,30 @@ test "preview metadata never turns a component filename into arbitrary path auth
     pages[0].height = 1656;
     metadata.grid = .{ .file = "grid.json", .bytes = 1, .sha256 = "1" ** 64 };
     try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .docx));
+}
+
+test "workbook manifest binds checked pages and layout status without losing the grid" {
+    var pages = [_]Page{.{ .file = "page-0001.png", .bytes = 1, .sha256 = "1" ** 64, .width = 1280, .height = 1656 }};
+    var metadata: Manifest = .{ .schema = 1, .format = .xlsx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "1" ** 64 }, .textScope = contract.sourceTextScope(.xlsx), .omissions = &.{"charts"}, .kind = .grid, .pages = &pages, .grid = .{ .file = "grid.json", .bytes = 1, .sha256 = "1" ** 64 }, .sheetCount = 1, .layout = .{ .state = .ready, .omissions = &.{"missing_formula_caches"} } };
+    try validateManifest(&metadata, .xlsx);
+    metadata.textScope = contract.sourceTextScope(.docx);
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .xlsx));
+    metadata.textScope = contract.sourceTextScope(.xlsx);
+    metadata.layout.?.state = .unsupported;
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .xlsx));
+    var no_pages: [0]Page = .{};
+    metadata.pages = &no_pages;
+    metadata.layout.?.omissions = &.{};
+    try validateManifest(&metadata, .xlsx);
+    metadata.layout.?.state = .limit;
+    try validateManifest(&metadata, .xlsx);
+    metadata.layout.?.state = .ready;
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .xlsx));
+    metadata.pages = &pages;
+    metadata.layout.?.omissions = &.{"charts"};
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .xlsx));
+    metadata.layout = null;
+    try std.testing.expectError(error.InvalidPreviewManifest, validateManifest(&metadata, .xlsx));
 }
 
 test "grid normalization rejects duplicate cells and cannot imply recalculation" {

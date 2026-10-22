@@ -210,8 +210,8 @@ fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Leas
     const pages = if (material.manifest.pages) |items| items.len else 0;
     const text_bytes = material.source_text.len;
     var cells: usize = 0;
-    for (0..3) |_| {
-        try lane.read(1, if (pages != 0) .{ .page = 0 } else .{ .region = .{ .sheet = 1, .row = 1, .column = 1, .rows = 10, .columns = 5 } });
+    for (0..3) |index| {
+        try lane.read(1, if (pages != 0 and (material.grid == null or index != 1)) .{ .page = 0 } else .{ .region = .{ .sheet = 1, .row = 1, .column = 1, .rows = 10, .columns = 5 } });
         const taken = try nextLane(init.io, &lane);
         const failure = taken.failure;
         if (taken.read) |read| switch (read.value) {

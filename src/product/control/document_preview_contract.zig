@@ -4,12 +4,17 @@ const std = @import("std");
 
 pub const Format = enum { docx, pptx, xlsx, pdf };
 pub fn sourceTextScope(format: Format) []const u8 {
-    return if (format == .pdf) "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr" else "ooxml_xml_text_and_attributes_without_ocr";
+    return switch (format) {
+        .pdf => "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr",
+        .xlsx => "ooxml_xml_and_available_layout_pdf_text_without_ocr",
+        else => "ooxml_xml_text_and_attributes_without_ocr",
+    };
 }
 
 pub const Kind = enum { pages, grid };
 pub const File = struct { file: []const u8, bytes: u32, sha256: []const u8 };
 pub const Page = struct { file: []const u8, bytes: u32, sha256: []const u8, width: u32, height: u32 };
+pub const Layout = struct { state: enum { ready, unsupported, limit }, omissions: []const []const u8 };
 pub const Manifest = struct {
     schema: u8,
     format: Format,
@@ -20,6 +25,7 @@ pub const Manifest = struct {
     pages: ?[]Page = null,
     grid: ?File = null,
     sheetCount: ?u16 = null,
+    layout: ?Layout = null,
 };
 pub const Value = struct { kind: enum { number, text, boolean, date, duration, @"error" }, text: []const u8 };
 pub const Cell = struct {

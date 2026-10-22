@@ -3,6 +3,7 @@ import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import type {
   DocumentCell,
   DocumentFailure,
+  DocumentLayout,
   DocumentOpen,
   DocumentRegion,
 } from "../../bridge/document-contract.ts";
@@ -49,20 +50,42 @@ function DocumentPreviewContent({
   const [sheet, setSheet] = useState(0);
   const [row, setRow] = useState(1);
   const [column, setColumn] = useState(1);
+  const [mode, setMode] = useState<"grid" | "pages">("grid");
+  const pageView = document?.kind === "pages" || mode === "pages";
+  const layoutUnavailable =
+    document?.kind === "grid" && pageView && document.layout?.state !== "ready";
   const currentSheet =
     document?.sheets.find((value) => value.index === sheet) ??
     document?.sheets.find((value) => !value.hidden) ??
     document?.sheets[0];
   const emptyGrid =
+    !pageView &&
     document?.kind === "grid" &&
     (!currentSheet || !currentSheet.rows || !currentSheet.columns);
+  const matchesContent =
+    content?.state === "ready" &&
+    (pageView
+      ? content.kind === "page" && content.page === page
+      : content.kind === "region" &&
+        content.sheet === currentSheet?.index &&
+        content.row === row &&
+        content.column === column);
   const loading =
-    state.state === "loading" || (content?.state === "loading" && !emptyGrid);
+    state.state === "loading" ||
+    (!emptyGrid &&
+      !layoutUnavailable &&
+      (content?.state === "loading" ||
+        (content?.state === "ready" && !matchesContent)));
   useEffect(() => {
     if (!document) return;
-    if (document.kind === "pages")
+    if (pageView && !layoutUnavailable)
       void preview.read({ kind: "page", page: String(page) });
-    else if (currentSheet && currentSheet.rows > 0 && currentSheet.columns > 0)
+    else if (
+      !pageView &&
+      currentSheet &&
+      currentSheet.rows > 0 &&
+      currentSheet.columns > 0
+    )
       void preview.read({
         kind: "region",
         sheet: String(currentSheet.index),
@@ -71,7 +94,16 @@ function DocumentPreviewContent({
         rows: String(Math.min(25, currentSheet.rows - row + 1)),
         columns: String(Math.min(10, currentSheet.columns - column + 1)),
       });
-  }, [preview, document?.token, page, currentSheet?.index, row, column]);
+  }, [
+    preview,
+    document?.token,
+    pageView,
+    layoutUnavailable,
+    page,
+    currentSheet?.index,
+    row,
+    column,
+  ]);
   const status = state.state === "ready" ? content?.state : state.state;
   const failure =
     status && status !== "ready" && status !== "loading"
@@ -93,7 +125,33 @@ function DocumentPreviewContent({
       </div>
       {document && (
         <>
-          {document.kind === "pages" ? (
+          {document.kind === "grid" && (
+            <div
+              className="document-preview-toolbar"
+              role="group"
+              aria-label={t("document_preview.view")}
+            >
+              <Button
+                variant={!pageView ? "secondary" : "ghost"}
+                size="sm"
+                aria-pressed={!pageView}
+                disabled={loading}
+                onClick={() => setMode("grid")}
+              >
+                {t("document_preview.grid")}
+              </Button>
+              <Button
+                variant={pageView ? "secondary" : "ghost"}
+                size="sm"
+                aria-pressed={pageView}
+                disabled={loading}
+                onClick={() => setMode("pages")}
+              >
+                {t("document_preview.layout")}
+              </Button>
+            </div>
+          )}
+          {pageView && !layoutUnavailable ? (
             <nav
               className="document-preview-toolbar"
               aria-label={t("document_preview.pages")}
@@ -121,7 +179,7 @@ function DocumentPreviewContent({
                 {t("document_preview.next")}
               </Button>
             </nav>
-          ) : (
+          ) : !pageView ? (
             currentSheet && (
               <>
                 <label className="document-preview-sheet">
@@ -187,12 +245,31 @@ function DocumentPreviewContent({
                 </p>
               </>
             )
+          ) : null}
+          {document.kind === "grid" && pageView && !layoutUnavailable && (
+            <p className="document-preview-note">
+              {t("document_preview.layout_saved_values")}
+            </p>
           )}
-          <DocumentOmissions document={document} />
+          <DocumentOmissions
+            items={
+              pageView && document.kind === "grid"
+                ? (document.layout?.omissions ?? [])
+                : document.omissions
+            }
+          />
         </>
       )}
       <div className="document-preview-body">
-        {loading ? (
+        {layoutUnavailable ? (
+          <p role="status">
+            {t(
+              document?.layout?.state === "limit"
+                ? "document_preview.layout_limit"
+                : "document_preview.layout_unsupported",
+            )}
+          </p>
+        ) : loading ? (
           <p role="status">{t("file_preview.loading")}</p>
         ) : failure ? (
           <div role="status">
@@ -201,7 +278,9 @@ function DocumentPreviewContent({
               {t("file_preview.retry")}
             </Button>
           </div>
-        ) : content?.state === "ready" && content.kind === "page" ? (
+        ) : matchesContent &&
+          content?.state === "ready" &&
+          content.kind === "page" ? (
           <PreviewImageView
             image={content.image}
             alt={t("document_preview.page_alt", { title, page: content.page })}
@@ -209,7 +288,9 @@ function DocumentPreviewContent({
               void preview.close();
             }}
           />
-        ) : content?.state === "ready" && content.kind === "region" ? (
+        ) : matchesContent &&
+          content?.state === "ready" &&
+          content.kind === "region" ? (
           <DocumentGrid
             key={`${document?.token}:${content.sheet}:${content.row}:${content.column}`}
             region={content}
@@ -222,13 +303,17 @@ function DocumentPreviewContent({
   );
 }
 
-function DocumentOmissions({ document }: { document: DocumentOpen }) {
+function DocumentOmissions({
+  items,
+}: {
+  items: DocumentOpen["omissions"] | DocumentLayout["omissions"];
+}) {
   const { t } = useI18n();
-  if (!document.omissions.length) return null;
+  if (!items.length) return null;
   return (
     <p className="document-preview-note">
       {t("document_preview.omissions", {
-        items: document.omissions
+        items: items
           .map((value) => t(`document_preview.omission.${value}`))
           .join(" · "),
       })}

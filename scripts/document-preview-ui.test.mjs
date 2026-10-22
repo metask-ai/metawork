@@ -209,6 +209,8 @@ test("grid preserves formulas and saved values, exposes hidden sheets and omissi
     ...fixture.open,
     kind: "grid",
     format: "xlsx",
+    textScope: fixture.openWorkbook.textScope,
+    layout: { state: "unsupported", omissions: [] },
     pageCount: 0,
     sheets: [
       {
@@ -255,6 +257,8 @@ test("empty workbook settles and invalidation removes page and cell content imme
     ...fixture.open,
     kind: "grid",
     format: "xlsx",
+    textScope: fixture.openWorkbook.textScope,
+    layout: { state: "unsupported", omissions: [] },
     pageCount: 0,
     sheets: [],
   });
@@ -283,6 +287,66 @@ test("empty workbook settles and invalidation removes page and cell content imme
   act(() => content.publish({ state: "expired" }));
   assert.equal(page.container.querySelector("img"), null);
   assert.match(page.container.textContent, /Preview expired/);
+});
+
+test("workbook switches between cells and print pages within one preview and uses view-specific omissions", async () => {
+  const preview = new Preview(fixture.openWorkbook);
+  const page = render(
+    element(DocumentPreviewView, {
+      preview,
+      title: "book.xlsx",
+      onRefresh() {},
+    }),
+  );
+  await waitFor(() => assert.equal(preview.calls.at(-1)?.kind, "region"));
+  assert.match(page.container.textContent, /Charts/);
+  const layout = screen.getByRole("button", { name: "Print layout" });
+  layout.focus();
+  await userEvent.setup({ document: dom.window.document }).keyboard("{Enter}");
+  await waitFor(() =>
+    assert.deepEqual(preview.calls.at(-1), { kind: "page", page: "1" }),
+  );
+  assert.equal(layout.getAttribute("aria-pressed"), "true");
+  assert.equal(page.container.querySelector("table"), null);
+  assert.match(page.container.textContent, /without saved values/);
+  assert.doesNotMatch(
+    page.container.textContent,
+    /Omitted from this preview: Charts/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+  await waitFor(() => assert.equal(preview.calls.at(-1)?.page, "2"));
+  fireEvent.click(screen.getByRole("button", { name: "Read-only cells" }));
+  await waitFor(() => assert.equal(preview.calls.at(-1)?.kind, "region"));
+  assert.ok(page.container.querySelector("table"));
+  assert.equal(page.container.querySelector("img"), null);
+  assert.equal(preview.closed, 0);
+});
+
+test("unavailable workbook layout stays explicit and preserves the usable grid", async () => {
+  for (const state of ["unsupported", "limit"]) {
+    const preview = new Preview({
+      ...fixture.openWorkbook,
+      pageCount: 0,
+      layout: { state, omissions: [] },
+    });
+    const page = render(
+      element(DocumentPreviewView, {
+        preview,
+        title: "book.xlsx",
+        onRefresh() {},
+      }),
+    );
+    await waitFor(() => assert.equal(preview.calls.length, 1));
+    fireEvent.click(screen.getByRole("button", { name: "Print layout" }));
+    assert.equal(preview.calls.length, 1);
+    assert.match(page.container.textContent, /still use the read-only grid/);
+    assert.equal(page.container.querySelector("table"), null);
+    assert.equal(page.container.querySelector("img"), null);
+    fireEvent.click(screen.getByRole("button", { name: "Read-only cells" }));
+    await waitFor(() => assert.equal(preview.calls.length, 2));
+    assert.ok(page.container.querySelector("table"));
+    page.unmount();
+  }
 });
 test("file preview tabs route Office without invoking ordinary preview and close on Task switch", () => {
   const reference = { id: "ref", title: "Report", displayPath: "report.docx" };

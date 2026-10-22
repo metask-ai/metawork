@@ -14,7 +14,8 @@
     "pageCount": 1,
     "sheets": [],
     "omissions": [],
-    "textScope": "ooxml_xml_text_and_attributes_without_ocr"
+    "textScope": "ooxml_xml_text_and_attributes_without_ocr",
+    "layout": null
   },
   "page": {
     "state": "ready",
@@ -97,6 +98,36 @@
     "pageCount": 1,
     "sheets": [],
     "omissions": [],
-    "textScope": "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
+    "textScope": "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr",
+    "layout": null
+  },
+  "openWorkbook": {
+    "state": "ready",
+    "generation": "1",
+    "previewId": "2",
+    "token": "070707070707070707070707070707070707070707070707",
+    "securityEpoch": "1",
+    "sourceVersion": "0202020202020202020202020202020202020202020202020202020202020202",
+    "sourceBytes": "42",
+    "idleMs": "120000",
+    "lifetimeMs": "900000",
+    "format": "xlsx",
+    "kind": "grid",
+    "pageCount": 2,
+    "sheets": [
+      {
+        "index": 1,
+        "name": "Data",
+        "hidden": false,
+        "rows": 2,
+        "columns": 2
+      }
+    ],
+    "omissions": ["charts"],
+    "textScope": "ooxml_xml_and_available_layout_pdf_text_without_ocr",
+    "layout": {
+      "state": "ready",
+      "omissions": ["missing_formula_caches"]
+    }
   }
 }

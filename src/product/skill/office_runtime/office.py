@@ -30,6 +30,7 @@ sys.dont_write_bytecode = True
 
 from office_archive import checked_copy
 from defusedxml import ElementTree as ET
+from static_workbook import LayoutLimit, LayoutUnsupported
 
 INPUT_BYTES = 100 * 1024 * 1024
 OUTPUT_BYTES = 256 * 1024 * 1024
@@ -90,8 +91,10 @@ def checked_input(source):
 
 def bounded_file(path, remaining=OUTPUT_BYTES):
     size = path.stat().st_size
-    if size <= 0 or size > remaining:
-        raise ValueError("Missing or oversized Office result")
+    if size <= 0:
+        raise ValueError("Missing Office result")
+    if size > remaining:
+        raise LayoutLimit("Office result exceeds byte budget")
     return size
 
 
@@ -278,16 +281,25 @@ def convert(engine, source, staged, command, expected_formulas=None):
 
 
 def render(engine, source, output, width, *, max_pages=MAX_PAGES,
-           byte_budget=OUTPUT_BYTES, page_byte_budget=OUTPUT_BYTES):
-    document, static = load_layout(engine, source)
+           byte_budget=OUTPUT_BYTES, page_byte_budget=OUTPUT_BYTES, prepared_layout=None):
+    if prepared_layout is not None:
+        if source.suffix.lower() != ".xlsx":
+            raise ValueError("Prepared layout requires a workbook")
+        document, static = engine.load(prepared_layout[0]), prepared_layout[1]
+    else:
+        document, static = load_layout(engine, source)
     expected_slides = document.DrawPages.Count if source.suffix.lower() == ".pptx" else None
+    if source.suffix.lower() == ".xlsx" and document.getRendererCount(document, engine.properties(IsPrinter=False)) > max_pages:
+        raise LayoutLimit("Workbook print page budget exceeded")
     if source.suffix.lower() != ".pdf":
         pdf = engine.directory / "preview.pdf"
         engine.pdf(document, pdf, source.suffix.lower())
         document = engine.load(pdf)
     count = document.DrawPages.Count
-    if count < 1 or count > max_pages:
-        raise ValueError("Document page budget exceeded")
+    if count < 1:
+        raise LayoutUnsupported("Document has no printable pages")
+    if count > max_pages:
+        raise LayoutLimit("Document page budget exceeded")
     if expected_slides is not None and count != expected_slides:
         raise ValueError("Presentation rendering lost slide pages")
     remaining = byte_budget
@@ -295,8 +307,10 @@ def render(engine, source, output, width, *, max_pages=MAX_PAGES,
     for index in range(count):
         page = document.DrawPages.getByIndex(index)
         height = math.ceil(width * page.Height / page.Width)
-        if height < 1 or width * height > MAX_PAGE_PIXELS:
-            raise ValueError("Rendered page pixel budget exceeded")
+        if height < 1:
+            raise LayoutUnsupported("Rendered page dimensions are invalid")
+        if width * height > MAX_PAGE_PIXELS:
+            raise LayoutLimit("Rendered page pixel budget exceeded")
         filename = f"page-{index + 1:04}.png"
         path = output / filename
         exporter = engine.service("com.sun.star.drawing.GraphicExportFilter")

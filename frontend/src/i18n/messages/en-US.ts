@@ -928,6 +928,17 @@ export const enUS = {
   "document_preview.omission.images": "Images",
   "document_preview.omission.pivot_tables": "Pivot tables",
   "document_preview.omission.comments": "Comments",
+  "document_preview.view": "Preview view",
+  "document_preview.layout": "Print layout",
+  "document_preview.layout_saved_values":
+    "Workbook print layout uses saved values without calculating formulas. Hidden worksheets are not printed.",
+  "document_preview.layout_limit":
+    "Print layout exceeds the inspection limits. You can still use the read-only grid.",
+  "document_preview.layout_unsupported":
+    "This workbook contains objects or formatting that layout inspection does not support. You can still use the read-only grid.",
+  "document_preview.omission.defined_names": "Expression-based defined names",
+  "document_preview.omission.missing_formula_caches":
+    "Formula cells without saved values (left blank)",
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",

@@ -311,6 +311,52 @@ def resource(path):
     return {"file": path.name, "bytes": size, "sha256": digest.hexdigest()}
 
 
+def clear_layout(output):
+    for index in range(MAX_PAGES):
+        (output / f"page-{index + 1:04}.png").unlink(missing_ok=True)
+    (output / "pages.json").unlink(missing_ok=True)
+
+
+def workbook_layout(source, output, width, engine_factory, render, text_bytes):
+    from static_workbook import freeze, LayoutUnsupported, LayoutLimit
+    from pdf_source import extract, InspectionLimit
+    engine = engine_factory()  # construction is inert; reject before entering
+    frozen = engine.directory / "static.xlsx"
+    try:
+        report = freeze(source, frozen)
+    except LayoutUnsupported:
+        return {"state": "unsupported", "omissions": []}, [], b""
+    except LayoutLimit:
+        return {"state": "limit", "omissions": []}, [], b""
+    try:
+        with engine:
+            details = render(engine, source, output, width,
+                             max_pages=MAX_PAGES, byte_budget=PAGES_BYTES,
+                             page_byte_budget=PAGE_BYTES, prepared_layout=(frozen, report))
+    except (LayoutUnsupported, LayoutLimit) as failure:
+        # Reached only after Engine.__exit__ confirms shutdown; an uncertain
+        # shutdown overrides this error and cannot publish a partial result.
+        clear_layout(output)
+        return {"state": "limit" if isinstance(failure, LayoutLimit) else "unsupported", "omissions": []}, [], b""
+    # The engine has settled. Check its actual strings, including number-format
+    # literals and chart text, before any page may become a Host resource.
+    try:
+        converted, _, count = extract(engine.directory / "preview.pdf", TEXT_BYTES - text_bytes - 1)
+        if count != details["page_count"]:
+            raise ValueError("Workbook inspection and rendering disagree")
+    except ValueError as failure:
+        clear_layout(output)
+        return {"state": "limit" if isinstance(failure, InspectionLimit) else "unsupported", "omissions": []}, [], b""
+    omissions = list(report["omissions"])
+    if report["removed_defined_names"]:
+        omissions.append("defined_names")
+    if report["missing_formula_caches"]:
+        omissions.append("missing_formula_caches")
+    pages = [{**page, **resource(output / page["file"])} for page in
+             json.loads((output / "pages.json").read_text(encoding="utf-8"))["pages"]]
+    return {"state": "ready", "omissions": sorted(omissions)}, pages, converted
+
+
 def prepare(source, output, width, engine_factory, render):
     if source.suffix.lower() not in (".docx", ".pptx", ".xlsx", ".pdf"):
         raise ValueError("Preview source text extraction is unavailable for this format")
@@ -324,17 +370,20 @@ def prepare(source, output, width, engine_factory, render):
         text, omissions = source_text(source)
     output.mkdir()
     text_path = output / "source-text.txt"
-    text_path.write_bytes(text)
     manifest = {"schema": 1, "format": source.suffix.lower()[1:],
-                "sourceText": resource(text_path),
                 "textScope": scope,
-                "omissions": omissions}
+                "omissions": omissions, "layout": None}
     if source.suffix.lower() == ".xlsx":
         normalized = grid(source)
         grid_path = output / "grid.json"
         write_json(grid_path, normalized, GRID_BYTES)
         manifest.update(kind="grid", grid=resource(grid_path),
                         sheetCount=len(normalized["sheets"]))
+        layout, pages, converted = workbook_layout(source, output, width, engine_factory, render, len(text))
+        if converted:
+            text += b"\n" + converted
+        manifest.update(layout=layout, pages=pages,
+                        textScope="ooxml_xml_and_available_layout_pdf_text_without_ocr")
         details = {"kind": "grid", "sheet_count": len(normalized["sheets"])}
     else:
         with engine_factory() as engine:
@@ -347,5 +396,7 @@ def prepare(source, output, width, engine_factory, render):
                  json.loads((output / "pages.json").read_text(encoding="utf-8"))["pages"]]
         manifest.update(kind="pages", pages=pages)
         details = {"kind": "pages", **details}
+    text_path.write_bytes(text)
+    manifest["sourceText"] = resource(text_path)
     write_json(output / "preview.json", manifest, 128 * 1024)
     return details

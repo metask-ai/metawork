@@ -821,6 +821,16 @@ export const zhCN: Record<MessageId, string> = {
   "document_preview.omission.images": "图片",
   "document_preview.omission.pivot_tables": "数据透视表",
   "document_preview.omission.comments": "批注",
+  "document_preview.view": "预览视图",
+  "document_preview.layout": "打印版面",
+  "document_preview.layout_saved_values":
+    "按保存值显示工作簿打印版面，不执行公式；隐藏工作表不打印。",
+  "document_preview.layout_limit": "打印版面超出检查限制，仍可切换到只读网格。",
+  "document_preview.layout_unsupported":
+    "此工作簿的对象或格式暂不支持版面检查，仍可切换到只读网格。",
+  "document_preview.omission.defined_names": "表达式定义名称",
+  "document_preview.omission.missing_formula_caches":
+    "缺少保存值的公式单元格（留空）",
   "file_preview.loading": "正在加载预览…",
   "file_preview.close": "关闭文件预览",
   "file_preview.open": "预览 {path}",

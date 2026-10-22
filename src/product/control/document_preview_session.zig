@@ -31,7 +31,7 @@ pub const Target = struct {
 pub const State = enum { ready, busy, missing, restricted, stale_security, unavailable, unsupported, changed, limit, cancelled, expired, restart_required, failed };
 pub const Kind = enum { open, page, region };
 pub const Sheet = struct { index: u16, name: []const u8, hidden: bool, rows: u32, columns: u16 };
-pub const Summary = struct { format: contract.Format, kind: contract.Kind, source: contract.Source, page_count: u16, sheets: []const Sheet, omissions: []const []const u8, text_scope: []const u8 };
+pub const Summary = struct { format: contract.Format, kind: contract.Kind, source: contract.Source, page_count: u16, sheets: []const Sheet, omissions: []const []const u8, text_scope: []const u8, layout: ?contract.Layout = null };
 pub const Page = struct { size_bytes: usize, width: u32, height: u32 };
 /// All slices are callback-scoped. Raw source text is deliberately absent.
 pub const Result = struct {
@@ -352,7 +352,7 @@ fn buildSummary(session: *Session, material: contract.Material) !Summary {
         for (pages, 0..) |page, index| session.pages[index] = .{ .width = page.width, .height = page.height };
         session.page_count = @intCast(pages.len);
     }
-    return .{ .format = manifest.format, .kind = manifest.kind, .source = material.source, .page_count = @intCast(if (manifest.pages) |pages| pages.len else 0), .sheets = session.sheets[0..count], .omissions = manifest.omissions, .text_scope = manifest.textScope };
+    return .{ .format = manifest.format, .kind = manifest.kind, .source = material.source, .page_count = @intCast(if (manifest.pages) |pages| pages.len else 0), .sheets = session.sheets[0..count], .omissions = manifest.omissions, .text_scope = manifest.textScope, .layout = manifest.layout };
 }
 fn completePending(session: *Session, sink: Sink, state: State) void {
     const pending = session.pending orelse return;
@@ -416,6 +416,7 @@ const TestEffect = struct {
     main_thread: std.Thread.Id,
     text: []const u8 = "safe source",
     grid: ?*const contract.Grid = null,
+    manifest: ?*const contract.Manifest = null,
     blocked: bool = false,
     entered: std.Io.Event = .unset,
     gate: std.Io.Event = .unset,
@@ -449,7 +450,7 @@ const TestEffect = struct {
     fn material(context: *anyopaque) !contract.Material {
         const self = get(context);
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread and !self.cleaned);
-        return .{ .source = .{ .size_bytes = 1, .sha256 = @splat(1) }, .manifest = if (self.grid == null) &page_manifest else &grid_manifest, .grid = self.grid, .source_text = self.text };
+        return .{ .source = .{ .size_bytes = 1, .sha256 = @splat(1) }, .manifest = self.manifest orelse if (self.grid == null) &page_manifest else &grid_manifest, .grid = self.grid, .source_text = self.text };
     }
     fn read(context: *anyopaque, request: contract.Request) !contract.Read {
         const self = get(context);
@@ -484,6 +485,9 @@ const TestCapture = struct {
     released: usize = 0,
     last: State = .failed,
     last_kind: Kind = .open,
+    page_count: u16 = 0,
+    sheet_count: usize = 0,
+    layout_ready: bool = false,
     fn get(context: *anyopaque) *TestCapture {
         return @ptrCast(@alignCast(context));
     }
@@ -497,6 +501,11 @@ const TestCapture = struct {
         if (result.state == .ready) self.ready += 1;
         self.last = result.state;
         self.last_kind = result.kind;
+        if (result.summary) |summary| {
+            self.page_count = summary.page_count;
+            self.sheet_count = summary.sheets.len;
+            self.layout_ready = if (summary.layout) |layout| layout.state == .ready else false;
+        }
     }
     fn releasedFn(context: *anyopaque, _: u64, _: State) void {
         get(context).released += 1;
@@ -557,6 +566,41 @@ test "session scans actual grid display before exposing a ready summary" {
     try capture.wait(&sessions, policy.policy(), 1, 1);
     try std.testing.expectEqual(State.restricted, capture.last);
     try std.testing.expectEqual(0, capture.ready);
+}
+
+test "workbook session alternates regions and page transfers from one preparation" {
+    var cells = [_]contract.Cell{.{ .row = 1, .column = 1, .formula = "=1+1", .value = .{ .kind = .number, .text = "2" }, .display = "2", .formatCode = "General", .formatSupported = true, .bold = false, .italic = false, .alignment = null }};
+    var sheets = [_]contract.Sheet{.{ .id = "1", .name = "Sheet", .hidden = false, .rows = 1, .columns = 1, .cells = &cells }};
+    const grid: contract.Grid = .{ .schema = 1, .calculation = "saved_values_only", .sheets = &sheets };
+    var metadata = TestEffect.grid_manifest;
+    metadata.pages = @constCast(&TestEffect.pages);
+    metadata.layout = .{ .state = .ready, .omissions = &.{"missing_formula_caches"} };
+    var effect: TestEffect = .{ .main_thread = std.Thread.getCurrentId(), .grid = &grid, .manifest = &metadata };
+    var policy: TestPolicy = .{};
+    var capture: TestCapture = .{ .effect = &effect };
+    var sessions: Sessions = .{};
+    defer sessions.deinit() catch unreachable;
+    const id = try testOpen(&sessions, &policy, &effect);
+    try capture.wait(&sessions, policy.policy(), 1, 0);
+    try std.testing.expectEqual(1, capture.page_count);
+    try std.testing.expectEqual(1, capture.sheet_count);
+    try std.testing.expect(capture.layout_ready);
+    const region: contract.Request = .{ .region = .{ .sheet = 1, .row = 1, .column = 1, .rows = 1, .columns = 1 } };
+    try sessions.read(policy.policy(), id, 11, region);
+    try capture.wait(&sessions, policy.policy(), 2, 0);
+    try std.testing.expectEqual(Kind.region, capture.last_kind);
+    try sessions.read(policy.policy(), id, 12, .{ .page = 0 });
+    try capture.wait(&sessions, policy.policy(), 3, 0);
+    try std.testing.expectEqualStrings("page", try sessions.chunk(policy.policy(), id, 0));
+    sessions.releaseRead(id);
+    try sessions.read(policy.policy(), id, 13, region);
+    try capture.wait(&sessions, policy.policy(), 4, 0);
+    try std.testing.expectEqual(Kind.region, capture.last_kind);
+    try std.testing.expectEqual(1, effect.prepares);
+    try std.testing.expectEqual(0, effect.releases);
+    _ = sessions.close(id, .cancelled);
+    try capture.wait(&sessions, policy.policy(), 4, 1);
+    try std.testing.expectEqual(1, effect.releases);
 }
 
 test "page transfer revalidates security and keeps bytes until release" {

@@ -36,6 +36,10 @@ export type DocumentSheet = {
   rows: number;
   columns: number;
 };
+export type DocumentLayout = {
+  state: "ready" | "unsupported" | "limit";
+  omissions: (typeof layoutOmissions)[number][];
+};
 export type DocumentOpen = {
   state: "ready";
   generation: string;
@@ -52,6 +56,7 @@ export type DocumentOpen = {
   sheets: DocumentSheet[];
   omissions: (typeof omissions)[number][];
   textScope: string;
+  layout: DocumentLayout | null;
 };
 export type DocumentSelection =
   | { kind: "page"; page: string }
@@ -115,6 +120,13 @@ const omissions = [
   "pivot_tables",
   "comments",
 ] as const;
+const layoutOmissions = [
+  "external_hyperlinks",
+  "conditional_formatting",
+  "data_validation",
+  "defined_names",
+  "missing_formula_caches",
+] as const;
 const encoder = new TextEncoder();
 function text(value: unknown, path: string, maximum: number) {
   const result = stringValue(value, path);
@@ -167,6 +179,7 @@ export function decodeDocumentOpen(
     "sheets",
     "omissions",
     "textScope",
+    "layout",
   ]);
   const sourceBytes = positiveU64WireId(raw.sourceBytes, `${path}.sourceBytes`);
   if (BigInt(sourceBytes) > 100n * 1024n * 1024n)
@@ -208,10 +221,36 @@ export function decodeDocumentOpen(
   ] as const);
   const kind = enumValue(raw.kind, `${path}.kind`, ["pages", "grid"] as const);
   const pageCount = bounded(raw.pageCount, `${path}.pageCount`, 100);
+  let layout: DocumentLayout | null = null;
+  if (raw.layout !== null) {
+    const value = object(raw.layout, `${path}.layout`, ["state", "omissions"]);
+    const state = enumValue(value.state, `${path}.layout.state`, [
+      "ready",
+      "unsupported",
+      "limit",
+    ] as const);
+    const omitted = arrayValue(
+      value.omissions,
+      `${path}.layout.omissions`,
+      (value, path) => enumValue(value, path, layoutOmissions),
+    );
+    if (
+      omitted.length > 16 ||
+      new Set(omitted).size !== omitted.length ||
+      (state !== "ready" && omitted.length !== 0)
+    )
+      fail(path, "invalid layout omissions");
+    layout = { state, omissions: omitted };
+  }
   if (
     kind === "pages"
-      ? pageCount === 0 || sheets.length !== 0 || format === "xlsx"
-      : pageCount !== 0 || format !== "xlsx"
+      ? pageCount === 0 ||
+        sheets.length !== 0 ||
+        format === "xlsx" ||
+        layout !== null
+      : format !== "xlsx" ||
+        layout === null ||
+        (layout.state === "ready" ? pageCount === 0 : pageCount !== 0)
   )
     fail(path, "inconsistent document variant");
   const omitted = arrayValue(raw.omissions, `${path}.omissions`, (item, path) =>
@@ -224,7 +263,9 @@ export function decodeDocumentOpen(
     textScope !==
     (format === "pdf"
       ? "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
-      : "ooxml_xml_text_and_attributes_without_ocr")
+      : format === "xlsx"
+        ? "ooxml_xml_and_available_layout_pdf_text_without_ocr"
+        : "ooxml_xml_text_and_attributes_without_ocr")
   )
     fail(path, "unsupported text scope");
   const sourceVersion = hex(raw.sourceVersion, `${path}.sourceVersion`, 64);
@@ -248,6 +289,7 @@ export function decodeDocumentOpen(
     sheets,
     omissions: omitted,
     textScope,
+    layout,
   };
 }
 function cell(value: unknown, path: string): DocumentCell {

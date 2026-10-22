@@ -74,11 +74,14 @@ for (const name of [
     manifest.textScope,
     name.endsWith(".pdf")
       ? "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
-      : "ooxml_xml_text_and_attributes_without_ocr",
+      : name.endsWith(".xlsx")
+        ? "ooxml_xml_and_available_layout_pdf_text_without_ocr"
+        : "ooxml_xml_text_and_attributes_without_ocr",
   );
   const resources = [
     manifest.sourceText,
-    ...(manifest.kind === "grid" ? [manifest.grid] : manifest.pages),
+    ...(manifest.kind === "grid" ? [manifest.grid] : []),
+    ...(manifest.pages ?? []),
   ];
   for (const resource of resources) {
     assert.ok(
@@ -96,6 +99,8 @@ for (const name of [
     const formula = grid.sheets[0].cells.find((cell) => cell.formula);
     assert.equal(formula.formula, "=A2*3");
     assert.equal(formula.value, null);
+    assert.equal(manifest.layout.state, "ready");
+    assert.ok(manifest.pages.length > 0);
   } else assert.equal(manifest.pages.length, receipt.page_count);
   assert.equal(digest(source), before);
   results.push({ name, receipt, elapsedMs: Date.now() - started, output });

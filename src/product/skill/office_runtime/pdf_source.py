@@ -22,6 +22,10 @@ MAX_IMAGE_PIXELS = 32_000_000
 SCOPE = "pdf_reachable_strings_xmp_and_decoded_page_text_without_ocr"
 
 
+class InspectionLimit(ValueError):
+    pass
+
+
 class ParserWarnings(logging.Handler):
     def __init__(self):
         super().__init__(logging.WARNING)
@@ -45,11 +49,11 @@ class Scan:
 
     def append(self, value, compact=False):
         if len(value) > self.maximum:
-            raise ValueError("PDF inspection text exceeds budget")
+            raise InspectionLimit("PDF inspection text exceeds budget")
         encoded = value.encode("utf-8", errors="strict")
         joined = "".join(value.split()).encode("utf-8") if compact else b""
         if len(self.text) + len(self.compact) + len(encoded) + len(joined) + 1 > self.maximum:
-            raise ValueError("PDF inspection text exceeds budget")
+            raise InspectionLimit("PDF inspection text exceeds budget")
         self.text.extend(encoded)
         self.compact.extend(joined)
 
@@ -57,12 +61,12 @@ class Scan:
         data = value.get_data()
         self.decoded += len(data)
         if len(data) > MAX_STREAM or self.decoded > MAX_DECODED:
-            raise ValueError("PDF decoded streams exceed budget")
+            raise InspectionLimit("PDF decoded streams exceed budget")
         return data
 
     def visit(self, value, depth=0, as_action=False):
         if depth > MAX_DEPTH:
-            raise ValueError("PDF object depth exceeds budget")
+            raise InspectionLimit("PDF object depth exceeds budget")
         if isinstance(value, IndirectObject):
             identity = (value.idnum, value.generation, as_action)
             if identity in self.visited:
@@ -71,7 +75,7 @@ class Scan:
             value = value.get_object()
         self.count += 1
         if self.count > MAX_OBJECTS:
-            raise ValueError("PDF object count exceeds budget")
+            raise InspectionLimit("PDF object count exceeds budget")
         if isinstance(value, NameObject):
             self.append(str(value))
         elif isinstance(value, TextStringObject):
@@ -143,7 +147,7 @@ class XmpText(ContentHandler):
         self.depth += 1
         self.elements += 1
         if self.depth > MAX_DEPTH or self.elements > MAX_OBJECTS:
-            raise ValueError("PDF metadata complexity exceeds budget")
+            raise InspectionLimit("PDF metadata complexity exceeds budget")
         for value in attrs.values():
             self.scan.append(value)
 
@@ -192,7 +196,7 @@ def extract(source, maximum):
                     raise ValueError("Incremental PDF inspection is unsupported")
                 count = len(reader.pages)
                 if count < 1 or count > 100:
-                    raise ValueError("PDF page count exceeds budget")
+                    raise InspectionLimit("PDF page count exceeds budget")
                 scan = Scan(maximum)
                 scan.visit(reader.trailer)
                 for page in reader.pages:

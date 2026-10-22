@@ -152,6 +152,67 @@ class Host {
     );
   }
 }
+
+test("workbook page-to-region switches reuse one grant and retire the prior image", async () => {
+  const host = new Host();
+  host.openHook = (p) => ({
+    ...fixture.openWorkbook,
+    generation: p.generation,
+    previewId: p.previewId,
+  });
+  host.readHook = (p) =>
+    p.selection.kind === "page"
+      ? {
+          ...fixture.page,
+          readId: p.readId,
+          image: {
+            ...fixture.page.image,
+            sizeBytes: String(png.length),
+            width: 1,
+            height: 1,
+          },
+        }
+      : {
+          ...fixture.region,
+          ...Object.fromEntries(
+            ["sheet", "row", "column", "rows", "columns"].map((name) => [
+              name,
+              Number(p.selection[name]),
+            ]),
+          ),
+          readId: p.readId,
+        };
+  const document = host.open();
+  await tick();
+  const region = {
+    kind: "region",
+    sheet: "1",
+    row: "1",
+    column: "1",
+    rows: "1",
+    columns: "1",
+  };
+  await document.read(region);
+  assert.equal(document.getSnapshot().content.kind, "region");
+  await document.read({ kind: "page", page: "1" });
+  const image = document.getSnapshot().content.image;
+  assert.equal(image.valid(), true);
+  await document.read(region);
+  assert.equal(image.valid(), false);
+  assert.equal(image.src, "");
+  assert.equal(document.getSnapshot().content.kind, "region");
+  assert.equal(
+    host.calls.filter(({ command }) => command === commands.openDocument)
+      .length,
+    1,
+  );
+  assert.equal(
+    host.calls.filter(({ command }) => command === commands.closeDocument)
+      .length,
+    0,
+  );
+  assert.equal(await document.close(), true);
+});
 test("document pages transfer once, release Host bytes, and clear previous page bytes", async () => {
   const host = new Host(),
     handle = host.open();
@@ -208,6 +269,8 @@ test("security epoch revokes both page and region content, and blocks a late rea
     previewId: p.previewId,
     kind: "grid",
     format: "xlsx",
+    textScope: fixture.openWorkbook.textScope,
+    layout: { state: "unsupported", omissions: [] },
     pageCount: 0,
     sheets: [{ index: 1, name: "Sheet", hidden: false, rows: 1, columns: 1 }],
   });

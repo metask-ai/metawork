@@ -318,6 +318,8 @@ fn encodeResult(writer: *std.Io.Writer, grant: *const Grant, pending: Pending, r
             try std.json.Stringify.value(summary.omissions, .{}, writer);
             try writer.writeAll(",\"textScope\":");
             try std.json.Stringify.value(summary.text_scope, .{}, writer);
+            try writer.writeAll(",\"layout\":");
+            try std.json.Stringify.value(summary.layout, .{}, writer);
             try writer.writeByte('}');
         },
         .page => {
@@ -380,6 +382,19 @@ test "document encoder matches the cross-language fixture without private materi
     const pdf_expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("openPdf").?, .{});
     defer std.testing.allocator.free(pdf_expected);
     try std.testing.expectEqualStrings(pdf_expected, writer.buffered());
+    var workbook = result;
+    workbook.summary.?.format = .xlsx;
+    workbook.summary.?.kind = .grid;
+    workbook.summary.?.page_count = 2;
+    workbook.summary.?.sheets = &.{.{ .index = 1, .name = "Data", .hidden = false, .rows = 2, .columns = 2 }};
+    workbook.summary.?.omissions = &.{"charts"};
+    workbook.summary.?.text_scope = "ooxml_xml_and_available_layout_pdf_text_without_ocr";
+    workbook.summary.?.layout = .{ .state = .ready, .omissions = &.{"missing_formula_caches"} };
+    writer = .fixed(&buffer);
+    try encodeResult(&writer, &grant, pending, workbook);
+    const workbook_expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("openWorkbook").?, .{});
+    defer std.testing.allocator.free(workbook_expected);
+    try std.testing.expectEqualStrings(workbook_expected, writer.buffered());
     pending.kind = .page;
     writer = .fixed(&buffer);
     try encodeResult(&writer, &grant, pending, .{ .request_id = 1, .resource_id = 1, .kind = .page, .state = .ready, .page = .{ .size_bytes = 4, .width = 1280, .height = 1656 } });

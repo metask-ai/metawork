@@ -11,6 +11,14 @@ import zipfile
 
 from lxml import etree
 
+class LayoutUnsupported(ValueError):
+    pass
+
+
+class LayoutLimit(ValueError):
+    pass
+
+
 S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 XML_BYTES = 16 * 1024 * 1024
@@ -134,7 +142,7 @@ def freeze_cell(node, report):
             if not math.isfinite(float(value.text)):
                 raise ValueError("Workbook layout cache is not finite")
         elif kind not in ("s", "d"):
-            raise ValueError("Workbook layout cache type is unsupported")
+            raise LayoutUnsupported("Workbook layout cache type is unsupported")
     return bool(formulas)
 
 
@@ -156,24 +164,25 @@ def freeze(source, destination):
             lower = item.filename.lower()
             if (lower.startswith(FORBIDDEN_PARTS) or lower in ("xl/connections.xml", "xl/metadata.xml")
                     or lower.endswith(".vml")):
-                raise ValueError("Workbook layout contains an unsupported active object")
+                raise LayoutUnsupported("Workbook layout contains an unsupported active object")
             if lower.endswith((".xml", ".rels")):
                 xml_bytes += item.file_size
                 if item.file_size > XML_BYTES or xml_bytes > TOTAL_XML_BYTES:
-                    raise ValueError("Workbook layout XML budget exceeded")
+                    raise LayoutLimit("Workbook layout XML budget exceeded")
             elif lower.endswith(IMAGE_EXTENSIONS):
                 from PIL import Image
                 with original.open(item) as stream, Image.open(stream) as image:
-                    if (image.format not in ("PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP")
-                            or image.width * image.height > 16_777_216):
-                        raise ValueError("Workbook layout image budget exceeded")
+                    if image.format not in ("PNG", "JPEG", "GIF", "BMP", "TIFF", "WEBP"):
+                        raise LayoutUnsupported("Workbook layout image format is unsupported")
+                    if image.width * image.height > 16_777_216:
+                        raise LayoutLimit("Workbook layout image budget exceeded")
                     image.verify()
             else:
-                raise ValueError("Workbook layout contains an unsupported binary resource")
+                raise LayoutUnsupported("Workbook layout contains an unsupported binary resource")
         workbook = parse(original.read("xl/workbook.xml"))
         sheets = {node.get("name") for node in workbook.iter(f"{{{S}}}sheet")}
         if not sheets or None in sheets or len(sheets) > 64:
-            raise ValueError("Workbook layout sheet budget exceeded")
+            raise LayoutLimit("Workbook layout sheet budget exceeded")
         visited = 0
         with zipfile.ZipFile(destination, "x", zipfile.ZIP_DEFLATED) as output:
             for item in members:
@@ -189,9 +198,9 @@ def freeze(source, destination):
                         name = etree.QName(node)
                         if name.localname in ("externalData", "externalLink", "externalReference", "externalReferences",
                                               "connection", "queryTable", "oleObject", "control", "ddeLink", "oleLink"):
-                            raise ValueError("Workbook layout contains an unsupported active object")
+                            raise LayoutUnsupported("Workbook layout contains an unsupported active object")
                         if name.localname == "Relationship" and node.get("Type") not in RELATIONSHIPS:
-                            raise ValueError("Workbook layout relationship type is unsupported")
+                            raise LayoutUnsupported("Workbook layout relationship type is unsupported")
                         if name.localname == "Relationship" and node.get("TargetMode", "").lower() == "external":
                             node.getparent().remove(node)
                             changed = True
@@ -200,7 +209,7 @@ def freeze(source, destination):
                             changed = True
                         elif (name.namespace == S and name.localname == "extLst"
                                 or name.localname == "AlternateContent"):
-                            raise ValueError("Workbook layout does not support calculation extensions")
+                            raise LayoutUnsupported("Workbook layout does not support calculation extensions")
                         if node.tag in (f"{{{S}}}conditionalFormatting", f"{{{S}}}dataValidations"):
                             omissions.add("conditional_formatting" if name.localname == "conditionalFormatting"
                                           else "data_validation")
@@ -209,14 +218,14 @@ def freeze(source, destination):
                         elif node.tag == f"{{{S}}}definedName":
                             if not literal_ranges(node.text or "", sheets):
                                 if node.get("name", "").startswith("_xlnm.Print_"):
-                                    raise ValueError("Workbook layout print range is unsupported")
+                                    raise LayoutUnsupported("Workbook layout print range is unsupported")
                                 node.getparent().remove(node)
                                 report["removed_defined_names"] += 1
                                 changed = True
                         elif node.tag == f"{{{S}}}c":
                             visited += 1
                             if visited > MAX_CELLS or not address(node.get("r", "")):
-                                raise ValueError("Workbook layout cell/extent budget exceeded")
+                                raise LayoutLimit("Workbook layout cell/extent budget exceeded")
                             changed = freeze_cell(node, report) or changed
                         elif node.tag in (f"{{{S}}}calculatedColumnFormula", f"{{{S}}}totalsRowFormula"):
                             node.getparent().remove(node)
@@ -230,14 +239,14 @@ def freeze(source, destination):
                             changed = True
                         elif node.tag == f"{{{C}}}f":
                             if not literal_ranges(node.text or "", sheets):
-                                raise ValueError("Workbook layout chart reference is unsupported")
+                                raise LayoutUnsupported("Workbook layout chart reference is unsupported")
                         elif (name.localname in ("f", "formula", "formula1", "formula2")
                               and node.getparent() is not None):
-                            raise ValueError("Workbook layout contains an unsupported formula")
+                            raise LayoutUnsupported("Workbook layout contains an unsupported formula")
                     if changed:
                         data = etree.tostring(root, xml_declaration=True, encoding="utf-8")
                         if len(data) > XML_BYTES:
-                            raise ValueError("Workbook layout transformed XML budget exceeded")
+                            raise LayoutLimit("Workbook layout transformed XML budget exceeded")
                 output.writestr(item, data)
     report["omissions"] = sorted(omissions)
     return report

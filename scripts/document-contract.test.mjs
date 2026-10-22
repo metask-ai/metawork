@@ -19,6 +19,7 @@ const fixture = JSON.parse(
 test("document wire fixture is accepted without exposing source text or paths", () => {
   assert.equal(decodeDocumentOpen(fixture.open).state, "ready");
   assert.equal(decodeDocumentOpen(fixture.openPdf).format, "pdf");
+  assert.equal(decodeDocumentOpen(fixture.openWorkbook).layout.state, "ready");
   assert.throws(() =>
     decodeDocumentOpen({
       ...fixture.openPdf,
@@ -39,6 +40,45 @@ test("document wire fixture is accepted without exposing source text or paths", 
       decodeDocumentOpen({ ...fixture.open, sourceText: "PRIVATE-CONTENT" }),
     /unexpected fields/,
   );
+});
+
+test("workbook layout state, pages, omissions and scope form one strict variant", () => {
+  for (const state of ["unsupported", "limit"])
+    assert.equal(
+      decodeDocumentOpen({
+        ...fixture.openWorkbook,
+        pageCount: 0,
+        layout: { state, omissions: [] },
+      }).layout.state,
+      state,
+    );
+  for (const value of [
+    { ...fixture.openWorkbook, layout: null },
+    { ...fixture.openWorkbook, pageCount: 0 },
+    { ...fixture.openWorkbook, textScope: fixture.open.textScope },
+    {
+      ...fixture.openWorkbook,
+      layout: { state: "unsupported", omissions: [] },
+    },
+    {
+      ...fixture.openWorkbook,
+      pageCount: 0,
+      layout: { state: "unsupported", omissions: ["charts"] },
+    },
+    {
+      ...fixture.openWorkbook,
+      layout: { state: "ready", omissions: ["charts"] },
+    },
+    {
+      ...fixture.openWorkbook,
+      layout: {
+        state: "ready",
+        omissions: ["missing_formula_caches", "missing_formula_caches"],
+      },
+    },
+    { ...fixture.open, layout: fixture.openWorkbook.layout },
+  ])
+    assert.throws(() => decodeDocumentOpen(value));
 });
 
 test("region payload observes the same aggregate string budget as Host admission", () => {

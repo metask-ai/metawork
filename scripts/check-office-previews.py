@@ -44,6 +44,9 @@ def module(name, filename=None):
 
 
 preview = module("document_preview")
+if options.source:
+    module("static_workbook")
+    module("pdf_source")
 office = module("office_preview_controller", "office.py")
 if options.source:
     # Explicit source qualification only; never alter the selected component's
@@ -129,11 +132,15 @@ await deck.writeFile({fileName:process.argv[2]});
         workbook.close()
         return file
 
-    def test_grid_preserves_formulas_saved_values_hidden_sheets_and_common_formats_without_engine(self):
+    def test_grid_and_layout_preserve_saved_values_with_one_engine(self):
         source = self.workbook("grid-input.xlsx")
         before = digest(source)
-        with patch.object(office, "Engine", side_effect=AssertionError("Grid must not start the conversion engine")):
+        with patch.object(office, "Engine", wraps=office.Engine) as engine:
             output, manifest = self.run_preview(source, "grid-preview")
+            self.assertEqual(engine.call_count, 1)
+        self.assertEqual(manifest["layout"]["state"], "ready")
+        self.assertIn("missing_formula_caches", manifest["layout"]["omissions"])
+        self.assertTrue(manifest["pages"])
         grid = json.loads((output / "grid.json").read_text(encoding="utf-8"))
         self.assertEqual(grid["calculation"], "saved_values_only")
         cells = {(cell["row"], cell["column"]): cell for cell in grid["sheets"][0]["cells"]}
@@ -166,6 +173,73 @@ await deck.writeFile({fileName:process.argv[2]});
         formula = next(cell for cell in cells if cell["formula"])
         self.assertEqual(formula["value"], {"kind": "number", "text": "2469"})
         self.assertEqual(grid["sheets"][0]["columns"], 7)
+
+    def test_layout_scans_actual_formatted_pdf_text_and_keeps_the_original_grid(self):
+        book = Workbook()
+        sheet = book.active
+        sheet["A1"] = 1234
+        sheet["A1"].number_format = '"format-prefix-"0"-suffix"'
+        sheet.column_dimensions["A"].width = 60
+        source = self.root / "formatted-layout.xlsx"
+        book.save(source)
+        before = digest(source)
+        output, manifest = self.run_preview(source, "formatted-layout")
+        self.assertEqual(manifest["kind"], "grid")
+        self.assertEqual(manifest["layout"]["state"], "ready")
+        self.assertEqual(manifest["textScope"], "ooxml_xml_and_available_layout_pdf_text_without_ocr")
+        self.assertIn("format-prefix-1234-suffix", (output / "source-text.txt").read_text(encoding="utf-8"))
+        saved = json.loads((output / "grid.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["sheets"][0]["cells"][0]["value"]["text"], "1234")
+        self.assertFalse(saved["sheets"][0]["cells"][0]["formatSupported"])
+        self.assertEqual(digest(source), before)
+
+    def test_unsupported_and_limited_layout_keep_a_checked_grid_without_entering_engine(self):
+        source = self.workbook("layout-degraded.xlsx")
+        unsupported = self.root / "layout-unsupported.xlsx"
+        rewrite(source, unsupported, lambda name, data: data)
+        with zipfile.ZipFile(unsupported, "a") as archive:
+            archive.writestr("extra/unsupported.bin", b"not a passive layout resource")
+        with patch.object(office.Engine, "__enter__", side_effect=AssertionError("Unsupported layout entered engine")):
+            output, manifest = self.run_preview(unsupported, "unsupported-layout")
+        self.assertEqual(manifest["layout"], {"state": "unsupported", "omissions": []})
+        self.assertEqual(manifest["pages"], [])
+        self.assertTrue((output / "grid.json").is_file())
+        import static_workbook
+        with patch.object(static_workbook, "MAX_CELLS", 1), patch.object(office.Engine, "__enter__", side_effect=AssertionError("Limited layout entered engine")):
+            output, manifest = self.run_preview(source, "limited-layout")
+        self.assertEqual(manifest["layout"], {"state": "limit", "omissions": []})
+        self.assertEqual(manifest["pages"], [])
+        self.assertTrue((output / "grid.json").is_file())
+
+    def test_uninspectable_layout_never_publishes_pages_but_keeps_the_checked_grid(self):
+        source = self.workbook("layout-uninspectable.xlsx")
+        import pdf_source
+        with patch.object(pdf_source, "extract", side_effect=ValueError("Uninspectable generated PDF")):
+            output, manifest = self.run_preview(source, "uninspectable-layout")
+        self.assertEqual(manifest["layout"]["state"], "unsupported")
+        self.assertEqual(manifest["pages"], [])
+        self.assertFalse(list(output.glob("page-*.png")))
+        self.assertTrue((output / "grid.json").is_file())
+
+    def test_page_and_output_limits_keep_grid_only_after_engine_shutdown(self):
+        source = self.workbook("layout-page-limit.xlsx")
+        for setting in ("MAX_PAGES", "PAGE_BYTES"):
+            with patch.object(preview, setting, 0 if setting == "MAX_PAGES" else 1):
+                output, manifest = self.run_preview(source, "layout-limit-" + setting)
+            self.assertEqual(manifest["layout"]["state"], "limit")
+            self.assertEqual(manifest["pages"], [])
+            self.assertFalse(list(output.glob("page-*.png")))
+            self.assertTrue((output / "grid.json").is_file())
+        self.assertFalse(list(self.root.glob(".metawork-office-*")))
+
+    def test_empty_workbook_keeps_empty_grid_and_real_blank_print_page(self):
+        source = self.root / "empty-workbook.xlsx"
+        Workbook().save(source)
+        output, manifest = self.run_preview(source, "empty-workbook")
+        self.assertEqual(manifest["layout"]["state"], "ready")
+        self.assertEqual(len(manifest["pages"]), 1)
+        saved = json.loads((output / "grid.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["sheets"][0]["cells"], [])
 
     def test_source_text_rejoins_formatted_runs_decodes_xml_and_scans_attributes(self):
         source = self.root / "split.docx"

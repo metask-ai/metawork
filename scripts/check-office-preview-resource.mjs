@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -62,7 +61,10 @@ for (const [name, mode, pathMode] of [
   mkdirSync(sourceRoot, { recursive: true });
   mkdirSync(dataRoot, { recursive: true });
   const source = path.join(sourceRoot, name);
-  copyFileSync(path.join(fixtures, name), source);
+  // Each case owns fresh mutable bytes, not the source fixture's ACL/attributes.
+  writeFileSync(source, readFileSync(path.join(fixtures, name)), {
+    flag: "wx",
+  });
   if (mode === "engine_fail") writeFileSync(source, "not an OOXML archive");
   const bytes = readFileSync(source);
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -98,6 +100,10 @@ for (const [name, mode, pathMode] of [
     assert.equal(result.read_count, 3);
     assert.ok(result.source_text_bytes > 0);
     assert.ok(result.pages > 0 || result.cells > 0);
+    if (name.endsWith(".xlsx")) {
+      assert.ok(result.pages > 0, "workbook print pages are available");
+      assert.ok(result.cells > 0, "the same resource also supplies grid cells");
+    }
   } else {
     assert.equal(result.read_count, 0);
     assert.ok(result.failure_observed);
