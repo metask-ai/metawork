@@ -145,9 +145,9 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
   "account.retry_refresh": "Retry sign-in refresh",
-  "account.logout": "Sign out and clear this device",
+  "account.logout": "Sign out",
   "account.logout_confirm":
-    "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",
+    "You will be signed out of Metask on this device. Your local tasks and history will remain.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1352,9 +1352,9 @@ export const enUS = {
     "No default was changed. {api} · {model} remains active.",
   "settings.existing_tasks_unchanged":
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
-  "settings.signout_title": "Sign out on this device",
+  "settings.signout_title": "Sign out",
   "settings.signout_help":
-    "This clears Metask credentials from this device. New Metask model use becomes unavailable; custom models, task records, workspace files, and existing task bindings are preserved.",
+    "Sign in again to create new tasks using Metask models. Your custom models, local tasks, and workspace files will remain.",
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help":

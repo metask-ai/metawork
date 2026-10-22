@@ -236,7 +236,7 @@ test("account-menu sign out confirms in place without opening settings", async (
   await user.click(await screen.findByRole("menuitem", { name: "Sign out…" }));
   await user.click(
     await screen.findByRole("button", {
-      name: "Sign out and clear this device",
+      name: "Sign out",
     }),
   );
 

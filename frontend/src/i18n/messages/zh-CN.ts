@@ -127,9 +127,9 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.retry_refresh": "重试登录刷新",
-  "account.logout": "退出并清除这台设备上的信息",
+  "account.logout": "退出登录",
   "account.logout_confirm":
-    "这会清除这台设备上的 Metask 登录凭据，本地任务和历史记录会保留。是否继续？",
+    "仅退出这台设备上的 Metask 账号，本地任务和历史记录会保留。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -1204,9 +1204,9 @@ export const zhCN: Record<MessageId, string> = {
     "默认配置未被修改，{api} · {model} 仍然有效。",
   "settings.existing_tasks_unchanged":
     "默认配置只影响新任务。已有任务的绑定和历史不会被改写。",
-  "settings.signout_title": "在这台设备上退出",
+  "settings.signout_title": "退出登录",
   "settings.signout_help":
-    "这会清除本机 Metask 凭据，新的 Metask 模型使用将不可用；自定义模型、任务记录、工作区文件和已有任务绑定都会保留。",
+    "退出后，创建使用 Metask 模型的新任务需要重新登录。自定义模型、本地任务和工作区文件会保留。",
   "settings.task_binding_model":
     "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
   "settings.task_model_help": "选择此任务发送消息时使用的模型。",
