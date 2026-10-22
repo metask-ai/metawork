@@ -28,7 +28,10 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
     const command: office.Command = if (args.len == 6) .{ .preview = .{ .input = args[4], .output = args[5] } } else .selftest;
-    var result = switch (office.run(init.gpa, init.io, args[1], command, .{ .parent_environment = init.environ_map, .scratch_root = scratch, .operation_identity = random }, timeout, &cancellation)) {
+    var lifetime: ?office.ResourceScope = if (args.len == 5) null else try office.ResourceScope.initOperation(random);
+    defer if (lifetime) |*scope| scope.deinit();
+    const operation: office.Operation = if (lifetime) |*scope| .{ .borrow = scope } else .{ .create = random };
+    var result = switch (office.run(init.gpa, init.io, args[1], command, .{ .parent_environment = init.environ_map, .scratch_root = scratch, .operation = operation }, timeout, &cancellation)) {
         .completed => |output| output,
         .failed => |failure| {
             quiescent = failure.quiescent;

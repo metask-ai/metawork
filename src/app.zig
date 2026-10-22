@@ -114,7 +114,6 @@ const App = struct {
     platform: app_platform.Adapter,
     completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
-    data_root: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
     models_platform_binding: ?models_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
@@ -150,7 +149,7 @@ const App = struct {
         const office = self.office_component orelse return error.OfficePreviewUnavailable;
         var operation: [16]u8 = undefined;
         try std.Io.randomSecure(self.io, &operation);
-        return office.previewResource(control.officeManagement(), self.main_thread_id, self.data_root, .{ .root = input.workspace_root, .relative = input.relative_path, .expected = if (input.expected) |expected| .{ .size_bytes = expected.size_bytes, .sha256 = expected.sha256 } else null }, operation);
+        return office.previewResource(control.officeManagement(), self.main_thread_id, .{ .root = input.workspace_root, .relative = input.relative_path, .expected = if (input.expected) |expected| .{ .size_bytes = expected.size_bytes, .sha256 = expected.sha256 } else null }, operation);
     }
 
     fn app(self: *@This()) native_sdk.App {
@@ -587,7 +586,6 @@ pub fn run(init: std.process.Init) !void {
     );
     defer paths_state.deinit();
     app.account_path = paths_state.accountDir();
-    app.data_root = paths_state.dataDir();
     var single_instance_state: app_single_instance.Coordinator = undefined;
     const disposition = try single_instance_state.init(
         init.io,
@@ -767,6 +765,7 @@ pub fn run(init: std.process.Init) !void {
             std.heap.c_allocator,
             init.io,
             root,
+            paths_state.dataDir(),
             init.environ_map,
             @import("office_release_input").json,
             builtin_skill_root,

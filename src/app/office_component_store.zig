@@ -606,7 +606,7 @@ fn verifyComponent(allocator: std.mem.Allocator, io: std.Io, stage: ValidationSt
         try platform.verifySignature(allocator, path);
     }
     if (stage == .authentication) return;
-    var result = try selftestOutput(process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation_identity = operation_identity }, 120_000, cancellation));
+    var result = try selftestOutput(process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation = if (operation_identity) |id| .{ .create = id } else null }, 120_000, cancellation));
     defer result.deinit(allocator);
     if (result.term != .exited or result.term.exited != 0) return error.ComponentSelftestFailed;
     const Status = struct { schema: u32, status: []const u8, python: []const u8, node: []const u8, font: []const u8 };

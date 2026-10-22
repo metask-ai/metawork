@@ -44,6 +44,7 @@ for (const [name, mode, pathMode] of [
   ["workbook.xlsx", "root_swap"],
   ["original.docx", "cancel"],
   ["original.docx", "poison"],
+  ["original.docx", "collision"],
   ["original.docx", "cancel_live"],
   ["original.docx", "engine_fail"],
   ["original.docx", "normal", "boundary"],

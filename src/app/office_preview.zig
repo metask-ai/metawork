@@ -16,6 +16,15 @@ pub const max_pages_bytes = 64 * 1024 * 1024;
 pub const max_pages = 100;
 pub const max_cells = 100_000;
 const namespace = "pv";
+const owner_file = ".owner.json";
+const Owner = struct {
+    kind: enum { metawork_office_preview },
+    schema: u8,
+    operation: []const u8,
+    parent: std.Io.File.INode,
+    directory: std.Io.File.INode,
+};
+
 // The pinned engine appends registry and operation suffixes below this root.
 // Keep those within its Windows legacy-path limit; no external temp fallback.
 pub const max_root_windows_units = 120;
@@ -62,6 +71,7 @@ pub const Resource = struct {
     format: Format,
     state: State = .fresh,
     root: ?Root = null,
+    operation_scope: ?process.ResourceScope = null,
     manifest: ?std.json.Parsed(Manifest) = null,
     grid: ?std.json.Parsed(Grid) = null,
     source_text: []u8 = &.{},
@@ -123,7 +133,7 @@ pub const Resource = struct {
         defer self.allocator.free(input_path);
         const output_path = try std.fs.path.join(self.allocator, &.{ root.path, "prepared" });
         defer self.allocator.free(output_path);
-        var output = switch (process.run(self.allocator, self.io, self.component.root, .{ .preview = .{ .input = input_path, .output = output_path } }, .{ .parent_environment = self.environment, .scratch_root = root.path, .operation_identity = self.operation }, 120_000, cancellation)) {
+        var output = switch (process.run(self.allocator, self.io, self.component.root, .{ .preview = .{ .input = input_path, .output = output_path } }, .{ .parent_environment = self.environment, .scratch_root = root.path, .operation = .{ .borrow = &self.operation_scope.? } }, 120_000, cancellation)) {
             .completed => |result| result,
             .failed => |failure| {
                 if (!failure.quiescent) self.state = .poisoned;
@@ -217,24 +227,18 @@ pub const Resource = struct {
     }
 
     /// Worker only. An uncertain process scope cannot be retried into cleanup
-    /// authority in this process. A normal cleanup acquires a sealed operation
-    /// reservation and verifies both the owned directory and its current name.
+    /// authority in this process. Normal cleanup seals the owned operation
+    /// scope and verifies both the owned directory and its current name.
     pub fn cleanup(self: *Resource) !void {
         try self.worker();
         if (self.state == .poisoned) return error.PreviewRestartRequired;
         self.state = .failed;
+        if (self.root != null) try self.verifyRoot();
+        if (self.operation_scope) |*scope| scope.settle(self.io) catch {
+            self.state = .poisoned;
+            return error.PreviewRestartRequired;
+        };
         if (self.root) |*root| {
-            try self.verifyRoot();
-            const cancellation: process.Cancellation = .{};
-            var scope = process.ResourceScope.reserveOperationDeletion(self.io, self.operation, &cancellation) catch {
-                self.state = .poisoned;
-                return error.PreviewRestartRequired;
-            };
-            defer scope.deinit();
-            scope.settle(self.io) catch {
-                self.state = .poisoned;
-                return error.PreviewRestartRequired;
-            };
             if (root.directory) |directory| directory.close(self.io);
             root.directory = null;
             try root.parent.deleteTree(self.io, &self.name);
@@ -242,6 +246,8 @@ pub const Resource = struct {
             self.allocator.free(root.path);
             self.root = null;
         }
+        if (self.operation_scope) |*scope| scope.deinit();
+        self.operation_scope = null;
         self.clearPrepared();
         self.state = .cleaned;
     }
@@ -250,7 +256,7 @@ pub const Resource = struct {
     /// failed release attempt, including an uncertain/poisoned process scope.
     pub fn deinit(self: *Resource) !void {
         if (std.Thread.getCurrentId() != self.main_thread) return error.WrongPreviewThread;
-        if (self.root != null or self.state == .poisoned) return error.PreviewResourcesOutstanding;
+        if (self.root != null or self.operation_scope != null or self.state == .poisoned) return error.PreviewResourcesOutstanding;
         self.clearPrepared();
         self.component.release_fn(self.component.context);
         self.allocator.free(self.component.root);
@@ -272,6 +278,9 @@ pub const Resource = struct {
             return error.OutputChanged;
     }
     fn createRoot(self: *Resource) !void {
+        // Presence of this sole lifetime handle protects ready resources too.
+        // Acquire before creating any path; another Host must never adopt it.
+        self.operation_scope = try process.ResourceScope.initOperation(self.operation);
         const data = try source_file.openRoot(self.io, self.data_root);
         defer data.close(self.io);
         const parent = try data.createDirPathOpen(self.io, namespace, .{
@@ -303,6 +312,13 @@ pub const Resource = struct {
             self.state = .poisoned;
             return failure;
         };
+        var bytes: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try std.json.Stringify.value(Owner{ .kind = .metawork_office_preview, .schema = 1, .operation = &self.name, .parent = parent_identity.inode, .directory = self.root.?.identity.?.inode }, .{}, &writer);
+        const marker = try directory.createFile(self.io, owner_file, .{ .exclusive = true });
+        defer marker.close(self.io);
+        try marker.writeStreamingAll(self.io, writer.buffered());
+        try marker.sync(self.io);
     }
     fn verifyRoot(self: *Resource) !void {
         const root = self.root orelse return error.InvalidPreviewState;
@@ -393,6 +409,234 @@ fn hexDigest(text: []const u8) ![32]u8 {
     if (std.mem.allEqual(u8, &result, 0)) return error.InvalidPreviewManifest;
     return result;
 }
+pub const Collection = struct {
+    removed: u16 = 0,
+    retained: u16 = 0,
+    limited: bool = false,
+    pub fn pending(self: Collection) bool {
+        return self.retained != 0 or self.limited;
+    }
+};
+
+/// Worker only. Unknown names/records never authorize deletion. A sealed new
+/// Job proves the prior operation has no remaining owner or process; this
+/// reservation stays held through identity checks and the physical deletion.
+pub fn collectAbandoned(allocator: std.mem.Allocator, io: std.Io, main_thread: std.Thread.Id, data_root: []const u8, cancellation: *const process.Cancellation) !Collection {
+    if (std.Thread.getCurrentId() == main_thread) return error.MainThreadFileEffect;
+    try cancelled(cancellation);
+    const data = try source_file.openRoot(io, data_root);
+    defer data.close(io);
+    const parent = data.openDir(io, namespace, .{ .iterate = true, .follow_symlinks = false }) catch |failure| {
+        if (failure == error.FileNotFound) return .{};
+        return failure;
+    };
+    defer parent.close(io);
+    const parent_identity = try parent.stat(io);
+    if (parent_identity.kind != .directory) return error.PreviewRootChanged;
+    var result: Collection = .{};
+    var entries: usize = 0;
+    var iterator = parent.iterate();
+    while (try iterator.next(io)) |entry| {
+        try cancelled(cancellation);
+        entries += 1;
+        if (entries > 64) {
+            result.limited = true;
+            break;
+        }
+        const operation = operationIdentity(entry.name) orelse continue;
+        const removed = collectOne(allocator, io, data_root, parent, parent_identity, entry.name, operation) catch {
+            result.retained += 1;
+            continue;
+        };
+        if (removed) result.removed += 1 else result.retained += 1;
+    }
+    return result;
+}
+
+fn operationIdentity(name: []const u8) ?[16]u8 {
+    if (name.len != 32) return null;
+    for (name) |character| if (!std.ascii.isDigit(character) and !(character >= 'a' and character <= 'f')) return null;
+    var identity: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&identity, name) catch return null;
+    if (std.mem.allEqual(u8, &identity, 0)) return null;
+    return identity;
+}
+
+fn collectOne(allocator: std.mem.Allocator, io: std.Io, data_root: []const u8, parent: std.Io.Dir, parent_identity: std.Io.File.Stat, name: []const u8, operation: [16]u8) !bool {
+    var reservation = process.ResourceScope.tryReserveOperationDeletion(operation) catch |failure| {
+        if (failure == error.JobInUse) return false;
+        return failure;
+    };
+    defer reservation.deinit();
+    try reservation.settle(io);
+    const identity = identity: {
+        const directory = try parent.openDir(io, name, .{ .follow_symlinks = false });
+        defer directory.close(io);
+        const identity = try directory.stat(io);
+        if (identity.kind != .directory) return error.PreviewRootChanged;
+        var marker = try directory.openFile(io, owner_file, .{ .follow_symlinks = false, .allow_directory = false, .resolve_beneath = true });
+        defer marker.close(io);
+        if (builtin.os.tag == .windows) marker.flags.nonblocking = true;
+        const before = try marker.stat(io);
+        if (before.kind != .file or before.size == 0 or before.size > 512) return error.InvalidPreviewOwner;
+        var bytes: [512]u8 = undefined;
+        const length: usize = @intCast(before.size);
+        if (try marker.readPositionalAll(io, bytes[0..length], 0) != length or !stable(before, try marker.stat(io))) return error.InvalidPreviewOwner;
+        var parsed = try std.json.parseFromSlice(Owner, allocator, bytes[0..length], .{ .allocate = .alloc_always, .max_value_len = 64, .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        const owner = parsed.value;
+        if (owner.schema != 1 or !std.mem.eql(u8, owner.operation, name) or owner.parent != parent_identity.inode or owner.directory != identity.inode) return error.InvalidPreviewOwner;
+        const named_marker = try directory.statFile(io, owner_file, .{ .follow_symlinks = false });
+        if (!stable(before, named_marker)) return error.InvalidPreviewOwner;
+        break :identity identity;
+    };
+    const data = try source_file.openRoot(io, data_root);
+    defer data.close(io);
+    const named_parent = try data.statFile(io, namespace, .{ .follow_symlinks = false });
+    const named = try parent.statFile(io, name, .{ .follow_symlinks = false });
+    if (named_parent.kind != .directory or named_parent.inode != parent_identity.inode or named.kind != .directory or named.inode != identity.inode) return error.PreviewRootChanged;
+    try parent.deleteTree(io, name);
+    return true;
+}
+
+const CollectionTestLease = struct {
+    released: usize = 0,
+    fn release(context: *anyopaque) void {
+        const self: *CollectionTestLease = @ptrCast(@alignCast(context));
+        self.released += 1;
+    }
+};
+const CollectionTestWork = struct {
+    resource: *Resource,
+    mode: enum { active, abandon, collect },
+    cancellation: process.Cancellation = .{},
+    result: anyerror!Collection = error.NotStarted,
+    fn run(self: *CollectionTestWork) void {
+        self.result = self.execute();
+    }
+    fn execute(self: *CollectionTestWork) !Collection {
+        const resource = self.resource;
+        if (self.mode != .collect) try resource.createRoot();
+        if (self.mode == .abandon) {
+            // Model an exited owner, retaining its recognized directory.
+            resource.operation_scope.?.deinit();
+            resource.operation_scope = null;
+            resource.root.?.directory.?.close(resource.io);
+            resource.root.?.parent.close(resource.io);
+            resource.allocator.free(resource.root.?.path);
+            resource.root = null;
+            resource.state = .cleaned;
+            return .{};
+        }
+        const result = try collectAbandoned(resource.allocator, resource.io, resource.main_thread, resource.data_root, &self.cancellation);
+        if (self.mode == .active) try resource.cleanup();
+        return result;
+    }
+    fn joined(self: *CollectionTestWork) !Collection {
+        const thread = try std.Thread.spawn(.{}, run, .{self});
+        thread.join();
+        return self.result;
+    }
+};
+
+test "preview collection preserves active owners and removes recognized abandoned resources" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var lease: CollectionTestLease = .{};
+    var identity: [16]u8 = undefined;
+    try std.Io.randomSecure(std.testing.io, &identity);
+    var resource = try Resource.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), &environment, root, .{ .root = root, .identity = @splat(1), .context = &lease, .release_fn = CollectionTestLease.release }, .{ .root = root, .relative = "input.docx", .expected = null }, identity);
+    defer resource.deinit() catch unreachable;
+    const cancellation: process.Cancellation = .{};
+    try std.testing.expectError(error.MainThreadFileEffect, collectAbandoned(std.testing.allocator, std.testing.io, resource.main_thread, root, &cancellation));
+    var active: CollectionTestWork = .{ .resource = &resource, .mode = .active };
+    const preserved = try active.joined();
+    try std.testing.expectEqual(@as(u16, 1), preserved.retained);
+    try std.testing.expectEqual(@as(u16, 0), preserved.removed);
+    var abandoned: CollectionTestWork = .{ .resource = &resource, .mode = .abandon };
+    _ = try abandoned.joined();
+    var collect: CollectionTestWork = .{ .resource = &resource, .mode = .collect };
+    collect.cancellation.requested.store(true, .release);
+    try std.testing.expectError(error.Cancelled, collect.joined());
+    collect.cancellation.requested.store(false, .release);
+    const removed = try collect.joined();
+    try std.testing.expectEqual(@as(u16, 1), removed.removed);
+    try std.testing.expect(!removed.pending());
+}
+
+test "preview collection retains missing owner records and copied directory identities" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var lease: CollectionTestLease = .{};
+    var identity: [16]u8 = undefined;
+    try std.Io.randomSecure(std.testing.io, &identity);
+    var resource = try Resource.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), &environment, root, .{ .root = root, .identity = @splat(1), .context = &lease, .release_fn = CollectionTestLease.release }, .{ .root = root, .relative = "input.docx", .expected = null }, identity);
+    defer resource.deinit() catch unreachable;
+    var abandoned: CollectionTestWork = .{ .resource = &resource, .mode = .abandon };
+    _ = try abandoned.joined();
+    const parent = try temporary.dir.openDir(std.testing.io, namespace, .{});
+    defer parent.close(std.testing.io);
+    var saved: [512]u8 = undefined;
+    var length: usize = 0;
+    {
+        const original = try parent.openDir(std.testing.io, &resource.name, .{});
+        defer original.close(std.testing.io);
+        const marker = try original.openFile(std.testing.io, owner_file, .{});
+        defer marker.close(std.testing.io);
+        length = @intCast((try marker.stat(std.testing.io)).size);
+        try std.testing.expectEqual(length, try marker.readPositionalAll(std.testing.io, saved[0..length], 0));
+    }
+    try parent.rename(&resource.name, parent, "unregistered", std.testing.io);
+    try parent.createDir(std.testing.io, &resource.name, .default_dir);
+    const replacement = try parent.openDir(std.testing.io, &resource.name, .{});
+    defer replacement.close(std.testing.io);
+    var collect: CollectionTestWork = .{ .resource = &resource, .mode = .collect };
+    try std.testing.expectEqual(@as(u16, 1), (try collect.joined()).retained);
+    const marker = try replacement.createFile(std.testing.io, owner_file, .{ .exclusive = true });
+    try marker.writeStreamingAll(std.testing.io, saved[0..length]);
+    marker.close(std.testing.io);
+    const kept = try collect.joined();
+    try std.testing.expectEqual(@as(u16, 1), kept.retained);
+    try std.testing.expectEqual(@as(u16, 0), kept.removed);
+    _ = try parent.statFile(std.testing.io, "unregistered", .{});
+}
+
+test "preview collection bounds enumeration even when records are unrecognized" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try temporary.dir.createDir(std.testing.io, namespace, .default_dir);
+    const parent = try temporary.dir.openDir(std.testing.io, namespace, .{});
+    defer parent.close(std.testing.io);
+    for (1..67) |index| {
+        var buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "{x:0>32}", .{index});
+        try parent.createDir(std.testing.io, name, .default_dir);
+    }
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var lease: CollectionTestLease = .{};
+    var resource = try Resource.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), &environment, root, .{ .root = root, .identity = @splat(1), .context = &lease, .release_fn = CollectionTestLease.release }, .{ .root = root, .relative = "input.docx", .expected = null }, @splat(1));
+    defer resource.deinit() catch unreachable;
+    var collect: CollectionTestWork = .{ .resource = &resource, .mode = .collect };
+    const result = try collect.joined();
+    try std.testing.expect(result.limited);
+    try std.testing.expectEqual(@as(u16, 64), result.retained);
+    try std.testing.expectEqual(@as(u16, 0), result.removed);
+}
+
 fn validateManifest(value: *const Manifest, format: Format) !void {
     if (value.schema != 1 or value.format != format or value.omissions.len > 16 or
         !std.mem.eql(u8, value.textScope, contract.sourceTextScope(format)) or

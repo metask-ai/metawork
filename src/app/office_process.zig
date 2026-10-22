@@ -30,6 +30,13 @@ pub const ResourceScope = struct {
         return .{ .job = try windows.Job.operation(identity, false) };
     }
 
+    /// Non-waiting collection: an existing Job belongs to a live owner and
+    /// cannot be adopted, even when it currently has no child process.
+    pub fn tryReserveOperationDeletion(identity: [16]u8) !ResourceScope {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        return .{ .job = try windows.Job.operation(identity, true), .sealed = true };
+    }
+
     pub fn reserveVersionDeletion(io: std.Io, identity: [16]u8, cancellation: *const Cancellation) !ResourceScope {
         return reserve(io, identity, cancellation, false);
     }
@@ -65,10 +72,12 @@ pub const ResourceScope = struct {
     }
 };
 
+pub const Operation = union(enum) { create: [16]u8, borrow: *ResourceScope };
+
 pub const Context = struct {
     parent_environment: *const std.process.Environ.Map,
     scratch_root: []const u8,
-    operation_identity: ?[16]u8 = null,
+    operation: ?Operation = null,
 };
 
 const PagePaths = struct { input: []const u8, output: []const u8, width: u16 = 1280 };
@@ -144,13 +153,21 @@ fn runOwned(
     try environment.put("TMP", context.scratch_root);
     try environment.put("TEMP", context.scratch_root);
     try environment.put("TMPDIR", context.scratch_root);
-    var job = (if (context.operation_identity) |identity| windows.Job.operation(identity, false) else windows.Job.init(io)) catch |failure| {
-        // A collision can belong to an earlier still-live operation. Never
-        // claim its namespace is quiet merely because this call did not spawn.
-        if (failure == error.JobInUse) quiescent.* = false;
-        return failure;
+    var owned_job: ?windows.Job = null;
+    defer if (owned_job) |*owned| owned.deinit();
+    const job: *windows.Job = job: {
+        if (context.operation) |operation| switch (operation) {
+            .borrow => |scope| {
+                if (scope.sealed or scope.job.handle == null) return error.InvalidOperationScope;
+                break :job &scope.job;
+            },
+            .create => |identity| owned_job = windows.Job.operation(identity, false) catch |failure| {
+                if (failure == error.JobInUse) quiescent.* = false;
+                return failure;
+            },
+        } else owned_job = try windows.Job.init(io);
+        break :job &owned_job.?;
     };
-    defer job.deinit();
     const entry = try std.fs.path.join(allocator, &.{ component_root, "bin", "office.exe" });
     defer allocator.free(entry);
     // Fixed-size argument slots; no input is interpreted as a command string.
@@ -196,15 +213,15 @@ fn runOwned(
     defer std.crypto.secureZero(u8, &out.bytes);
     defer std.crypto.secureZero(u8, &err.bytes);
     const out_thread = std.Thread.spawn(.{}, Capture.read, .{&out}) catch |failure| {
-        try stop(io, &child, &job, null, null, quiescent);
+        try stop(io, &child, job, null, null, quiescent);
         return failure;
     };
     const err_thread = std.Thread.spawn(.{}, Capture.read, .{&err}) catch |failure| {
-        try stop(io, &child, &job, out_thread, null, quiescent);
+        try stop(io, &child, job, out_thread, null, quiescent);
         return failure;
     };
-    const term = monitor(io, &child, &job, &out, &err, started, timeout_ms, cancellation) catch |failure| {
-        try stop(io, &child, &job, out_thread, err_thread, quiescent);
+    const term = monitor(io, &child, job, &out, &err, started, timeout_ms, cancellation) catch |failure| {
+        try stop(io, &child, job, out_thread, err_thread, quiescent);
         return failure;
     };
     out_thread.join();

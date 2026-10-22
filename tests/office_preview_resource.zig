@@ -4,7 +4,7 @@ const std = @import("std");
 const preview = @import("office_preview");
 const process = @import("office_process");
 const document = @import("product_document_preview");
-const Mode = enum { normal, current, current_changed, changed, cancel, cancel_live, tamper, root_swap, poison, path_limit, engine_fail };
+const Mode = enum { normal, current, current_changed, hold, sweep, changed, cancel, cancel_live, tamper, root_swap, poison, collision, path_limit, engine_fail };
 const Lease = struct {
     main: std.Thread.Id,
     released: bool = false,
@@ -23,6 +23,14 @@ pub fn main(init: std.process.Init) !void {
     _ = try std.fmt.hexToBytes(&digest, args[6]);
     _ = try std.fmt.hexToBytes(&identity, args[7]);
     const mode = std.meta.stringToEnum(Mode, args[8]) orelse return error.InvalidMode;
+    if (mode == .sweep) {
+        var work: Sweep = .{ .allocator = init.gpa, .io = init.io, .main_thread = std.Thread.getCurrentId(), .root = args[4] };
+        const thread = try std.Thread.spawn(.{}, Sweep.run, .{&work});
+        thread.join();
+        const result = try work.result;
+        try emit(init.io, result);
+        return;
+    }
     var operation: [16]u8 = undefined;
     try std.Io.randomSecure(init.io, &operation);
     var lease: Lease = .{ .main = std.Thread.getCurrentId() };
@@ -30,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .normal or mode == .current) return qualifyLane(init, &resource, &lease, args[5], digest, mode);
     const cancellation: process.Cancellation = .{};
     if (resource.prepare(&cancellation)) |_| return error.MainThreadEffectAccepted else |failure| if (failure != error.MainThreadFileEffect) return failure;
-    var blocker: ?process.ResourceScope = if (mode == .poison) try process.ResourceScope.initOperation(operation) else null;
+    var blocker: ?process.ResourceScope = if (mode == .collision) try process.ResourceScope.initOperation(operation) else null;
     defer if (blocker) |*scope| scope.deinit();
     var work: Work = .{ .resource = &resource, .mode = mode };
     if (mode == .cancel) work.cancellation.requested.store(true, .release);
@@ -39,6 +47,11 @@ pub fn main(init: std.process.Init) !void {
     thread.join();
     if (timer) |handle| handle.join();
     if (work.failure) |failure| return failure;
+    if (mode == .hold) {
+        try emit(init.io, .{ .ready = true, .operation = resource.name[0..] });
+        var stop: [1]u8 = undefined;
+        _ = try std.Io.File.stdin().readStreaming(init.io, &.{&stop});
+    }
     if (mode == .poison) {
         if (lease.released) return error.LeaseReleasedTooEarly;
         if (resource.deinit()) |_| return error.PoisonedResourceReleased else |failure| if (failure != error.PreviewResourcesOutstanding) return failure;
@@ -92,8 +105,8 @@ const Work = struct {
     }
     fn execute(self: *Work) !void {
         self.resource.prepare(&self.cancellation) catch |failure| {
-            if (self.mode == .poison and failure == error.PreviewRestartRequired) {
-                if (self.resource.cleanup()) |_| return error.PoisonedCleanupAccepted else |problem| if (problem != error.PreviewRestartRequired) return problem;
+            if (self.mode == .collision and failure == error.JobInUse) {
+                if (self.resource.root != null or self.resource.operation_scope != null) return error.CollidingScopeAdopted;
                 self.observed = @errorName(failure);
                 return;
             }
@@ -109,6 +122,23 @@ const Work = struct {
         const metadata = try self.resource.prepared();
         self.pages = if (metadata.pages) |pages| pages.len else 0;
         self.text_bytes = self.resource.source_text.len;
+        if (process.ResourceScope.initOperation(self.resource.operation)) |unprotected| {
+            var unexpected = unprotected;
+            unexpected.deinit();
+            return error.ReadyResourceLostLifetimeOwner;
+        } else |failure| if (failure != error.JobInUse) return failure;
+
+        if (self.mode == .hold) return;
+        if (self.mode == .poison) {
+            // A completed process does not authorize cleanup after the owner's
+            // kernel observation is lost. Inject that failure on our own Job.
+            self.resource.operation_scope.?.deinit();
+            if (self.resource.cleanup()) |_| return error.PoisonedCleanupAccepted else |failure| if (failure != error.PreviewRestartRequired) return failure;
+            if (self.resource.cleanup()) |_| return error.PoisonedCleanupAccepted else |failure| if (failure != error.PreviewRestartRequired) return failure;
+            self.observed = "PreviewRestartRequired";
+            return;
+        }
+
         if (self.resource.prepare(&self.cancellation)) |_| return error.PreparationRepeated else |failure| if (failure != error.InvalidPreviewState) return failure;
         if (self.mode == .changed or self.mode == .current_changed) {
             const source_path = try std.fs.path.join(self.resource.allocator, &.{ self.resource.source.root, self.resource.source.relative });
@@ -216,4 +246,23 @@ fn nextLane(io: std.Io, lane: *document.Lane) !document.Taken {
         try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(2), .clock = .awake } }, io);
     }
     return error.QualificationTimeout;
+}
+
+const Sweep = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    main_thread: std.Thread.Id,
+    root: []const u8,
+    result: anyerror!preview.Collection = error.NotStarted,
+    fn run(self: *Sweep) void {
+        const cancellation: process.Cancellation = .{};
+        self.result = preview.collectAbandoned(self.allocator, self.io, self.main_thread, self.root, &cancellation);
+    }
+};
+fn emit(io: std.Io, value: anytype) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try std.json.Stringify.value(value, .{}, &writer.interface);
+    try writer.interface.writeByte('\n');
+    try writer.interface.flush();
 }

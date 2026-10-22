@@ -24,6 +24,7 @@ pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     root: []u8,
+    preview_root: []u8,
     environment: *const std.process.Environ.Map,
     input: releases.Parsed,
     input_json: []u8,
@@ -32,6 +33,7 @@ pub const Coordinator = struct {
     store: store_impl.Store = undefined,
     store_opened: bool = false,
     storage_cleanup_pending: bool = false,
+    preview_cleanup_pending: bool = false,
     registry: versions.Registry = undefined,
     work: ?*Work = null,
     closing: bool = false,
@@ -39,8 +41,8 @@ pub const Coordinator = struct {
 
     /// Called after Primary authority is acquired. No filesystem or process
     /// effect runs here, nor on a normal management command's admission path.
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, root: []const u8, environment: *const std.process.Environ.Map, input_json: []const u8, basic_root: ?[]const u8, notify: Notify) !*Coordinator {
-        if (!std.fs.path.isAbsolute(root)) return error.InvalidComponentRoot;
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, root: []const u8, preview_root: []const u8, environment: *const std.process.Environ.Map, input_json: []const u8, basic_root: ?[]const u8, notify: Notify) !*Coordinator {
+        if (!std.fs.path.isAbsolute(root) or !std.fs.path.isAbsolute(preview_root)) return error.InvalidComponentRoot;
         if (input_json.len > 16 * 1024) return error.InvalidComponentRelease;
         const owned_input = try allocator.dupe(u8, input_json);
         errdefer allocator.free(owned_input);
@@ -48,8 +50,10 @@ pub const Coordinator = struct {
         errdefer input.deinit();
         const owned_root = try allocator.dupe(u8, root);
         errdefer allocator.free(owned_root);
+        const owned_preview_root = try allocator.dupe(u8, preview_root);
+        errdefer allocator.free(owned_preview_root);
         const self = try allocator.create(Coordinator);
-        self.* = .{ .allocator = allocator, .io = io, .root = owned_root, .environment = environment, .input = input, .input_json = owned_input, .basic_root = basic_root, .notify = notify };
+        self.* = .{ .allocator = allocator, .io = io, .root = owned_root, .preview_root = owned_preview_root, .environment = environment, .input = input, .input_json = owned_input, .basic_root = basic_root, .notify = notify };
         self.registry = .{ .allocator = allocator, .store = &self.store };
         return self;
     }
@@ -61,7 +65,7 @@ pub const Coordinator = struct {
 
     /// Main-only capture of an already verified current version. IO and
     /// process work start later on the preview lane, never during admission.
-    pub fn previewResource(self: *Coordinator, product: ports.OfficeManagement, main_thread: std.Thread.Id, data_root: []const u8, input: preview.Input, operation: [16]u8) !preview_contract.Owned {
+    pub fn previewResource(self: *Coordinator, product: ports.OfficeManagement, main_thread: std.Thread.Id, input: preview.Input, operation: [16]u8) !preview_contract.Owned {
         if (std.Thread.getCurrentId() != main_thread) return error.WrongPreviewThread;
         const current = product.view();
         const version = self.registry.current orelse return error.OfficePreviewUnavailable;
@@ -71,7 +75,7 @@ pub const Coordinator = struct {
         var pin = try version.pin();
         var transferred = false;
         errdefer if (!transferred) pin.deinit();
-        var resource = try preview.Resource.init(self.allocator, self.io, main_thread, self.environment, data_root, .{ .root = version.directory, .identity = version.record.archive_sha256, .context = version, .release_fn = releasePreviewVersion }, input, operation);
+        var resource = try preview.Resource.init(self.allocator, self.io, main_thread, self.environment, self.preview_root, .{ .root = version.directory, .identity = version.record.archive_sha256, .context = version, .release_fn = releasePreviewVersion }, input, operation);
         transferred = true;
         // Once initialized, resource owns the pin, including adapter failure.
         const owned = resource.intoOwned() catch |failure| {
@@ -102,6 +106,9 @@ pub const Coordinator = struct {
             .allocator = self.allocator,
             .io = self.io,
             .root = self.root,
+            .preview_root = self.preview_root,
+            .main_thread = std.Thread.getCurrentId(),
+            .preview_cleanup_pending = self.preview_cleanup_pending,
             .store = &self.store,
             .opened = self.store_opened,
             .input = &self.input,
@@ -186,6 +193,7 @@ pub const Coordinator = struct {
 
     fn finish(self: *Coordinator, product: ports.OfficeManagement, work: *Work) bool {
         if (work.kind == .cleanup) self.registry.finishCollection(&work.collection);
+        self.preview_cleanup_pending = work.preview_cleanup_pending;
         self.storage_cleanup_pending = work.result.completion.cleanup_pending;
         work.result.completion.cleanup_pending = self.storage_cleanup_pending or self.registry.cleanupPending();
         _ = product.complete(work.attempt.id, work.result.completion);
@@ -219,6 +227,7 @@ pub const Coordinator = struct {
         const allocator = self.allocator;
         allocator.free(self.input_json);
         allocator.free(self.root);
+        allocator.free(self.preview_root);
         allocator.destroy(self);
     }
 };
@@ -227,6 +236,9 @@ const Work = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     root: []const u8,
+    preview_root: []const u8,
+    main_thread: std.Thread.Id,
+    preview_cleanup_pending: bool,
     store: *store_impl.Store,
     opened: bool,
     input: *const releases.Parsed,
@@ -251,6 +263,7 @@ const Work = struct {
 
     fn run(self: *Work) void {
         self.result = self.execute() catch |failure| self.failed(failure);
+        self.result.completion.cleanup_pending = self.result.completion.cleanup_pending or self.preview_cleanup_pending;
         self.finished.store(true, .release);
         self.notify.notify_fn(self.notify.context);
     }
@@ -260,6 +273,10 @@ const Work = struct {
         if (!self.opened) {
             self.store.* = try store_impl.Store.open(self.allocator, self.io, self.root);
             self.opened = true;
+        }
+        if (self.kind == .check or self.kind == .cleanup) {
+            const collected = try preview.collectAbandoned(self.allocator, self.io, self.main_thread, self.preview_root, &self.cancellation);
+            self.preview_cleanup_pending = collected.pending();
         }
         try self.store.recover(); // admission excludes unresolved live processes
         try self.store.bindHostScope(try process.hostScope());
@@ -486,6 +503,35 @@ fn testDrain(coordinator: *Coordinator, product: ports.OfficeManagement) !void {
     }
 }
 
+test "Office startup and explicit cleanup report retained preview records through the worker" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const store_root = try std.fs.path.join(std.testing.allocator, &.{ root, "office" });
+    defer std.testing.allocator.free(store_root);
+    const unrecognized = "pv/00000000000000000000000000000019";
+    try temporary.dir.createDirPath(std.testing.io, unrecognized);
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var effects: TestEffects = .{};
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    defer coordinator.destroy() catch unreachable;
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
+    defer coordinator.shutdown(product.port());
+    try std.testing.expect(coordinator.begin(product.port(), .check, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(product.port().view().cleanup_pending);
+    _ = try temporary.dir.statFile(std.testing.io, unrecognized, .{});
+    // Only the test removes this unregistered fixture; production collection
+    // must leave it alone even though its name looks like an operation UUID.
+    try temporary.dir.deleteTree(std.testing.io, unrecognized);
+    try std.testing.expect(coordinator.begin(product.port(), .cleanup, product.state.generation).accepted);
+    try testDrain(coordinator, product.port());
+    try std.testing.expect(!product.port().view().cleanup_pending);
+}
+
 test "Office worker publishes only joined verified receipts after owner-thread source handoff" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -496,7 +542,7 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{};
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
     coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
@@ -527,17 +573,17 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     for ([_][]const u8{ "not-created.docx", "not-created.pdf" }) |relative| {
         var accepted = preview_input;
         accepted.relative = relative;
-        const resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, accepted, @splat(4));
+        const resource = try coordinator.previewResource(product.port(), std.Thread.getCurrentId(), accepted, @splat(4));
         try std.testing.expectEqual(references + 1, pointer.references.load(.acquire));
         resource.release_fn(resource.context); // no IO occurred; absent source is not opened
         try std.testing.expectEqual(references, pointer.references.load(.acquire));
     }
     var unsupported = preview_input;
     unsupported.relative = "input.doc";
-    try std.testing.expectError(error.UnsupportedPreview, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, unsupported, @splat(4)));
+    try std.testing.expectError(error.UnsupportedPreview, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), unsupported, @splat(4)));
     try std.testing.expectEqual(references, pointer.references.load(.acquire));
     product.state.current.?.identity[0] ^= 1;
-    try std.testing.expectError(error.OfficePreviewUnavailable, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), root, preview_input, @splat(4)));
+    try std.testing.expectError(error.OfficePreviewUnavailable, coordinator.previewResource(product.port(), std.Thread.getCurrentId(), preview_input, @splat(4)));
     product.state.current.?.identity[0] ^= 1;
     effects.reject.store(true, .release);
     try std.testing.expect(coordinator.begin(product.port(), .repair, product.state.generation).accepted);
@@ -556,7 +602,7 @@ test "Office cancellation joins a blocked transfer before clearing its exact sta
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{ .blocked = .init(true) };
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
     coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
@@ -585,7 +631,7 @@ test "Office update and removal keep catalog-pinned versions until the independe
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{};
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
     coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
@@ -636,7 +682,7 @@ test "cold Office cleanup preserves its intent while a version job is unresolved
     // Keep an old version through update, then simulate process exit without
     // replaying or persisting any of its catalog references.
     {
-        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
         defer coordinator.destroy() catch unreachable;
         coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
         var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
@@ -657,7 +703,7 @@ test "cold Office cleanup preserves its intent while a version job is unresolved
     var unresolved = try process.ResourceScope.initVersion(retired.install_id);
     defer unresolved.deinit();
     for ([_]bool{ true, false }) |blocked| {
-        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
         defer coordinator.destroy() catch unreachable;
         coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
         var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };

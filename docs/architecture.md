@@ -166,6 +166,8 @@ Window compatibility 共享的 startup window identity 只能由 Application 在
 
 清理必须在零进程内引用的基础上，将对应 Job 封闭为零 active-process limit，再终止并观测 active 数归零，持有封闭的 Job 完成文件与删除意图收口后才释放。冷清理不能接管旧 Job；只允许独占创建同身份的封闭 reservation，已有对象则有界等待，超时或观测失败保留资源并报告未静止。安装 pending 的自检使用按事务身份命名的独占 Job，恢复阶段目录及未提交候选前同样取得该事务的封闭 reservation。依据 [Windows Job 对象生命周期](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)，对象要在最后 handle 关闭且关联进程终止后才销毁；不得把 Host 退出、内存引用消失或取消回执单独视为该证明。入口拒绝已封闭的 Job，OS 的零进程限制同时防止“先读取旧限制、后加入”的竞争。
 
+预览资源从创建目录前到物理删除完成持续持有独占 operation Job，转换调用借用该持有范围；引擎退出后仍打开的预览不能失去保护。目录中的有界归属记录绑定 operation、实际父目录和目录身份。启动检查与显式清理由既有 Office worker 有界扫描，只有归属记录及当前目录身份一致、且独占取得同身份的新封闭 Job 后才能删除；已有 Job 时立即保留，不接管、不按 PID 推断静止。缺失或损坏的记录、目录替换、链接及超过单次扫描界限的资源保留并如实报告待清理。该记录只授予精确临时目录的回收权，不持久引用组件版本，也不建立预览缓存。
+
 模型 Shell 路径仍由 AgentCore 执行，Office 入口只管理自己的子树。Application 在发布已安装 Skill 来源前，以 Primary authority 原子写出当前 Host 的 PID 和进程创建时间；组件入口只接受处于自身祖先链中且创建时间一致的 Host，并持有本次 Shell 祖先至该 Host 的 Windows process handle。启动任何子进程前确认范围仍存活，等待时同时观察子进程和这些 handle；Shell 范围或 Host 结束即退出入口，由它独占的 kill-on-close Job 终止子树。不得按可复用 PID、进程名或 Host 之上的 Explorer/终端状态判断生命周期。损坏、缺失、已过期或非祖先 Host 的记录不允许安装资源开始执行；开发树与 Application 专用 Host Job 路径不因此获得任意进程管理 authority。AgentCore 返回取消完成本身不证明 Office 后代已物理退出，版本与临时资源清理仍须独立证明静止。
 
 `system_webview_resize` 只拥有输入子窗口和同 UI 线程的宿主生命周期回调；仅在系统上沿窄带内让缩放命中优先于隐藏标题栏残留的 DWM caption-button 命中。窗口尺寸限制与 resize loop 仍由 SDK/OS 决定，不建立第二份主窗口状态或 Renderer resize 协议。输入层须保持 WebView 原有绘制，跟随客户区及 DPI 更新，最大化或不可缩放时不截获输入；安装失败回滚并使应用启动失败，避免在未完成窗口能力初始化时继续启动；运行更新失败则移除失效输入层并报告，保留已运行的应用。主窗口销毁与 Application cleanup 均释放资源。真实鼠标缩放和无损绘制必须同时验收，不以程序化 resize 代替。
