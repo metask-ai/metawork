@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-workspace-configuration", .root_module = test_modules.product_workspace_configuration },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
         .{ .name = "metawork-app-image-output", .root_module = test_modules.image_output },
+        .{ .name = "metawork-app-output-file", .root_module = test_modules.output_file },
         .{ .name = "metawork-product-workspace-view", .root_module = test_modules.product_workspace_view },
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
         .{ .name = "metawork-product-schedule-state", .root_module = test_modules.product_schedule_state },
@@ -610,6 +611,7 @@ const WiredModules = struct {
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
     image_output: *std.Build.Module,
+    output_file: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -1944,6 +1946,11 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const output_file = b.createModule(.{
+        .root_source_file = b.path("src/app/output_file.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
     image_output.addImport("metawork_product_workspace", product_workspace);
@@ -2237,6 +2244,7 @@ fn wireAgentCore(
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
         .image_output = image_output,
+        .output_file = output_file,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,
