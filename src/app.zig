@@ -114,6 +114,7 @@ const App = struct {
     platform: app_platform.Adapter,
     completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
+    data_root: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
     models_platform_binding: ?models_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
@@ -140,6 +141,16 @@ const App = struct {
     fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         const self: *App = @ptrCast(@alignCast(context));
         return FrozenFileDelivery.prepare(self.io, self.main_thread_id, authority.canonical_root);
+    }
+
+    fn prepareDocumentPreview(context: *anyopaque, input: product_control.DocumentPreviewInput) !@import("product_document_preview_contract").Owned {
+        const self: *App = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.WrongPreviewThread;
+        const control = self.control orelse return error.OfficePreviewUnavailable;
+        const office = self.office_component orelse return error.OfficePreviewUnavailable;
+        var operation: [16]u8 = undefined;
+        try std.Io.randomSecure(self.io, &operation);
+        return office.previewResource(control.officeManagement(), self.main_thread_id, self.data_root, .{ .root = input.workspace_root, .relative = input.relative_path, .expected = if (input.expected) |expected| .{ .size_bytes = expected.size_bytes, .sha256 = expected.sha256 } else null }, operation);
     }
 
     fn app(self: *@This()) native_sdk.App {
@@ -290,6 +301,7 @@ const App = struct {
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileSave(self.platform.outputFileSave());
+        control_storage.setDocumentPreviewPreparation(.{ .context = self, .prepare_fn = prepareDocumentPreview });
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -366,6 +378,7 @@ const App = struct {
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
             control.shutdownOutputChecks();
+            control.shutdownDocumentPreviews();
             control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
@@ -571,6 +584,7 @@ pub fn run(init: std.process.Init) !void {
     );
     defer paths_state.deinit();
     app.account_path = paths_state.accountDir();
+    app.data_root = paths_state.dataDir();
     var single_instance_state: app_single_instance.Coordinator = undefined;
     const disposition = try single_instance_state.init(
         init.io,

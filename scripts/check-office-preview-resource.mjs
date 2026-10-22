@@ -32,6 +32,9 @@ for (const [name, mode, pathMode] of [
   ["original.docx", "normal"],
   ["sample.pptx", "normal"],
   ["workbook.xlsx", "normal"],
+  ["original.docx", "current"],
+  ["workbook.xlsx", "current"],
+  ["workbook.xlsx", "current_changed"],
   ["workbook.xlsx", "changed"],
   ["original.docx", "tamper"],
   ["workbook.xlsx", "root_swap"],
@@ -80,10 +83,13 @@ for (const [name, mode, pathMode] of [
       },
     ),
   );
-  if (mode === "normal") assert.equal(result.product_lane, true);
+  if (mode === "normal" || mode === "current") {
+    assert.equal(result.product_lane, true);
+    assert.equal(result.captured_source, true);
+  }
   assert.equal(result.guard, true);
   assert.equal(result.lease_released, mode !== "poison");
-  if (mode === "normal") {
+  if (mode === "normal" || mode === "current") {
     assert.equal(result.read_count, 3);
     assert.ok(result.source_text_bytes > 0);
     assert.ok(result.pages > 0 || result.cells > 0);
@@ -96,7 +102,8 @@ for (const [name, mode, pathMode] of [
     ? readdirSync(namespace, { withFileTypes: true })
     : [];
   assert.equal(leftovers.length, mode === "poison" ? 1 : 0);
-  if (mode !== "changed") assert.deepEqual(readFileSync(source), bytes);
+  if (mode !== "changed" && mode !== "current_changed")
+    assert.deepEqual(readFileSync(source), bytes);
   results.push({
     name,
     mode,

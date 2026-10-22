@@ -4,7 +4,7 @@ const std = @import("std");
 const preview = @import("office_preview");
 const process = @import("office_process");
 const document = @import("product_document_preview");
-const Mode = enum { normal, changed, cancel, cancel_live, tamper, root_swap, poison, path_limit, engine_fail };
+const Mode = enum { normal, current, current_changed, changed, cancel, cancel_live, tamper, root_swap, poison, path_limit, engine_fail };
 const Lease = struct {
     main: std.Thread.Id,
     released: bool = false,
@@ -26,8 +26,8 @@ pub fn main(init: std.process.Init) !void {
     var operation: [16]u8 = undefined;
     try std.Io.randomSecure(init.io, &operation);
     var lease: Lease = .{ .main = std.Thread.getCurrentId() };
-    var resource = try preview.Resource.init(init.gpa, init.io, lease.main, init.environ_map, args[4], .{ .root = args[1], .identity = identity, .context = &lease, .release_fn = Lease.release }, .{ .root = args[2], .relative = args[3], .expected = .{ .size_bytes = try std.fmt.parseInt(u64, args[5], 10), .sha256 = digest } }, operation);
-    if (mode == .normal) return qualifyLane(init, &resource, &lease);
+    var resource = try preview.Resource.init(init.gpa, init.io, lease.main, init.environ_map, args[4], .{ .root = args[1], .identity = identity, .context = &lease, .release_fn = Lease.release }, .{ .root = args[2], .relative = args[3], .expected = if (mode == .current or mode == .current_changed) null else .{ .size_bytes = try std.fmt.parseInt(u64, args[5], 10), .sha256 = digest } }, operation);
+    if (mode == .normal or mode == .current) return qualifyLane(init, &resource, &lease, args[5], digest, mode);
     const cancellation: process.Cancellation = .{};
     if (resource.prepare(&cancellation)) |_| return error.MainThreadEffectAccepted else |failure| if (failure != error.MainThreadFileEffect) return failure;
     var blocker: ?process.ResourceScope = if (mode == .poison) try process.ResourceScope.initOperation(operation) else null;
@@ -110,7 +110,7 @@ const Work = struct {
         self.pages = if (metadata.pages) |pages| pages.len else 0;
         self.text_bytes = self.resource.source_text.len;
         if (self.resource.prepare(&self.cancellation)) |_| return error.PreparationRepeated else |failure| if (failure != error.InvalidPreviewState) return failure;
-        if (self.mode == .changed) {
+        if (self.mode == .changed or self.mode == .current_changed) {
             const source_path = try std.fs.path.join(self.resource.allocator, &.{ self.resource.source.root, self.resource.source.relative });
             defer self.resource.allocator.free(source_path);
             const file = try std.Io.Dir.cwd().openFile(self.resource.io, source_path, .{ .mode = .read_write });
@@ -135,7 +135,7 @@ const Work = struct {
         }
         for (0..3) |index| {
             self.read() catch |failure| {
-                if ((self.mode == .changed and failure == error.OutputChanged) or
+                if (((self.mode == .changed or self.mode == .current_changed) and failure == error.OutputChanged) or
                     (self.mode == .tamper and (failure == error.PreviewResourceDigest or failure == error.InvalidPreviewImage)))
                 {
                     self.observed = @errorName(failure);
@@ -146,7 +146,7 @@ const Work = struct {
             _ = index;
             self.read_count += 1;
         }
-        if (self.mode == .changed or self.mode == .tamper) return error.TamperingAccepted;
+        if (self.mode == .changed or self.mode == .current_changed or self.mode == .tamper) return error.TamperingAccepted;
     }
     fn read(self: *Work) !void {
         if (self.pages != 0) {
@@ -163,7 +163,7 @@ const Work = struct {
 // Normal resources go through the same narrow owned effect and independent
 // Product scheduler. Runtime admission is separate; fault injection above
 // remains resource-only.
-fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Lease) !void {
+fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Lease, size_text: []const u8, digest: [32]u8, mode: Mode) !void {
     var lane: document.Lane = .{ .io = init.io, .allocator = init.gpa, .main_thread = lease.main, .notifier = .{ .context = null, .wake_fn = laneWake } };
     defer lane.deinit() catch @panic("qualification cleanup failed");
     const effect = try resource.intoOwned();
@@ -176,6 +176,7 @@ fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Leas
     lane.finish(prepared);
     if (preparation_failure) |failure| return failure;
     const material = try lane.material(1);
+    if (material.source.size_bytes != try std.fmt.parseInt(u64, size_text, 10) or !std.mem.eql(u8, &material.source.sha256, &digest)) return error.CapturedSourceMismatch;
     const pages = if (material.manifest.pages) |items| items.len else 0;
     const text_bytes = material.source_text.len;
     var cells: usize = 0;
@@ -201,7 +202,7 @@ fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Leas
     if (!lease.released) return error.LeaseNotReleased;
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(init.io, &buffer);
-    try std.json.Stringify.value(.{ .mode = "normal", .pages = pages, .cells = cells, .source_text_bytes = text_bytes, .read_count = 3, .lease_released = lease.released, .guard = true, .failure_observed = @as(?[]const u8, null), .product_lane = true }, .{}, &writer.interface);
+    try std.json.Stringify.value(.{ .mode = @tagName(mode), .pages = pages, .cells = cells, .source_text_bytes = text_bytes, .read_count = 3, .lease_released = lease.released, .guard = true, .failure_observed = @as(?[]const u8, null), .product_lane = true, .captured_source = true }, .{}, &writer.interface);
     try writer.interface.writeByte('\n');
     try writer.interface.flush();
 }

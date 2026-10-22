@@ -210,6 +210,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
         .{ .name = "metawork-product-document-preview", .root_module = test_modules.product_document_preview },
+        .{ .name = "metawork-product-document-preview-session", .root_module = test_modules.product_document_preview_session },
         .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
@@ -608,6 +609,7 @@ const WiredModules = struct {
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
     product_document_preview: *std.Build.Module,
+    product_document_preview_session: *std.Build.Module,
     product_control_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
@@ -1468,6 +1470,12 @@ fn wireAgentCore(
     });
     document_preview.addImport("product_document_preview_contract", document_contract);
     document_preview.addImport("product_control_executor", executor);
+    const document_sessions = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview_session.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    document_sessions.addImport("product_document_preview", document_preview);
     const file_preview = b.createModule(.{
         .root_source_file = b.path("src/product/control/file_preview.zig"),
         .target = target,
@@ -1933,6 +1941,7 @@ fn wireAgentCore(
     });
     product_control_ports.addImport("metawork_agent", agent);
     product_control_ports.addImport("product_office_component", product_office_component);
+    product_control_ports.addImport("product_document_preview_contract", document_contract);
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_models_contract", models_contract);
     product_control_ports.addImport("product_models_ports", models_ports);
@@ -2002,6 +2011,8 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
     product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_document_preview", document_preview);
+    product_control_runtime.addImport("product_document_preview_session", document_sessions);
     product_control_runtime.addImport("product_permission_review", product_permission_review);
     product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
@@ -2270,6 +2281,7 @@ fn wireAgentCore(
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
         .product_document_preview = document_preview,
+        .product_document_preview_session = document_sessions,
         .product_control_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,

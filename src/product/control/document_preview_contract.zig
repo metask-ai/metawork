@@ -34,7 +34,10 @@ pub const Sheet = struct { id: []const u8, name: []const u8, hidden: bool, rows:
 pub const Grid = struct { schema: u8, calculation: []const u8, sheets: []Sheet };
 pub const Region = struct { sheet: u16, row: u32, column: u16, rows: u16, columns: u16 };
 
+pub const Source = struct { size_bytes: u64, sha256: [32]u8 };
+pub const Input = struct { workspace_root: []const u8, relative_path: []const u8, expected: ?Source };
 pub const Material = struct {
+    source: Source,
     manifest: *const Manifest,
     grid: ?*const Grid,
     source_text: []const u8,
@@ -67,4 +70,8 @@ pub const Owned = struct {
     cancel_fn: *const fn (*anyopaque) void,
     cleanup_fn: *const fn (*anyopaque) anyerror!void,
     release_fn: *const fn (*anyopaque) void,
+};
+pub const Preparation = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, Input) anyerror!Owned,
 };

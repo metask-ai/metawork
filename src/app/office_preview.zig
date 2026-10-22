@@ -39,7 +39,7 @@ pub const Component = struct {
     context: *anyopaque,
     release_fn: *const fn (*anyopaque) void,
 };
-pub const Input = struct { root: []const u8, relative: []const u8, expected: source_file.Inspection };
+pub const Input = struct { root: []const u8, relative: []const u8, expected: ?source_file.Inspection };
 const State = enum { fresh, prepared, failed, cleaned, poisoned };
 const Root = struct {
     parent: std.Io.Dir,
@@ -72,10 +72,10 @@ pub const Resource = struct {
         try source_file.validatePath(input.relative);
         for ([_][]const u8{ data_root, component.root, input.root }) |path|
             if (!validRoot(path)) return error.InvalidPreviewRoot;
-        if (input.expected.size_bytes == 0 or input.expected.size_bytes > max_source_bytes or
-            std.mem.allEqual(u8, &input.expected.sha256, 0) or
-            std.mem.allEqual(u8, &component.identity, 0) or std.mem.allEqual(u8, &operation, 0))
-            return error.InvalidPreviewInput;
+        if (input.expected) |expected| {
+            if (expected.size_bytes == 0 or expected.size_bytes > max_source_bytes or std.mem.allEqual(u8, &expected.sha256, 0)) return error.InvalidPreviewInput;
+        }
+        if (std.mem.allEqual(u8, &component.identity, 0) or std.mem.allEqual(u8, &operation, 0)) return error.InvalidPreviewInput;
         const extension = std.fs.path.extension(input.relative);
         const format: Format = if (std.ascii.eqlIgnoreCase(extension, ".docx")) .docx else if (std.ascii.eqlIgnoreCase(extension, ".pptx")) .pptx else if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) .xlsx else return error.UnsupportedPreview;
         const data = try allocator.dupe(u8, data_root);
@@ -104,6 +104,10 @@ pub const Resource = struct {
         if (self.state != .fresh) return error.InvalidPreviewState;
         self.state = .failed;
         try cancelled(cancellation);
+        // Ordinary trusted references have no delivery receipt. Capture their
+        // actual source on the worker, then copy exactly that same identity.
+        if (self.source.expected == null) self.source.expected = try source_file.inspect(self.io, self.sourceRequest(), &cancellation.requested);
+        if (self.source.expected.?.size_bytes == 0 or self.source.expected.?.size_bytes > max_source_bytes) return error.PreviewSourceLimit;
         try self.createRoot();
         const root = &self.root.?;
         const input_name = try std.fmt.allocPrint(self.allocator, "input.{s}", .{@tagName(self.format)});
@@ -112,7 +116,7 @@ pub const Resource = struct {
             var file = try root.directory.?.createFile(self.io, input_name, .{ .read = true, .exclusive = true });
             defer file.close(self.io);
             if (builtin.os.tag == .windows) file.flags.nonblocking = true;
-            try source_file.copyVerified(self.io, self.sourceRequest(), &cancellation.requested, self.source.expected, file);
+            try source_file.copyVerified(self.io, self.sourceRequest(), &cancellation.requested, self.source.expected.?, file);
             try file.sync(self.io);
         }
         const input_path = try std.fs.path.join(self.allocator, &.{ root.path, input_name });
@@ -130,7 +134,7 @@ pub const Resource = struct {
         if (output.term != .exited or output.term.exited != 0) return error.PreviewPreparationFailed;
         try self.verifyRoot();
         const frozen = try source_file.inspect(self.io, .{ .workspace_root = root.path, .relative_path = input_name, .main_thread_id = self.main_thread }, &cancellation.requested);
-        if (frozen.size_bytes != self.source.expected.size_bytes or !std.mem.eql(u8, &frozen.sha256, &self.source.expected.sha256)) return error.PreviewResourceChanged;
+        if (frozen.size_bytes != self.source.expected.?.size_bytes or !std.mem.eql(u8, &frozen.sha256, &self.source.expected.?.sha256)) return error.PreviewResourceChanged;
         try self.checkSource(cancellation);
         const directory = try root.directory.?.openDir(self.io, "prepared", .{ .follow_symlinks = false });
         defer directory.close(self.io);
@@ -264,7 +268,7 @@ pub const Resource = struct {
     }
     fn checkSource(self: *const Resource, cancellation: *const process.Cancellation) !void {
         const actual = try source_file.inspect(self.io, self.sourceRequest(), &cancellation.requested);
-        if (actual.size_bytes != self.source.expected.size_bytes or !std.mem.eql(u8, &actual.sha256, &self.source.expected.sha256))
+        if (actual.size_bytes != self.source.expected.?.size_bytes or !std.mem.eql(u8, &actual.sha256, &self.source.expected.?.sha256))
             return error.OutputChanged;
     }
     fn createRoot(self: *Resource) !void {
@@ -488,7 +492,7 @@ const OwnedResource = struct {
     fn material(context: *anyopaque) !contract.Material {
         const self = get(context);
         if (std.Thread.getCurrentId() != self.resource.main_thread) return error.WrongPreviewThread;
-        return .{ .manifest = try self.resource.prepared(), .grid = if (self.resource.grid) |*value| &value.value else null, .source_text = self.resource.source_text };
+        return .{ .manifest = try self.resource.prepared(), .grid = if (self.resource.grid) |*value| &value.value else null, .source_text = self.resource.source_text, .source = .{ .size_bytes = self.resource.source.expected.?.size_bytes, .sha256 = self.resource.source.expected.?.sha256 } };
     }
     fn read(context: *anyopaque, request: contract.Request) !contract.Read {
         const self = get(context);

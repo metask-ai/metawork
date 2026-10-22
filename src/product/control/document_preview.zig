@@ -3,6 +3,10 @@
 const std = @import("std");
 const executor_impl = @import("product_control_executor");
 pub const contract = @import("product_document_preview_contract");
+pub const Scan = @import("document_preview_scan.zig");
+test {
+    std.testing.refAllDecls(Scan);
+}
 pub const max_resources = 2;
 pub const Notifier = struct { context: ?*anyopaque, wake_fn: *const fn (?*anyopaque) bool };
 pub const Operation = union(enum) { prepare, read: contract.Request, cleanup };
@@ -280,7 +284,7 @@ const Fixture = struct {
     fn material(context: *anyopaque) !contract.Material {
         const self = get(context);
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread and self.cleanups == 0);
-        return .{ .manifest = &manifest, .grid = null, .source_text = "body" };
+        return .{ .source = .{ .size_bytes = 1, .sha256 = @splat(1) }, .manifest = &manifest, .grid = null, .source_text = "body" };
     }
     fn read(context: *anyopaque, _: contract.Request) !contract.Read {
         const self = get(context);

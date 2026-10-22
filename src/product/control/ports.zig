@@ -362,3 +362,7 @@ pub const OwnedOutputSave = struct {
         self.* = undefined;
     }
 };
+
+/// Main-only preparation copies a previously authorized locator; the owned
+/// effect captures the current verified component. No Product pointer survives.
+pub const DocumentPreviewPreparation = @import("product_document_preview_contract").Preparation;
