@@ -1,6 +1,40 @@
 import type { MessageId } from "./en-US.ts";
 
 export const zhCN: Record<MessageId, string> = {
+  "model_setup.title": "开始使用 MetaWork",
+  "model_setup.body": "登录 Metask 使用模型，也可以配置自己的模型服务。",
+  "model_setup.body_metask": "登录 Metask，选择模型并开始任务。",
+  "model_setup.configure": "配置自己的模型",
+  "model_setup.skip": "暂时跳过",
+  "model_setup.start": "开始使用",
+  "model_setup.other_options": "其他方式",
+  "model_setup.retry": "重试",
+  "model_setup.unconfigured": "尚未配置模型",
+  "model_setup.provider_next":
+    "保存服务后，前往模型设置添加并测试模型，再选择默认模型。",
+  "model_setup.required": "登录或配置模型后即可发送，已输入的内容会保留。",
+  "model_setup.sign_in": "登录 Metask 后可使用此模型，已输入的内容会保留。",
+  "model_setup.authorizing": "请在浏览器中完成登录，已输入的内容会保留。",
+  "model_setup.cancel_login": "取消登录",
+  "model_setup.loading": "正在加载模型…",
+  "model_setup.preparing": "正在准备模型…",
+  "model_setup.choose": "选择可用模型后即可发送。",
+  "model_setup.choose_action": "查看模型设置",
+  "model_setup.catalog_failed": "模型加载失败，请重试。",
+  "model_setup.no_models":
+    "当前 Metask 账号没有可用对话模型，请重试或查看模型设置。",
+  "model_setup.model_unavailable": "所选模型暂不可用，请查看模型设置。",
+  "model_setup.provider_unavailable":
+    "自己的模型服务尚未就绪，请检查配置并测试模型。",
+  "model_setup.execution_unavailable":
+    "当前默认执行配置暂不可用，请检查模型选择。",
+  "model_setup.view_schedules": "查看定时任务",
+  "model_setup.schedule_unavailable":
+    "定时任务存储不可用，暂时无法更新执行配置。",
+  "model_setup.schedule_failed": "定时任务数据保存失败，暂时无法更新执行配置。",
+  "model_setup.schedule_unknown":
+    "定时任务数据的保存结果尚未确认，暂时无法更新执行配置。",
+  "model_setup.resources_unavailable": "本机资源不足，无法准备执行配置。",
   "common.loading": "正在读取…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "账户与应用菜单",

@@ -21,6 +21,7 @@ import {
   accountIdentityLabel,
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import { supportsCustomProviders } from "../../workbench/model-setup.ts";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -288,10 +289,9 @@ export function SettingsPage({
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
-  const customProviderSettingsAvailable =
-    customProviderCapabilities.management &&
-    customProviderCapabilities.secretCapture &&
-    customProviderCapabilities.modelTest;
+  const customProviderSettingsAvailable = supportsCustomProviders(
+    customProviderCapabilities,
+  );
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
@@ -1784,7 +1784,19 @@ export function SettingsPage({
                 <div className="settings-custom-providers">
                   <div className="settings-execution-header">
                     {providersPage === "list" ? (
-                      <p>{t("settings.providers_help")}</p>
+                      <div>
+                        <p>{t("settings.providers_help")}</p>
+                        <p>{t("model_setup.provider_next")}</p>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={disabled}
+                          onClick={() => setActiveSection("models")}
+                        >
+                          {t("settings.open_models")}
+                        </Button>
+                      </div>
                     ) : (
                       <button
                         type="button"

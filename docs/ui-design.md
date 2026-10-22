@@ -716,7 +716,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
+- New task 没有有效模型选择时，Composer 在输入框下方、Workspace 行附近显示单一、可换行的模型准备提示，按 §14.1 区分首次配置、登录、选择、加载与恢复，并提供对应动作；不只依赖发送按钮的禁用样式或 tooltip。已有有效的显式草稿模型选择可沿原准入规则发送，不要求先设置 global default；其他情况等待 Host 确认配置可用。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已保存且可用的 Manual Workspace 之间直接切换，也可以打开原生目录选择器添加目录或重新选择失效目录；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
@@ -970,7 +970,19 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-Account 状态只在 Workbench 的账号入口和 Account 设置中演进：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
+Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
+
+新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Providers 设置复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
+
+自动展示须在可信 Snapshot 与正常连接建立后，仅在新任务工作面、Account 已确认 signed_out、没有可用模型或更具体的配置恢复问题时发生。检查、授权、目录加载、执行配置替换、存储恢复、账号错误、已有自定义配置待修复和显式草稿选择失效优先呈现自己的状态。历史、执行中的 Task、设置、搜索、其他模态界面和正在输入的草稿不被首次引导打断。
+
+本机轻量 UI 偏好记住引导已处理，不保存账号、模型或 credential：用户选择任一入口、跳过或关闭后记为已处理；首次确认已有可用模型也视为已处理。记录跨 reload/重启保留，不随退出登录或模型失效重置；存储失败不阻止使用，当前 Renderer 会话仍抑制重复自动展示。关闭按钮、Esc 和遮罩关闭等同跳过。输入区“开始使用”可主动重新打开弹层。
+
+点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Providers 设置，保存服务后通过清晰的 Models 入口添加、测试和选择模型；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
+
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时提供模型设置；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Providers，服务已保存但模型尚未就绪时进入 Models 添加、测试或选择；模型存储异常进入 Models，定时任务存储阻止执行配置更新时说明具体原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+
+弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
 ### 14.2 设置结构
 
@@ -1205,7 +1217,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ### 17.1 未登录
 
-未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；等待浏览器授权与取消在账号入口和 Account 设置中演进。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
+未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；新任务模型准备引导、等待浏览器授权与取消遵守 [首次启动](#141-首次启动)，复用账号动作。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
 
 ### 17.2 New task
 
@@ -1217,7 +1229,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 - 当前模型与 Workspace；
 - 当真实能力边界影响本次执行时，显示准确、可操作的 authority 限制提示；不得显示泛化的“信任此工作区”。
 
-没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。Account 此时已经 ready，不再出现登录 prerequisite。
+没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。模型尚未准备时同时遵守 §14.1 的模型提示，不把 Workspace 问题解释为登录问题。
 
 ### 17.3 错误原则
 
@@ -1294,7 +1306,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.4 Account 与首次启动
 
 - cold restore 保持稳定的 Workbench shell，可信 Snapshot 到达前不开放 mutation，也不闪现独立登录页；
-- 首次 signed out 且没有本地历史：保持 Workbench，并由账号入口提供统一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
+- 首次 signed out 且没有可用模型：保持 Workbench，按 §14.1 展示可跳过的开始弹层与输入区恢复提示；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；

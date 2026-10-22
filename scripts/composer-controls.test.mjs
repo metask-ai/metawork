@@ -104,6 +104,9 @@ const { useNewTaskDrafts } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { ModelSetupNotice } = await vite.ssrLoadModule(
+  "/src/features/models/ModelSetup.tsx",
+);
 const { SettingsPage, customProviderEndpointFromBaseUrl } =
   await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
 const { GlobalSearch } = await vite.ssrLoadModule(
@@ -1371,8 +1374,6 @@ function renderComposer(overrides = {}) {
       modelSelectionDisabled: false,
       modelSelectionPending: false,
       modelContextTitle: "",
-      defaultSelectionMissing: false,
-      defaultRecoveryDisabled: false,
       actionDisabled: false,
       onSubmit() {
         submissions += 1;
@@ -1384,7 +1385,6 @@ function renderComposer(overrides = {}) {
       onConfirmAccess() {},
       onSelectWorkspace() {},
       onSelectModel() {},
-      onOpenModels() {},
       ...overrides,
       draft,
       onDraftChange(value) {
@@ -1457,43 +1457,35 @@ test("detached Conversation uses the ordinary send action", async () => {
   assert.equal(composer.submissions(), 1);
 });
 
-test("Composer explains a missing executable default and opens Models", async () => {
+test("Composer model notice explains the blocker and opens its recovery action", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let opens = 0;
   renderComposer({
     canSubmit: false,
-    defaultSelectionMissing: true,
-    onOpenModels() {
-      opens += 1;
-    },
+    modelNotice: createElement(ModelSetupNotice, {
+      notice: { reason: "choose", action: "models" },
+      disabled: false,
+      onAction(action) {
+        assert.equal(action, "models");
+        opens += 1;
+      },
+    }),
   });
-
   assert.match(
     screen.getByRole("status").textContent,
-    /No executable default model is selected/,
+    /Choose an available model/,
   );
-  const recovery = screen.getByRole("button", {
-    name: "Open Models",
-  });
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
-  await user.click(recovery);
+  await user.click(screen.getByRole("button", { name: "Open model settings" }));
   assert.equal(opens, 1);
 });
 
-test("Composer disables default recovery while an execution command is active", () => {
-  renderComposer({
-    defaultSelectionMissing: true,
-    defaultRecoveryDisabled: true,
-  });
+test("Composer does not show model recovery for a ready selection", () => {
+  renderComposer();
   assert.equal(
-    screen.getByRole("button", { name: "Open Models" }).disabled,
-    true,
+    screen.queryByRole("button", { name: "Open model settings" }),
+    null,
   );
-});
-
-test("Composer does not show Models recovery for a normal default", () => {
-  renderComposer({ defaultSelectionMissing: false });
-  assert.equal(screen.queryByRole("button", { name: "Open Models" }), null);
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {
