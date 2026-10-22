@@ -39,6 +39,24 @@ extern "kernel32" fn TerminateJobObject(HANDLE, u32) callconv(.winapi) BOOL;
 extern "kernel32" fn CloseHandle(HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn WaitForSingleObject(HANDLE, u32) callconv(.winapi) u32;
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
+extern "kernel32" fn GetProcessTimes(HANDLE, *FileTime, *FileTime, *FileTime, *FileTime) callconv(.winapi) BOOL;
+const FileTime = extern struct { low: u32 = 0, high: u32 = 0 };
+
+/// Only this Host's process identity. It conveys no process-control authority.
+pub fn hostScope() ![24]u8 {
+    var born: FileTime = .{};
+    var exited: FileTime = .{};
+    var kernel: FileTime = .{};
+    var user: FileTime = .{};
+    if (GetProcessTimes(GetCurrentProcess(), &born, &exited, &kernel, &user) == 0) return error.HostIdentityUnavailable;
+    var record: [24]u8 = @splat(0);
+    @memcpy(record[0..8], "MWOFS001");
+    std.mem.writeInt(u32, record[8..12], GetCurrentProcessId(), .little);
+    std.mem.writeInt(u64, record[16..24], @as(u64, born.high) << 32 | born.low, .little);
+    return record;
+}
 
 pub const Error = error{ JobUnavailable, JobObservationFailed, JobTerminationFailed, JobDidNotSettle, RootObservationFailed };
 

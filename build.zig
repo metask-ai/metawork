@@ -68,8 +68,8 @@ pub fn build(b: *std.Build) void {
         });
         test_modules.app.linkFramework("AppKit", .{});
     }
-    addOfficeQualification(b, modules.app, bundle.link_libc, &artifacts.tests.step);
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    addOfficeQualification(b, modules.app, lifecycle_fixture, bundle.link_libc, &artifacts.tests.step);
     const image_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/generate_image.zig"),
         .target = test_modules.agent.resolved_target,
@@ -2296,7 +2296,7 @@ fn selectedArtifact(b: *std.Build) ArtifactOption {
     return artifact;
 }
 
-fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool, tests: *std.Build.Step) void {
+fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.Build.Module, link_libc: bool, tests: *std.Build.Step) void {
     if (app.resolved_target.?.result.os.tag == .windows) {
         const job_tests = b.addTest(.{ .name = "office-process-job", .root_module = existingImport(app, "office_process_windows") });
         tests.dependOn(&b.addRunArtifact(job_tests).step);
@@ -2304,6 +2304,15 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, link_libc: bool
         tests.dependOn(&b.addRunArtifact(validation_tests).step);
         const process_tests = b.addTest(.{ .name = "office-process", .root_module = existingImport(app, "office_process") });
         tests.dependOn(&b.addRunArtifact(process_tests).step);
+        const core_shell = b.addExecutable(.{ .name = "office-core-shell", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/office_core_shell.zig"),
+            .target = app.resolved_target,
+            .optimize = app.optimize,
+            .link_libc = link_libc,
+        }) });
+        core_shell.root_module.addImport("lifecycle_fixture", fixture);
+        core_shell.root_module.addImport("office_process", existingImport(app, "office_process"));
+        b.step("build-office-core-shell-probe", "Build the canonical Core Shell Office lifecycle qualifier").dependOn(&b.addInstallArtifact(core_shell, .{}).step);
     }
     const archive = b.createModule(.{
         .root_source_file = b.path("src/app/office_component_archive.zig"),

@@ -130,6 +130,21 @@ pub const Store = struct {
         return self.readRecord("current.json");
     }
 
+    /// Primary-authorized worker only, before publishing an installed Skill
+    /// source. A stale record is deliberately unusable by a later/foreign Host.
+    pub fn bindHostScope(self: *Store, scope: [24]u8) !void {
+        if (!std.mem.eql(u8, scope[0..8], "MWOFS001") or std.mem.readInt(u32, scope[8..12], .little) == 0 or
+            std.mem.readInt(u32, scope[12..16], .little) != 0 or std.mem.readInt(u64, scope[16..24], .little) == 0) return error.InvalidHostScope;
+        try self.deleteKnownFile("host.scope.next");
+        const file = try self.directory.createFile(self.io, "host.scope.next", .{ .exclusive = true, .resolve_beneath = true });
+        {
+            defer file.close(self.io);
+            try file.writeStreamingAll(self.io, &scope);
+            try file.sync(self.io);
+        }
+        try self.directory.rename("host.scope.next", self.directory, "host.scope", self.io);
+    }
+
     pub fn versionPath(self: *Store, record: Record) ![]u8 {
         var name: [32]u8 = undefined;
         return std.fs.path.join(self.allocator, &.{ self.root, "versions", record.versionName(&name) });
@@ -695,6 +710,22 @@ test "Office installation commits an independent version and current record only
     const bytes = try version.readFileAlloc(std.testing.io, "payload.bin", std.testing.allocator, .limited(16));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("runtime", bytes);
+}
+
+test "Office Host scope publication preserves the previous valid process identity on invalid input" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    const scope = try process.hostScope();
+    try store.bindHostScope(scope);
+    var invalid = scope;
+    invalid[12] = 1;
+    try std.testing.expectError(error.InvalidHostScope, store.bindHostScope(invalid));
+    try std.testing.expectEqual(@as(u64, 24), (try store.directory.statFile(std.testing.io, "host.scope", .{})).size);
+    const contents = try store.directory.readFileAlloc(std.testing.io, "host.scope", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualSlices(u8, &scope, contents);
 }
 
 test "Office retirement intents survive restart without persisting catalog references or discovering versions" {

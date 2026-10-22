@@ -224,6 +224,7 @@ const Work = struct {
             self.opened = true;
         }
         try self.store.recover(); // admission excludes unresolved live processes
+        try self.store.bindHostScope(try process.hostScope());
         self.before_record = try self.store.current();
         const observer: store_impl.Observer = .{ .context = self, .observe_fn = observe, .activate_fn = activate };
         if (self.kind == .cleanup) {

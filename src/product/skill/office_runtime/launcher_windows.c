@@ -2,6 +2,9 @@
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
+#include <stdint.h>
+#include <string.h>
 #include <stdio.h>
 #include <wchar.h>
 
@@ -11,6 +14,79 @@
 static HANDLE office_job;
 static wchar_t command[32768];
 static size_t used;
+static HANDLE scope[32];
+static DWORD scope_count;
+
+/* Installed resources bind to the Primary Host that published their Skill
+ * source. This is process identity, never a Task/Session/version reference.
+ * Only ancestors through that exact process are observed; Explorer, terminals
+ * and other ancestors above the Host do not own a running Office operation. */
+static int bind_shell_scope(const wchar_t *component) {
+    wchar_t path[32768];
+    if (wcslen(component) >= 32700) return 0;
+    wmemcpy(path, component, wcslen(component) + 1);
+    wchar_t *version = wcsrchr(path, L'\\');
+    if (!version || wcslen(version + 1) != 32) return 1; /* explicit dev tree */
+    for (wchar_t *c = version + 1; *c; ++c)
+        if (!((*c >= L'0' && *c <= L'9') || (*c >= L'a' && *c <= L'f') ||
+              (*c >= L'A' && *c <= L'F'))) return 1;
+    *version = 0;
+    wchar_t *versions = wcsrchr(path, L'\\');
+    if (!versions || _wcsicmp(versions + 1, L"versions")) return 1;
+    wmemcpy(versions + 1, L"host.scope", 11);
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    unsigned char record[24] = {0};
+    DWORD read = 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    int valid = GetFileInformationByHandle(file, &info) &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+        info.nFileSizeHigh == 0 && info.nFileSizeLow == sizeof(record) &&
+        ReadFile(file, record, sizeof(record), &read, NULL) && read == sizeof(record) &&
+        !memcmp(record, "MWOFS001", 8);
+    CloseHandle(file);
+    uint32_t host_pid = 0, reserved = 1;
+    uint64_t host_birth = 0;
+    memcpy(&host_pid, record + 8, sizeof(host_pid));
+    memcpy(&reserved, record + 12, sizeof(reserved));
+    memcpy(&host_birth, record + 16, sizeof(host_birth));
+    if (!valid || !host_pid || reserved || !host_birth) return 0;
+    FILETIME child_birth, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &child_birth, &exited, &kernel, &user)) return 0;
+    DWORD child_pid = GetCurrentProcessId();
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    int bound = 0;
+    for (DWORD depth = 0; depth < 32; ++depth) {
+        PROCESSENTRY32W entry = {0};
+        entry.dwSize = sizeof(entry);
+        DWORD parent = 0;
+        if (Process32FirstW(snapshot, &entry)) do {
+            if (entry.th32ProcessID == child_pid) { parent = entry.th32ParentProcessID; break; }
+        } while (Process32NextW(snapshot, &entry));
+        if (!parent || parent == child_pid) break;
+        HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent);
+        if (!handle) break;
+        FILETIME birth;
+        if (!GetProcessTimes(handle, &birth, &exited, &kernel, &user) ||
+            CompareFileTime(&birth, &child_birth) > 0 || WaitForSingleObject(handle, 0) != WAIT_TIMEOUT) {
+            CloseHandle(handle);
+            break;
+        }
+        scope[scope_count++] = handle;
+        if (parent == host_pid) {
+            uint64_t actual_birth;
+            memcpy(&actual_birth, &birth, sizeof(actual_birth));
+            bound = actual_birth == host_birth;
+            break;
+        }
+        child_pid = parent;
+        child_birth = birth;
+    }
+    CloseHandle(snapshot);
+    return bound;
+}
 
 static int host_job_name(const wchar_t *name) {
     const wchar_t *prefix = L"Local\\MetaWork.Office.";
@@ -113,6 +189,7 @@ int wmain(int argc, wchar_t **argv) {
         CloseHandle(office_job);
         office_job = NULL;
     } else {
+        if (!bind_shell_scope(root)) return fail("Office Shell scope is unavailable");
         office_job = CreateJobObjectW(NULL, NULL);
         if (!office_job) return fail("cannot create Office job");
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
@@ -139,13 +216,20 @@ int wmain(int argc, wchar_t **argv) {
     startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION child = {0};
+    if (scope_count && WaitForMultipleObjects(scope_count, scope, FALSE, 0) != WAIT_TIMEOUT)
+        return fail("Office Shell scope ended before execution");
     if (!CreateProcessW(python, command, NULL, NULL, TRUE, CREATE_NO_WINDOW,
             NULL, NULL, &startup, &child))
         return fail("cannot start component Python");
     CloseHandle(child.hThread);
-    if (WaitForSingleObject(child.hProcess, INFINITE) != WAIT_OBJECT_0) {
+    HANDLE waiting[33];
+    waiting[0] = child.hProcess;
+    for (DWORD i = 0; i < scope_count; ++i) waiting[i + 1] = scope[i];
+    if (WaitForMultipleObjects(scope_count + 1, waiting, FALSE, INFINITE) != WAIT_OBJECT_0) {
         CloseHandle(child.hProcess);
-        return fail("cannot wait for component Python");
+        /* Returning tears down the entry's sole Job handle, including its own
+         * process and every descendant. No Python finally block is required. */
+        return fail("Office Shell scope ended during execution");
     }
     DWORD exit_code = 1;
     BOOL exited = GetExitCodeProcess(child.hProcess, &exit_code);

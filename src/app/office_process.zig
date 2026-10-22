@@ -8,6 +8,11 @@ pub const Cancellation = struct {
     requested: std.atomic.Value(bool) = .init(false),
 };
 
+pub fn hostScope() ![24]u8 {
+    if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    return windows.hostScope();
+}
+
 pub const Context = struct {
     parent_environment: *const std.process.Environ.Map,
     scratch_root: []const u8,

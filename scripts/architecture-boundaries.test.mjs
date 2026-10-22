@@ -2903,7 +2903,10 @@ test("Office Windows Job seam has one Application consumer and exact OS symbols"
     [
       "CloseHandle",
       "CreateJobObjectW",
+      "GetCurrentProcess",
+      "GetCurrentProcessId",
       "GetLastError",
+      "GetProcessTimes",
       "QueryInformationJobObject",
       "SetInformationJobObject",
       "TerminateJobObject",

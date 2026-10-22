@@ -95,6 +95,8 @@ Application 只有在持有本地数据目录 Primary authority 且该组件操�
 
 组件 store 的持久记录仅描述组件自身，不写入 Task 或 Session。`current.json` 与 `pending.json` 使用 schema 1、`installId`（32 位小写十六进制随机身份）及 `archiveSha256`（64 位小写十六进制）；固定 `.next` 文件是机械临时文件，不授予身份。阶段目录为 `staging/<installId>`，最终版本目录为 `versions/<installId>`，不得覆盖既有目录。新安装与修复都使用独立身份，不原地替换仍被引用的资源。归档摘要保留在记录中，不重复拼进长运行时路径，以避免供应商 Windows loader 的路径限制。
 
+`host.scope` 只标识当前 Primary Host 的进程存活范围，不保存 Task/Session 或组件版本引用，不授予组件安装、下载或执行信任。它精确为 24 字节：ASCII `MWOFS001`、little-endian u32 PID、必须为零的 u32 保留位、little-endian u64 Windows 进程创建 FILETIME。Application worker 从当前进程取得身份，经 `host.scope.next` 写入、sync、原子替换；准备发布已安装 Skill 来源前必须成功完成。旧记录可留在磁盘，但不能被另一 Host、PID 复用或非祖先进程继续使用。正式 `versions/<installId>` 入口在开始子进程前必须验证该范围；Application 专用 `--host-job` 调用继续使用独占 Job 生命周期，不依赖模型 Shell 的身份记录。具体生命周期边界由[高层架构](architecture.md#35-native-sdk)定义。
+
 替换或移除 current 前，必须先持久发布对应版本的删除意图 `retired-<installId>.json`，其内容采用同一 schema 1 记录。最多保留 128 个意图；同目录身份冲突、损坏记录或超出有界读取预算时拒绝继续，不猜测清理目标。固定 `retired.next`、`retired.json` 仅是意图发布的临时文件；恢复可清除它们，不能据此删除版本。意图描述组件自己的待清理资源，不保存或重建 Task/Session 引用，也不授予组件执行信任。它让重启后仍可定位旧版本，而无需扫描、收养或删除未登记目录。
 
 移除先提交 current 缺席，再由 owner 将新 catalog 来源切回基础 Skill；原有 catalog 继续持有旧资源。后台清理接收 owner 生成的进程内受保护身份快照，只有零引用的已认领条目或没有进程内引用的已登记意图才可删除；current 与 pending 的同目录保护仍必须独立检查。删除意图指向仍为 current 的版本时，只撤销意图，保留版本字节。物理删除成功后才能移除对应意图，失败与取消保留剩余工作；崩溃在两者之间时可幂等收口。启动清理仍以 Primary authority 和进程静止为前提，不能将内存引用丢失本身视为外层 Shell 进程已退出的证明。
