@@ -281,6 +281,76 @@ test("unconfigured and expired-login states have different recovery actions", ()
   assert.equal(classify(state, { valid: true }), null);
 });
 
+test("a retained Metask choice explains authorization before generic admission failures", () => {
+  const state = signedOut();
+  state.models.defaultSelection = structuredClone(
+    fixture.models.defaultSelection,
+  );
+  state.newTaskAdmission.reason = "invalid_candidate";
+  assert.deepEqual(classify(state), { reason: "sign_in", action: "login" });
+  state.account.state = "checking";
+  assert.deepEqual(classify(state), { reason: "checking", action: null });
+  state.account.state = "authorizing";
+  state.account.canCancel = true;
+  assert.deepEqual(classify(state), {
+    reason: "authorizing",
+    action: "cancel",
+  });
+  state.account.state = "authenticated";
+  state.models.providers[0].catalogState = "ready";
+  assert.deepEqual(classify(state), {
+    reason: "execution_unavailable",
+    action: "models",
+  });
+  const custom = customModels();
+  custom.newTaskAdmission.reason = "invalid_candidate";
+  assert.deepEqual(classify(custom), {
+    reason: "execution_unavailable",
+    action: "models",
+  });
+});
+
+test("logout with retained official selection offers login after remount and preserves the draft", async (ctx) => {
+  const state = structuredClone(fixture);
+  state.tasks = [];
+  const selected = structuredClone(state.models.defaultSelection);
+  const app = await renderApp(ctx, state, { locale: "zh-CN" });
+  const next = signedOut();
+  next.models.defaultSelection = selected;
+  next.models.metaskSelection = selected;
+  next.newTaskAdmission.reason = "invalid_candidate";
+  state.account = next.account;
+  state.models = next.models;
+  state.newTaskAdmission = next.newTaskAdmission;
+  await app.publish();
+  await screen.findByRole("button", { name: "登录 Metask", exact: true });
+  assert.ok(!screen.queryByRole("dialog"));
+  app.view.unmount();
+  app.mount();
+  const login = await screen.findByRole("button", {
+    name: "登录 Metask",
+    exact: true,
+  });
+  assert.match(
+    document.querySelector(".composer-model-notice").textContent,
+    /登录 Metask 后可使用此模型/,
+  );
+  assert.ok(!screen.queryByRole("dialog"));
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, { target: { value: "退出登录后继续写的草稿" } });
+  assert.equal(
+    screen.getByRole("button", { name: "发送", exact: true }).disabled,
+    true,
+  );
+  fireEvent.click(login);
+  await waitFor(() => assert.equal(app.calls.login, 1));
+  await screen.findByRole("button", { name: "取消登录", exact: true });
+  assert.equal(textarea.value, "退出登录后继续写的草稿");
+  assert.deepEqual(state.models.defaultSelection, selected);
+  assert.equal(app.calls.create, 0);
+  assert.equal(app.calls.select, 0);
+});
+
 test("Host preparation, failures and default selection are not first-use setup", () => {
   const state = signedOut();
   state.account.state = "checking";

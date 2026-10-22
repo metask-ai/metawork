@@ -98,10 +98,9 @@ export function modelSetupNotice({
       return { reason: "resources_unavailable", action: null };
     case "custom_provider_persistence_unavailable":
       return { reason: "persistence", action: "models" };
-    case "invalid_candidate":
-      return { reason: "execution_unavailable", action: "models" };
     case "none":
     case "credential_unavailable":
+    case "invalid_candidate":
       break;
   }
 
@@ -142,6 +141,10 @@ export function modelSetupNotice({
     if (metask?.catalogState === "needs_authentication")
       return { reason: "execution_unavailable", action: "models" };
   }
+  // Logout can leave a retained Metask intent with no resolvable execution
+  // candidate. Explain its authorization state before the generic failure.
+  if (admission.reason === "invalid_candidate")
+    return { reason: "execution_unavailable", action: "models" };
   if (selected) {
     const customProvider = models.customProviders.find(
       (provider) => provider.id === selected.sourceId,
