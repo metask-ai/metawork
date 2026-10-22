@@ -2367,6 +2367,78 @@ test("input metadata places the nullable submitted time before copy", async (con
   );
 });
 
+test("message action hover and focus stay within one message, including interjections in the same Run", async () => {
+  const view = render(
+    taskContentElement(
+      task({
+        runs: ["1", "2", "3"].map((id) =>
+          run({
+            id,
+            input: { kind: "text", text: `Input ${id}`, redacted: false },
+            additionalInputs: [
+              {
+                id: `later-${id}`,
+                afterOutputCount: 1,
+                operationId: `follow-up-${id}`,
+                text: `Later input ${id}`,
+                redacted: false,
+                sequence: 1,
+                adoptedTurn: null,
+                order: null,
+                state: "unadopted",
+              },
+            ],
+          }),
+        ),
+      }),
+    ),
+  );
+  const stylesheet = await readFile("frontend/src/index.css", "utf8");
+  const visibilityRule = stylesheet.match(
+    /([^{}]+)\{\s*--message-actions-opacity: 1;\s*--message-actions-pointer-events: auto;/,
+  );
+  assert.ok(visibilityRule);
+  // Evaluate the real CSS selectors against the rendered message tree. Mark
+  // ancestors too: browser hover/focus-within propagates up to the whole Run.
+  const selectors = visibilityRule[1]
+    .split(/,\n(?=\S)/)
+    .filter((selector) => /:hover|:focus-within/.test(selector))
+    .join(",")
+    .replaceAll(":hover", "[data-test-hover]")
+    .replaceAll(":focus-within", "[data-test-focus]");
+  assert.ok(selectors);
+  const messages = view.container.querySelectorAll(".ai-message");
+  assert.equal(messages.length, 9);
+  const footers = view.container.querySelectorAll(
+    ".input-copy-actions, .response-copy-actions",
+  );
+  assert.equal(footers.length, 9);
+  for (const attribute of ["data-test-hover", "data-test-focus"]) {
+    for (const target of [...messages, ...footers]) {
+      const marked = [];
+      for (
+        let node = target;
+        node && node !== view.container;
+        node = node.parentElement
+      ) {
+        node.setAttribute(attribute, "");
+        marked.push(node);
+      }
+      const expected = target.matches(".ai-message")
+        ? target.dataset.role === "user"
+          ? target.nextElementSibling
+          : target.querySelector(".response-copy-actions")
+        : target;
+      assert.deepEqual(
+        [...view.container.querySelectorAll(selectors)],
+        [expected],
+        `${attribute} on one message must not reveal sibling messages`,
+      );
+      for (const node of marked) node.removeAttribute(attribute);
+    }
+  }
+});
+
 test("terminal transition preserves reading position and collapses technical details", () => {
   const activeRun = run({
     phase: "running",

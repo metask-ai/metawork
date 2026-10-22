@@ -649,8 +649,8 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局，也不重复显示“你”等归属标签；在窄窗口下可以放宽到约 88%；
 - 首条指令建立 Task 目标，后续指令作为明确的补充或重试节点；普通界面不显示 Run ID；
 - 附件以文件/目录 chip 展示名称、数量和大小；
-- 每条指令正文下方靠右提供纯图标“复制输入”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；普通文本保持 Host 投影原文，Skill 输入复制为 `/调用名 参数…`，多模态输入复制已投影文本与附件显示名，不读取附件内容、内部 locator 或本地路径，也不从 DOM 反向提取；
-- Product 提供 Run 提交时间时，在复制图标左侧使用 12px muted 本地化相对时间，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name；时间缺失时不占位，禁止使用完成时间、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造。相对文案与回复完成时间共用每分钟低频更新，不发布 Snapshot、不自动滚动、不改变历史；
+- 每条指令正文下方靠右提供纯图标“复制输入”：最新一条始终可见，历史条目仅在对应消息正文或其复制/时间栏 hover 或 focus-within 时显示，不因同一 Run 内其他消息或整个 Run 被悬停而显示，coarse pointer 设备始终显示；普通文本保持 Host 投影原文，Skill 输入复制为 `/调用名 参数…`，多模态输入复制已投影文本与附件显示名，不读取附件内容、内部 locator 或本地路径，也不从 DOM 反向提取；
+- Product 提供 Run 提交时间时，在复制图标左侧使用 12px muted 本地化相对时间，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name；时间与同条复制图标共用最新/历史、hover、focus-within、复制反馈和 coarse pointer 显隐条件，隐藏时保留布局占位且不接收鼠标事件。时间缺失时不占位，禁止使用完成时间、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造。相对文案与回复完成时间共用每分钟低频更新，不发布 Snapshot、不自动滚动、不改变历史；
 - 已发送内容不能静默编辑历史；
 - 未来的“编辑并重新运行”必须显式创建新的执行分支或新 Task。
 
@@ -661,8 +661,8 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `commentary | provisional | final | partial` 共用安全 Markdown 排版；尚未收到 output-segment 定性的 provisional 不称为草稿，保持惰性交互并在 discard 后随下一 Snapshot 立即消失；流式生成不增加光标、骨架或第二个活动指示；
 - 已闭合 commentary 与 final/partial 中的 `http`、`https`、`mailto` 链接保留链接色、下划线、键盘可达性和可复制 `href`，但点击必须同步阻止 WebView 默认导航并交给 Host；请求期间同一链接不重复提交，打开失败在原链接后以紧凑 danger 文案就地提示并允许再次点击，不使用与目标脱节的全局 Toast。非法协议、相对网页地址和 provisional 链接只显示文字；
-- 已 terminal 且非空的 `final | partial` response 在所属 Assistant 回复正文下方提供纯图标“复制回复”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
-- 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间始终可见而复制图标仍遵守最新/历史显隐规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
+- 已 terminal 且非空的 `final | partial` response 在所属 Assistant 回复正文下方提供纯图标“复制回复”：最新一条始终可见，历史条目仅在对应消息正文或其复制/时间栏 hover 或 focus-within 时显示，不因同一 Run 内其他消息或整个 Run 被悬停而显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
+- 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间与同条复制图标共用显隐条件，遵循用户指令时间的相同规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。

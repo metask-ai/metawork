@@ -2419,6 +2419,12 @@ summary::-webkit-details-marker {
   margin-top: 38px;
 }
 
+.input-copy-actions,
+.response-copy-actions {
+  --message-actions-opacity: 0;
+  --message-actions-pointer-events: none;
+}
+
 .response-copy-actions {
   display: flex;
   align-items: center;
@@ -2442,7 +2448,9 @@ summary::-webkit-details-marker {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  opacity: 0.72;
+  opacity: calc(var(--message-actions-opacity) * 0.72);
+  pointer-events: var(--message-actions-pointer-events);
+  transition: opacity 120ms ease;
   white-space: nowrap;
 }
 
@@ -2453,25 +2461,24 @@ summary::-webkit-details-marker {
   padding: 0;
   font-size: 14px;
   color: var(--ui-content-muted);
-  opacity: 0;
-  pointer-events: none;
+  opacity: var(--message-actions-opacity);
+  pointer-events: var(--message-actions-pointer-events);
   transition: opacity 120ms ease;
 }
 
-.input-copy-action[data-latest="true"],
-.input-copy-action[data-copy-state="copying"],
-.input-copy-action[data-copy-state="copied"],
-.input-copy-action[data-copy-state="failed"],
-.ai-exchange:hover .input-copy-action,
-.ai-exchange:focus-within .input-copy-action,
-.response-copy-action[data-latest="true"],
-.response-copy-action[data-copy-state="copying"],
-.response-copy-action[data-copy-state="copied"],
-.response-copy-action[data-copy-state="failed"],
-.ai-exchange:hover .response-copy-action,
-.ai-exchange:focus-within .response-copy-action {
-  opacity: 1;
-  pointer-events: auto;
+:is(.input-copy-actions, .response-copy-actions):has(
+  > :is(.input-copy-action, .response-copy-action):is(
+      [data-latest="true"],
+      [data-copy-state="copying"],
+      [data-copy-state="copied"],
+      [data-copy-state="failed"]
+    )
+),
+.ai-message[data-role="user"]:is(:hover, :focus-within) + .input-copy-actions,
+.input-copy-actions:is(:hover, :focus-within),
+.run-assistant-output:is(:hover, :focus-within) > .response-copy-actions {
+  --message-actions-opacity: 1;
+  --message-actions-pointer-events: auto;
 }
 
 .input-copy-action[data-copy-state="failed"],
@@ -7453,8 +7460,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (any-pointer: coarse) {
-  .input-copy-action,
-  .response-copy-action,
+  .input-copy-actions,
+  .response-copy-actions {
+    --message-actions-opacity: 1;
+    --message-actions-pointer-events: auto;
+  }
+
   .code-block-copy-action {
     opacity: 1;
     pointer-events: auto;
