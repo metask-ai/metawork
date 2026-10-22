@@ -206,7 +206,9 @@ subprocess.Popen([str(component/'engine/program/soffice.com'),
     '--nodefault','--nofirststartwizard','--norestore',
     '--accept=pipe,name=office_qualification_'+scratch.name+';urp;StarOffice.ComponentContext'],
     env=environment)
-subprocess.Popen([sys.executable,'-I','-S','-c','import time;time.sleep(120)'])
+# -I ignores PYTHONDONTWRITEBYTECODE inherited from the controller. Keep the
+# artificial sleeper read-only too; it must not contaminate accepted resources.
+subprocess.Popen([sys.executable,'-I','-S','-B','-c','import time;time.sleep(120)'])
 (scratch/'started').write_text('started')
 time.sleep(120)
 '''
@@ -396,7 +398,15 @@ try:
         except Exception as failure:
             failures.append(str(failure))
             print(json.dumps({"scenario": scenario, "result": "failed", "failure": str(failure)}), flush=True)
-    assert inventory() == before, "Immutable component changed during Core Shell qualification"
+    after = inventory()
+    if after != before:
+        delta = {"added": sorted(after.keys() - before.keys()),
+                 "removed": sorted(before.keys() - after.keys()),
+                 "modified": sorted(name for name in before.keys() & after.keys()
+                                    if before[name] != after[name])}
+        summary = {kind: {"count": len(names), "sample": names[:16]}
+                   for kind, names in delta.items()}
+        raise AssertionError("Immutable component changed during Core Shell qualification: " + json.dumps(summary))
     assert not failures, failures
     print(json.dumps({"result": "passed", "providerRequests": Provider.requests, "scratch": str(scratch)}), flush=True)
 finally:

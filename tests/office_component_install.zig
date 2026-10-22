@@ -88,7 +88,7 @@ const Context = struct {
         _ = try reader.interface.streamRemaining(writer);
     }
 
-    fn developmentWitness(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: component.Identity, root: []const u8, scratch: []const u8, cancellation: *const office.Cancellation) component.ValidationResult {
+    fn developmentWitness(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, stage: component.ValidationStage, _: component.Identity, root: []const u8, scratch: []const u8, cancellation: *const office.Cancellation) component.ValidationResult {
         const self: *Context = @ptrCast(@alignCast(context.?));
         // Explicit local qualification: the development entry must really be
         // unsigned, while every vendor anchor still needs Windows trust.
@@ -105,6 +105,7 @@ const Context = struct {
                     return .rejected;
                 }
             }
+            if (stage == .authentication) return .ready;
             var result = office.run(allocator, io, root, .selftest, .{ .parent_environment = self.environment, .scratch_root = scratch }, 120_000, cancellation) catch |problem| {
                 std.debug.print("Qualification selftest failed: {s}\n", .{@errorName(problem)});
                 return .cleanup_incomplete;

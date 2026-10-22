@@ -439,7 +439,7 @@ const TestEffects = if (builtin.is_test) struct {
     fn available(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) !u64 {
         return 1024 * 1024 * 1024;
     }
-    fn validate(context: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: store_impl.Identity, _: []const u8, _: []const u8, _: *const process.Cancellation) store_impl.ValidationResult {
+    fn validate(context: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: store_impl.ValidationStage, _: store_impl.Identity, _: []const u8, _: []const u8, _: *const process.Cancellation) store_impl.ValidationResult {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         return if (self.reject.load(.acquire)) .rejected else .ready;
     }

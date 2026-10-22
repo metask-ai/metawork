@@ -31,29 +31,30 @@ pub const Download = struct {
 };
 
 pub const ValidationResult = enum { ready, rejected, cleanup_incomplete };
+pub const ValidationStage = enum { authentication, runtime };
 pub const Validation = struct {
     context: ?*anyopaque = null,
     parent_environment: ?*const std.process.Environ.Map = null,
     operation_identity: ?[16]u8 = null,
     available_fn: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror!u64 = available,
-    test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, Identity, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
+    test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, ValidationStage, Identity, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
 
     fn available(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) !u64 {
         return platform.availableBytes(allocator, path);
     }
 
-    fn testComponent(self: Validation, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
-        if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, identity, path, scratch, cancellation);
+    fn testComponent(self: Validation, stage: ValidationStage, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
+        if (self.test_fn) |test_fn| return test_fn(self.context, allocator, io, stage, identity, path, scratch, cancellation);
         const environment = self.parent_environment orelse return .rejected;
-        verifyRuntime(allocator, io, path, scratch, environment, self.operation_identity, cancellation) catch |failure| return switch (failure) {
+        verifyComponent(allocator, io, stage, path, scratch, environment, self.operation_identity, cancellation) catch |failure| return switch (failure) {
             error.JobInUse, error.JobTerminationFailed, error.JobObservationFailed, error.JobDidNotSettle => .cleanup_incomplete,
             else => .rejected,
         };
         return .ready;
     }
 
-    fn check(self: Validation, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation, preserve: *bool) !void {
-        switch (self.testComponent(allocator, io, identity, path, scratch, cancellation)) {
+    fn check(self: Validation, stage: ValidationStage, allocator: std.mem.Allocator, io: std.Io, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation, preserve: *bool) !void {
+        switch (self.testComponent(stage, allocator, io, identity, path, scratch, cancellation)) {
             .ready => {},
             .rejected => return if (cancellation.requested.load(.acquire)) error.Cancelled else error.ComponentValidationFailed,
             .cleanup_incomplete => {
@@ -369,7 +370,7 @@ pub const Store = struct {
         defer self.allocator.free(scratch);
         const path = try self.versionPath(record);
         defer self.allocator.free(path);
-        try validation.check(self.allocator, self.io, identity, path, scratch, cancellation, preserve);
+        try validation.check(.runtime, self.allocator, self.io, identity, path, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .cleaning });
         try self.assertCurrent(record);
         var name: [32]u8 = undefined;
@@ -431,7 +432,10 @@ pub const Store = struct {
         const scratch = try std.fs.path.join(self.allocator, &.{ stage_path, "scratch" });
         defer self.allocator.free(scratch);
         try observer.update(cancellation, .{ .phase = .testing });
-        try scoped.check(self.allocator, self.io, release.identity(), component, scratch, cancellation, preserve);
+        // Windows can retain a directory after code from it has executed.
+        // Authenticate staged bytes first; execute only at the final candidate
+        // path. No catalog or current record may expose this candidate yet.
+        try scoped.check(.authentication, self.allocator, self.io, release.identity(), component, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .publishing });
         var name: [32]u8 = undefined;
         try stage.renamePreserve("component", self.versions, record.versionName(&name), self.io);
@@ -439,7 +443,7 @@ pub const Store = struct {
         try observer.update(cancellation, .{ .phase = .finalizing });
         const final_path = try self.versionPath(record);
         defer self.allocator.free(final_path);
-        try scoped.check(self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
+        try scoped.check(.runtime, self.allocator, self.io, release.identity(), final_path, scratch, cancellation, preserve);
         try observer.update(cancellation, .{ .phase = .activating });
         if (observer.activate_fn) |activate| if (!activate(observer.context)) return error.Cancelled;
         if (try self.current()) |previous| try self.enqueueRetirement(previous);
@@ -593,7 +597,7 @@ const ContentsObserver = struct {
     }
 };
 
-fn verifyRuntime(allocator: std.mem.Allocator, io: std.Io, root: []const u8, scratch: []const u8, environment: *const std.process.Environ.Map, operation_identity: ?[16]u8, cancellation: *const process.Cancellation) !void {
+fn verifyComponent(allocator: std.mem.Allocator, io: std.Io, stage: ValidationStage, root: []const u8, scratch: []const u8, environment: *const std.process.Environ.Map, operation_identity: ?[16]u8, cancellation: *const process.Cancellation) !void {
     for ([_][]const u8{ "bin/office.exe", "python/bin/python.exe", "node/node.exe", "engine/program/soffice.com" }) |relative| {
         if (cancellation.requested.load(.acquire)) return error.Cancelled;
         const path = try std.fs.path.join(allocator, &.{ root, relative });
@@ -601,6 +605,7 @@ fn verifyRuntime(allocator: std.mem.Allocator, io: std.Io, root: []const u8, scr
         try verifyPe(io, path);
         try platform.verifySignature(allocator, path);
     }
+    if (stage == .authentication) return;
     var result = try process.run(allocator, io, root, .selftest, .{ .parent_environment = environment, .scratch_root = scratch, .operation_identity = operation_identity }, 120_000, cancellation);
     defer result.deinit(allocator);
     if (result.term != .exited or result.term.exited != 0) return error.ComponentSelftestFailed;
@@ -675,7 +680,7 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(context.?));
         return self.space;
     }
-    fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: Identity, path: []const u8, _: []const u8, _: *const process.Cancellation) ValidationResult {
+    fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, _: ValidationStage, _: Identity, path: []const u8, _: []const u8, _: *const process.Cancellation) ValidationResult {
         const self: *Fixture = @ptrCast(@alignCast(context.?));
         self.validations += 1;
         if (self.reject_on_validation == self.validations) return .rejected;
@@ -701,6 +706,40 @@ fn fixtureStore(temporary: *std.testing.TmpDir) !Store {
     const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     return Store.open(std.testing.allocator, std.testing.io, root);
+}
+
+test "Office runtime validation runs at its final candidate path before current publication" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    const Probe = struct {
+        store: *Store,
+        fixture: Fixture = .{},
+        runtime_calls: usize = 0,
+
+        fn available(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) !u64 {
+            return 128 * 1024 * 1024;
+        }
+        fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, stage: ValidationStage, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (stage == .runtime) {
+                self.runtime_calls += 1;
+                // A loader may retain its installation path. Executing it in
+                // staging and moving it later is therefore invalid.
+                const parent = std.fs.path.dirname(path) orelse return .rejected;
+                if (!std.mem.eql(u8, std.fs.path.basename(parent), "versions")) return .rejected;
+                if ((self.store.current() catch return .rejected) != null) return .rejected;
+            }
+            return Fixture.validate(&self.fixture, allocator, io, stage, identity, path, scratch, cancellation);
+        }
+    };
+    var probe: Probe = .{ .store = &store };
+    const cancellation: process.Cancellation = .{};
+    const receipt = try store.install(try Fixture.release(), probe.fixture.download(), .{ .context = &probe, .available_fn = Probe.available, .test_fn = Probe.validate }, .{}, &cancellation);
+    try std.testing.expectEqual(@as(usize, 1), probe.runtime_calls);
+    try std.testing.expectEqual(@as(usize, 2), probe.fixture.validations);
+    try std.testing.expect((try store.current()).?.eql(receipt.record));
 }
 
 test "Office installation commits an independent version and current record only after validation" {
