@@ -2409,7 +2409,8 @@ test("all interjection states render the same ordinary message with copy only", 
         view.getByRole("button", { name: translate(locale, "copy.input") }),
       );
       assert.equal(
-        view.container.querySelectorAll(".input-copy-actions").length,
+        view.container.querySelectorAll(".message-info-bar[data-role=user]")
+          .length,
         1,
       );
       ordinaryMarkup ??= message.outerHTML;

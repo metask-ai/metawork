@@ -2419,70 +2419,73 @@ summary::-webkit-details-marker {
   margin-top: 38px;
 }
 
-.input-copy-actions,
-.response-copy-actions {
-  --message-actions-opacity: 0;
-  --message-actions-pointer-events: none;
-}
-
-.response-copy-actions {
+.message-info-bar {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 32px;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  min-height: 32px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message-info-bar[data-role="user"] {
+  width: fit-content;
+  margin: 4px 0 0 auto;
+}
+
+.message-info-bar[data-role="assistant"] {
   margin-top: 8px;
 }
 
-.input-copy-actions {
+.message-info-metadata {
   display: flex;
-  width: fit-content;
-  min-height: 32px;
-  margin: 4px 0 0 auto;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-}
-
-.input-submitted-time,
-.response-finished-time {
   color: var(--ui-content-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
-  opacity: calc(var(--message-actions-opacity) * 0.72);
-  pointer-events: var(--message-actions-pointer-events);
-  transition: opacity 120ms ease;
+  line-height: 1.4;
+  opacity: 0.72;
+}
+
+.message-info-metadata time {
   white-space: nowrap;
 }
 
-.input-copy-action,
-.response-copy-action {
+.message-info-model {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.message-info-copy {
   width: 32px;
   height: 32px;
   padding: 0;
   font-size: 14px;
   color: var(--ui-content-muted);
-  opacity: var(--message-actions-opacity);
-  pointer-events: var(--message-actions-pointer-events);
-  transition: opacity 120ms ease;
 }
 
-:is(.input-copy-actions, .response-copy-actions):has(
-  > :is(.input-copy-action, .response-copy-action):is(
-      [data-latest="true"],
+.message-info-bar[data-latest="true"],
+.message-info-bar:has(
+  > .message-info-copy:is(
       [data-copy-state="copying"],
       [data-copy-state="copied"],
       [data-copy-state="failed"]
     )
 ),
-.ai-message[data-role="user"]:is(:hover, :focus-within) + .input-copy-actions,
-.input-copy-actions:is(:hover, :focus-within),
-.run-assistant-output:is(:hover, :focus-within) > .response-copy-actions {
-  --message-actions-opacity: 1;
-  --message-actions-pointer-events: auto;
+.ai-message[data-role="user"]:is(:hover, :focus-within) + .message-info-bar,
+.message-info-bar:is(:hover, :focus-within),
+.run-assistant-output:is(:hover, :focus-within) > .message-info-bar {
+  opacity: 1;
 }
 
-.input-copy-action[data-copy-state="failed"],
-.response-copy-action[data-copy-state="failed"] {
+.message-info-copy[data-copy-state="failed"] {
   color: var(--ui-content-error);
 }
 
@@ -7460,10 +7463,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (any-pointer: coarse) {
-  .input-copy-actions,
-  .response-copy-actions {
-    --message-actions-opacity: 1;
-    --message-actions-pointer-events: auto;
+  .message-info-bar {
+    opacity: 1;
   }
 
   .code-block-copy-action {

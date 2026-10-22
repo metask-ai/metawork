@@ -2632,7 +2632,7 @@ async function probeWindowsClipboard({
       const point = await poll(
         async () => {
           const observation = await webview.evaluate(`(() => {
-            const buttons = document.querySelectorAll('.response-copy-action[data-latest="true"]');
+            const buttons = document.querySelectorAll('.message-info-bar[data-role=assistant][data-latest="true"] .message-info-copy');
             if (buttons.length !== 1) return {point:null, buttonCount:buttons.length};
             const response = buttons[0];
             const exchange = response.closest('.ai-exchange');
@@ -3044,7 +3044,7 @@ async function verifyActiveRendererDraft(taskId, text) {
       const flow=document.querySelector('.run-reading-flow');
       const first=flow.querySelector('.additional-input .ai-message');
       const before=window.__activeReadingObservation;
-      return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,copies:flow.querySelectorAll('.additional-input .input-copy-actions').length};
+      return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,copies:flow.querySelectorAll('.additional-input .message-info-bar[data-role=user]').length};
     })()`);
         if (current.roles.join(",") === "user,assistant,user,assistant")
           return current;
@@ -3097,7 +3097,7 @@ async function observeTransferredInput(taskId, targetRunId) {
       const source=[...document.querySelectorAll('.additional-input[data-input-id] .task-input-copy')];
       const copies=[...document.querySelectorAll('.ai-message[data-role="user"] .task-input-copy')];
       const target=document.querySelector('[data-run-id="${targetRunId}"]');
-      return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .input-copy-actions')};
+      return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .message-info-bar[data-role=user]')};
     })()`);
     assert.deepEqual(inputCopies, {
       counts: [1, 1],
@@ -3125,12 +3125,12 @@ async function observeTransferredInput(taskId, targetRunId) {
         if(messages.length!==2) return false;
         if(document.querySelector('.additional-input-target, .additional-input-state, .additional-input-restore, .run-process-input')) throw new Error('Interjection-specific status or action is visible');
         for(const message of messages) {
-          if(message.querySelectorAll('button').length!==1 || !message.querySelector('.input-copy-actions .input-copy-action')) throw new Error('User message must only offer ordinary copy');
+          if(message.querySelectorAll('button').length!==1 || !message.querySelector('.message-info-bar[data-role=user] .message-info-copy')) throw new Error('User message must only offer ordinary copy');
         }
         if(document.documentElement.scrollWidth>innerWidth) throw new Error('Continuation horizontal overflow');
         if(!document.querySelector('[data-run-id="${targetRunId}"]')) throw new Error('Transfer target is not a real exchange');
         messages[0].scrollIntoView({block:'start'});
-        return {width:innerWidth,theme:document.documentElement.dataset.theme,messages:messages.length,copyActions:messages.filter(node=>node.querySelector('.input-copy-action')).length,errors:window.__activeInputUiErrors??0};
+        return {width:innerWidth,theme:document.documentElement.dataset.theme,messages:messages.length,copyActions:messages.filter(node=>node.querySelector('.message-info-copy')).length,errors:window.__activeInputUiErrors??0};
       })()`),
         commandTimeoutMs,
         `${name} transfer geometry`,

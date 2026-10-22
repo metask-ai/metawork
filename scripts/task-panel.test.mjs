@@ -1430,7 +1430,9 @@ test("continuation and transfer preserve the ordinary submitted bubble without e
   assert.equal(screen.queryByRole("button", { name: "View next Run" }), null);
   assert.equal(screen.getAllByText(message.text).length, 1);
   assert.equal(
-    view.container.querySelector('[data-run-id="10"] .input-copy-actions'),
+    view.container.querySelector(
+      '[data-run-id="10"] .message-info-bar[data-role=user]',
+    ),
     null,
   );
 });
@@ -1496,11 +1498,16 @@ test("merged continuation displays each original message once after remount and 
       destination.querySelector('.ai-message[data-role="user"]'),
       null,
     );
-    assert.equal(destination.querySelector(".input-copy-actions"), null);
+    assert.equal(
+      destination.querySelector(".message-info-bar[data-role=user]"),
+      null,
+    );
     assert.match(destination.textContent, /Failed/i);
     assert.equal(
       view.container
-        .querySelector('.input-copy-action[data-latest="true"]')
+        .querySelector(
+          '.message-info-bar[data-role=user][data-latest="true"] .message-info-copy',
+        )
         .closest(".additional-input").dataset.inputId,
       "4",
     );
@@ -1565,7 +1572,9 @@ test("chained continuation keeps new interjections and independently sent identi
   );
   assert.equal(
     view.container
-      .querySelector('.input-copy-action[data-latest="true"]')
+      .querySelector(
+        '.message-info-bar[data-role=user][data-latest="true"] .message-info-copy',
+      )
       .closest("[data-run-id]").dataset.runId,
     "12",
   );
@@ -2199,7 +2208,8 @@ test("successful terminal keeps commentary and collapsed technical process visib
   assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
   assert.equal(
-    document.querySelector(".response-copy-actions").parentElement,
+    document.querySelector(".message-info-bar[data-role=assistant]")
+      .parentElement,
     screen.getByText("Final response").closest(".run-assistant-output"),
   );
 });
@@ -2294,7 +2304,9 @@ test("reply metadata stays with its response before a later user interjection", 
     const view = render(taskContentElement(value));
     const response = screen.getByText("Here is the answer");
     const message = response.closest(".run-assistant-output");
-    const footer = view.container.querySelector(".response-copy-actions");
+    const footer = view.container.querySelector(
+      ".message-info-bar[data-role=assistant]",
+    );
     const laterInput = screen.getByText("Generate a starry sky");
     assert.equal(footer.parentElement, message);
     assert.equal(message.lastElementChild, footer);
@@ -2308,7 +2320,8 @@ test("reply metadata stays with its response before a later user interjection", 
         dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
     );
     assert.equal(
-      view.container.querySelectorAll(".response-copy-actions").length,
+      view.container.querySelectorAll(".message-info-bar[data-role=assistant]")
+        .length,
       1,
     );
     cleanup();
@@ -2324,9 +2337,15 @@ test("reply footer uses the product tooltip for the finished time", async (conte
       task({ runs: [run({ finishedAtUnixMs: String(finishedAt) })] }),
     ),
   );
-  const footer = view.container.querySelector(".response-copy-actions");
+  const footer = view.container.querySelector(
+    ".message-info-bar[data-role=assistant]",
+  );
   assert.equal(footer.children[0].tagName, "BUTTON");
-  assert.equal(footer.children[1].tagName, "TIME");
+  assert.equal(footer.children[1].className, "message-info-metadata");
+  assert.equal(
+    footer.querySelector(".message-info-model").textContent,
+    "fixture-model",
+  );
   assert.equal(footer.querySelector("time").textContent, "4 days ago");
   const time = footer.querySelector("time");
   assert.equal(time.hasAttribute("title"), false);
@@ -2342,6 +2361,57 @@ test("reply footer uses the product tooltip for the finished time", async (conte
   );
 });
 
+test("reply metadata keeps each Run's actual model when the next-run model changes", () => {
+  const value = task({
+    modelIntent: {
+      modelRef: { sourceId: "metask", modelId: "next-model" },
+      selectionRevision: "1",
+      state: "committed",
+    },
+    runs: [
+      run({
+        id: "1",
+        execution: { ...run().execution, model: "first-model" },
+        finishedAtUnixMs: String(Date.now() - 120_000),
+      }),
+      run({
+        id: "2",
+        execution: { ...run().execution, model: "second-model" },
+        output: { ...run().output, responseKind: "partial" },
+      }),
+    ],
+  });
+  const view = render(taskContentElement(value));
+  const assertModels = () => {
+    const footers = view.container.querySelectorAll(
+      ".message-info-bar[data-role=assistant]",
+    );
+    assert.equal(
+      footers[0].querySelector(".message-info-model").textContent,
+      "first-model",
+    );
+    assert.equal(
+      footers[1].querySelector(".message-info-model").textContent,
+      "second-model",
+    );
+    assert.equal(footers[1].querySelector("time"), null);
+    assert.equal(
+      view.container.querySelector(
+        ".message-info-bar[data-role=user] .message-info-model",
+      ),
+      null,
+    );
+    assert.equal(
+      view.container.querySelector(".agent-response .message-info-model"),
+      null,
+    );
+  };
+  assertModels();
+  value.modelIntent.modelRef.modelId = "another-next-model";
+  view.rerender(taskContentElement(value, "2"));
+  assertModels();
+});
+
 test("input metadata places the nullable submitted time before copy", async (context) => {
   const user = userEvent.setup({ document: dom.window.document });
   const submittedAt = new Date(2026, 8, 11, 10, 25).getTime();
@@ -2351,8 +2421,10 @@ test("input metadata places the nullable submitted time before copy", async (con
       task({ runs: [run({ submittedAtUnixMs: String(submittedAt) })] }),
     ),
   );
-  const metadata = view.container.querySelector(".input-copy-actions");
-  assert.equal(metadata.children[0].tagName, "TIME");
+  const metadata = view.container.querySelector(
+    ".message-info-bar[data-role=user]",
+  );
+  assert.equal(metadata.children[0].className, "message-info-metadata");
   assert.equal(metadata.children[1].tagName, "BUTTON");
   assert.equal(metadata.querySelector("time").textContent, "4 days ago");
   assert.ok(screen.getByRole("button", { name: "Copy input" }));
@@ -2395,7 +2467,7 @@ test("message action hover and focus stay within one message, including interjec
   );
   const stylesheet = await readFile("frontend/src/index.css", "utf8");
   const visibilityRule = stylesheet.match(
-    /([^{}]+)\{\s*--message-actions-opacity: 1;\s*--message-actions-pointer-events: auto;/,
+    /(\.message-info-bar\[data-latest="true"\][^{}]+)\{\s*opacity: 1;/,
   );
   assert.ok(visibilityRule);
   // Evaluate the real CSS selectors against the rendered message tree. Mark
@@ -2409,9 +2481,7 @@ test("message action hover and focus stay within one message, including interjec
   assert.ok(selectors);
   const messages = view.container.querySelectorAll(".ai-message");
   assert.equal(messages.length, 9);
-  const footers = view.container.querySelectorAll(
-    ".input-copy-actions, .response-copy-actions",
-  );
+  const footers = view.container.querySelectorAll(".message-info-bar");
   assert.equal(footers.length, 9);
   for (const attribute of ["data-test-hover", "data-test-focus"]) {
     for (const target of [...messages, ...footers]) {
@@ -2427,7 +2497,7 @@ test("message action hover and focus stay within one message, including interjec
       const expected = target.matches(".ai-message")
         ? target.dataset.role === "user"
           ? target.nextElementSibling
-          : target.querySelector(".response-copy-actions")
+          : target.querySelector(".message-info-bar[data-role=assistant]")
         : target;
       assert.deepEqual(
         [...view.container.querySelectorAll(selectors)],
@@ -2712,7 +2782,7 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
   assert.ok(
-    markup.indexOf('class="response-copy-actions"') <
+    markup.indexOf('class="message-info-bar" data-role="assistant"') <
       markup.indexOf('class="ai-activity"'),
   );
 });
@@ -2872,7 +2942,13 @@ test("inline diagnostics stay absent for other failures and preserve safe exact 
   });
   render(taskContentElement(value));
   const summary = screen.getByText("View run details");
-  assert.ok(screen.queryByText("<img src=x onerror=alert(1)>") === null);
+  const details = summary.closest("details");
+  const model = document.querySelector(".message-info-model");
+  assert.equal(model.textContent, "<img src=x onerror=alert(1)>");
+  assert.equal(model.querySelector("img"), null);
+  assert.ok(
+    within(details).queryByText("<img src=x onerror=alert(1)>") === null,
+  );
   summary.focus();
   await user.click(summary);
   assert.ok(summary.closest("details").open);
@@ -2881,11 +2957,13 @@ test("inline diagnostics stay absent for other failures and preserve safe exact 
       "MetaWork did not receive additional diagnostics for this run.",
     ),
   );
-  assert.ok(screen.getByText("<img src=x onerror=alert(1)>"));
+  assert.ok(within(details).getByText("<img src=x onerror=alert(1)>"));
   assert.ok(summary.closest("details").querySelector("img") === null);
   await user.click(summary);
   assert.ok(!summary.closest("details").open);
-  assert.ok(screen.queryByText("<img src=x onerror=alert(1)>") === null);
+  assert.ok(
+    within(details).queryByText("<img src=x onerror=alert(1)>") === null,
+  );
   cleanup();
   for (const cause of [null, "tool_failure"]) {
     render(
@@ -3152,7 +3230,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
   );
   assert.ok(
-    visible.indexOf('class="response-copy-actions"') <
+    visible.indexOf('class="message-info-bar" data-role="assistant"') <
       visible.indexOf(">File changes<"),
   );
   assert.match(visible, />Execution details</);
@@ -3160,7 +3238,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   assert.ok(
     visible.indexOf(">File changes<") <
       visible.indexOf(">Execution details<") &&
-      visible.indexOf('class="response-copy-actions"') <
+      visible.indexOf('class="message-info-bar" data-role="assistant"') <
         visible.indexOf(">Execution details<"),
   );
 

@@ -146,7 +146,8 @@ export async function probeWindowChromeUi({
       };
     })()`);
     if (conversation) {
-      const copy = '.response-copy-action[data-latest="true"]';
+      const copy =
+        '.message-info-bar[data-role=assistant][data-latest="true"] .message-info-copy';
       const editor = ".ai-composer textarea";
       const expected = "metawork agentcore vertical complete";
       evidence.unverified = [

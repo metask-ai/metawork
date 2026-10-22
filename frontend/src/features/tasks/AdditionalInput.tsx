@@ -1,10 +1,10 @@
-import type { ReactNode } from "react";
 import type {
   AdditionalInputView,
   RunInputView,
 } from "../../bridge/contracts.ts";
 import { Message } from "../../components/ai/Message.tsx";
-import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { MessageInfoBar } from "./MessageInfoBar.tsx";
+import type { RunTimestamp } from "./run-presentation.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { copyRunInput } from "./response-copy.ts";
 
@@ -15,7 +15,7 @@ export function AdditionalInput({
 }: {
   input: AdditionalInputView;
   latest?: boolean;
-  submittedTime?: ReactNode;
+  submittedTime?: RunTimestamp | null;
 }) {
   const { t } = useI18n();
   const textInput: RunInputView = {
@@ -31,17 +31,12 @@ export function AdditionalInput({
           <p className="projection-note">{t("privacy.sensitive_hidden")}</p>
         )}
       </Message>
-      <div className="input-copy-actions">
-        {submittedTime}
-        <CopyButton
-          className="input-copy-action"
-          data-latest={latest}
-          copyLabel={t("copy.input")}
-          copiedLabel={t("copy.copied")}
-          failedLabel={t("copy.failed")}
-          onCopy={() => copyRunInput(textInput)}
-        />
-      </div>
+      <MessageInfoBar
+        role="user"
+        time={submittedTime}
+        latest={latest}
+        onCopy={() => copyRunInput(textInput)}
+      />
     </div>
   );
 }

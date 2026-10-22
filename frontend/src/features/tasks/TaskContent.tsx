@@ -4,6 +4,7 @@ import {
 } from "./GeneratedImagePreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
+import { MessageInfoBar } from "./MessageInfoBar.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import {
   Fragment,
@@ -33,9 +34,7 @@ import {
   Message,
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
-import { CopyButton } from "../../components/ui/CopyButton.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
@@ -46,7 +45,6 @@ import {
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
-  type RunTimestamp,
 } from "./run-presentation.ts";
 import {
   copyCodeText,
@@ -241,36 +239,6 @@ function TaskInput({ input }: { input: RunInputView }) {
   );
 }
 
-function MessageTime({
-  className,
-  time,
-}: {
-  className: string;
-  time: RunTimestamp;
-}) {
-  return (
-    <Tooltip.Root>
-      <Tooltip.Trigger
-        render={
-          <time
-            className={className}
-            dateTime={time.dateTime}
-            aria-label={time.absolute}
-            tabIndex={0}
-          />
-        }
-      >
-        {time.relative}
-      </Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Positioner side="top">
-          <Tooltip.Popup>{time.absolute}</Tooltip.Popup>
-        </Tooltip.Positioner>
-      </Tooltip.Portal>
-    </Tooltip.Root>
-  );
-}
-
 export function TaskContent({
   task,
   snapshotReceivedAt,
@@ -385,27 +353,22 @@ export function TaskContent({
         <Message role="user" tabIndex={-1} className="focus-ring">
           <TaskInput input={record.input} />
         </Message>
-        <div className="input-copy-actions">
-          {time && <MessageTime className="input-submitted-time" time={time} />}
-          {!executed && (
-            <span className="projection-note">
-              {t(
-                record.state === "waiting"
-                  ? "input.waiting"
-                  : record.state === "cancelled"
-                    ? "input.cancelled"
-                    : "input.unexecuted",
-              )}
-            </span>
-          )}
-          <CopyButton
-            className="input-copy-action"
-            copyLabel={t("copy.input")}
-            copiedLabel={t("copy.copied")}
-            failedLabel={t("copy.failed")}
-            onCopy={() => copyRunInput(record.input)}
-          />
-        </div>
+        <MessageInfoBar
+          role="user"
+          time={time}
+          onCopy={() => copyRunInput(record.input)}
+        />
+        {!executed && (
+          <p className="projection-note">
+            {t(
+              record.state === "waiting"
+                ? "input.waiting"
+                : record.state === "cancelled"
+                  ? "input.cancelled"
+                  : "input.unexecuted",
+            )}
+          </p>
+        )}
         {record.reason && record.state === "failed" && (
           <p className="projection-note">
             {t(`mutation.reason.${record.reason}` as MessageId)}
@@ -652,25 +615,15 @@ export function TaskContent({
                 <Message role="user" tabIndex={-1} className="focus-ring">
                   <TaskInput input={run.input} />
                 </Message>
-                <div className="input-copy-actions">
-                  {submittedTime && (
-                    <MessageTime
-                      className="input-submitted-time"
-                      time={submittedTime}
-                    />
-                  )}
-                  <CopyButton
-                    className="input-copy-action"
-                    data-latest={
-                      run.id === latestInputId &&
-                      run.additionalInputs.length === 0
-                    }
-                    copyLabel={t("copy.input")}
-                    copiedLabel={t("copy.copied")}
-                    failedLabel={t("copy.failed")}
-                    onCopy={() => copyRunInput(run.input)}
-                  />
-                </div>
+                <MessageInfoBar
+                  role="user"
+                  time={submittedTime}
+                  latest={
+                    run.id === latestInputId &&
+                    run.additionalInputs.length === 0
+                  }
+                  onCopy={() => copyRunInput(run.input)}
+                />
               </>
             )}
             <div className="run-reading-flow">
@@ -681,19 +634,11 @@ export function TaskContent({
                   <AdditionalInput
                     key={entry.identity}
                     input={entry.input}
-                    submittedTime={(() => {
-                      const time = formatRunTimestamp(
-                        locale,
-                        entry.input.submission?.receivedAtUnixMs ?? null,
-                        nowUnixMs,
-                      );
-                      return time ? (
-                        <MessageTime
-                          className="input-submitted-time"
-                          time={time}
-                        />
-                      ) : undefined;
-                    })()}
+                    submittedTime={formatRunTimestamp(
+                      locale,
+                      entry.input.submission?.receivedAtUnixMs ?? null,
+                      nowUnixMs,
+                    )}
                     latest={
                       run.id === latestInputId &&
                       entry.input.id === run.additionalInputs.at(-1)?.id
@@ -751,24 +696,15 @@ export function TaskContent({
                             part.disposition === "final" ||
                             part.disposition === "partial",
                         ) && (
-                          <div className="response-copy-actions">
-                            <CopyButton
-                              className="response-copy-action"
-                              data-latest={run.id === latestCopyableId}
-                              copyLabel={t("copy.response")}
-                              copiedLabel={t("copy.copied")}
-                              failedLabel={t("copy.failed")}
-                              onCopy={() =>
-                                copyResponseMarkdown(run.output.response)
-                              }
-                            />
-                            {finishedTime && (
-                              <MessageTime
-                                className="response-finished-time"
-                                time={finishedTime}
-                              />
-                            )}
-                          </div>
+                          <MessageInfoBar
+                            role="assistant"
+                            time={finishedTime}
+                            model={run.execution.model}
+                            latest={run.id === latestCopyableId}
+                            onCopy={() =>
+                              copyResponseMarkdown(run.output.response)
+                            }
+                          />
                         )}
                     </Message>
                   </Fragment>
