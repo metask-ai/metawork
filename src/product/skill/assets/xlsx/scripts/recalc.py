@@ -9,114 +9,129 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
+
+from defusedxml import ElementTree as SafeET
+from office.archive import checked_copy
 from pathlib import Path
 
 from office.soffice import get_soffice_env
 
 from openpyxl import load_workbook
 
+# Limit dense iteration as well as ZIP expansion; sparse far-away coordinates
+# must not cause billions of empty cells to be visited by a result check.
+MAX_CHECKED_CELLS = 1_000_000
+
+
+def _cells(workbook):
+    remaining = MAX_CHECKED_CELLS
+    for sheet in workbook:
+        remaining -= sheet.max_row * sheet.max_column
+        if remaining < 0:
+            raise ValueError("Workbook result-check cell budget exceeded")
+        for row in sheet.iter_rows():
+            for cell in row:
+                yield sheet.title, cell
+
+
+def _formulas(filename):
+    workbook = load_workbook(filename, data_only=False)
+    try:
+        formulas = {}
+        for sheet, cell in _cells(workbook):
+            if cell.data_type == "f":
+                value = cell.value
+                # openpyxl represents array/data-table formulas as typed
+                # objects; compare their fields rather than object identity.
+                formulas[(sheet, cell.coordinate)] = value if isinstance(value, str) else (
+                    type(value).__name__, vars(value).copy())
+        return formulas
+    finally:
+        workbook.close()
+
+
+def _check_formula_caches(filename):
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    # filename is already a private, fully checked archive. Validate cache
+    # presence in XML because a legitimate empty string also decodes as None.
+    with zipfile.ZipFile(filename) as archive:
+        for name in archive.namelist():
+            if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                continue
+            root = SafeET.fromstring(archive.read(name))
+            for cell in root.iter(namespace + "c"):
+                if cell.find(namespace + "f") is None:
+                    continue
+                value = cell.find(namespace + "v")
+                if value is None or (value.text is None and cell.get("t") != "str"):
+                    raise ValueError(f"Missing recalculated formula cache: {name}!{cell.get('r')}")
+
+
+def _summary(filename, formula_count):
+    workbook = load_workbook(filename, data_only=True)
+    try:
+        errors = {}
+        for sheet, cell in _cells(workbook):
+            if cell.data_type == "e":
+                details = errors.setdefault(str(cell.value), {"count": 0, "locations": []})
+                details["count"] += 1
+                if len(details["locations"]) < 20:
+                    details["locations"].append(f"{sheet}!{cell.coordinate}")
+        total = sum(details["count"] for details in errors.values())
+        return {"status": "errors_found" if total else "success", "total_errors": total,
+                "error_summary": errors, "total_formulas": formula_count}
+    finally:
+        workbook.close()
+
+
+def _identity(path):
+    value = path.lstat()
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
 def recalc(filename, timeout=30):
-    if not Path(filename).exists():
-        return {"error": f"File {filename} does not exist"}
-    source = Path(filename).resolve()
+    source = Path(filename).absolute()
     if source.suffix.lower() != ".xlsx":
         return {"error": "Formula recalculation accepts .xlsx files only"}
     if timeout <= 0:
         return {"error": "Timeout must be positive"}
 
-    # Conversion into a distinct output directory forces Calc to load and
-    # save the workbook. The private profile avoids changing the user's
-    # LibreOffice configuration or attaching to an existing instance.
     try:
-        with tempfile.TemporaryDirectory(prefix="metawork-xlsx-") as directory:
+        identity = _identity(source)
+        with checked_copy(source) as input_copy, tempfile.TemporaryDirectory(prefix="metawork-xlsx-") as directory:
+            expected_formulas = _formulas(input_copy)
             scratch = Path(directory)
             output = scratch / "output"
             output.mkdir()
             profile = (scratch / "profile").as_uri()
             result = subprocess.run(
                 ["soffice", f"-env:UserInstallation={profile}", "--headless", "--norestore",
-                 "--convert-to", "xlsx", "--outdir", str(output), str(source)],
+                 "--convert-to", "xlsx", "--outdir", str(output), str(input_copy)],
                 capture_output=True, text=True, timeout=timeout, env=get_soffice_env(),
             )
-            converted = output / (source.stem + ".xlsx")
+            converted = output / input_copy.name
             if result.returncode != 0 or not converted.is_file():
                 return {"error": result.stderr.strip() or "LibreOffice did not produce a recalculated workbook"}
-            with tempfile.NamedTemporaryFile(dir=source.parent, suffix=".xlsx", delete=False) as staged:
-                staged_path = Path(staged.name)
-            try:
-                shutil.copyfile(converted, staged_path)
-                check = load_workbook(staged_path, data_only=True)
-                check.close()
-                os.replace(staged_path, source)
-            finally:
-                staged_path.unlink(missing_ok=True)
+            with checked_copy(converted) as checked_output:
+                with tempfile.NamedTemporaryFile(dir=source.parent, suffix=".xlsx", delete=False) as staged:
+                    staged_path = Path(staged.name)
+                try:
+                    shutil.copyfile(checked_output, staged_path)
+                    if _formulas(staged_path) != expected_formulas:
+                        raise ValueError("Recalculation changed or removed workbook formulas")
+                    _check_formula_caches(staged_path)
+                    summary = _summary(staged_path, len(expected_formulas))
+                    if _identity(source) != identity:
+                        raise ValueError("Source workbook changed during recalculation; result not published")
+                    os.replace(staged_path, source)
+                    return summary
+                finally:
+                    staged_path.unlink(missing_ok=True)
     except subprocess.TimeoutExpired:
         return {"error": f"LibreOffice recalculation timed out after {timeout} seconds"}
     except Exception as error:
         return {"error": str(error)}
-
-    try:
-        wb = load_workbook(filename, data_only=True)
-
-        excel_errors = [
-            "#VALUE!",
-            "#DIV/0!",
-            "#REF!",
-            "#NAME?",
-            "#NULL!",
-            "#NUM!",
-            "#N/A",
-        ]
-        error_details = {err: [] for err in excel_errors}
-        total_errors = 0
-
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            for row in ws.iter_rows():
-                for cell in row:
-                    if cell.value is not None and isinstance(cell.value, str):
-                        for err in excel_errors:
-                            if err in cell.value:
-                                location = f"{sheet_name}!{cell.coordinate}"
-                                error_details[err].append(location)
-                                total_errors += 1
-                                break
-
-        wb.close()
-
-        result = {
-            "status": "success" if total_errors == 0 else "errors_found",
-            "total_errors": total_errors,
-            "error_summary": {},
-        }
-
-        for err_type, locations in error_details.items():
-            if locations:
-                result["error_summary"][err_type] = {
-                    "count": len(locations),
-                    "locations": locations[:20],
-                }
-
-        wb_formulas = load_workbook(filename, data_only=False)
-        formula_count = 0
-        for sheet_name in wb_formulas.sheetnames:
-            ws = wb_formulas[sheet_name]
-            for row in ws.iter_rows():
-                for cell in row:
-                    if (
-                        cell.value
-                        and isinstance(cell.value, str)
-                        and cell.value.startswith("=")
-                    ):
-                        formula_count += 1
-        wb_formulas.close()
-
-        result["total_formulas"] = formula_count
-
-        return result
-
-    except Exception as e:
-        return {"error": str(e)}
 
 
 def main():
