@@ -499,6 +499,86 @@ desktopVertical: try {
       provider,
       toolSse,
       textSse,
+      nativeOutputProbe:
+        process.env.METAWORK_OUTPUT_NATIVE === "1"
+          ? async ({ mode, source, destination, trigger }) => {
+              const args = [
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                join(root, "scripts/probe-windows-output-native.ps1"),
+                "-ProcessId",
+                String(app.pid),
+                "-ExpectedExecutable",
+                binary,
+                "-WorkspaceRoot",
+                canonicalWorkspace,
+                "-SourcePath",
+                source,
+                "-Mode",
+                mode,
+              ];
+              if (destination) args.push("-Destination", destination);
+              const child = spawn("powershell.exe", args, {
+                cwd: root,
+                windowsHide: true,
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              let output = "",
+                errors = "",
+                readyResolve,
+                readyReject;
+              const ready = new Promise((resolve, reject) => {
+                readyResolve = resolve;
+                readyReject = reject;
+              });
+              child.stdout.on("data", (chunk) => {
+                output += chunk.toString("utf8");
+                if (output.length > 65536) {
+                  child.kill();
+                  readyReject(
+                    new Error(
+                      "Native output probe exceeded its capture budget",
+                    ),
+                  );
+                }
+                for (const line of output.split(/\r?\n/)) {
+                  try {
+                    if (JSON.parse(line).phase === "ready") readyResolve();
+                  } catch {}
+                }
+              });
+              child.stderr.on("data", (chunk) => {
+                errors += chunk.toString("utf8");
+                if (errors.length > 65536) child.kill();
+              });
+              const finished = new Promise((resolve, reject) => {
+                child.once("error", reject);
+                child.once("close", (code, signal) => {
+                  if (code !== 0 || signal !== null)
+                    reject(
+                      new Error(
+                        `Native output probe failed: ${code}/${signal}: ${errors}\n${output}`,
+                      ),
+                    );
+                  else resolve();
+                });
+              });
+              void finished.catch(readyReject);
+              const timer = setTimeout(() => child.kill(), 40_000);
+              try {
+                await ready;
+                await Promise.all([trigger(), finished]);
+                return JSON.parse(output.trim().split(/\r?\n/).at(-1));
+              } finally {
+                clearTimeout(timer);
+                if (child.exitCode === null && child.signalCode === null) {
+                  child.kill();
+                  await finished.catch(() => undefined);
+                }
+              }
+            }
+          : undefined,
       connectWebView: () =>
         connectTestWebView(chromeProbePort, {
           requestTimeoutMs: commandTimeoutMs,
@@ -509,11 +589,16 @@ desktopVertical: try {
         startApplication();
         await waitForBridge();
       },
-      evidenceDirectory: join(root, ".zig-cache/output-delivery-desktop"),
+      evidenceDirectory: join(
+        root,
+        process.env.METAWORK_OUTPUT_NATIVE === "1"
+          ? ".zig-cache/output-native-desktop"
+          : ".zig-cache/output-delivery-desktop",
+      ),
     });
     await stopApplication("Output desktop verification complete");
     process.stdout.write(
-      "Output Windows desktop vertical passed: real Core delivery, Renderer checks/edit draft, cold history and source preservation.\n",
+      `Output Windows desktop vertical passed: real Core delivery, Renderer checks/edit draft, cold history and source preservation${process.env.METAWORK_OUTPUT_NATIVE === "1" ? ", native Save As/cancel/overwrite protection and exact Explorer selection" : ""}.\n`,
     );
     break desktopVertical;
   }

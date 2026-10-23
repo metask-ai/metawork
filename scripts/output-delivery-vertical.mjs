@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { enUS } from "../frontend/src/i18n/messages/en-US.ts";
 import { zhCN } from "../frontend/src/i18n/messages/zh-CN.ts";
@@ -19,6 +19,7 @@ export async function runOutputDeliveryVertical({
   provider,
   toolSse,
   textSse,
+  nativeOutputProbe,
   connectWebView,
   restart,
   evidenceDirectory,
@@ -260,6 +261,57 @@ export async function runOutputDeliveryVertical({
       return request;
     }
     await click("check", "ready");
+    if (nativeOutputProbe) {
+      const beforeNative = await readdir(workspaceRoot);
+      const destination = path.join(workspaceRoot, "另存 output 中文.txt");
+      const saved = await nativeOutputProbe({
+        mode: "save",
+        source,
+        destination,
+        trigger: () => click("save", "saved"),
+      });
+      assert.deepEqual(await readFile(destination), bytes);
+      const cancelled = await nativeOutputProbe({
+        mode: "cancel",
+        source,
+        trigger: () => click("save", "cancelled"),
+      });
+      await writeFile(source, `${content}changed before Save As`);
+      const changed = await nativeOutputProbe({
+        mode: "save",
+        source,
+        destination,
+        trigger: () => click("save", "changed"),
+      });
+      assert.deepEqual(await readFile(destination), bytes);
+      assert.deepEqual(
+        (await readdir(workspaceRoot)).sort(),
+        [...beforeNative, path.basename(destination)].sort(),
+      );
+      await writeFile(source, bytes);
+      const revealed = await nativeOutputProbe({
+        mode: "reveal",
+        source,
+        trigger: () => click("reveal", "revealed"),
+      });
+      assert.equal(saved.dialogObserved, true);
+      assert.equal(cancelled.dialogObserved, true);
+      assert.equal(changed.dialogObserved, true);
+      assert.equal(saved.overwriteConfirmed, false);
+      assert.equal(changed.overwriteConfirmed, true);
+      assert.equal(revealed.selectedFixture, true);
+      evidence.native = {
+        saved,
+        cancelled,
+        changedSourcePreservedTarget: changed,
+        revealed,
+        savedSha256: createHash("sha256")
+          .update(await readFile(destination))
+          .digest("hex"),
+      };
+      evidence.scope =
+        "Real Windows App/Core/Renderer and native Save As through scoped Win32 dialog controls, UIAutomation and Explorer selection; fixture Provider, not remote-model quality or physical mouse gestures";
+    }
     await writeFile(source, `${content}changed`);
     await click("check", "changed");
     await unlink(source);
