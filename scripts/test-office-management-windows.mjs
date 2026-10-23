@@ -1,6 +1,6 @@
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { buildAutomationDebugArtifact, nativeCli } from "./build.mjs";
@@ -43,6 +43,12 @@ try {
   const result = await probeOfficeManagement(
     port,
     join(root, ".zig-cache", "office-management-evidence"),
+    JSON.parse(
+      await readFile(
+        join(root, "build_support/office-component-release.windows-x64.json"),
+        "utf8",
+      ),
+    ).release !== null,
   );
   await promisify(execFile)(
     process.execPath,

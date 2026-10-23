@@ -4,13 +4,15 @@ import { join } from "node:path";
 import { connectTestWebView } from "./window-top-resize-paint.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 
-// Real unpublished-release App path only. Positive install states are covered
-// separately; this probe never inserts a development package into Main trust.
-export async function probeOfficeManagement(port, evidenceDir) {
+// Exercise the actual main-pinned offer without starting a download. Positive
+// installation needs its own workflow; this probe never adds an accepted input.
+export async function probeOfficeManagement(port, evidenceDir, hasRelease) {
+  assert.equal(typeof hasRelease, "boolean");
   const webview = await connectTestWebView(port, { requestTimeoutMs: 15000 });
   const evidence = {
     cases: [],
-    scope: "actual App; no published Office release",
+    scope: "actual App; main-pinned offer; no installation",
+    hasRelease,
   };
   async function until(expression) {
     const deadline = Date.now() + 15000;
@@ -50,26 +52,29 @@ export async function probeOfficeManagement(port, evidenceDir) {
     const denied = await invokeWebViewBridge(
       webview,
       "metawork.office.install",
-      { expectedGeneration: "1" },
+      { expectedGeneration: "18446744073709551615" },
     );
     assert.equal(denied.accepted, false);
-    const unpublished = await invokeWebViewBridge(
-      webview,
-      "metawork.office.install",
-      { expectedGeneration: denied.generation },
-    );
-    assert.equal(unpublished.accepted, false);
-    assert.equal(unpublished.reason, "unpublished");
-    assert.equal(unpublished.operationId, null);
-    evidence.install = unpublished;
+    assert.equal(denied.reason, "stale_generation");
+    if (!hasRelease) {
+      const unpublished = await invokeWebViewBridge(
+        webview,
+        "metawork.office.install",
+        { expectedGeneration: denied.generation },
+      );
+      assert.equal(unpublished.accepted, false);
+      assert.equal(unpublished.reason, "unpublished");
+      assert.equal(unpublished.operationId, null);
+      evidence.install = unpublished;
+    }
     await assert.rejects(
       invokeWebViewBridge(webview, "metawork.office.install", {
-        expectedGeneration: unpublished.generation,
+        expectedGeneration: denied.generation,
         url: "https://example.invalid/",
       }),
     );
     for (const [action, reason] of [
-      ["repair", "unpublished"],
+      ["repair", hasRelease ? "not_installed" : "unpublished"],
       ["remove", "not_installed"],
       ["cleanup", "nothing_to_clean"],
       ["retry", "not_needed"],
@@ -77,7 +82,7 @@ export async function probeOfficeManagement(port, evidenceDir) {
       const result = await invokeWebViewBridge(
         webview,
         `metawork.office.${action}`,
-        { expectedGeneration: unpublished.generation },
+        { expectedGeneration: denied.generation },
       );
       assert.equal(result.accepted, false);
       assert.equal(result.reason, reason);
@@ -134,9 +139,13 @@ export async function probeOfficeManagement(port, evidenceDir) {
         assert.equal(geometry.overflow, false);
         assert.ok(geometry.left >= 0 && geometry.right <= width);
         assert.ok(geometry.focused && geometry.reducedMotion);
-        assert.equal(geometry.actions, 0);
+        assert.equal(geometry.actions, hasRelease ? 1 : 0);
         assert.match(geometry.body, /DOCX.*XLSX.*PPTX/);
-        assert.match(geometry.body, /not yet published|尚未发布/);
+        if (hasRelease) {
+          assert.match(geometry.body, /Install environment|安装环境/);
+          assert.doesNotMatch(geometry.body, /not yet published|尚未发布/);
+          assert.match(geometry.body, /MiB/);
+        } else assert.match(geometry.body, /not yet published|尚未发布/);
         const screenshot = await webview.send("Page.captureScreenshot", {
           format: "png",
         });
@@ -156,7 +165,9 @@ export async function probeOfficeManagement(port, evidenceDir) {
     evidence.afterReload = await webview.evaluate(
       `document.querySelector('[data-office-component]').textContent`,
     );
-    assert.match(evidence.afterReload, /not yet published|尚未发布/);
+    if (hasRelease)
+      assert.match(evidence.afterReload, /Install environment|安装环境/);
+    else assert.match(evidence.afterReload, /not yet published|尚未发布/);
     assert.deepEqual(await webview.evaluate(`window.__officeProbeErrors`), []);
     await writeFile(
       join(evidenceDir, "office-management.json"),

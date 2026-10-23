@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     const observer: component.Observer = .{ .context = &context, .observe_fn = Context.progress };
     const workflow = std.mem.eql(u8, args[5], "--workflow-witness");
     const checking = workflow or std.mem.eql(u8, args[5], "--check-current");
-    const source = if (std.mem.eql(u8, args[5], "--https")) download.source() else component.Download{ .context = &context, .read_fn = Context.read };
+    const source: component.Download = if (std.mem.eql(u8, args[5], "--https")) .{ .context = &context, .read_fn = Context.https } else .{ .context = &context, .read_fn = Context.read };
     const operation = if (checking)
         store.verifyCurrent(release.identity(), (try store.current()) orelse return error.MissingQualificationCurrent, validation, observer, &cancellation)
     else
@@ -90,6 +90,18 @@ const Context = struct {
     source_directory: []const u8,
     environment: *const std.process.Environ.Map,
     phase: ?component.Phase = null,
+    https_index: usize = 0,
+
+    fn https(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, source: component.Source, writer: *std.Io.Writer, cancellation: *const office.Cancellation) !void {
+        const self: *Context = @ptrCast(@alignCast(context.?));
+        self.https_index += 1;
+        std.debug.print("Qualification HTTPS source {d}: expected {d} bytes\n", .{ self.https_index, source.bytes });
+        const public = download.source();
+        public.read_fn(public.context, allocator, io, source, writer, cancellation) catch |failure| {
+            std.debug.print("Qualification HTTPS source {d} failed: {s}\n", .{ self.https_index, @errorName(failure) });
+            return failure;
+        };
+    }
 
     fn progress(context: ?*anyopaque, value: component.Progress) bool {
         const self: *Context = @ptrCast(@alignCast(context.?));
