@@ -98,6 +98,12 @@ OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Appl
 
 精确 module imports 由 `build.zig` 强制，本文不复制内部 leaf graph。跨 owner import 必须符合上述方向，并只消费发布者显式暴露且由 build graph 具名注入的 root、contract、port 或窄 leaf；具名 leaf 不因此取得新的 owner 身份。
 
+`product_office_component` 是 Product Control 内唯一可选 Office 组件的纯合同与状态 module，不形成新的顶层 owner。Runtime 拥有状态，scoped port 只发布类型和回调；Application worker 仅借用稳定 Attempt，机械进度消费同一 Phase 合同，不持有 Product Runtime。组件行为和事务边界见 [Product 架构](product-architecture.md#可选-office-组件)。
+
+文档预览的 typed material 与 owned effect 是 Product Control 发布的窄合同 leaf；Application 实现物理资源 effect，Product Control 调度只消费该合同，不反向导入 Application。调度与内容授权职责见 [Product 架构](product-architecture.md#3-并发与生命周期)，它不形成新的 owner 或 Renderer 协议。
+
+`office_component_windows` 是 Application 安装事务专用的 Windows 容量与 Authenticode compatibility module，只由组件 store 消费。`office_process` 是 Application 具名注入的有界 Office 进程模块；`office_process_windows` 是其专用 Windows Job compatibility module，只由 `app/office_process.zig` 消费；进程和有界输出的组合仍由 Application 拥有，不形成 Product 或 Agent 可调用的通用进程接口。允许能力与替换条件见[高层架构](architecture.md#35-native-sdk)。
+
 Product Control 的 history schema 位于其 persistence 子模块，只提供静态迁移清单与编译期校验，不拥有连接、health 或恢复方法。它消费具名的纯 SQL contract；测试负责组合真实 backend。生产 Application/Runtime 接入与业务 adapter 另行完成，不能把 schema 的具名导入扩展为任意 Product 模块直接消费 backend 的许可。历史结构与接入条件由 [Product 架构](product-architecture.md#431-history-schema) 唯一承载。
 
 ## 4. 文件放置与封装规则

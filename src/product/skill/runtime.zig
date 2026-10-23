@@ -44,6 +44,13 @@ pub const SourceSettingsResult = state.SourceSettingsResult;
 pub const SourceSettingsView = state.SourceSettingsView;
 pub const SourceRecoveryAction = enum { reread, reset };
 
+/// Borrowed verified Application source. The caller keeps its current-version
+/// reference until a later replacement; each dispatched job retains its own.
+pub const BuiltinSource = struct {
+    root: ?[]const u8,
+    lifetime: ?agent.CatalogSourceLifetime = null,
+};
+
 pub const testing = if (builtin.is_test) struct {
     pub const ManagementInventory = management.Inventory;
     pub const ManagementFileStore = management.FileStore;
@@ -182,6 +189,7 @@ const CatalogJob = struct {
         self.outcome = if (self.catalog_port.query(.{
             .canonical_user_home = self.canonical_user_home,
             .additional_sources = additional,
+            .source_lifetime = self.source_roots.builtin_lifetime,
             .target = switch (self.scope) {
                 .personal => .management,
                 .workspace => .{ .workspace = .{
@@ -208,6 +216,7 @@ const CatalogJob = struct {
     }
 
     fn deinit(self: *CatalogJob) void {
+        if (self.source_roots.builtin_lifetime) |lifetime| lifetime.release();
         if (self.source_roots.builtin_root) |root| self.allocator.free(root);
         self.allocator.free(self.epoch_token);
         self.allocator.free(self.canonical_user_home);
@@ -408,6 +417,34 @@ pub const Runtime = struct {
         // Even a valid reread is durably reconfirmed. Old revisions cannot be
         // reused after recovery, including a file restored from an older copy.
         return self.commitSourceSettings(candidate, budget);
+    }
+
+    /// Owner-thread handoff only. It never touches the filesystem or changes a
+    /// Task's pinned authority. In-flight jobs keep their captured root/pin and
+    /// become stale before the new source can publish a catalog.
+    pub fn replaceBuiltinSource(self: *Runtime, source: BuiltinSource, budget: ProjectionBudget) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (source.root) |root| {
+            if (root.len == 0 or !std.fs.path.isAbsolute(root)) return error.CatalogUnavailable;
+        } else if (source.lifetime != null) return error.CatalogUnavailable;
+        const old = self.ports.source_roots;
+        const same_root = if (source.root) |root| if (old.builtin_root) |previous| std.mem.eql(u8, root, previous) else false else old.builtin_root == null;
+        const same_pin = if (source.lifetime) |pin| if (old.builtin_lifetime) |previous| pin.context == previous.context and pin.retain_fn == previous.retain_fn and pin.release_fn == previous.release_fn else false else old.builtin_lifetime == null;
+        if (same_root and same_pin) return false;
+        // A source switch must not silently complete an asset transaction that
+        // was prepared against another query authority.
+        if (self.state.reconciliation != null) return error.CatalogLoading;
+        if (!self.sourceGenerationsAvailable(true)) return error.CatalogRequestGenerationExhausted;
+        self.ports.source_roots.builtin_root = source.root;
+        self.ports.source_roots.builtin_lifetime = source.lifetime;
+        self.invalidateSourceControl(&self.state.catalog, budget);
+        self.personal_reschedule_pending = true;
+        for (self.workspaces) |*entry| if (entry.*) |*workspace| {
+            if (!workspace.authorized) continue;
+            self.invalidateSourceControl(&workspace.control, budget);
+            workspace.reschedule_pending = true;
+        };
+        return true;
     }
 
     fn sourceGenerationsAvailable(self: *const Runtime, personal_changed: bool) bool {
@@ -1694,7 +1731,7 @@ pub const Runtime = struct {
         home: []const u8,
         epoch: []const u8,
         verification: ?state.Reconciliation,
-    ) std.mem.Allocator.Error!*CatalogJob {
+    ) Error!*CatalogJob {
         const owned_root = try self.allocator.dupe(u8, root);
         errdefer self.allocator.free(owned_root);
         const owned_home = try self.allocator.dupe(u8, home);
@@ -1706,6 +1743,10 @@ pub const Runtime = struct {
         else
             null;
         errdefer if (builtin_root) |value| self.allocator.free(value);
+        const lifetime = self.ports.source_roots.builtin_lifetime;
+        if (lifetime != null and builtin_root == null) return error.CatalogUnavailable;
+        if (lifetime) |value| value.retain() catch return error.CatalogUnavailable;
+        errdefer if (lifetime) |value| value.release();
         var owned_source_roots = self.ports.source_roots;
         owned_source_roots.builtin_root = builtin_root;
         const job = try self.allocator.create(CatalogJob);
@@ -1861,6 +1902,7 @@ const TestHarness = struct {
 
     last_builtin_root: [4096]u8 = undefined,
     last_builtin_root_len: usize = 0,
+    last_source_lifetime: ?agent.CatalogSourceLifetime = null,
 
     fn effectPorts(self: *TestHarness) ports.Ports {
         return .{
@@ -1930,6 +1972,7 @@ const TestHarness = struct {
     ) anyerror!agent.CatalogAcquisition {
         const self: *TestHarness = @ptrCast(@alignCast(context));
         self.query_count += 1;
+        self.last_source_lifetime = input.source_lifetime;
         self.last_source_count = input.additional_sources.len;
         for (input.additional_sources, 0..) |source, index| {
             if (std.mem.eql(u8, source.source_instance_id, sources.builtin_source_instance_id)) {
@@ -3279,4 +3322,139 @@ test "builtin source path is frozen before worker dispatch and missing root bloc
     try std.testing.expectEqual(@as(usize, 1), harness.query_count);
     try std.testing.expectEqual(sources.RootFailure.unreadable, runtime.state.catalog.source_checks.?.builtin.blocked);
     try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
+}
+
+const TestSourceLifetime = struct {
+    references: usize = 1,
+    deny: bool = false,
+
+    fn port(self: *@This()) agent.CatalogSourceLifetime {
+        return .{ .context = self, .retain_fn = retain, .release_fn = release };
+    }
+    fn retain(context: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.deny) return false;
+        self.references += 1;
+        return true;
+    }
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.debug.assert(self.references > 1);
+        self.references -= 1;
+    }
+};
+
+test "builtin job freezes its source pin and query failure releases that exact version" {
+    var first: TestSourceLifetime = .{};
+    var second: TestSourceLifetime = .{};
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    runtime.ports.source_roots.builtin_root = root;
+    runtime.ports.source_roots.builtin_lifetime = first.port();
+    try runtime.refreshPersonal();
+    try std.testing.expectEqual(@as(usize, 2), first.references);
+    runtime.ports.source_roots.builtin_lifetime = second.port();
+    harness.runQueued();
+    try std.testing.expectEqual(first.port().context, harness.last_source_lifetime.?.context);
+    try std.testing.expectEqual(@as(usize, 2), first.references);
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), first.references);
+    try runtime.refreshPersonal();
+    try std.testing.expectEqual(@as(usize, 2), second.references);
+    runtime.beginShutdown();
+    runtime.finishShutdownAfterExecutorJoin(harness.budget(), test_snapshot_limits);
+    try std.testing.expectEqual(@as(usize, 1), second.references);
+}
+
+test "builtin job cannot leak a source pin on queue rejection, missing root or refusal" {
+    var source: TestSourceLifetime = .{};
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    runtime.ports.source_roots.builtin_root = root;
+    runtime.ports.source_roots.builtin_lifetime = source.port();
+    harness.queue_blocked = true;
+    try std.testing.expectError(error.QueueFull, runtime.refreshPersonal());
+    try std.testing.expectEqual(@as(usize, 1), source.references);
+    harness.queue_blocked = false;
+    source.deny = true;
+    try std.testing.expectError(error.CatalogUnavailable, runtime.refreshPersonal());
+    try std.testing.expectEqual(@as(usize, 1), source.references);
+    source.deny = false;
+    runtime.ports.source_roots.builtin_root = "not-an-absolute-existing-root";
+    try runtime.refreshPersonal();
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 0), harness.query_count);
+    try std.testing.expectEqual(@as(usize, 1), source.references);
+}
+
+test "builtin replacement makes captured jobs stale while keeping the exact old source pin" {
+    var first: TestSourceLifetime = .{};
+    var second: TestSourceLifetime = .{};
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    // Keep a workspace query active too: both scopes must reject old results.
+    runtime.registerWorkspaceOwned(.{ .id = 9, .epoch = 1, .catalog_authorized = true, .canonical_root = try std.testing.allocator.dupe(u8, root) }, harness.budget());
+    runtime.ports.source_roots.builtin_root = root;
+    runtime.ports.source_roots.builtin_lifetime = first.port();
+    try runtime.refreshPersonal();
+    harness.runQueued(); // one-slot fixture executor; leave completion uncommitted
+    try runtime.refreshWorkspace(9, 1);
+    const old_generation = runtime.state.catalog.request_generation;
+    try std.testing.expectEqual(@as(usize, 3), first.references);
+    try std.testing.expect(try runtime.replaceBuiltinSource(.{ .root = root, .lifetime = second.port() }, harness.budget()));
+    try std.testing.expect(runtime.state.catalog.request_generation > old_generation);
+    try std.testing.expect(!try runtime.replaceBuiltinSource(.{ .root = root, .lifetime = second.port() }, harness.budget()));
+    harness.queue_blocked = true;
+    harness.runQueued();
+    try std.testing.expectEqual(first.port().context, harness.last_source_lifetime.?.context);
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), first.references);
+    try std.testing.expect(runtime.state.catalog.source_checks == null);
+    try std.testing.expect(runtime.findWorkspace(9).?.control.source_checks == null);
+    try std.testing.expect(runtime.personal_reschedule_pending);
+    try std.testing.expect(runtime.findWorkspace(9).?.reschedule_pending);
+    harness.queue_blocked = false;
+    for (0..4) |_| {
+        _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+        if (harness.queued != null) harness.runQueued();
+    }
+    try std.testing.expectEqual(second.port().context, harness.last_source_lifetime.?.context);
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), second.references);
+    try std.testing.expect(runtime.state.catalog.source_checks != null);
+    try std.testing.expect(runtime.findWorkspace(9).?.control.source_checks != null);
+}
+
+test "builtin replacement refuses malformed exhausted or closing authority without mutation" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var pin: TestSourceLifetime = .{};
+    try std.testing.expectError(error.CatalogUnavailable, runtime.replaceBuiltinSource(.{ .root = null, .lifetime = pin.port() }, harness.budget()));
+    try std.testing.expectError(error.CatalogUnavailable, runtime.replaceBuiltinSource(.{ .root = "relative" }, harness.budget()));
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    runtime.state.catalog.request_generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.CatalogRequestGenerationExhausted, runtime.replaceBuiltinSource(.{ .root = root }, harness.budget()));
+    try std.testing.expect(runtime.ports.source_roots.builtin_root == null);
+    runtime.beginShutdown();
+    try std.testing.expectError(error.ExecutorShuttingDown, runtime.replaceBuiltinSource(.{ .root = root }, harness.budget()));
 }

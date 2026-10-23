@@ -1,9 +1,10 @@
+import { Slots, PreviewCapacityError as Capacity } from "./preview-slots.ts";
+import {
+  PreviewImagePool,
+  PreviewImageSecurityError as StaleSecurity,
+} from "./preview-image-pool.ts";
 import type { NativeSdkJson } from "@native-sdk/cli";
-import type {
-  FilePreview,
-  FilePreviewImage,
-  FilePreviewLoadOptions,
-} from "./contracts.ts";
+import type { FilePreview, FilePreviewLoadOptions } from "./contracts.ts";
 import { commands } from "./commands.ts";
 import {
   decodeFilePreview,
@@ -32,53 +33,6 @@ function delay(ms: number, signal: AbortSignal) {
   });
 }
 
-// The same bounded queue mechanism is used for preparation, receipt and explicit
-// DOM decode admission; it does not claim to control browser-internal workers.
-class Slots {
-  private used = 0;
-  private waiting: {
-    start: () => void;
-    abort: () => void;
-    priority: boolean;
-  }[] = [];
-  private readonly limit: number;
-  private readonly queueLimit: number;
-  constructor(limit: number, queueLimit: number) {
-    this.limit = limit;
-    this.queueLimit = queueLimit;
-  }
-  acquire(signal: AbortSignal, priority = false): Promise<() => void> {
-    check(signal);
-    if (this.waiting.length >= this.queueLimit)
-      return Promise.reject(new Capacity());
-    return new Promise((resolve, reject) => {
-      const entry = { priority, abort: () => {}, start: () => {} };
-      entry.abort = () => {
-        this.waiting = this.waiting.filter((item) => item !== entry);
-        reject(abortError());
-      };
-      entry.start = () => {
-        signal.removeEventListener("abort", entry.abort);
-        this.used++;
-        let released = false;
-        resolve(() => {
-          if (released) return;
-          released = true;
-          this.used--;
-          const next = this.waiting.findIndex((item) => item.priority);
-          this.waiting.splice(next < 0 ? 0 : next, 1)[0]?.start();
-        });
-      };
-      if (this.used < this.limit) entry.start();
-      else {
-        this.waiting.push(entry);
-        signal.addEventListener("abort", entry.abort, { once: true });
-      }
-    });
-  }
-}
-class Capacity extends Error {}
-class StaleSecurity extends Error {}
 type Invoke = (command: string, payload: NativeSdkJson) => Promise<unknown>;
 const failed = (reason?: "capacity"): FilePreview => ({
   state: "error",
@@ -90,19 +44,20 @@ const failed = (reason?: "capacity"): FilePreview => ({
 
 export class FilePreviewLoader {
   private readonly preparations = new Slots(2, 8);
-  private readonly receipts = new Slots(1, 8);
-  private readonly decodes = new Slots(1, 32);
   private session = new AbortController();
   private nextId = 1n;
   private epoch: string | null = null;
   private readonly epochWaiters = new Set<() => void>();
-  private readonly resources = new Set<() => void>();
-  private bytes = 0;
-  private pixels = 0;
 
   private readonly invoke: Invoke;
   private readonly generation: () => string | undefined;
-  constructor(invoke: Invoke, generation: () => string | undefined) {
+  private readonly images: PreviewImagePool;
+  constructor(
+    invoke: Invoke,
+    generation: () => string | undefined,
+    images = new PreviewImagePool(),
+  ) {
+    this.images = images;
     this.invoke = invoke;
     this.generation = generation;
   }
@@ -111,14 +66,14 @@ export class FilePreviewLoader {
     this.session.abort();
     this.session = new AbortController();
     this.epoch = null;
-    for (const dispose of [...this.resources]) dispose();
+    this.images.clear();
     for (const notify of this.epochWaiters) notify();
   }
   observeSecurityEpoch(epoch: string) {
     if (this.epoch !== null && BigInt(epoch) < BigInt(this.epoch)) return;
     if (epoch === this.epoch) return;
     this.epoch = epoch;
-    for (const dispose of [...this.resources]) dispose();
+    this.images.observeSecurityEpoch(epoch);
     for (const notify of this.epochWaiters) notify();
   }
   private waitForNewEpoch(previous: string | null, signal: AbortSignal) {
@@ -226,35 +181,21 @@ export class FilePreviewLoader {
           if (this.epoch === null) this.epoch = descriptor.securityEpoch;
           if (this.epoch !== descriptor.securityEpoch)
             throw new StaleSecurity();
-          const pixels = descriptor.width * descriptor.height;
-          if (
-            this.resources.size >= 32 ||
-            this.bytes + descriptor.sizeBytes > 40 * 1024 * 1024 ||
-            this.pixels + pixels > 33554432
-          )
-            throw new Capacity();
-          this.bytes += descriptor.sizeBytes;
-          this.pixels += pixels;
-          let source = "",
-            valid = true;
-          const listeners = new Set<() => void>();
-          const dispose = () => {
-            if (!valid) return;
-            valid = false;
-            source = "";
-            this.bytes -= descriptor.sizeBytes;
-            this.pixels -= pixels;
-            this.resources.delete(dispose);
-            for (const changed of listeners) changed();
-          };
+          const reservation = this.images.reserve(
+            {
+              ...descriptor,
+              id: `file:${generation}:${previewId}`,
+            },
+            priority,
+          );
+          const { image, release: dispose } = reservation;
           disposeReservation = dispose;
-          this.resources.add(dispose);
-          const releaseReceipt = await this.receipts.acquire(signal, priority);
+          const releaseReceipt = await this.images.receive(signal, priority);
           try {
             const parts: string[] = [];
             for (let offset = 0; offset < descriptor.sizeBytes;) {
               check(signal);
-              if (!valid || this.epoch !== descriptor.securityEpoch)
+              if (!image.valid() || this.epoch !== descriptor.securityEpoch)
                 throw new StaleSecurity();
               const chunk = decodePreviewChunk(
                 await this.invoke(commands.readPreviewImage, {
@@ -289,39 +230,15 @@ export class FilePreviewLoader {
             }
             await releaseHost();
             check(signal);
-            if (!valid || this.epoch !== descriptor.securityEpoch)
+            if (!image.valid() || this.epoch !== descriptor.securityEpoch)
               throw new StaleSecurity();
-            source = `data:${descriptor.mediaType};base64,${parts.join("")}`;
+            reservation.setSource(
+              `data:${descriptor.mediaType};base64,${parts.join("")}`,
+            );
             parts.length = 0;
           } finally {
             releaseReceipt();
           }
-          const image: FilePreviewImage = {
-            id: previewId,
-            mediaType: descriptor.mediaType,
-            width: descriptor.width,
-            height: descriptor.height,
-            securityEpoch: descriptor.securityEpoch,
-            get src() {
-              return source;
-            },
-            valid: () => valid,
-            subscribe: (changed) => {
-              listeners.add(changed);
-              return () => {
-                listeners.delete(changed);
-              };
-            },
-            beginDecode: async (decodeSignal) => {
-              if (!valid) throw abortError();
-              const done = await this.decodes.acquire(decodeSignal, priority);
-              if (!valid) {
-                done();
-                throw abortError();
-              }
-              return done;
-            },
-          };
           disposeReservation = undefined;
           return {
             state: "ready",

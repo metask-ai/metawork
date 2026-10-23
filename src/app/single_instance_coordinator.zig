@@ -427,10 +427,6 @@ test "single-instance coordinator reports SDK wake failure over real transport a
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
-    try adapter.prepareStartup();
-    const startup_window = try @import("window.zig").TestSupport.Window.init();
-    defer startup_window.deinit();
     var coordinator: Coordinator = undefined;
     try std.testing.expectEqual(Disposition.primary, try coordinator.init(std.testing.io, std.testing.allocator, .{ .vector = &.{} }, root, "wake-test", false, false));
     // Declare platform cleanup first: ingress must join before services clear.

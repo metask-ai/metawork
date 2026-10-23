@@ -55,13 +55,6 @@ function run(command, args, options = {}) {
         repositoryRoot,
         localOfficeEnvironment(repositoryRoot),
       ),
-      METAWORK_LOCAL_SKILL_ROOT: path.join(
-        repositoryRoot,
-        "src",
-        "product",
-        "skill",
-        "assets",
-      ),
     },
   });
   if (result.error) throw result.error;
@@ -366,13 +359,6 @@ export function developmentEnvironment(root, inherited = process.env) {
   delete environment.NATIVE_SDK_HMR;
   delete environment.NATIVE_SDK_MODE;
   environment.METAWORK_DEV_REQUIRE_PRIMARY = "1";
-  environment.METAWORK_LOCAL_SKILL_ROOT = path.join(
-    root,
-    "src",
-    "product",
-    "skill",
-    "assets",
-  );
   return environment;
 }
 

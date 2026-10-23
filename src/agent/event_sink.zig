@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdk = @import("metask_agentcore");
+const file_delivery = @import("agent_file_delivery");
 
 pub const Error = error{
     EventTooLarge,
@@ -8,6 +9,8 @@ pub const Error = error{
 
 pub const OwnedCoreEvent = struct {
     generated_image_path: ?[]u8 = null,
+    /// Agent-verified receipt, never decoded from Core JSON or tool text.
+    delivered_file: ?file_delivery.Receipt = null,
     session_id: u64,
     run_id: u64,
     encoded_bytes: usize,
@@ -16,7 +19,9 @@ pub const OwnedCoreEvent = struct {
     allocator: std.mem.Allocator,
 
     pub fn ownedBytes(self: *const OwnedCoreEvent) usize {
-        return self.encoded_bytes +| if (self.generated_image_path) |path| path.len else @as(usize, 0);
+        return self.encoded_bytes +|
+            (if (self.generated_image_path) |path| path.len else @as(usize, 0)) +|
+            (if (self.delivered_file != null) @as(usize, @sizeOf(file_delivery.Receipt)) else 0);
     }
 
     /// Ownership transfers from the sink to the caller. Do not copy this

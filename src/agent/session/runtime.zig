@@ -18,6 +18,7 @@ const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 const image = @import("../image_generation.zig");
 const image_tool = @import("../generate_image.zig");
+const delivery_tool = @import("agent_file_delivery");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
 // direct typed references without introducing a speculative context layer.
 const root = @import("../session.zig");
@@ -69,6 +70,7 @@ pub const Runtime = struct {
     image_budget: image.Budget = .{ .limit = 0 },
     image_results_created: std.atomic.Value(usize) = .init(0),
     image_results_released: std.atomic.Value(usize) = .init(0),
+    delivery_results_outstanding: std.atomic.Value(usize) = .init(0),
     io: std.Io,
     allocator: std.mem.Allocator,
     api: sdk.Api,
@@ -194,8 +196,17 @@ pub const Runtime = struct {
         image_descriptor.input_schema_json = sdk.bytesView(image_tool.schema);
         image_descriptor.execute = Session.executeImage;
         image_descriptor.release_result = Session.releaseImageResult;
-        runtime_config.host_tools = @ptrCast(&image_descriptor);
-        runtime_config.host_tool_count = 1;
+        var delivery_descriptor = std.mem.zeroes(wire.HostToolV1);
+        delivery_descriptor.struct_size = @sizeOf(wire.HostToolV1);
+        delivery_descriptor.ctx = self;
+        delivery_descriptor.name = sdk.bytesView(delivery_tool.name);
+        delivery_descriptor.description = sdk.bytesView(delivery_tool.description);
+        delivery_descriptor.input_schema_json = sdk.bytesView(delivery_tool.schema);
+        delivery_descriptor.execute = Session.executeDelivery;
+        delivery_descriptor.release_result = Session.releaseDeliveryResult;
+        const host_tools = [_]wire.HostToolV1{ image_descriptor, delivery_descriptor };
+        runtime_config.host_tools = &host_tools;
+        runtime_config.host_tool_count = host_tools.len;
         const mcp_registry_generation = if (limits.mcp_input) |input|
             input.generation
         else
@@ -942,11 +953,12 @@ pub const Runtime = struct {
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
-        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + 1);
+        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + 2);
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
         allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
+        allowed_views[capabilities.builtins.len + 1] = sdk.bytesView(delivery_tool.name);
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -1075,12 +1087,13 @@ pub const Runtime = struct {
         }
         const allowed_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            capabilities.builtins.len + 1,
+            capabilities.builtins.len + 2,
         );
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
         allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
+        allowed_views[capabilities.builtins.len + 1] = sdk.bytesView(delivery_tool.name);
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
@@ -1462,6 +1475,7 @@ pub const Runtime = struct {
         std.debug.assert(self.multimodal_input_budget.used.load(.monotonic) == 0);
         std.debug.assert(self.image_budget.used.load(.acquire) == 0);
         std.debug.assert(self.image_results_created.load(.acquire) == self.image_results_released.load(.acquire));
+        std.debug.assert(self.delivery_results_outstanding.load(.acquire) == 0);
         self.events.deinit();
         self.mcp_servers.deinit();
         for (self.retired_mcp_servers.items) |*servers| servers.deinit();

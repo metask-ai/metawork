@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import struct
+import tempfile
 import unicodedata
 import uuid
 import zipfile
@@ -218,6 +219,69 @@ def list_archive(filename, offset=0, limit=100, limits=DEFAULT_LIMITS):
                         for info, _, _ in entries[offset:offset + limit]],
             "nextOffset": offset + limit if offset + limit < len(entries) else None,
         }
+
+
+def read_member(filename, name, limits=DEFAULT_LIMITS):
+    """Read one checked member; never trust ZipFile's declared size to bound it."""
+    with _archive(filename, limits) as (source, entries):
+        for info, _, start in entries:
+            if info.orig_filename != name or info.is_dir():
+                continue
+            content = bytearray()
+            crc = 0
+            for chunk in _chunks(source, info, start):
+                if len(content) + len(chunk) > min(limits.member_bytes, limits.total_bytes):
+                    raise ArchiveError("Actual ZIP decompressed-byte budget exceeded")
+                content.extend(chunk)
+                crc = zlib.crc32(chunk, crc)
+            if len(content) != info.file_size or crc != info.CRC:
+                raise ArchiveError("ZIP payload size or CRC mismatch")
+            return bytes(content)
+        raise KeyError(name)
+
+
+def check_archive(filename, limits=DEFAULT_LIMITS):
+    """Validate every payload without materializing an extraction tree."""
+    total = 0
+    with _archive(filename, limits) as (source, entries):
+        for info, _, start in entries:
+            size, crc = 0, 0
+            for chunk in _chunks(source, info, start):
+                size += len(chunk)
+                total += len(chunk)
+                if size > limits.member_bytes or total > limits.total_bytes:
+                    raise ArchiveError("Actual ZIP decompressed-byte budget exceeded")
+                crc = zlib.crc32(chunk, crc)
+            if size != info.file_size or crc != info.CRC:
+                raise ArchiveError("ZIP payload size or CRC mismatch")
+
+
+@contextmanager
+def checked_copy(filename, limits=DEFAULT_LIMITS):
+    """Give third-party consumers the same private bytes that were checked."""
+    with tempfile.TemporaryDirectory(prefix="metawork-office-input-") as directory:
+        target = Path(directory) / ("input" + Path(filename).suffix)
+        with _archive(filename, limits) as (source, _):
+            source.seek(0)
+            copied = 0
+            with target.open("xb") as output:
+                while chunk := source.read(CHUNK):
+                    copied += len(chunk)
+                    if copied > limits.archive_bytes:
+                        raise ArchiveError("Actual ZIP archive-byte budget exceeded")
+                    output.write(chunk)
+        check_archive(target, limits)
+        yield target
+
+
+@contextmanager
+def temporary_extract(filename, limits=DEFAULT_LIMITS):
+    """Own the checked extraction until its consumer finishes, including failure."""
+    with tempfile.TemporaryDirectory(prefix="metawork-office-") as directory:
+        root = Path(directory).resolve()
+        output = root / "content"
+        safe_extract(filename, output, limits, workspace=root)
+        yield output
 
 
 def safe_extract(filename, output, limits=DEFAULT_LIMITS, *, workspace=None):

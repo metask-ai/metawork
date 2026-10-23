@@ -3,8 +3,7 @@ Validator for tracked changes in Word documents.
 """
 
 import subprocess
-import tempfile
-import zipfile
+from archive import temporary_extract
 from pathlib import Path
 
 
@@ -56,15 +55,7 @@ class RedliningValidator:
         except Exception:
             pass
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-
-            try:
-                with zipfile.ZipFile(self.original_docx, "r") as zip_ref:
-                    zip_ref.extractall(temp_path)
-            except Exception as e:
-                print(f"FAILED - Error unpacking original docx: {e}")
-                return False
+        with temporary_extract(self.original_docx) as temp_path:
 
             original_file = temp_path / "word" / "document.xml"
             if not original_file.exists():

@@ -1,4 +1,8 @@
-import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
+import { outputActionStates } from "./contracts.ts";
+import {
+  decodeTaskApprovalResultWire,
+  decodeOfficeComponentView,
+} from "./generated-wire.ts";
 import {
   exactKeys,
   fail,
@@ -8,6 +12,7 @@ import {
   booleanValue,
   arrayValue,
   wireId,
+  u64WireInteger,
   positiveWireId,
   positiveU64WireId,
   numberValue,
@@ -121,6 +126,24 @@ import {
 } from "./contracts.ts";
 
 type JsonObject = Record<string, unknown>;
+
+export function decodeOutputActionResult(value: unknown) {
+  const item = object(value, "$", ["generation", "operationId", "state"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    operationId: positiveU64WireId(item.operationId, "$.operationId"),
+    state: enumValue(item.state, "$.state", outputActionStates),
+  };
+}
+
+export function decodeOutputActionCancel(value: unknown) {
+  const item = object(value, "$", ["generation", "operationId", "cancelled"]);
+  return {
+    generation: positiveU64WireId(item.generation, "$.generation"),
+    operationId: positiveU64WireId(item.operationId, "$.operationId"),
+    cancelled: booleanValue(item.cancelled, "$.cancelled"),
+  };
+}
 
 export function decodeExternalLinkOpenResult(value: unknown) {
   const item = object(value, "$", ["outcome"]);
@@ -2572,6 +2595,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "usage",
     "tools",
     "fileChanges",
+    "outputs",
   ]);
   const executionItem = object(item.execution, `${path}.execution`, [
     "generation",
@@ -2706,7 +2730,55 @@ function decodeRun(value: unknown, path: string): RunView {
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
     fileChanges: decodeRunFileChanges(item.fileChanges, `${path}.fileChanges`),
+    outputs: decodeDeliveredOutputs(item.outputs, `${path}.outputs`),
   };
+}
+
+function decodeDeliveredOutputs(
+  value: unknown,
+  path: string,
+): RunView["outputs"] {
+  if (!Array.isArray(value) || value.length > 8)
+    fail(path, "expected bounded delivered outputs");
+  const ids = new Set<string>();
+  return value.map((raw, index) => {
+    const itemPath = `${path}[${index}]`;
+    const item = object(raw, itemPath, [
+      "id",
+      "displayPath",
+      "sizeBytes",
+      "redacted",
+    ]);
+    const id = stringValue(item.id, `${itemPath}.id`);
+    if (!/^[0-9a-f]{32}$/.test(id) || /^0+$/.test(id) || ids.has(id))
+      fail(itemPath, "invalid or repeated output identity");
+    ids.add(id);
+    const displayPath = stringValue(
+      item.displayPath,
+      `${itemPath}.displayPath`,
+    );
+    const redacted = booleanValue(item.redacted, `${itemPath}.redacted`);
+    if (
+      redacted
+        ? displayPath !== ""
+        : displayPath.length === 0 ||
+          new TextEncoder().encode(displayPath).length > 512 ||
+          /[\u0000-\u001f\u007f\\:<>"|?*]/.test(displayPath) ||
+          displayPath
+            .split("/")
+            .some(
+              (part) =>
+                !part || part === "." || part === ".." || /[. ]$/.test(part),
+            )
+    )
+      fail(itemPath, "invalid output display path");
+    return {
+      id,
+      displayPath,
+      sizeBytes: u64WireInteger(item.sizeBytes, `${itemPath}.sizeBytes`),
+      redacted,
+    };
+  });
 }
 
 function decodeRunFileChanges(
@@ -4882,6 +4954,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "permissions",
     "account",
     "models",
+    "office",
     "newTaskAdmission",
     "automaticWorkspaceRoot",
     "skillCatalog",
@@ -5590,6 +5663,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     permissions,
     account: decodeAccount(root.account, "$.account"),
     models: decodeModels(root.models, "$.models"),
+    office: decodeOfficeComponentView(root.office, "$.office"),
     newTaskAdmission: decodeNewTaskAdmission(
       root.newTaskAdmission,
       "$.newTaskAdmission",

@@ -212,7 +212,15 @@ function renderCompletedSurface(
     redacted: false,
   },
   compacts = [],
-  { pendingUi = null, uiHistory = [], conversationCoverage = "included" } = {},
+  {
+    pendingUi = null,
+    uiHistory = [],
+    conversationCoverage = "included",
+    outputs = [],
+    outputsEnabled = false,
+    onOutputAction,
+    onPrepareOutputEdit,
+  } = {},
 ) {
   const task = {
     id: "3",
@@ -228,6 +236,7 @@ function renderCompletedSurface(
         },
         input,
         additionalInputs: [],
+        outputs,
         output: {
           commentary: [],
           response: assistant,
@@ -288,6 +297,9 @@ function renderCompletedSurface(
         retryAvailable: true,
         responseDisabled: false,
         fileChangesEnabled: false,
+        outputsEnabled,
+        onOutputAction,
+        onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
@@ -1240,4 +1252,62 @@ test("an active Run keeps same-sized Send and Stop actions", () => {
   assert.match(empty, /aria-label="Stop task"/);
   assert.doesNotMatch(empty, /aria-label="Send"/);
   assert.doesNotMatch(empty, /composer-draft-note|await adoption/);
+});
+
+test("Task shows only explicit delivered Output records and hides redacted paths", () => {
+  const output = {
+    id: "01".repeat(16),
+    displayPath: "results/年度报告.docx",
+    sizeBytes: "42",
+    redacted: false,
+  };
+  const empty = renderCompletedSurface();
+  assert.doesNotMatch(empty, /class="run-outputs"/);
+  const disabled = renderCompletedSurface("Final report", undefined, [], {
+    outputs: [output],
+  });
+  assert.doesNotMatch(disabled, /class="run-outputs"/);
+  const visible = renderCompletedSurface("Final report", undefined, [], {
+    outputs: [output],
+    outputsEnabled: true,
+  });
+  assert.match(visible, /aria-label="Delivered files"/);
+  assert.match(visible, /年度报告.docx/);
+  assert.match(visible, /Delivered · 42 bytes/);
+  assert.doesNotMatch(visible, /href="(?:file:|results)/);
+  assert.doesNotMatch(visible, /SHA-256|sha256|locator/);
+  const hidden = renderCompletedSurface("Final report", undefined, [], {
+    outputs: [{ ...output, displayPath: "", redacted: true }],
+    outputsEnabled: true,
+  });
+  assert.match(hidden, /File path hidden/);
+  assert.doesNotMatch(hidden, /年度报告|results\//);
+});
+
+test("Task passes the continue-edit action to its delivered files only when preparation is available", () => {
+  const options = {
+    outputs: [
+      {
+        id: "01".repeat(16),
+        displayPath: "results/report.docx",
+        sizeBytes: "42",
+        redacted: false,
+      },
+    ],
+    outputsEnabled: true,
+    onOutputAction: async () => "ready",
+  };
+  const withoutPreparation = renderCompletedSurface(
+    "Done",
+    undefined,
+    [],
+    options,
+  );
+  assert.match(withoutPreparation, />Check file</);
+  assert.doesNotMatch(withoutPreparation, />Continue editing</);
+  const available = renderCompletedSurface("Done", undefined, [], {
+    ...options,
+    onPrepareOutputEdit: () => "edit_prepared",
+  });
+  assert.match(available, />Continue editing</);
 });

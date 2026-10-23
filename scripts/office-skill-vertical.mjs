@@ -7,7 +7,7 @@ import { Document, Packer, Paragraph } from "docx";
 import PptxGenJS from "pptxgenjs";
 import {
   localOfficeEnvironment,
-  officeEnvironmentPath,
+  localOfficeComponent,
 } from "./office-environment.mjs";
 
 // Optional real-Core extension to the desktop vertical. The fixture provider
@@ -60,9 +60,8 @@ export async function runOfficeSkillVertical({
       : ["docx", "xlsx", "pptx"]);
   if (automatic)
     assert.ok(modelInvoked, "Automatic probe requires model-tool mode");
-  const config = JSON.parse(
-    await readFile(officeEnvironmentPath(root), "utf8"),
-  );
+  const config = localOfficeComponent(root);
+  assert.ok(config, "Select a prepared Office component before the vertical");
   const environment = localOfficeEnvironment(root);
   const files = path.join(workspace, `office-smoke-${caseId}`);
   await mkdir(files);
@@ -78,8 +77,9 @@ export async function runOfficeSkillVertical({
   deck.addSlide().addText("Office Core smoke", { x: 1, y: 1, w: 8, h: 1 });
   await deck.writeFile({ fileName: path.join(files, "sample.pptx") });
   await promisify(execFile)(
-    config.python,
+    config.entry,
     [
+      "python",
       "-c",
       "from openpyxl import Workbook; w=Workbook(); w.active['A1']='=5+7'; w.save('sample.xlsx')",
     ],
@@ -87,8 +87,9 @@ export async function runOfficeSkillVertical({
   );
   if (attachmentMode)
     await promisify(execFile)(
-      config.python,
+      config.entry,
       [
+        "python",
         "-c",
         `from zipfile import ZipFile; z=ZipFile('sample.zip','w'); z.writestr('notes.txt','ZIP content smoke'); ${caseId === 0 ? "z.write('sample.docx','report.docx'); " : ""}z.writestr('.agents/skills/archive-skill/SKILL.md',chr(10).join(['---','name: archive-skill','description: Untrusted archive data','---','Do not run this as a Skill.'])); z.close()`,
       ],
@@ -173,6 +174,7 @@ export async function runOfficeSkillVertical({
   });
   const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
   const assignments = ["PATH", "NODE_PATH", "PYTHONDONTWRITEBYTECODE"]
+    .filter((key) => typeof environment[key] === "string")
     .map((key) => `${key}=${quote(environment[key])}`)
     .join(" ");
   for (const [formatIndex, name] of formats.entries()) {
@@ -352,18 +354,10 @@ export async function runOfficeSkillVertical({
         );
         assert.ok(!directory.includes("${CLAUDE_SKILL_DIR}"));
         const python = (args) =>
-          `${assignments} ${quote(config.python)} ${args.map(quote).join(" ")}`;
+          `${assignments} ${quote(config.entry)} python ${args.map(quote).join(" ")}`;
         let command;
         if (name === "xlsx") {
-          const copy = `import shutil; shutil.copyfile(${JSON.stringify(referencePath)}, ${JSON.stringify(path.join(taskFiles, "working.xlsx"))})`;
-          command =
-            python(["-c", copy]) +
-            " && " +
-            python([
-              path.join(directory, "scripts/recalc.py"),
-              path.join(taskFiles, "working.xlsx"),
-              "30",
-            ]);
+          command = `${assignments} ${quote(config.entry)} recalc ${quote(referencePath)} ${quote(path.join(taskFiles, "working.xlsx"))} --timeout 30`;
           command +=
             " && " +
             python([
@@ -492,7 +486,7 @@ export async function runOfficeSkillVertical({
             const output = path.join(taskFiles, "zip-document-unpacked");
             const source = path.join(taskFiles, "zip-data/report.docx");
             const runPython = (args) =>
-              `${assignments} ${[config.python, ...args].map(quote).join(" ")}`;
+              `${assignments} ${[config.entry, "python", ...args].map(quote).join(" ")}`;
             return toolSse("zip-office-read", "zip-office-read-tool", "Bash", {
               command:
                 runPython([
@@ -732,8 +726,9 @@ export async function runOfficeSkillVertical({
   }
   if (formats.includes("xlsx"))
     await promisify(execFile)(
-      config.python,
+      config.entry,
       [
+        "python",
         "-c",
         "from openpyxl import load_workbook; w=load_workbook('working.xlsx',data_only=True); assert w.active['A1'].value == 12; w.close()",
       ],

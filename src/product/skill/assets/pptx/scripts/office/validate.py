@@ -15,8 +15,9 @@ Auto-repair fixes:
 
 import argparse
 import sys
-import tempfile
-import zipfile
+from contextlib import ExitStack
+
+from archive import temporary_extract
 from pathlib import Path
 
 from validators import DOCXSchemaValidator, PPTXSchemaValidator, RedliningValidator
@@ -52,59 +53,57 @@ def main():
     )
     args = parser.parse_args()
 
-    path = Path(args.path)
-    assert path.exists(), f"Error: {path} does not exist"
+    with ExitStack() as resources:
+        path = Path(args.path)
+        assert path.exists(), f"Error: {path} does not exist"
 
-    original_file = None
-    if args.original:
-        original_file = Path(args.original)
-        assert original_file.is_file(), f"Error: {original_file} is not a file"
-        assert original_file.suffix.lower() in [".docx", ".pptx", ".xlsx"], (
-            f"Error: {original_file} must be a .docx, .pptx, or .xlsx file"
+        original_file = None
+        if args.original:
+            original_file = Path(args.original)
+            assert original_file.is_file(), f"Error: {original_file} is not a file"
+            assert original_file.suffix.lower() in [".docx", ".pptx", ".xlsx"], (
+                f"Error: {original_file} must be a .docx, .pptx, or .xlsx file"
+            )
+
+        file_extension = (original_file or path).suffix.lower()
+        assert file_extension in [".docx", ".pptx", ".xlsx"], (
+            f"Error: Cannot determine file type from {path}. Use --original or provide a .docx/.pptx/.xlsx file."
         )
 
-    file_extension = (original_file or path).suffix.lower()
-    assert file_extension in [".docx", ".pptx", ".xlsx"], (
-        f"Error: Cannot determine file type from {path}. Use --original or provide a .docx/.pptx/.xlsx file."
-    )
+        if path.is_file() and path.suffix.lower() in [".docx", ".pptx", ".xlsx"]:
+            unpacked_dir = resources.enter_context(temporary_extract(path))
+        else:
+            assert path.is_dir(), f"Error: {path} is not a directory or Office file"
+            unpacked_dir = path
 
-    if path.is_file() and path.suffix.lower() in [".docx", ".pptx", ".xlsx"]:
-        temp_dir = tempfile.mkdtemp()
-        with zipfile.ZipFile(path, "r") as zf:
-            zf.extractall(temp_dir)
-        unpacked_dir = Path(temp_dir)
-    else:
-        assert path.is_dir(), f"Error: {path} is not a directory or Office file"
-        unpacked_dir = path
+        match file_extension:
+            case ".docx":
+                validators = [
+                    DOCXSchemaValidator(unpacked_dir, original_file, verbose=args.verbose),
+                ]
+                if original_file:
+                    validators.append(
+                        RedliningValidator(unpacked_dir, original_file, verbose=args.verbose, author=args.author)
+                    )
+            case ".pptx":
+                validators = [
+                    PPTXSchemaValidator(unpacked_dir, original_file, verbose=args.verbose),
+                ]
+            case _:
+                print(f"Error: Validation not supported for file type {file_extension}")
+                sys.exit(1)
 
-    match file_extension:
-        case ".docx":
-            validators = [
-                DOCXSchemaValidator(unpacked_dir, original_file, verbose=args.verbose),
-            ]
-            if original_file:
-                validators.append(
-                    RedliningValidator(unpacked_dir, original_file, verbose=args.verbose, author=args.author)
-                )
-        case ".pptx":
-            validators = [
-                PPTXSchemaValidator(unpacked_dir, original_file, verbose=args.verbose),
-            ]
-        case _:
-            print(f"Error: Validation not supported for file type {file_extension}")
-            sys.exit(1)
+        if args.auto_repair:
+            total_repairs = sum(v.repair() for v in validators)
+            if total_repairs:
+                print(f"Auto-repaired {total_repairs} issue(s)")
 
-    if args.auto_repair:
-        total_repairs = sum(v.repair() for v in validators)
-        if total_repairs:
-            print(f"Auto-repaired {total_repairs} issue(s)")
+        success = all(v.validate() for v in validators)
 
-    success = all(v.validate() for v in validators)
+        if success:
+            print("All validations PASSED!")
 
-    if success:
-        print("All validations PASSED!")
-
-    sys.exit(0 if success else 1)
+        sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

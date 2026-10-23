@@ -2621,11 +2621,17 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /system_webview_drag_region|startWindowDrag/,
   );
   const window = read("src/app/window.zig");
-  const resizePath = "src/native_sdk_compat/system_webview_resize.zig";
-  const resizeWindowsPath =
-    "src/native_sdk_compat/system_webview_resize/windows.zig";
-  const startupWindowsPath =
-    "src/native_sdk_compat/system_webview_startup_window/windows.zig";
+  for (const path of [
+    "src/native_sdk_compat/system_webview_resize.zig",
+    "src/native_sdk_compat/system_webview_resize/windows.zig",
+    "src/native_sdk_compat/system_webview_startup_window.zig",
+    "src/native_sdk_compat/system_webview_startup_window/windows.zig",
+  ])
+    assert.ok(!existsSync(new URL(path, root)), `retired window seam: ${path}`);
+  assert.doesNotMatch(
+    compatSource + window + read("src/app/platform.zig"),
+    /system_webview_resize|system_webview_startup_window|SetWindowsHookEx|SetWindowSubclass/,
+  );
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
   const instanceWindowsPath =
     "src/native_sdk_compat/app_single_instance/windows.zig";
@@ -2654,14 +2660,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   ]) {
     assert.match(window, new RegExp(`runtime\\.${method}\\(window_id\\)`));
   }
-  for (const seamPath of [resizePath]) {
-    assert.deepEqual(
-      zigFiles("src/").filter((file) =>
-        read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
-      ),
-      ["src/app/window.zig"],
-    );
-  }
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes('@import("metawork_app_single_instance_compat")'),
@@ -2689,63 +2687,11 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     [],
   );
 
-  assert.deepEqual(
-    externSymbols(read(resizeWindowsPath), ["user32", "kernel32", "comctl32"]),
-    [
-      "CreateWindowExW",
-      "DefSubclassProc",
-      "DefWindowProcW",
-      "DestroyWindow",
-      "GetClientRect",
-      "GetCurrentThreadId",
-      "GetDpiForWindow",
-      "GetModuleHandleW",
-      "GetSystemMetricsForDpi",
-      "GetWindow",
-      "GetWindowLongPtrW",
-      "GetWindowThreadProcessId",
-      "IsIconic",
-      "IsWindow",
-      "IsWindowEnabled",
-      "IsZoomed",
-      "LoadCursorW",
-      "PostMessageW",
-      "RegisterClassExW",
-      "RegisterWindowMessageW",
-      "ReleaseCapture",
-      "RemoveWindowSubclass",
-      "ScreenToClient",
-      "SetCursor",
-      "SetWindowLongPtrW",
-      "SetWindowPos",
-      "SetWindowSubclass",
-    ].sort(),
-  );
-  assert.doesNotMatch(
-    read(resizeWindowsPath),
-    /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
-  );
   assert.doesNotMatch(
     read("build.zig"),
     /window-chrome-probe|window_chrome_probe/,
   );
   assert.doesNotMatch(read("src/app.zig"), /runWindowChromeProbe/);
-  assert.deepEqual(
-    externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),
-    [
-      "CallNextHookEx",
-      "CreateWindowExW",
-      "DestroyWindow",
-      "GetAncestor",
-      "GetCurrentProcessId",
-      "GetCurrentThreadId",
-      "GetWindow",
-      "GetWindowThreadProcessId",
-      "IsWindow",
-      "SetWindowsHookExW",
-      "UnhookWindowsHookEx",
-    ].sort(),
-  );
   assert.deepEqual(
     externSymbols(read(instanceWindowsPath), [
       "advapi32",
@@ -2888,6 +2834,52 @@ test("Application arbitrates single-instance ownership before business owners", 
     platform,
     /app_window\.tray_quit_id => \.quit_requested,[\s\S]*?pub fn requestExplicitQuit/u,
   );
+});
+
+test("Office Windows Job seam has one Application consumer and exact OS symbols", () => {
+  const seam = "src/native_sdk_compat/office_process_windows.zig";
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("office_process_windows")'),
+    ),
+    ["src/app/office_process.zig"],
+  );
+  assert.deepEqual(
+    externSymbols(read(seam), ["kernel32"]),
+    [
+      "CloseHandle",
+      "CreateJobObjectW",
+      "GetCurrentProcess",
+      "GetCurrentProcessId",
+      "GetLastError",
+      "GetProcessTimes",
+      "PeekNamedPipe",
+      "QueryInformationJobObject",
+      "SetInformationJobObject",
+      "TerminateJobObject",
+      "WaitForSingleObject",
+    ].sort(),
+  );
+  assert.match(read("docs/architecture.md"), /`office_process_tree`/u);
+});
+
+test("Office installation platform validation stays narrow and main-pinned", () => {
+  assert.deepEqual(
+    externSymbols(read("src/native_sdk_compat/office_component_windows.zig"), [
+      "kernel32",
+      "wintrust",
+    ]),
+    ["GetDiskFreeSpaceExW", "WinVerifyTrust"].sort(),
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("office_component_windows")'),
+    ),
+    ["src/app/office_component_store.zig"],
+  );
+  assert.match(read("build.zig"), /office_component_release\.zig/u);
+  assert.match(read("src/app/office_component_release.zig"), /manifestSha256/u);
+  assert.match(read("docs/architecture.md"), /`office_component_validation`/u);
 });
 
 test("ordinary build and test entries stay isolated from macOS signing", () => {

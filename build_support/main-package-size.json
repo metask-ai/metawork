@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "baselineVersion": "0.2.6",
+  "targets": {
+    "x86_64-windows-msvc": {
+      "artifact": "metawork-0.2.6-windows-x64.exe",
+      "sha256": "92c0cefa7d75fe3606587e7695acc33fddb16945d66b939e88193d93a8075ff4",
+      "bytes": 8441096,
+      "allowanceBytes": 1048576
+    },
+    "aarch64-windows-msvc": {
+      "artifact": "metawork-0.2.6-windows-arm64.exe",
+      "sha256": "eef76ada2f0b6cfaf9ed89ea260a1f827a77007f8729790c1b7ec9e813e50acd",
+      "bytes": 8053432,
+      "allowanceBytes": 1048576
+    }
+  }
+}

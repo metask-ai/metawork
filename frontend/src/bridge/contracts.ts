@@ -1,8 +1,13 @@
 import {
   approvalFailureReasons,
   type TaskApprovalResultWire,
+  type OfficeComponentView,
 } from "./generated-wire.ts";
 export { approvalFailureReasons };
+export type {
+  OfficeComponentView,
+  OfficeComponentResult,
+} from "./generated-wire.ts";
 
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
@@ -707,6 +712,41 @@ export type RunActivity =
 
 export type ConversationCoverage = "included" | "excluded";
 
+export const outputActionStates = [
+  "ready",
+  "revealed",
+  "saved",
+  "save_failed",
+  "target_changed",
+  "cleanup_failed",
+  "busy",
+  "missing",
+  "restricted",
+  "changed",
+  "too_large",
+  "cancelled",
+  "timed_out",
+  "stale_security",
+  "unavailable",
+  "failed",
+] as const;
+export type OutputActionState = (typeof outputActionStates)[number];
+export type OutputAction = "check" | "reveal" | "save";
+export type OutputActionHandler = (
+  taskId: string,
+  runId: string,
+  outputId: string,
+  action: OutputAction,
+  signal: AbortSignal,
+) => Promise<OutputActionState>;
+
+export type DeliveredOutputView = {
+  id: string;
+  displayPath: string;
+  sizeBytes: string;
+  redacted: boolean;
+};
+
 export type RunView = {
   submission: InputSubmission | null;
   elapsedMs: string | null;
@@ -735,6 +775,7 @@ export type RunView = {
   };
   tools: ToolView[];
   fileChanges: RunFileChanges | null;
+  outputs: DeliveredOutputView[];
 };
 
 export type ConversationContext = {
@@ -1120,6 +1161,7 @@ export const emptyViewVersions: ViewVersions = {
 };
 
 export type WorkbenchSnapshot = {
+  office: OfficeComponentView;
   revision: string;
   blockVersions: ViewVersions;
   securityEpoch: string;

@@ -19,6 +19,10 @@ import { runChild } from "./run-child-process.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import {
+  verifyMainPackageSize,
+  verifyMainPackageStage,
+} from "./main-package-size.mjs";
+import {
   stageAgentCoreRuntimeAssets,
   verifyAgentCoreRuntimeAssets,
 } from "./agentcore-runtime-assets.mjs";
@@ -641,6 +645,7 @@ async function packageWindows() {
     bundle,
     path.join(distribution.runtimeStagePath, "bin"),
   );
+  verifyMainPackageStage(distribution.runtimeStagePath);
   const installerStem = distribution.installerArtifactName.slice(
     0,
     -".exe".length,
@@ -693,6 +698,10 @@ async function packageWindows() {
     );
   }
   const digest = verifyWindowsInstaller(distribution.installerArtifactPath);
+  verifyMainPackageSize(
+    distribution.targetId,
+    distribution.installerArtifactPath,
+  );
   console.log(
     `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest})`,
   );

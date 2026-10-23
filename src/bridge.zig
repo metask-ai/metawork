@@ -15,6 +15,7 @@ pub const Dispatcher = dispatcher_impl.Dispatcher;
 pub const DispatcherPlatform = dispatcher_impl.Platform;
 pub const DispatcherAutomationAuthority = dispatcher_impl.AutomationAuthority;
 pub const McpManagementHost = dispatcher_impl.McpManagementHost;
+pub const OfficeHost = dispatcher_impl.OfficeHost;
 pub const McpHostOutcome = dispatcher_impl.McpHostOutcome;
 pub const McpAuthorizationStartOutcome = dispatcher_impl.McpAuthorizationStartOutcome;
 pub const McpConnectionTestStartOutcome = dispatcher_impl.McpConnectionTestStartOutcome;
@@ -118,4 +119,5 @@ test {
     std.testing.refAllDecls(snapshot_delivery_impl);
     std.testing.refAllDecls(@import("bridge/snapshot_contract.zig"));
     std.testing.refAllDecls(dispatcher_impl);
+    std.testing.refAllDecls(@import("bridge/document_preview.zig"));
 }

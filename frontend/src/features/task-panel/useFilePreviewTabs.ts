@@ -1,3 +1,5 @@
+import { isDocumentPreviewFile } from "../../bridge/document-format.ts";
+import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { useEffect, useRef, useState } from "react";
 
 import type {
@@ -16,6 +18,7 @@ type FilePreviewIdentity = {
 };
 
 export type FilePreviewTabState =
+  | (FilePreviewIdentity & { kind: "document"; document: DocumentPreview })
   | (FilePreviewIdentity & { kind: "loading" })
   | (FilePreviewIdentity & { kind: "ready"; preview: FilePreview })
   | (FilePreviewIdentity & { kind: "failed"; preview: FilePreview });
@@ -31,6 +34,12 @@ export function useFilePreviewTabs(
   activeTaskId: string | null,
   validTabIds: ReadonlySet<string>,
   load: FilePreviewLoader,
+  loadDocument?: (
+    taskId: string,
+    runId: string,
+    referenceId: string,
+    signal: AbortSignal,
+  ) => DocumentPreview,
 ) {
   const [resources, setResourceState] = useState<
     Record<string, FilePreviewTabState>
@@ -56,6 +65,7 @@ export function useFilePreviewTabs(
     controllers.current.delete(tabId);
     const resource = resourcesRef.current[tabId];
     if (resource && "preview" in resource) resource.preview.release?.();
+    if (resource?.kind === "document") void resource.document.close();
     generations.current.set(tabId, (generations.current.get(tabId) ?? 0) + 1);
   }
 
@@ -77,6 +87,19 @@ export function useFilePreviewTabs(
       reference,
       requestGeneration,
     };
+    if (loadDocument && isDocumentPreviewFile(reference.displayPath)) {
+      const document = loadDocument(
+        taskId,
+        runId,
+        reference.id,
+        controller.signal,
+      );
+      setResources((current) => ({
+        ...current,
+        [tab.tabId]: { ...identity, kind: "document", document },
+      }));
+      return;
+    }
     setResources((current) => ({
       ...current,
       [tab.tabId]: { kind: "loading", ...identity },
@@ -184,8 +207,10 @@ export function useFilePreviewTabs(
     return () => {
       for (const controller of controllers.current.values()) controller.abort();
       controllers.current.clear();
-      for (const resource of Object.values(resourcesRef.current))
+      for (const resource of Object.values(resourcesRef.current)) {
         if ("preview" in resource) resource.preview.release?.();
+        if (resource.kind === "document") void resource.document.close();
+      }
     };
   }, [activeTaskId]);
 

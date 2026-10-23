@@ -8,6 +8,16 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
+const initialOfficeView = JSON.parse(
+  readFileSync(
+    new URL(
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+).office;
+
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
   appType: "custom",
@@ -182,6 +192,9 @@ function withI18n(child) {
 function renderSettings(account, models = readyModels, options = {}) {
   return withI18n(
     createElement(SettingsPage, {
+      office: initialOfficeView,
+      onOfficeAction: async () => null,
+      onOfficeCancel: async () => null,
       account,
       models,
       automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
