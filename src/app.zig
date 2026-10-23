@@ -3,6 +3,9 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
+const output_file = @import("app_output_file");
+const product_task = @import("metawork_product_task");
+const product_workspace = @import("metawork_product_workspace");
 const product_control = @import("metawork_product_control");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
@@ -27,6 +30,8 @@ const mcp_bridge_adapter = @import("app/mcp_bridge_adapter.zig");
 const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
+const basic_office_skills = @import("app/basic_office_skills.zig");
+const office_component_coordinator = @import("app/office_component_coordinator.zig");
 const app_platform = @import("app/platform.zig");
 const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
@@ -57,6 +62,49 @@ const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 // exhaust the pool.
 const host_worker_count = 16;
 const product_snapshot_capacity = bridge_api.snapshot_max_bytes;
+
+const FrozenFileDelivery = struct {
+    io: std.Io,
+    main_thread_id: std.Thread.Id,
+    root: []u8,
+
+    fn prepare(io: std.Io, main_thread_id: std.Thread.Id, root: []const u8) ?product_task.OwnedFileDelivery {
+        if (std.Thread.getCurrentId() != main_thread_id) return null;
+        const allocator = std.heap.c_allocator;
+        const owned = allocator.dupe(u8, root) catch return null;
+        const self = allocator.create(FrozenFileDelivery) catch {
+            allocator.free(owned);
+            return null;
+        };
+        self.* = .{ .io = io, .main_thread_id = main_thread_id, .root = owned };
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+        const self: *FrozenFileDelivery = @ptrCast(@alignCast(context));
+        const value = output_file.inspect(self.io, .{
+            .workspace_root = self.root,
+            .relative_path = path,
+            .main_thread_id = self.main_thread_id,
+        }, cancelled) catch |err| return .{ .failed = switch (err) {
+            error.Cancelled, error.Canceled => .cancelled,
+            error.FileNotFound => .missing,
+            error.OutputTooLarge => .too_large,
+            error.OutputChanged => .changed,
+            error.InvalidOutputPath, error.InvalidWorkspaceRoot, error.NotRegularOutput, error.AccessDenied, error.SymLinkLoop, error.MainThreadFileEffect => .restricted,
+            else => .read_failed,
+        } };
+        return .{ .verified = .{ .size_bytes = value.size_bytes, .sha256 = value.sha256 } };
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *FrozenFileDelivery = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        std.heap.c_allocator.free(self.root);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
@@ -87,6 +135,22 @@ const App = struct {
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
     single_instance: ?*app_single_instance.Coordinator = null,
+    office_component: ?*office_component_coordinator.Coordinator = null,
+
+    fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *App = @ptrCast(@alignCast(context));
+        return FrozenFileDelivery.prepare(self.io, self.main_thread_id, authority.canonical_root);
+    }
+
+    fn prepareDocumentPreview(context: *anyopaque, input: product_control.DocumentPreviewInput) !@import("product_document_preview_contract").Owned {
+        const self: *App = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.WrongPreviewThread;
+        const control = self.control orelse return error.OfficePreviewUnavailable;
+        const office = self.office_component orelse return error.OfficePreviewUnavailable;
+        var operation: [16]u8 = undefined;
+        try std.Io.randomSecure(self.io, &operation);
+        return office.previewResource(control.officeManagement(), self.main_thread_id, .{ .root = input.workspace_root, .relative = input.relative_path, .expected = if (input.expected) |expected| .{ .size_bytes = expected.size_bytes, .sha256 = expected.sha256 } else null }, operation);
+    }
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -194,6 +258,10 @@ const App = struct {
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
+        if (self.office_component) |office| {
+            const port = control_storage.officeManagement();
+            _ = office.begin(port, .check, port.view().generation);
+        }
         try self.platform.installScheduleHost(control_storage.scheduleHost());
         self.mcp_management = mcp_management_coordinator.Coordinator.init(
             std.heap.c_allocator,
@@ -229,6 +297,10 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
+        control_storage.setOutputFileReveal(self.platform.outputFileReveal());
+        control_storage.setOutputFileSave(self.platform.outputFileSave());
+        control_storage.setDocumentPreviewPreparation(.{ .context = self, .prepare_fn = prepareDocumentPreview });
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -283,6 +355,11 @@ const App = struct {
             .refresh_catalog_fn = refreshModelsCatalog,
             .reset_store_fn = resetModelsStore,
         });
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setOfficeHost(.{
+            .context = self,
+            .begin_fn = beginOfficeOperation,
+            .cancel_fn = cancelOfficeOperation,
+        });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
@@ -290,6 +367,8 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.control) |control| control.beginShutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
+        if (self.control) |control| if (self.office_component) |office|
+            office.shutdown(control.officeManagement());
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.account_started) if (self.account_coordinator) |coordinator|
             coordinator.beginShutdown();
@@ -297,12 +376,18 @@ const App = struct {
             control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
+            control.shutdownOutputChecks();
+            control.shutdownDocumentPreviews();
             control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
+                control.drainOutputChecks(dispatcher.outputCheckSink());
+                dispatcher.drainDocumentPreviews();
                 control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
                 dispatcher.settleAttachmentStagingForShutdown();
                 dispatcher.settleFilePreviewsForShutdown();
+                dispatcher.settleOutputActionsForShutdown();
+                dispatcher.settleDocumentPreviewsForShutdown();
                 dispatcher.settleFileChangeDiffsForShutdown();
             }
         }
@@ -314,6 +399,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
             dispatcher.setModelsHost(null);
+            dispatcher.setOfficeHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -366,11 +452,16 @@ const App = struct {
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
                 self.drainAgentEvents();
+                if (self.control) |control| {
+                    if (self.office_component) |office| _ = office.drain(control.officeManagement());
+                }
                 if (self.control) |control|
                     if (self.dispatcher) |dispatcher| {
                         control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
                         );
+                        control.drainOutputChecks(dispatcher.outputCheckSink());
+                        dispatcher.drainDocumentPreviews();
                         control.drainAttachmentStagingCompletions(
                             dispatcher.attachmentStagingSink(),
                         );
@@ -472,11 +563,6 @@ pub fn run(init: std.process.Init) !void {
     });
     defer app.platform.deinit();
     defer app.automation.deinit();
-    const builtin_skill_root = if (product_identity.artifact_kind != .release) root: {
-        const root = init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT") orelse break :root null;
-        break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, root, std.heap.c_allocator);
-    } else null;
-    defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
         const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
@@ -517,6 +603,17 @@ pub fn run(init: std.process.Init) !void {
         app.single_instance = null;
         single_instance_state.deinit();
     }
+
+    const builtin_skill_root: ?[:0]u8 = root: {
+        if (product_identity.artifact_kind != .release) {
+            if (init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT")) |configured|
+                break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, configured, std.heap.c_allocator);
+        }
+        if (@import("builtin").os.tag == .windows)
+            break :root try basic_office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir());
+        break :root null;
+    };
+    defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
 
     const frontend_asset_root = if (init.environ_map.get(frontend.url_env) == null)
         try frontend.resolveAssetRoot(init.io, std.heap.c_allocator)
@@ -631,6 +728,8 @@ pub fn run(init: std.process.Init) !void {
             coordinator.deinit();
             app.mcp_oauth_refresh = null;
         }
+        if (app.control_initialized) if (app.office_component) |office|
+            office.shutdown(control.officeManagement());
         if (app.control_initialized) control.shutdownExecutor();
         if (app.agent_runtime) |runtime| {
             const shutdown_complete = if (app.agent_shutdown)
@@ -654,6 +753,27 @@ pub fn run(init: std.process.Init) !void {
             }
             runtime.deinit();
         }
+        if (app.office_component) |office| {
+            office.destroy() catch |failure| std.log.err("Office component references did not settle: {s}", .{@errorName(failure)});
+            app.office_component = null;
+        }
+    }
+    if (@import("builtin").os.tag == .windows and @import("builtin").cpu.arch == .x86_64) {
+        const root = try std.fs.path.join(std.heap.c_allocator, &.{ paths_state.dataDir(), "office", "windows-x64" });
+        defer std.heap.c_allocator.free(root);
+        const office = try office_component_coordinator.Coordinator.create(
+            std.heap.c_allocator,
+            init.io,
+            root,
+            paths_state.dataDir(),
+            init.environ_map,
+            @import("office_release_input").json,
+            @import("office_release_input").seed_archive,
+            builtin_skill_root,
+            .{ .context = &app.platform, .notify_fn = notifyOfficeComponent },
+        );
+        app.office_component = office;
+        app.control_configuration.office_component = try office.configuration();
     }
     var account_http = metask_http_transport.Adapter{
         .allocator = std.heap.c_allocator,
@@ -792,6 +912,14 @@ test "MCP Application composition imports the startup owner" {
 }
 
 test {
+    _ = @import("app/office_component_archive.zig");
+    _ = @import("office_process");
+    _ = @import("app/office_component_store.zig");
+    _ = @import("app/office_component_versions.zig");
+    _ = @import("app/office_component_coordinator.zig");
+    _ = @import("app/office_component_release.zig");
+    _ = @import("app/office_component_download.zig");
+    std.testing.refAllDecls(basic_office_skills);
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(models_automation_vault);
@@ -826,4 +954,56 @@ test "automation Models vault is bounded, overwrites securely, and deletes idemp
         vault.secret[0.."short".len],
     );
     try port.delete(generated);
+}
+
+fn notifyOfficeComponent(context: *anyopaque) void {
+    _ = app_platform.Adapter.notifyMainLoop(context);
+}
+
+fn beginOfficeOperation(context: *anyopaque, kind: product_control.OfficeKind, generation: u64) product_control.OfficeAdmission {
+    const app: *App = @ptrCast(@alignCast(context));
+    const control = app.control orelse return .{ .reason = .unavailable };
+    const office = app.office_component orelse return .{ .reason = if (control.officeComponentView().supported) .unavailable else .unsupported_platform };
+    return office.begin(control.officeManagement(), kind, generation);
+}
+
+fn cancelOfficeOperation(context: *anyopaque, id: u64) product_control.OfficeAdmission {
+    const app: *App = @ptrCast(@alignCast(context));
+    const control = app.control orelse return .{ .reason = .unavailable };
+    const office = app.office_component orelse return .{ .reason = .unavailable };
+    return office.cancel(control.officeManagement(), id);
+}
+
+test "Application file delivery freezes Workspace root and keeps all file reads off main" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const file = try tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    try file.writeStreamingAll(std.testing.io, "abc");
+    file.close(std.testing.io);
+    var delivery = FrozenFileDelivery.prepare(std.testing.io, std.Thread.getCurrentId(), root).?;
+    defer delivery.deinit();
+    @memset(root, 'x');
+    var cancelled = std.atomic.Value(bool).init(false);
+    try std.testing.expectEqual(.restricted, delivery.input.inspect_fn(delivery.input.context, "result.docx", &cancelled).failed);
+    const Work = struct {
+        input: agent.FileDeliveryInput,
+        cancelled: *std.atomic.Value(bool),
+        outcome: ?agent.FileDeliveryInspection = null,
+        fn run(self: *@This()) void {
+            self.outcome = self.input.inspect_fn(self.input.context, "result.docx", self.cancelled);
+        }
+    };
+    var work: Work = .{ .input = delivery.input, .cancelled = &cancelled };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    thread.join();
+    try std.testing.expectEqual(@as(u64, 3), work.outcome.?.verified.size_bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("abc", &digest, .{});
+    try std.testing.expectEqualSlices(u8, &digest, &work.outcome.?.verified.sha256);
+    cancelled.store(true, .release);
+    const stopped = try std.Thread.spawn(.{}, Work.run, .{&work});
+    stopped.join();
+    try std.testing.expectEqual(.cancelled, work.outcome.?.failed);
 }

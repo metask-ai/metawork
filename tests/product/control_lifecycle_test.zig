@@ -3353,7 +3353,7 @@ test "restart recovery revalidates live authority and continues the same Convers
             .argument_values = &.{},
         } }),
     );
-    try std.testing.expectEqual(@as(usize, 11), fake_core.last_restored_allowed_tool_count);
+    try std.testing.expectEqual(@as(usize, 12), fake_core.last_restored_allowed_tool_count);
 
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
@@ -10646,4 +10646,172 @@ test "image Run duplicate bearer ownership does not revoke the Renderer on admis
         try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
         try std.testing.expectEqual(epoch + 1, scenario.control.projectionSecurityEpoch());
     }
+}
+
+test "Office source replacement keeps Task catalog pinned until explicit idle refresh" {
+    const Source = struct {
+        references: std.atomic.Value(usize) = .init(1),
+        fn retain(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.references.fetchAdd(1, .monotonic);
+            return true;
+        }
+        fn release(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(self.references.fetchSub(1, .acq_rel) > 1);
+        }
+        fn lifetime(self: *@This()) lifecycle.CatalogSourceLifetime {
+            return .{ .context = self, .retain_fn = retain, .release_fn = release };
+        }
+    };
+    fake_core.reset();
+    var first: Source = .{};
+    var second: Source = .{};
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    try temporary.dir.createDirPath(std.testing.io, "office-a");
+    try temporary.dir.createDirPath(std.testing.io, "office-b");
+    const root_a = try temporary.dir.realPathFileAlloc(std.testing.io, "office-a", std.testing.allocator);
+    defer std.testing.allocator.free(root_a);
+    const root_b = try temporary.dir.realPathFileAlloc(std.testing.io, "office-b", std.testing.allocator);
+    defer std.testing.allocator.free(root_b);
+    var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement_store.deinit();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{
+        .directories = .{ .canonical_user_home = home },
+        .skill_enablement = .{ .file_store = &enablement_store },
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+    });
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    try std.testing.expect(try workbench.replaceBuiltinSkillSource(.{ .root = root_a, .lifetime = first.lifetime() }));
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    const workspace = try workbench.openWorkspace(input);
+    const catalog = try waitCatalogReady(&workbench, workspace);
+    const task = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), 1, workbench.newTaskAdmissionView().active_selection_revision, null, catalog.revision, catalog.selection_revision, .{ .interactive = null });
+    try settleWorkspaceSkillQueries(&workbench, workspace);
+    try std.testing.expect(try workbench.replaceBuiltinSkillSource(.{ .root = root_b, .lifetime = second.lifetime() }));
+    try settleWorkspaceSkillQueries(&workbench, workspace);
+    // Both scope catalogs have switched. The original Session alone still
+    // retains its original Core catalog and therefore the first component.
+    try std.testing.expect(first.references.load(.acquire) > 1);
+    try std.testing.expect(second.references.load(.acquire) > 1);
+    try workbench.refreshTaskCatalog(task, try workbench.taskBindingEpoch(task));
+    try std.testing.expectEqual(@as(usize, 1), first.references.load(.acquire));
+    try std.testing.expect(second.references.load(.acquire) > 1);
+    try std.testing.expectEqual(@as(usize, 1), (try workbench.taskCatalog(task)).skills.len);
+}
+
+test "Office component management keeps ordinary Task admission independent from environment installation" {
+    fake_core.reset();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = root;
+    configuration.office_component = .{ .supported = true, .available = true, .offered = .{ .identity = @splat(1), .download_bytes = 100, .installed_bytes = 300 } };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const office = workbench.officeManagement();
+    const original_revision = workbench.currentRevision();
+    const check = office.begin(.check, office.view().generation);
+    try std.testing.expect(check.accepted);
+    try std.testing.expect(workbench.currentRevision() > original_revision);
+    try std.testing.expect(office.complete(check.operation_id.?, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .succeeded }));
+    const install = office.begin(.install, office.view().generation);
+    try std.testing.expect(install.accepted);
+    try std.testing.expect(office.attempt(install.operation_id.?) != null);
+    var input = productControlTaskInput();
+    input.workspace_root = root;
+    input.trust = .explicitly_trusted;
+    const task = try workbench.createTask(input);
+    // This assertion is about Office readiness, not saturation by the Task's
+    // asynchronous initial catalog jobs. Keep that independent prerequisite explicit.
+    try waitInitialTaskCatalog(&workbench, task);
+    _ = try workbench.runTask(task, .{ .text = "ordinary text while the Office environment is not installed" });
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    office.progress(install.operation_id.?, .{ .phase = .downloading, .bytes = 50, .total = 100 });
+    try std.testing.expect(office.cancel(install.operation_id.?).accepted);
+    try std.testing.expect(office.attempt(install.operation_id.?).?.cancelRequested());
+    try std.testing.expect(office.complete(install.operation_id.?, .{ .current = null, .health = .ready, .cleanup_pending = false, .outcome = .cancelled }));
+    try std.testing.expect(office.view().current == null);
+    try std.testing.expect(office.view().actions.install);
+    workbench.beginShutdown();
+    try std.testing.expect(office.begin(.install, office.view().generation).reason.? == .shutting_down);
+}
+
+const DeliveryAdmissionProbe = struct {
+    calls: usize = 0,
+    released: usize = 0,
+    workspace_id: u64 = 0,
+    workspace_epoch: u64 = 0,
+    fn prepare(context: *anyopaque, authority: fixture.product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.workspace_id = authority.id;
+        self.workspace_epoch = authority.epoch;
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+    fn inspect(_: *anyopaque, _: []const u8, _: *const std.atomic.Value(bool)) lifecycle.FileDeliveryInspection {
+        @panic("this admission lifecycle case must not read files");
+    }
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.released += 1;
+    }
+};
+
+test "file delivery Run authority survives preparation changes until worker and event drain quiesce" {
+    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+    defer scenario.deinit();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    var probe: DeliveryAdmissionProbe = .{};
+    scenario.control.setFileDeliveryPreparation(.{ .context = &probe, .prepare_fn = DeliveryAdmissionProbe.prepare });
+    defer scenario.control.setFileDeliveryPreparation(null);
+    fake_core.rearmControlled();
+    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "explicit file delivery" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const run = &task.durable.runs[1].?;
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(task.durable.workspace_id, probe.workspace_id);
+    try std.testing.expectEqual(task.durable.workspace_epoch, probe.workspace_epoch);
+    scenario.control.setFileDeliveryPreparation(null);
+    try std.testing.expectEqual(@as(*anyopaque, &probe), run.file_delivery.?.input.context);
+    fake_core.releaseControlled();
+    for (0..5000) |_| {
+        scenario.control.syncLifecycle();
+        if (!task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    try std.testing.expectEqual(@as(usize, 0), probe.released);
+    try std.testing.expect(run.file_delivery != null);
+    try settleInputScenario(scenario);
+    try std.testing.expect(run.file_delivery == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.released);
 }

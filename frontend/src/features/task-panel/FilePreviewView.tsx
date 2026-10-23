@@ -1,5 +1,6 @@
+import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
 import {
   Markdown,
@@ -16,6 +17,7 @@ export type FilePreviewViewState = {
   selected: FileReferenceView;
   phase: "loading" | "settled";
   preview: FilePreview | null;
+  document?: DocumentPreview;
 };
 
 export function FilePreviewView({
@@ -26,6 +28,7 @@ export function FilePreviewView({
   onScrollTopChange,
   onRetry,
   webLink,
+  documentContent,
 }: {
   state: FilePreviewViewState;
   mode: FilePreviewMode;
@@ -34,6 +37,7 @@ export function FilePreviewView({
   onScrollTopChange: (scrollTop: number) => void;
   onRetry: () => void;
   webLink: MarkdownWebLink;
+  documentContent?: ReactNode;
 }) {
   const { t } = useI18n();
   const root = useRef<HTMLDivElement | null>(null);
@@ -53,6 +57,8 @@ export function FilePreviewView({
     );
     if (document) document.scrollTop = scrollTop;
   }, [mode, scrollTop, state.selected.id, status]);
+
+  if (state.document) return documentContent;
 
   return (
     <Tabs.Root

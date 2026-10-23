@@ -109,6 +109,10 @@ pub const Query = struct {
     canonical_user_home: []const u8,
     target: QueryTarget,
     additional_sources: []const Source = &.{},
+    /// Borrowed through query completion. A successful acquisition retains one
+    /// reference until its final Core catalog release, including Session and
+    /// same-process restore captures. Never encoded into Core or checkpoints.
+    source_lifetime: ?SourceLifetime = null,
 
     pub fn workspaceRoot(self: Query) []const u8 {
         return switch (self.target) {
@@ -122,6 +126,23 @@ pub const Query = struct {
             .management => "",
             .workspace => |workspace| workspace.epoch,
         };
+    }
+};
+
+/// Pins the immutable files behind a catalog (for example an Office version).
+/// Callbacks must be thread-safe, nonblocking reference accounting only: no
+/// filesystem effects, allocation, Product mutation, or Agent re-entry.
+pub const SourceLifetime = struct {
+    context: *anyopaque,
+    retain_fn: *const fn (*anyopaque) bool,
+    release_fn: *const fn (*anyopaque) void,
+
+    pub fn retain(self: SourceLifetime) error{CatalogResourceLimit}!void {
+        if (!self.retain_fn(self.context)) return error.CatalogResourceLimit;
+    }
+
+    pub fn release(self: SourceLifetime) void {
+        self.release_fn(self.context);
     }
 };
 
@@ -151,6 +172,7 @@ const LeaseStorage = struct {
     workspace_root: []u8,
     canonical_user_home: []u8,
     workspace_epoch: []u8,
+    source_lifetime: ?SourceLifetime,
 };
 
 pub fn query(
@@ -264,6 +286,7 @@ pub fn release(lease: *Lease) Error!void {
         &diagnostic,
     );
     releaseOwned(owned.api, &diagnostic);
+    if (owned.source_lifetime) |lifetime| lifetime.release();
     const allocator = owned.allocator;
     allocator.free(owned.workspace_root);
     allocator.free(owned.canonical_user_home);
@@ -400,7 +423,7 @@ fn createLease(
     owner: *anyopaque,
     raw: *wire.SkillCatalogHandle,
     input: Query,
-) std.mem.Allocator.Error!*Lease {
+) (std.mem.Allocator.Error || error{CatalogResourceLimit})!*Lease {
     const owned = try allocator.create(LeaseStorage);
     errdefer allocator.destroy(owned);
     const workspace_root = try allocator.dupe(u8, input.workspaceRoot());
@@ -412,6 +435,7 @@ fn createLease(
     errdefer allocator.free(canonical_user_home);
     const workspace_epoch = try allocator.dupe(u8, input.workspaceEpoch());
     errdefer allocator.free(workspace_epoch);
+    if (input.source_lifetime) |lifetime| try lifetime.retain();
     owned.* = .{
         .allocator = allocator,
         .api = api,
@@ -421,6 +445,7 @@ fn createLease(
         .workspace_root = workspace_root,
         .canonical_user_home = canonical_user_home,
         .workspace_epoch = workspace_epoch,
+        .source_lifetime = input.source_lifetime,
     };
     return @ptrCast(owned);
 }

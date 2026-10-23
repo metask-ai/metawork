@@ -1,6 +1,17 @@
+import { DocumentPreviewLoader } from "./document-preview.ts";
+import { PreviewImagePool } from "./preview-image-pool.ts";
+import {
+  documentInvalidatedEvent,
+  type DocumentTarget,
+} from "./document-contract.ts";
 import { FilePreviewLoader } from "./file-preview.ts";
+import { decodeOfficeComponentResult } from "./generated-wire.ts";
 import { object } from "./wire-codec.ts";
-import { decodeSendInputResult } from "./decode-contracts.ts";
+import {
+  decodeOutputActionResult,
+  decodeOutputActionCancel,
+  decodeSendInputResult,
+} from "./decode-contracts.ts";
 import {
   commands,
   events,
@@ -10,6 +21,8 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
+  OutputAction,
+  OutputActionState,
   ViewScope,
   McpHttpConnectionInput,
   McpSecretSlot,
@@ -121,9 +134,18 @@ export class BridgeClient {
       }
     | undefined;
   private nextReceiveBatch = 1n;
+  private nextOutputOperation = 1n;
+  private readonly previewImages = new PreviewImagePool();
+  private stopDocumentEvents: (() => void) | undefined;
+  private readonly documents = new DocumentPreviewLoader(
+    (command, payload, timeout) => this.invoke(command, payload, timeout),
+    () => this.attachmentConnection?.generation,
+    this.previewImages,
+  );
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
     () => this.attachmentConnection?.generation,
+    this.previewImages,
   );
 
   constructor(options: BridgeClientOptions = {}) {
@@ -137,16 +159,19 @@ export class BridgeClient {
     return bridge;
   }
 
-  private invoke(command: string, payload: NativeSdkJson) {
+  private invoke(
+    command: string,
+    payload: NativeSdkJson,
+    timeoutMs = this.commandTimeoutMs,
+  ) {
     const pending = this.bridge().invoke(command, payload);
-    if (this.commandTimeoutMs <= 0) return pending;
+    if (timeoutMs <= 0) return pending;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () =>
-          reject(new BridgeCommandTimeoutError(command, this.commandTimeoutMs)),
-        this.commandTimeoutMs,
+        () => reject(new BridgeCommandTimeoutError(command, timeoutMs)),
+        timeoutMs,
       );
     });
     return Promise.race([pending, timeout]).finally(() => {
@@ -182,6 +207,7 @@ export class BridgeClient {
           return;
         this.viewCache.observeSecurityEpoch(notification.securityEpoch);
         this.previews.observeSecurityEpoch(notification.securityEpoch);
+        this.documents.observeSecurityEpoch(notification.securityEpoch);
         consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
@@ -203,6 +229,9 @@ export class BridgeClient {
   }
 
   async connect() {
+    this.documents.reset();
+    this.stopDocumentEvents?.();
+    this.stopDocumentEvents = undefined;
     this.previews.reset();
     this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
@@ -235,13 +264,27 @@ export class BridgeClient {
       generation: result.generation,
       ...result.attachmentInput,
     };
+    this.stopDocumentEvents = this.bridge().on<unknown>(
+      documentInvalidatedEvent,
+      (value) => {
+        try {
+          this.documents.invalidated(value);
+        } catch {
+          this.documents.rejectEvents();
+        }
+      },
+    );
     this.nextReceiveBatch = 1n;
+    this.nextOutputOperation = 1n;
     return result.generation;
   }
 
   async disconnect(generation: string) {
     this.viewCache.clear();
     if (this.attachmentConnection?.generation === generation) {
+      this.documents.reset();
+      this.stopDocumentEvents?.();
+      this.stopDocumentEvents = undefined;
       this.previews.reset();
       this.attachmentConnection = undefined;
     }
@@ -263,6 +306,92 @@ export class BridgeClient {
     return decodeExternalLinkOpenResult(
       await this.invoke(commands.openExternalLink, { url }),
     );
+  }
+
+  async outputAction(
+    taskId: string,
+    runId: string,
+    outputId: string,
+    action: OutputAction,
+    signal: AbortSignal,
+  ): Promise<OutputActionState> {
+    const connection = this.attachmentConnection;
+    if (!connection) throw new Error("Host connection is unavailable");
+    if (signal.aborted)
+      throw new DOMException("Output action cancelled", "AbortError");
+    if (this.nextOutputOperation > 18446744073709551615n)
+      throw new Error("Output operation identity exhausted");
+    const key = {
+      generation: connection.generation,
+      operationId: String(this.nextOutputOperation++),
+    };
+    const matches = (result: { generation: string; operationId: string }) => {
+      if (
+        result.generation !== key.generation ||
+        result.operationId !== key.operationId
+      )
+        throw new RendererBridgeContractError(
+          "invalid_response",
+          "Output operation identity mismatch",
+        );
+    };
+    let cancelled = false;
+    const cancel = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (this.attachmentConnection?.generation !== key.generation) return;
+      void this.invoke(commands.cancelOutputAction, key)
+        .then(decodeOutputActionCancel)
+        .then(matches)
+        .catch(() => undefined);
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const result = decodeOutputActionResult(
+        await this.invoke(
+          commands.outputAction,
+          { ...key, taskId, runId, outputId, action },
+          action === "save" || this.commandTimeoutMs <= 0
+            ? 0
+            : Math.max(35_000, this.commandTimeoutMs),
+        ),
+      );
+      matches(result);
+      if (
+        (signal.aborted && action !== "save") ||
+        this.attachmentConnection?.generation !== key.generation
+      )
+        throw new DOMException("Output action cancelled", "AbortError");
+      if (
+        (action === "check" && result.state === "revealed") ||
+        (action === "reveal" && result.state === "ready") ||
+        (action === "save" &&
+          (result.state === "ready" || result.state === "revealed")) ||
+        (action !== "save" &&
+          ["saved", "save_failed", "target_changed", "cleanup_failed"].includes(
+            result.state,
+          ))
+      )
+        throw new RendererBridgeContractError(
+          "invalid_response",
+          "Output action result mismatch",
+        );
+      return result.state;
+    } catch (error) {
+      cancel();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
+  }
+
+  previewDocument(
+    taskId: string,
+    runId: string,
+    target: DocumentTarget,
+    signal?: AbortSignal,
+  ) {
+    return this.documents.open(taskId, runId, target, signal);
   }
 
   previewFile(
@@ -334,6 +463,30 @@ export class BridgeClient {
       await this.invoke(commands.retryAutomaticWorkspaceRoot, {
         expectedGeneration,
       }),
+    );
+  }
+
+  async manageOffice(
+    action: "install" | "repair" | "remove" | "retry" | "cleanup",
+    expectedGeneration: string,
+  ) {
+    const names = {
+      install: commands.officeInstall,
+      repair: commands.officeRepair,
+      remove: commands.officeRemove,
+      retry: commands.officeRetry,
+      cleanup: commands.officeCleanup,
+    };
+    return decodeOfficeComponentResult(
+      await this.invoke(names[action], { expectedGeneration }),
+      "$",
+    );
+  }
+
+  async cancelOffice(operationId: string) {
+    return decodeOfficeComponentResult(
+      await this.invoke(commands.officeCancel, { operationId }),
+      "$",
     );
   }
 

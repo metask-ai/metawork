@@ -58,6 +58,58 @@ pub const Adapter = struct {
         self.window.deinit();
     }
 
+    pub fn outputFileSave(self: *Adapter) control_ports.OutputFileSave {
+        return .{ .context = self, .prepare_fn = prepareOutputSave };
+    }
+
+    const OwnedSave = struct {
+        main_thread_id: std.Thread.Id,
+        value: @import("app_output_file").Save,
+        fn stage(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
+            const self: *OwnedSave = @ptrCast(@alignCast(context));
+            try self.value.stage(cancelled);
+        }
+        fn publish(context: *anyopaque) !void {
+            const self: *OwnedSave = @ptrCast(@alignCast(context));
+            try self.value.publish();
+        }
+        fn discard(context: *anyopaque) !void {
+            const self: *OwnedSave = @ptrCast(@alignCast(context));
+            try self.value.discard();
+        }
+        fn release(context: *anyopaque) void {
+            const self: *OwnedSave = @ptrCast(@alignCast(context));
+            std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+            self.value.deinit();
+            std.heap.c_allocator.destroy(self);
+        }
+    };
+
+    fn prepareOutputSave(context: *anyopaque, source: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        const runtime = self.native_runtime orelse return error.RuntimeUnavailable;
+        var selected: [native_sdk.platform.max_dialog_path_bytes]u8 = undefined;
+        const path = (try runtime.showSaveDialog(.{ .default_name = std.fs.path.basename(source.relative_path) }, &selected)) orelse return null;
+        const owned = try std.heap.c_allocator.create(OwnedSave);
+        errdefer std.heap.c_allocator.destroy(owned);
+        owned.* = .{ .main_thread_id = self.main_thread_id, .value = try @import("app_output_file").Save.init(std.heap.c_allocator, self.io, .{ .workspace_root = source.workspace_root, .relative_path = source.relative_path, .main_thread_id = self.main_thread_id }, path, .{ .size_bytes = source.size_bytes, .sha256 = source.sha256 }) };
+        return .{ .context = owned, .stage_fn = OwnedSave.stage, .publish_fn = OwnedSave.publish, .discard_fn = OwnedSave.discard, .release_fn = OwnedSave.release };
+    }
+
+    pub fn outputFileReveal(self: *Adapter) control_ports.OutputFileReveal {
+        return .{ .context = self, .reveal_fn = revealOutputFile };
+    }
+
+    fn revealOutputFile(context: *anyopaque, root: []const u8, relative: []const u8) !void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
+        if (!std.fs.path.isAbsolute(root)) return error.InvalidPath;
+        const path = try @import("app_output_file").absolutePath(std.heap.c_allocator, root, relative);
+        defer std.heap.c_allocator.free(path);
+        try (self.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+    }
+
     pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {
         return self.platform_services;
     }
@@ -678,4 +730,107 @@ test "SDK consumption file picker keeps multi-selection cancel and Runtime valid
     try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, options, &.{}));
     try std.testing.expectError(error.InvalidDialogOptions, port.show_open_dialog_fn(port.context, .{ .title = "bad\x00title" }, &output));
     try std.testing.expectEqual(@as(usize, 3), Spy.calls);
+}
+
+test "Output location uses the SDK Runtime reveal boundary and rejects invalid input before the platform" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        fn reveal(_: ?*anyopaque, path: []const u8) !void {
+            calls += 1;
+            try std.testing.expect(std.mem.endsWith(u8, path, "report.docx"));
+            if (fail) return error.InjectedRevealFailure;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.reveal_path_fn = Spy.reveal;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.outputFileReveal();
+    const root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace";
+    try port.reveal_fn(port.context, root, "report.docx");
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expectError(error.InvalidOutputPath, port.reveal_fn(port.context, root, "../report.docx"));
+    try std.testing.expectError(error.InvalidPath, port.reveal_fn(port.context, "relative", "report.docx"));
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    Spy.fail = true;
+    try std.testing.expectError(error.InjectedRevealFailure, port.reveal_fn(port.context, root, "report.docx"));
+    adapter.native_runtime = null;
+    try std.testing.expectError(error.RuntimeUnavailable, port.reveal_fn(port.context, root, "report.docx"));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
+
+test "Output Save picker uses SDK Runtime and freezes the selected path for worker publication" {
+    const Spy = struct {
+        var selected: []const u8 = "";
+        var cancelled = false;
+        var calls: usize = 0;
+        fn save(_: ?*anyopaque, options: native_sdk.platform.SaveDialogOptions, buffer: []u8) !?[]const u8 {
+            calls += 1;
+            try std.testing.expectEqualStrings("source.txt", options.default_name);
+            if (cancelled) return null;
+            if (selected.len > buffer.len) return error.NoSpaceLeft;
+            @memcpy(buffer[0..selected.len], selected);
+            return buffer[0..selected.len];
+        }
+    };
+    const Worker = struct {
+        effect: *control_ports.OwnedOutputSave,
+        operation: enum { stage, publish },
+        cancelled: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = error.NotStarted,
+        fn run(self: *@This()) void {
+            self.result = switch (self.operation) {
+                .stage => self.effect.stage_fn(self.effect.context, &self.cancelled),
+                .publish => self.effect.publish_fn(self.effect.context),
+            };
+        }
+        fn execute(self: *@This()) !void {
+            const thread = try std.Thread.spawn(.{}, run, .{self});
+            thread.join();
+            return self.result;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "selected.txt", .data = "keep" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "selected.txt" });
+    defer std.testing.allocator.free(selected);
+    Spy.selected = selected;
+    Spy.cancelled = true;
+    Spy.calls = 0;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.show_save_dialog_fn = Spy.save;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.outputFileSave();
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("abc", &hash, .{});
+    const source: control_ports.OutputFileSaveInput = .{ .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash };
+    try std.testing.expect((try port.prepare_fn(port.context, source)) == null);
+    Spy.cancelled = false;
+    var effect = (try port.prepare_fn(port.context, source)).?;
+    defer effect.deinit();
+    // Native dialog storage is temporary; publication uses the owned selection.
+    Spy.selected = "";
+    var worker: Worker = .{ .effect = &effect, .operation = .stage };
+    try worker.execute();
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(before);
+    try std.testing.expectEqualStrings("keep", before);
+    worker.operation = .publish;
+    try worker.execute();
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "selected.txt", std.testing.allocator, .limited(32));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings("abc", after);
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }

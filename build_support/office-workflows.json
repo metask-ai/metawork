@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "skills": [
+    {
+      "id": "docx",
+      "guides": ["SKILL.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/validate.py",
+        "scripts/comment.py"
+      ],
+      "workflows": [
+        {
+          "id": "read",
+          "tools": ["office"],
+          "pythonPackages": ["defusedxml"]
+        },
+        {
+          "id": "create",
+          "nodePackages": ["docx"],
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "edit-and-comment",
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "accept-revisions",
+          "tools": ["office"]
+        },
+        {
+          "id": "render-and-pdf",
+          "tools": ["office"]
+        }
+      ]
+    },
+    {
+      "id": "xlsx",
+      "guides": ["SKILL.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/formulas.py"
+      ],
+      "workflows": [
+        {
+          "id": "read-create-edit",
+          "pythonPackages": ["pandas", "openpyxl", "defusedxml", "lxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "recalculate",
+          "tools": ["office"],
+          "pythonPackages": ["openpyxl", "defusedxml"]
+        },
+        {
+          "id": "render-and-pdf",
+          "tools": ["office"],
+          "pythonPackages": ["defusedxml", "lxml"]
+        }
+      ]
+    },
+    {
+      "id": "pptx",
+      "guides": ["SKILL.md", "editing.md", "pptxgenjs.md"],
+      "helpers": [
+        "scripts/office/archive.py",
+        "scripts/office/unpack.py",
+        "scripts/office/pack.py",
+        "scripts/office/validate.py",
+        "scripts/add_slide.py",
+        "scripts/clean.py"
+      ],
+      "workflows": [
+        {
+          "id": "read",
+          "pythonPackages": ["defusedxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "create",
+          "nodePackages": ["pptxgenjs"],
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "edit",
+          "pythonPackages": ["defusedxml", "lxml"],
+          "tools": ["office"]
+        },
+        {
+          "id": "page-images-and-pdf",
+          "tools": ["office"],
+          "pythonPackages": ["pillow", "defusedxml"]
+        }
+      ]
+    }
+  ]
+}

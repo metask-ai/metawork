@@ -1,3 +1,5 @@
+import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
+import { DocumentPreviewView } from "./DocumentPreviewView.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -16,6 +18,7 @@ import {
 } from "react";
 
 import { AppShell } from "./AppShell.tsx";
+import type { OfficeComponentResult } from "../bridge/contracts.ts";
 import {
   documentHasAttention,
   subscribeDocumentAttention,
@@ -108,6 +111,7 @@ import {
 import {
   newTaskDraftStorageId,
   prepareRetryDraft,
+  prepareOutputEditDraft,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
 import {
@@ -788,10 +792,21 @@ export default function App() {
     ) => client.previewFile(taskId, runId, referenceId, options),
     [client],
   );
+  const loadDocumentPreview = useCallback(
+    (taskId: string, runId: string, referenceId: string, signal: AbortSignal) =>
+      client.previewDocument(
+        taskId,
+        runId,
+        { kind: "fileReference", id: referenceId },
+        signal,
+      ),
+    [client],
+  );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
+    loadDocumentPreview,
   );
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
@@ -974,6 +989,16 @@ export default function App() {
   const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
     newTaskDraftActive || Boolean(activeTask?.inputAcceptance.available);
+  const outputEditContext = useRef({
+    task: activeTask,
+    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
+    audience: attachmentAudience.current,
+  });
+  outputEditContext.current = {
+    task: activeTask,
+    allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
+    audience: attachmentAudience.current,
+  };
   const taskOperationInFlight = Boolean(
     activeTask?.activeOperation ||
     inputContinuation ||
@@ -1766,6 +1791,20 @@ export default function App() {
     } catch {
       await refreshSnapshot().catch(() => undefined);
       return false;
+    }
+  }
+
+  async function mutateOffice(
+    invoke: () => Promise<OfficeComponentResult>,
+  ): Promise<OfficeComponentResult | null> {
+    if (bridgeUnavailable) return null;
+    try {
+      const result = await invoke();
+      await refreshCommittedView();
+      return result;
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      return null;
     }
   }
 
@@ -2938,6 +2977,50 @@ export default function App() {
     );
   }
 
+  const outputEditAudience = attachmentAudience.current;
+  function prepareOutputEdit(
+    taskId: string,
+    runId: string,
+    outputId: string,
+  ): OutputEditResult {
+    const current = outputEditContext.current;
+    if (
+      current.audience !== outputEditAudience ||
+      !current.allowed ||
+      current.task?.id !== taskId ||
+      composerDraftScopeRef.current !== `task:${taskId}`
+    )
+      return "edit_unavailable";
+    const output = current.task.runs
+      .find((run) => run.id === runId)
+      ?.outputs.find((record) => record.id === outputId);
+    if (!output || output.redacted) return "edit_unavailable";
+    const draft = taskDrafts.currentDraft(taskId);
+    if (!draft) return "edit_unavailable";
+    const prepared = prepareOutputEditDraft(
+      draft,
+      t("outputs.edit_reference", { path: JSON.stringify(output.displayPath) }),
+    );
+    if (prepared.kind === "preserved") return "edit_draft_busy";
+    if (prepared.kind === "too_long") return "edit_too_long";
+    if (!taskDrafts.commitDraft(taskId, prepared.draft))
+      return "edit_unavailable";
+    composerDraftRef.current = prepared.draft;
+    window.requestAnimationFrame(() => {
+      const latest = outputEditContext.current;
+      if (
+        latest.audience === outputEditAudience &&
+        latest.allowed &&
+        latest.task?.id === taskId
+      ) {
+        const input = composer.current;
+        input?.focus();
+        input?.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+    return "edit_prepared";
+  }
+
   function prepareRetry(input: RunInputView) {
     if (!activeTask || !taskCanCompose) return;
     if (input.kind === "skill") {
@@ -3443,7 +3526,13 @@ export default function App() {
         selected: activePreview.reference,
         phase: activePreview.kind === "loading" ? "loading" : "settled",
         preview:
-          activePreview.kind === "loading" ? null : activePreview.preview,
+          activePreview.kind === "loading" || activePreview.kind === "document"
+            ? null
+            : activePreview.preview,
+        document:
+          activePreview.kind === "document"
+            ? activePreview.document
+            : undefined,
       };
   const activePanelView = taskPanel.activeTab
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
@@ -3769,6 +3858,17 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
+                documentContent={
+                  filePreviewViewState.document ? (
+                    <DocumentPreviewView
+                      key={filePreviewViewState.selected.id}
+                      preview={filePreviewViewState.document}
+                      title={filePreviewViewState.selected.displayPath}
+                      onRefresh={refreshFilePreview}
+                      showRefreshAction={false}
+                    />
+                  ) : undefined
+                }
                 webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
@@ -3831,6 +3931,11 @@ export default function App() {
             account={snapshot.account}
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
+            office={snapshot.office}
+            onOfficeAction={(action, generation) =>
+              mutateOffice(() => client.manageOffice(action, generation))
+            }
+            onOfficeCancel={(id) => mutateOffice(() => client.cancelOffice(id))}
             customProviderCapabilities={{
               management: snapshot.capabilities.customProviderManagement,
               secretCapture: snapshot.capabilities.customProviderSecretCapture,
@@ -4226,6 +4331,28 @@ export default function App() {
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
+                outputsEnabled={snapshot.capabilities.typedOutputs}
+                renderOutputPreview={(preview, title, onRefresh) => (
+                  <DocumentPreviewView
+                    preview={preview}
+                    title={title}
+                    onRefresh={onRefresh}
+                  />
+                )}
+                onPreviewOutput={(taskId, runId, outputId) =>
+                  client.previewDocument(taskId, runId, {
+                    kind: "output",
+                    id: outputId,
+                  })
+                }
+                onOutputAction={(taskId, runId, outputId, action, signal) =>
+                  client.outputAction(taskId, runId, outputId, action, signal)
+                }
+                onPrepareOutputEdit={
+                  taskCanCompose && !newTaskDraftActive
+                    ? prepareOutputEdit
+                    : undefined
+                }
                 onPrepareRetry={prepareRetry}
                 onPreviewFile={openFilePreview}
                 loadFilePreview={loadFilePreview}

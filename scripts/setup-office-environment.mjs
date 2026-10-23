@@ -1,103 +1,82 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  createReadStream,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { officeEnvironmentPath } from "./office-environment.mjs";
+import {
+  officeEnvironmentPath,
+  readOfficeComponent,
+} from "./office-environment.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const options = new Map();
-for (let index = 2; index < process.argv.length; index += 2) {
-  const key = process.argv[index];
-  const value = process.argv[index + 1];
-  if (
-    !["--python", "--soffice", "--pdftoppm", "--pandoc"].includes(key) ||
-    !value ||
-    options.has(key)
-  )
-    throw new Error(
-      "Usage: node scripts/setup-office-environment.mjs --python /path/to/python3.12 --soffice /path/to/soffice --pdftoppm /path/to/pdftoppm [--pandoc /path/to/pandoc]",
-    );
-  if (!path.isAbsolute(value) || !existsSync(value))
-    throw new Error(`${key} must name an existing absolute executable path`);
-  if (
-    key !== "--python" &&
-    path.basename(value).replace(/\.exe$/i, "") !== key.slice(2)
-  )
-    throw new Error(
-      `${key} executable must keep its command name for Skill PATH lookup`,
-    );
-  options.set(key, value);
-}
-for (const required of ["--python", "--soffice", "--pdftoppm"])
-  if (!options.has(required))
-    throw new Error(`Missing required ${required} executable`);
-function run(command, args, capture = false) {
-  const result = spawnSync(command, args, {
-    cwd: root,
-    stdio: capture ? "pipe" : "inherit",
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PIP_CACHE_DIR: path.join(
-        root,
-        ".zig-cache",
-        "office-runtime",
-        "pip-cache",
-      ),
-    },
-    timeout: capture ? 30_000 : 20 * 60_000,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0)
-    throw new Error(
-      `${path.basename(command)} failed (${result.status}): ${result.stderr ?? ""}`,
-    );
-  return result.stdout;
-}
-const version = run(
-  options.get("--python"),
-  ["-c", "import sys; print('.'.join(map(str, sys.version_info[:2])))"],
-  true,
-).trim();
-if (version !== "3.12")
+if (process.argv.length !== 4 || process.argv[2] !== "--component")
   throw new Error(
-    `Local Office setup requires Python 3.12, received ${version}`,
+    "Usage: setup-office-environment.mjs --component <absolute-prepared-component-root>",
   );
-const runtime = path.dirname(officeEnvironmentPath(root));
-const venv = path.join(runtime, "venv");
-mkdirSync(runtime, { recursive: true });
-rmSync(officeEnvironmentPath(root), { force: true });
-run(options.get("--python"), ["-m", "venv", venv]);
-const python = path.join(
-  venv,
-  process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
-);
-run(python, [
-  "-m",
-  "pip",
-  "install",
-  "--no-deps",
-  "--disable-pip-version-check",
-  "-r",
-  path.join(root, "scripts", "office-requirements.txt"),
-]);
-run(python, ["-m", "pip", "check"]);
-run(python, [
-  "-c",
-  "import pandas, openpyxl, lxml.etree, defusedxml, PIL, markitdown",
-]);
-run(options.get("--soffice"), ["--version"], true);
-run(options.get("--pdftoppm"), ["-v"], true);
-if (options.has("--pandoc")) run(options.get("--pandoc"), ["--version"], true);
-const toolDirectories = [
-  ...new Set(
-    ["--soffice", "--pdftoppm", "--pandoc"]
-      .filter((key) => options.has(key))
-      .map((key) => path.dirname(options.get(key))),
-  ),
-];
-writeFileSync(
-  officeEnvironmentPath(root),
-  JSON.stringify({ schema: 1, python, toolDirectories }, null, 2) + "\n",
-);
-console.log(`Local Office environment ready: ${runtime}`);
+const component = readOfficeComponent(process.argv[3]);
+// Setup validates the complete immutable payload once. Launch binds the
+// manifest and essential executable/Skill identities without scanning gigabytes
+// for every developer subprocess or changing ordinary Task environments.
+for (const file of component.manifest.files) {
+  if (
+    typeof file.path !== "string" ||
+    file.path.includes("\\") ||
+    file.path
+      .split("/")
+      .some((part) => !part || part === "." || part === "..") ||
+    path.isAbsolute(file.path)
+  )
+    throw new Error("Unsafe Office component manifest path");
+  const filename = path.join(component.root, file.path);
+  const status = lstatSync(filename);
+  if (!status.isFile() || status.isSymbolicLink() || status.size !== file.bytes)
+    throw new Error(`Office component file identity mismatch: ${file.path}`);
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(filename)) digest.update(chunk);
+  if (digest.digest("hex") !== file.sha256)
+    throw new Error(`Office component file digest mismatch: ${file.path}`);
+}
+const result = spawnSync(component.entry, ["selftest"], {
+  cwd: root,
+  encoding: "utf8",
+  timeout: 300_000,
+  windowsHide: true,
+});
+if (
+  result.error ||
+  result.status !== 0 ||
+  JSON.parse(result.stdout).status !== "success"
+)
+  throw new Error(
+    "Office component self-test failed; local selection was not changed",
+  );
+const filename = officeEnvironmentPath(root);
+mkdirSync(path.dirname(filename), { recursive: true });
+const temporary = `${filename}.${randomUUID()}.tmp`;
+try {
+  writeFileSync(
+    temporary,
+    JSON.stringify(
+      {
+        schema: 2,
+        componentRoot: component.root,
+        manifestSha256: component.manifestSha256,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  renameSync(temporary, filename);
+} finally {
+  if (existsSync(temporary)) unlinkSync(temporary);
+}
+
+console.log(`Local Office component selected: ${component.root}`);

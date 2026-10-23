@@ -42,6 +42,69 @@ export const enUS = {
     "The schedule save outcome is unknown, so the execution configuration could not be updated.",
   "model_setup.resources_unavailable":
     "The execution configuration could not be prepared because local resources are insufficient.",
+  "office.title": "Office documents",
+  "office.environment": "Document environment",
+  "office.help":
+    "Basic DOCX, XLSX and PPTX Skills are included. Install the environment for local reading, editing, recalculation and previews.",
+  "office.not_available": "Unavailable",
+  "office.not_installed": "Not installed",
+  "office.ready": "Ready",
+  "office.needs_check": "Needs checking",
+  "office.working": "In progress",
+  "office.unsupported":
+    "The Office environment is currently available on Windows x64. Basic Skills remain available.",
+  "office.unavailable": "The Office environment cannot be managed right now.",
+  "office.unpublished":
+    "An installable environment is not yet published for this app version. Basic Skills are available.",
+  "office.changed": "The environment state changed. Review it and try again.",
+  "office.busy": "Another environment operation is in progress.",
+  "office.check_required": "Check the environment state before continuing.",
+  "office.finishing":
+    "The operation is finishing and can no longer be cancelled.",
+  "office.restart": "Close and reopen MetaWork to finish the pending cleanup.",
+  "office.download_failed":
+    "Download failed. Check your connection and try again.",
+  "office.invalid_component":
+    "The environment did not pass validation and was not enabled.",
+  "office.insufficient_space":
+    "There is not enough disk space to install the environment.",
+  "office.resource_limit":
+    "Resources are temporarily unavailable. Try again later.",
+  "office.write_failed":
+    "The environment state could not be saved. Check disk space and access permissions.",
+  "office.unknown":
+    "This request could not be confirmed. Review the current environment state before continuing.",
+  "office.cleanup_failed": "Cleanup is incomplete. Try again later.",
+  "office.incompatible":
+    "The installed environment is not compatible with this app version.",
+  "office.existing_tasks":
+    "New tasks use this environment. Refresh Skills in an existing task while it is idle to use it there.",
+  "office.size": "{download} download · {installed} installed",
+  "office.progress": "Environment operation progress",
+  "office.cancelling": "Cancelling and waiting for cleanup…",
+  "office.cancelled": "Operation cancelled.",
+  "office.cleanup_pending":
+    "Some resources await cleanup. Resources still in use require the sessions to end, or MetaWork to restart.",
+  "office.shared":
+    "Other MetaWork versions on this device may need to reinstall the environment after cleanup.",
+  "office.install": "Install environment",
+  "office.update": "Update environment",
+  "office.repair": "Reinstall",
+  "office.retry": "Check again",
+  "office.cleanup": "Clean up resources",
+  "office.remove": "Remove environment",
+  "office.remove_title": "Remove the Office environment?",
+  "office.remove_description":
+    "New tasks will use basic Skills. Resources still in use will be cleaned up after the sessions end or MetaWork restarts.",
+  "office.phase.preparing": "Preparing…",
+  "office.phase.downloading": "Downloading…",
+  "office.phase.unpacking": "Unpacking…",
+  "office.phase.verifying": "Verifying files…",
+  "office.phase.testing": "Checking the environment…",
+  "office.phase.publishing": "Preparing installation…",
+  "office.phase.finalizing": "Checking the installed environment…",
+  "office.phase.activating": "Enabling the environment…",
+  "office.phase.cleaning": "Cleaning up resources…",
   "common.loading": "Loading…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "Account and application menu",
@@ -854,6 +917,71 @@ export const enUS = {
   "file_preview.state.image_limit":
     "Image exceeds the preview file size or dimension limit.",
   "file_preview.state.animated_image": "Only static images can be previewed.",
+  "document_preview.readonly": "Read-only preview",
+  "document_preview.pages": "Document pages",
+  "document_preview.previous": "Previous page",
+  "document_preview.next": "Next page",
+  "document_preview.page": "Page {current} of {total}",
+  "document_preview.page_alt": "{title}, page {page}",
+  "document_preview.sheet": "Worksheet",
+  "document_preview.hidden": "Hidden",
+  "document_preview.region": "Worksheet region",
+  "document_preview.previous_rows": "Previous 25 rows",
+  "document_preview.next_rows": "Next 25 rows",
+  "document_preview.previous_columns": "Previous 10 columns",
+  "document_preview.next_columns": "Next 10 columns",
+  "document_preview.saved_values":
+    "Showing saved values. Formulas and external links are not executed. Select a cell to inspect its formula and saved value.",
+  "document_preview.empty": "This worksheet is empty.",
+  "document_preview.omissions": "Omitted from this preview: {items}.",
+  "document_preview.grid": "Read-only cells",
+  "document_preview.row": "Row",
+  "document_preview.cell": "Cell",
+  "document_preview.formula": "Formula",
+  "document_preview.saved_value": "Saved value",
+  "document_preview.no_cache": "No saved value",
+  "document_preview.none": "None",
+  "document_preview.format": "Number format",
+  "document_preview.format_unsupported": "Format not supported",
+  "document_preview.select_cell": "Select a cell for details.",
+  "document_preview.state.busy":
+    "Preview resources are busy. Close another preview and retry.",
+  "document_preview.state.missing": "The source file is missing.",
+  "document_preview.state.restricted":
+    "This file cannot currently be previewed.",
+  "document_preview.state.stale_security":
+    "Access has changed. Refresh the preview.",
+  "document_preview.state.unavailable":
+    "The Office environment is not ready. Check Office support in Settings.",
+  "document_preview.state.unsupported": "This document cannot be previewed.",
+  "document_preview.state.changed":
+    "The source file has changed. Refresh to read the current content.",
+  "document_preview.state.limit":
+    "This document exceeds preview limits. Save it and open it in a local application.",
+  "document_preview.state.cancelled": "Preview closed.",
+  "document_preview.state.expired": "Preview expired. Refresh to continue.",
+  "document_preview.state.restart_required":
+    "Preview cleanup could not be confirmed. Restart MetaWork before retrying.",
+  "document_preview.state.error": "Preview failed. Refresh and try again.",
+  "document_preview.omission.external_hyperlinks": "External hyperlinks",
+  "document_preview.omission.merged_cells": "Merged cells",
+  "document_preview.omission.conditional_formatting": "Conditional formatting",
+  "document_preview.omission.data_validation": "Data validation",
+  "document_preview.omission.charts": "Charts",
+  "document_preview.omission.images": "Images",
+  "document_preview.omission.pivot_tables": "Pivot tables",
+  "document_preview.omission.comments": "Comments",
+  "document_preview.view": "Preview view",
+  "document_preview.layout": "Print layout",
+  "document_preview.layout_saved_values":
+    "Workbook print layout uses saved values without calculating formulas. Hidden worksheets are not printed.",
+  "document_preview.layout_limit":
+    "Print layout exceeds the inspection limits. You can still use the read-only grid.",
+  "document_preview.layout_unsupported":
+    "This workbook contains objects or formatting that layout inspection does not support. You can still use the read-only grid.",
+  "document_preview.omission.defined_names": "Expression-based defined names",
+  "document_preview.omission.missing_formula_caches":
+    "Formula cells without saved values (left blank)",
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",
@@ -870,6 +998,47 @@ export const enUS = {
   "file_preview.state.changing":
     "The file changed while it was being read. Try again.",
   "file_preview.state.error": "File preview failed",
+  "outputs.save": "Save as…",
+  "outputs.saving": "Preparing and saving file…",
+  "outputs.cancelling": "Cancelling…",
+  "outputs.state.save_unknown":
+    "Save result is unconfirmed. Check the selected location.",
+  "outputs.state.saved": "File saved",
+  "outputs.state.save_failed": "Could not save the file",
+  "outputs.state.target_changed":
+    "The selected destination changed. Choose it again.",
+  "outputs.state.cleanup_failed": "Temporary file cleanup was incomplete",
+  "outputs.edit": "Continue editing",
+  "outputs.edit_reference": "Continue editing the Workspace file {path}:",
+  "outputs.state.edit_prepared":
+    "File reference added. Enter your requested changes.",
+  "outputs.state.edit_draft_busy":
+    "Skill draft preserved. Finish the current input first.",
+  "outputs.state.edit_too_long":
+    "The draft is near its limit and was preserved.",
+  "outputs.state.edit_unavailable":
+    "Cannot prepare editing now. Check the file again.",
+  "outputs.preview": "Preview",
+  "outputs.close_preview": "Close preview",
+  "outputs.check": "Check file",
+  "outputs.reveal": "Show in folder",
+  "outputs.cancel": "Cancel",
+  "outputs.checking": "Checking file…",
+  "outputs.state.ready": "Matched delivered content when checked",
+  "outputs.state.revealed": "Requested location in file manager",
+  "outputs.state.busy": "File operations are busy. Try again shortly.",
+  "outputs.state.missing": "The source file no longer exists",
+  "outputs.state.restricted": "This file is not currently accessible",
+  "outputs.state.changed": "Changed since delivery",
+  "outputs.state.too_large": "The file exceeds the processing limit",
+  "outputs.state.cancelled": "Operation cancelled",
+  "outputs.state.timed_out": "File check timed out",
+  "outputs.state.stale_security": "Authorization changed. Check again.",
+  "outputs.state.unavailable": "File operations are unavailable",
+  "outputs.state.failed": "File operation failed. Try again.",
+  "outputs.title": "Delivered files",
+  "outputs.hidden_path": "File path hidden",
+  "outputs.delivered_size": "Delivered · {bytes} bytes",
   "file_changes.title": "File changes",
   "file_changes.file_count.one": "{fileCount} file",
   "file_changes.file_count.other": "{fileCount} files",

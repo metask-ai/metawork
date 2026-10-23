@@ -2890,6 +2890,52 @@ test("Application arbitrates single-instance ownership before business owners", 
   );
 });
 
+test("Office Windows Job seam has one Application consumer and exact OS symbols", () => {
+  const seam = "src/native_sdk_compat/office_process_windows.zig";
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("office_process_windows")'),
+    ),
+    ["src/app/office_process.zig"],
+  );
+  assert.deepEqual(
+    externSymbols(read(seam), ["kernel32"]),
+    [
+      "CloseHandle",
+      "CreateJobObjectW",
+      "GetCurrentProcess",
+      "GetCurrentProcessId",
+      "GetLastError",
+      "GetProcessTimes",
+      "PeekNamedPipe",
+      "QueryInformationJobObject",
+      "SetInformationJobObject",
+      "TerminateJobObject",
+      "WaitForSingleObject",
+    ].sort(),
+  );
+  assert.match(read("docs/architecture.md"), /`office_process_tree`/u);
+});
+
+test("Office installation platform validation stays narrow and main-pinned", () => {
+  assert.deepEqual(
+    externSymbols(read("src/native_sdk_compat/office_component_windows.zig"), [
+      "kernel32",
+      "wintrust",
+    ]),
+    ["GetDiskFreeSpaceExW", "WinVerifyTrust"].sort(),
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("office_component_windows")'),
+    ),
+    ["src/app/office_component_store.zig"],
+  );
+  assert.match(read("build.zig"), /office_component_release\.zig/u);
+  assert.match(read("src/app/office_component_release.zig"), /manifestSha256/u);
+  assert.match(read("docs/architecture.md"), /`office_component_validation`/u);
+});
+
 test("ordinary build and test entries stay isolated from macOS signing", () => {
   const packageJson = JSON.parse(read("package.json"));
   for (const script of ["check", "test", "build:debug", "build:release"]) {

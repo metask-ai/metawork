@@ -3,6 +3,7 @@
 //! coordinators; these values are callback-scoped and must not enter jobs.
 
 const std = @import("std");
+const office_component = @import("product_office_component");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -117,6 +118,16 @@ pub const ImageRunPreparation = struct {
     prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedImageExecution,
 
     pub fn prepare(self: ImageRunPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        return self.prepare_fn(self.context, authority);
+    }
+};
+
+/// Main-thread preparation only; the result retains one frozen file effect.
+pub const FileDeliveryPreparation = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedFileDelivery,
+
+    pub fn prepare(self: FileDeliveryPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         return self.prepare_fn(self.context, authority);
     }
 };
@@ -267,3 +278,91 @@ pub const ScheduleHost = struct {
 
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
+
+pub const OfficeView = office_component.View;
+pub const OfficeRelease = office_component.Release;
+pub const OfficeCurrent = office_component.Current;
+pub const OfficeKind = office_component.Kind;
+pub const OfficePhase = office_component.Phase;
+pub const OfficeReason = office_component.Reason;
+pub const OfficeOutcome = office_component.Outcome;
+pub const OfficeAdmission = office_component.Admission;
+pub const OfficeAttempt = office_component.Attempt;
+pub const OfficeCompletion = office_component.Completion;
+pub const OfficeProgress = office_component.Progress;
+
+/// Owner-thread only; never copied into a component worker. Only the returned
+/// Attempt may be borrowed by that worker, until its matching join/completion.
+pub const OfficeManagement = struct {
+    context: *anyopaque,
+    view_fn: *const fn (*anyopaque) OfficeView,
+    begin_fn: *const fn (*anyopaque, OfficeKind, u64) OfficeAdmission,
+    attempt_fn: *const fn (*anyopaque, u64) ?*OfficeAttempt,
+    cancel_fn: *const fn (*anyopaque, u64) OfficeAdmission,
+    progress_fn: *const fn (*anyopaque, u64, OfficeProgress) void,
+    complete_fn: *const fn (*anyopaque, u64, OfficeCompletion) bool,
+    resources_fn: *const fn (*anyopaque, bool, bool) void,
+    source_fn: *const fn (*anyopaque, ?[]const u8, ?agent.CatalogSourceLifetime) anyerror!bool,
+
+    pub fn view(self: OfficeManagement) OfficeView {
+        return self.view_fn(self.context);
+    }
+    pub fn begin(self: OfficeManagement, kind: OfficeKind, generation: u64) OfficeAdmission {
+        return self.begin_fn(self.context, kind, generation);
+    }
+    pub fn attempt(self: OfficeManagement, id: u64) ?*OfficeAttempt {
+        return self.attempt_fn(self.context, id);
+    }
+    pub fn cancel(self: OfficeManagement, id: u64) OfficeAdmission {
+        return self.cancel_fn(self.context, id);
+    }
+    pub fn progress(self: OfficeManagement, id: u64, value: OfficeProgress) void {
+        self.progress_fn(self.context, id, value);
+    }
+    pub fn complete(self: OfficeManagement, id: u64, value: OfficeCompletion) bool {
+        return self.complete_fn(self.context, id, value);
+    }
+    pub fn resources(self: OfficeManagement, capacity: bool, cleanup_pending: bool) void {
+        self.resources_fn(self.context, capacity, cleanup_pending);
+    }
+    pub fn source(self: OfficeManagement, root: ?[]const u8, lifetime: ?agent.CatalogSourceLifetime) !bool {
+        return self.source_fn(self.context, root, lifetime);
+    }
+};
+
+/// Main-loop effect for a currently authorized, hash-verified Output only.
+pub const OutputFileReveal = struct {
+    context: *anyopaque,
+    reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
+};
+
+/// Callback-scoped source identity. The Application copies this and the picker
+/// selection into an owned effect before returning; no Product pointer escapes.
+pub const OutputFileSaveInput = struct {
+    workspace_root: []const u8,
+    relative_path: []const u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+};
+pub const OutputFileSave = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, OutputFileSaveInput) anyerror!?OwnedOutputSave,
+};
+/// Owned exception to the borrowed coordination ports above. Stage, publish
+/// and discard run only on the worker; release runs after quiescence on main.
+/// Stage/publish must close and discard resources on failure, or report cleanup.
+pub const OwnedOutputSave = struct {
+    context: *anyopaque,
+    stage_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
+    publish_fn: *const fn (*anyopaque) anyerror!void,
+    discard_fn: *const fn (*anyopaque) anyerror!void,
+    release_fn: *const fn (*anyopaque) void,
+    pub fn deinit(self: *OwnedOutputSave) void {
+        self.release_fn(self.context);
+        self.* = undefined;
+    }
+};
+
+/// Main-only preparation copies a previously authorized locator; the owned
+/// effect captures the current verified component. No Product pointer survives.
+pub const DocumentPreviewPreparation = @import("product_document_preview_contract").Preparation;

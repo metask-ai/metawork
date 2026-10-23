@@ -1,4 +1,8 @@
 const std = @import("std");
+const office_component = @import("product_office_component");
+pub const OfficeWire = @import("product_office_view_contract");
+pub const OfficeKind = office_component.Kind;
+pub const OfficeAdmission = office_component.Admission;
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
@@ -9,6 +13,15 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const output_check = @import("output_check.zig");
+const document_sessions = @import("product_document_preview_session");
+pub const DocumentPreviewLimits = document_sessions.Limits;
+pub const DocumentPreviewInput = document_sessions.contract.Input;
+pub const DocumentPreviewRequest = document_sessions.contract.Request;
+pub const DocumentPreviewSelector = document_sessions.Selector;
+pub const DocumentPreviewState = document_sessions.State;
+pub const DocumentPreviewResult = document_sessions.Result;
+pub const DocumentPreviewSink = document_sessions.Sink;
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_control_attachment_staging");
@@ -62,6 +75,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     RunCapacity,
     CompactCapacity,
     ToolCapacity,
+    InvalidDeliveryReceipt,
     InvalidOutputSegment,
     InvalidInputAdoption,
     SnapshotTooLarge,
@@ -373,6 +387,8 @@ pub const SkillMutationResult = skill_runtime.MutationResult;
 pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
 
+pub const OfficeComponentConfiguration = office_component.Configuration;
+
 pub const Configuration = struct {
     run_clock: task_runtime.RunClock = .{},
     change_notifier: ChangeNotifier = .{},
@@ -391,6 +407,7 @@ pub const Configuration = struct {
     skill_enablement: SkillEnablementConfiguration = .{},
     skill_sources: skill_runtime.SourceConfiguration = .{},
     builtin_skill_root: ?[]const u8 = null,
+    office_component: OfficeComponentConfiguration = .{},
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
@@ -507,7 +524,9 @@ const skill_snapshot_structure = skill_runtime.Runtime.snapshotStructureBounds()
 const skill_asset_snapshot_overhead = skill_snapshot_structure.asset;
 const skill_source_settings_snapshot_bytes: usize = 1024;
 const skill_source_discovery_snapshot_bytes: usize = 1024;
-const run_snapshot_overhead: usize = 1024;
+// Output identities, decimal sizes and object syntax are fixed overhead;
+// locator bytes already belong to the globally bounded text projection.
+const run_snapshot_overhead: usize = 1024 + 128 * lifecycle.max_file_deliveries_per_run;
 const commentary_segment_snapshot_overhead: usize = 3;
 const compact_snapshot_overhead: usize = 512;
 const catalog_snapshot_overhead: usize = 256;
@@ -971,6 +990,28 @@ fn absoluteReferenceRelativePath(
     return storage[0..relative.len];
 }
 
+pub const OutputFileTarget = output_check.Target;
+pub const OutputCheckState = output_check.State;
+pub const OutputCheckKind = output_check.Kind;
+pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState, committed: bool = false };
+pub const OutputCheckSink = struct { context: *anyopaque, request_active_fn: *const fn (*anyopaque, u64) bool, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
+
+pub const OutputFileAuthorityError = error{
+    UnknownOutput,
+    RestrictedOutput,
+    StaleSecurityEpoch,
+    ExecutorShuttingDown,
+};
+
+fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
+    return switch (err) {
+        error.UnknownOutput => .missing,
+        error.RestrictedOutput => .restricted,
+        error.StaleSecurityEpoch => .stale_security,
+        else => .failed,
+    };
+}
+
 pub const FilePreviewState = file_preview.State;
 pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
 const file_preview_scan_bytes = 256 * 1024;
@@ -1043,6 +1084,39 @@ pub const FileChangeDiffAdmission = union(enum) {
     queued,
     immediate: FileChangeDiffReason,
 };
+
+fn controlOfficeView(context: *anyopaque) office_component.View {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.officeComponentView();
+}
+fn controlOfficeBegin(context: *anyopaque, kind: office_component.Kind, generation: u64) office_component.Admission {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.beginOfficeOperation(kind, generation);
+}
+fn controlOfficeAttempt(context: *anyopaque, id: u64) ?*office_component.Attempt {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.officeAttempt(id);
+}
+fn controlOfficeCancel(context: *anyopaque, id: u64) office_component.Admission {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.cancelOfficeOperation(id);
+}
+fn controlOfficeProgress(context: *anyopaque, id: u64, progress: office_component.Progress) void {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    self.reportOfficeProgress(id, progress);
+}
+fn controlOfficeComplete(context: *anyopaque, id: u64, completion: office_component.Completion) bool {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.completeOfficeOperation(id, completion);
+}
+fn controlOfficeResources(context: *anyopaque, capacity: bool, cleanup_pending: bool) void {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    self.setOfficeResourceFacts(capacity, cleanup_pending);
+}
+fn controlOfficeSource(context: *anyopaque, root: ?[]const u8, lifetime: ?lifecycle.CatalogSourceLifetime) !bool {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.replaceBuiltinSkillSource(.{ .root = root, .lifetime = lifetime });
+}
 
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
@@ -1192,6 +1266,7 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
+    office: office_component.State,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1269,6 +1344,12 @@ pub const Runtime = struct {
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
+    file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
+    output_checks: output_check.Lane = .{},
+    documents: document_sessions.Sessions = .{},
+    document_preparation: ?control_ports.DocumentPreviewPreparation = null,
+    output_file_reveal: ?control_ports.OutputFileReveal = null,
+    output_file_save: ?control_ports.OutputFileSave = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1558,6 +1639,7 @@ pub const Runtime = struct {
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
         var control: Runtime = .{
+            .office = office_component.State.init(configuration.office_component),
             .allocator = allocator,
             .io = io,
             .agent_runtime = agent_runtime,
@@ -1659,6 +1741,255 @@ pub const Runtime = struct {
             .free_fn = freeWorkspaceStorage,
             .redact_fn = redactWorkspaceStorage,
         };
+    }
+
+    pub fn setDocumentPreviewPreparation(self: *Runtime, preparation: control_ports.DocumentPreviewPreparation) void {
+        self.document_preparation = preparation;
+    }
+
+    const DocumentReference = struct { workspace_id: u64, workspace_epoch: u64, input: document_sessions.contract.Input };
+    fn documentReference(self: *const Runtime, task_id: u64, run_id: u64, selector: document_sessions.Selector, storage: *[4096]u8) !DocumentReference {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+        const task = self.task_runtime.findConst(task_id) orelse return error.MissingPreview;
+        if (task.deletion != .idle) return error.MissingPreview;
+        switch (selector) {
+            .output => |id| {
+                const current = try self.outputFileAuthority(task_id, run_id, id);
+                return .{ .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .input = .{ .workspace_root = current.workspace_root, .relative_path = current.locator, .expected = .{ .size_bytes = current.size_bytes, .sha256 = current.sha256 } } };
+            },
+            .reference => |id| {
+                if (id.len == 0 or id.len > 128 or self.containsKnownCredential(id)) return error.RestrictedPreview;
+                const current = self.task_runtime.fileReference(task_id, run_id, id) orelse return error.MissingPreview;
+                if (!self.filePreviewWorkspaceAuthorized(current) or self.containsKnownCredential(current.workspace_root) or self.containsKnownCredential(current.locator)) return error.RestrictedPreview;
+                const relative = switch (current.locator_kind) {
+                    .workspace_path => current.locator,
+                    .absolute_path => absoluteReferenceRelativePath(current.workspace_root, current.locator, storage) orelse return error.RestrictedPreview,
+                    .uri => return error.UnsupportedPreview,
+                };
+                return .{ .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .input = .{ .workspace_root = current.workspace_root, .relative_path = relative, .expected = null } };
+            },
+        }
+    }
+    fn documentComponentIdentity(self: *const Runtime) ![32]u8 {
+        const current = self.office.current orelse return error.OfficePreviewUnavailable;
+        if (!self.office.supported or self.office.health != .ready or current.state != .ready or self.office.shutting_down or
+            (if (self.office.operation) |operation| operation.kind == .remove else false)) return error.OfficePreviewUnavailable;
+        return current.identity;
+    }
+    /// Deep copy on main; only Application may capture actual bytes on worker.
+    pub fn copyDocumentPreviewTarget(self: *const Runtime, allocator: std.mem.Allocator, task_id: u64, run_id: u64, selector: document_sessions.Selector) !document_sessions.Target {
+        const component = try self.documentComponentIdentity();
+        var relative: [4096]u8 = undefined;
+        const current = try self.documentReference(task_id, run_id, selector, &relative);
+        const reference = switch (selector) {
+            .output => "",
+            .reference => |id| id,
+        };
+        const root_len = current.input.workspace_root.len;
+        const path_len = current.input.relative_path.len;
+        const storage = try allocator.alloc(u8, root_len + path_len + reference.len);
+        @memcpy(storage[0..root_len], current.input.workspace_root);
+        @memcpy(storage[root_len..][0..path_len], current.input.relative_path);
+        @memcpy(storage[root_len + path_len ..], reference);
+        return .{ .allocator = allocator, .storage = storage, .task_id = task_id, .run_id = run_id, .selector = switch (selector) {
+            .output => |id| .{ .output = id },
+            .reference => .{ .reference = storage[root_len + path_len ..] },
+        }, .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .security_epoch = self.projection_security_epoch, .component = component, .input = .{ .workspace_root = storage[0..root_len], .relative_path = storage[root_len..][0..path_len], .expected = current.input.expected } };
+    }
+    pub fn revalidateDocumentPreviewTarget(self: *const Runtime, target: *const document_sessions.Target) !void {
+        if (target.security_epoch == 0 or target.security_epoch != self.projection_security_epoch) return error.StaleSecurityEpoch;
+        const component = try self.documentComponentIdentity();
+        if (!std.mem.eql(u8, &component, &target.component)) return error.OfficePreviewUnavailable;
+        var relative: [4096]u8 = undefined;
+        const current = try self.documentReference(target.task_id, target.run_id, target.selector, &relative);
+        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
+            !std.mem.eql(u8, current.input.workspace_root, target.input.workspace_root) or
+            !std.mem.eql(u8, current.input.relative_path, target.input.relative_path) or !std.meta.eql(current.input.expected, target.input.expected)) return error.RestrictedPreview;
+    }
+    fn documentPolicy(self: *Runtime) document_sessions.Policy {
+        return .{ .context = self, .validate_fn = documentValidate, .contains_fn = documentContains, .overlap_fn = documentOverlap };
+    }
+    fn documentValidate(context: *anyopaque, target: *const document_sessions.Target) !void {
+        try (@as(*Runtime, @ptrCast(@alignCast(context)))).revalidateDocumentPreviewTarget(target);
+    }
+    fn documentContains(context: *anyopaque, bytes: []const u8) bool {
+        return (@as(*Runtime, @ptrCast(@alignCast(context)))).containsKnownCredential(bytes);
+    }
+    fn documentOverlap(context: *anyopaque) !usize {
+        return (@as(*Runtime, @ptrCast(@alignCast(context)))).filePreviewCredentialOverlap();
+    }
+    pub const DocumentPreviewAdmission = union(enum) { queued: u64, immediate: document_sessions.State };
+    pub fn beginDocumentPreview(self: *Runtime, request_id: u64, task_id: u64, run_id: u64, selector: document_sessions.Selector) DocumentPreviewAdmission {
+        const preparation = self.document_preparation orelse return .{ .immediate = .unavailable };
+        var target = self.copyDocumentPreviewTarget(self.allocator, task_id, run_id, selector) catch |failure| return .{ .immediate = document_sessions.failureState(failure) };
+        var consumed = false;
+        defer if (!consumed) target.deinit();
+        const id = self.documents.open(self.io, self.allocator, .{ .context = self.change_notifier.context, .wake_fn = self.change_notifier.wake }, self.documentPolicy(), preparation, target, request_id) catch |failure| return .{ .immediate = document_sessions.failureState(failure) };
+        consumed = true;
+        _ = self.change_notifier.notify();
+        return .{ .queued = id };
+    }
+    pub fn readDocumentPreview(self: *Runtime, id: u64, request_id: u64, request: document_sessions.contract.Request) !void {
+        try self.documents.read(self.documentPolicy(), id, request_id, request);
+    }
+    pub fn readDocumentPreviewChunk(self: *Runtime, id: u64, offset: usize) ![]const u8 {
+        return self.documents.chunk(self.documentPolicy(), id, offset);
+    }
+    pub fn releaseDocumentPreviewRead(self: *Runtime, id: u64) void {
+        self.documents.releaseRead(id);
+    }
+    pub fn closeDocumentPreview(self: *Runtime, id: u64) bool {
+        return self.documents.close(id, .cancelled);
+    }
+    pub fn drainDocumentPreviews(self: *Runtime, sink: document_sessions.Sink) void {
+        self.documents.drain(self.documentPolicy(), sink);
+    }
+    pub fn documentPreviewNeedsWake(self: *const Runtime) bool {
+        return self.documents.needsWake();
+    }
+    pub fn documentPreviewResourceReleased(self: *const Runtime, id: u64) bool {
+        return if (self.documents.lane) |lane| !lane.hasResource(id) else true;
+    }
+    pub fn shutdownDocumentPreviews(self: *Runtime) void {
+        self.documents.shutdown() catch std.log.warn("document preview shutdown retained physical resources", .{});
+    }
+
+    /// Main-loop admission only; does no file I/O and copies the exact trusted
+    /// record for a caller-owned, bounded asynchronous operation.
+    pub fn copyOutputFileTarget(
+        self: *const Runtime,
+        allocator: std.mem.Allocator,
+        task_id: u64,
+        run_id: u64,
+        output_id: [16]u8,
+    ) (OutputFileAuthorityError || std.mem.Allocator.Error)!OutputFileTarget {
+        const reference = try self.outputFileAuthority(task_id, run_id, output_id);
+        const storage = try allocator.alloc(u8, reference.workspace_root.len + reference.locator.len);
+        const root = storage[0..reference.workspace_root.len];
+        const locator = storage[reference.workspace_root.len..];
+        @memcpy(root, reference.workspace_root);
+        @memcpy(locator, reference.locator);
+        return .{
+            .allocator = allocator,
+            .storage = storage,
+            .task_id = task_id,
+            .run_id = run_id,
+            .output_id = reference.id,
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .security_epoch = self.projection_security_epoch,
+            .workspace_root = root,
+            .relative_path = locator,
+            .size_bytes = reference.size_bytes,
+            .sha256 = reference.sha256,
+        };
+    }
+
+    /// Must run again after worker completion, before any result becomes usable.
+    /// Content hashing separately proves the actual bytes; neither check alone
+    /// authorizes Save As, reveal, preview or a continuation input.
+    pub fn revalidateOutputFileTarget(self: *const Runtime, target: *const OutputFileTarget) OutputFileAuthorityError!void {
+        if (target.security_epoch == 0 or target.security_epoch != self.projection_security_epoch)
+            return error.StaleSecurityEpoch;
+        const current = try self.outputFileAuthority(target.task_id, target.run_id, target.output_id);
+        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
+            !std.mem.eql(u8, current.workspace_root, target.workspace_root) or
+            !std.mem.eql(u8, current.locator, target.relative_path) or
+            current.size_bytes != target.size_bytes or !std.mem.eql(u8, &current.sha256, &target.sha256))
+            return error.RestrictedOutput;
+    }
+
+    fn outputFileAuthority(self: *const Runtime, task_id: u64, run_id: u64, output_id: [16]u8) OutputFileAuthorityError!task_runtime.OutputFileReference {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+        const reference = self.task_runtime.outputFileReference(task_id, run_id, output_id) orelse return error.UnknownOutput;
+        if (reference.redacted or !self.workspace.filePreviewAuthorized(reference.workspace_id, reference.workspace_epoch, reference.workspace_root) or
+            self.containsKnownCredential(reference.locator) or self.containsKnownCredential(reference.workspace_root))
+            return error.RestrictedOutput;
+        // Persisted/projection bytes must still be a valid delivery locator.
+        _ = lifecycle.FileDeliveryReceipt.init(reference.id, reference.locator, reference.size_bytes, reference.sha256) catch
+            return error.RestrictedOutput;
+        return reference;
+    }
+
+    pub const OutputCheckAdmission = union(enum) { queued, immediate: OutputCheckState };
+
+    pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8, kind: OutputCheckKind) OutputCheckAdmission {
+        if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
+        var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
+            return .{ .immediate = outputCheckAuthorityState(err) };
+        var target_owned = true;
+        defer if (target_owned) target.deinit();
+        var work: output_check.Work = if (kind == .save) save: {
+            const preparation = self.output_file_save orelse return .{ .immediate = .unavailable };
+            const owned = preparation.prepare_fn(preparation.context, .{ .workspace_root = target.workspace_root, .relative_path = target.relative_path, .size_bytes = target.size_bytes, .sha256 = target.sha256 }) catch |err|
+                return .{ .immediate = if (err == error.UnsupportedService or err == error.RuntimeUnavailable) .unavailable else .save_failed };
+            break :save .{ .save = owned orelse return .{ .immediate = .cancelled } };
+        } else inspect: {
+            const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
+            const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
+            break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
+        };
+        var work_owned = true;
+        defer if (work_owned) work.deinit();
+        // A Native picker may pump messages; no pre-dialog authority survives it.
+        self.revalidateOutputFileTarget(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
+        self.output_checks.begin(self.io, self.allocator, .{
+            .context = self.change_notifier.context,
+            .wake_fn = self.change_notifier.wake,
+        }, completion_id, kind, target, work) catch |err|
+            return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        target_owned = false;
+        work_owned = false;
+        return .queued;
+    }
+
+    pub fn cancelOutputCheck(self: *Runtime, completion_id: u64) bool {
+        return self.output_checks.cancel(completion_id);
+    }
+
+    pub fn hasOutputChecks(self: *const Runtime) bool {
+        return self.output_checks.hasPending();
+    }
+
+    pub fn drainOutputChecks(self: *Runtime, sink: OutputCheckSink) void {
+        self.output_checks.expire(self.io);
+        while (self.output_checks.awaitingPublication()) |publication| {
+            const state = if (!sink.request_active_fn(sink.context, publication.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(publication.target)) |_| OutputCheckState.ready else |err| outputCheckAuthorityState(err);
+            self.output_checks.decide(publication, state);
+        }
+        while (self.output_checks.take(self.io)) |taken| {
+            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            if (state == .ready and taken.kind == .reveal) {
+                state = if (self.output_file_reveal) |reveal| result: {
+                    reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
+                        error.UnsupportedService, error.RuntimeUnavailable => OutputCheckState.unavailable,
+                        else => OutputCheckState.failed,
+                    };
+                    break :result .revealed;
+                } else .unavailable;
+            }
+            const completion_id = taken.completion_id;
+            self.output_checks.release(taken);
+            sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state, .committed = taken.committed });
+        }
+    }
+
+    pub fn outputPublicationCommitted(self: *const Runtime, completion_id: u64) bool {
+        return self.output_checks.publicationCommitted(completion_id);
+    }
+
+    pub fn setOutputFileSave(self: *Runtime, save: control_ports.OutputFileSave) void {
+        self.output_file_save = save;
+    }
+
+    pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
+        self.output_file_reveal = reveal;
+    }
+
+    pub fn shutdownOutputChecks(self: *Runtime) void {
+        self.output_checks.shutdown();
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -3544,6 +3875,62 @@ pub const Runtime = struct {
         return self.skill.personalCatalogProjection();
     }
 
+    pub fn officeManagement(self: *Runtime) control_ports.OfficeManagement {
+        return .{ .context = self, .view_fn = controlOfficeView, .begin_fn = controlOfficeBegin, .attempt_fn = controlOfficeAttempt, .cancel_fn = controlOfficeCancel, .progress_fn = controlOfficeProgress, .complete_fn = controlOfficeComplete, .resources_fn = controlOfficeResources, .source_fn = controlOfficeSource };
+    }
+
+    pub fn officeComponentView(self: *const Runtime) office_component.View {
+        return self.office.view();
+    }
+
+    pub fn beginOfficeOperation(self: *Runtime, kind: office_component.Kind, expected_generation: u64) office_component.Admission {
+        if (self.shutting_down) return .{ .reason = .shutting_down };
+        self.syncLifecycle();
+        if (kind != .cleanup and self.skill.reconciliationPending()) return .{ .reason = .busy };
+        const result = self.office.begin(kind, expected_generation);
+        if (result.accepted and kind == .remove) self.documents.closeAll(.unavailable);
+        if (result.changed) self.bumpRevision();
+        return result;
+    }
+
+    pub fn officeAttempt(self: *Runtime, id: u64) ?*office_component.Attempt {
+        const operation = self.office.operation orelse return null;
+        return if (operation.id == id) &self.office.attempt else null;
+    }
+
+    pub fn cancelOfficeOperation(self: *Runtime, id: u64) office_component.Admission {
+        const result = self.office.cancel(id);
+        if (result.changed) self.bumpRevision();
+        return result;
+    }
+
+    pub fn reportOfficeProgress(self: *Runtime, id: u64, progress: office_component.Progress) void {
+        if (self.office.progress(id, progress)) self.bumpRevision();
+    }
+
+    pub fn completeOfficeOperation(self: *Runtime, id: u64, completion: office_component.Completion) bool {
+        const applied = self.office.finish(id, completion);
+        if (applied) self.bumpRevision();
+        return applied;
+    }
+
+    pub fn setOfficeResourceFacts(self: *Runtime, installation_capacity: bool, cleanup_pending: bool) void {
+        const capacity_changed = self.office.setInstallationCapacity(installation_capacity);
+        const cleanup_changed = self.office.setCleanupPending(cleanup_pending);
+        if (capacity_changed or cleanup_changed) self.bumpRevision();
+    }
+
+    pub fn replaceBuiltinSkillSource(self: *Runtime, source: skill_runtime.BuiltinSource) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const changed = try self.skill.replaceBuiltinSource(source, self.skillProjectionBudget());
+        if (changed) {
+            _ = self.syncSkillCatalogsNoFail();
+            self.bumpRevision();
+        }
+        return changed;
+    }
+
     pub fn refreshSkillCatalog(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -4177,7 +4564,10 @@ pub const Runtime = struct {
         const image_workspace = try self.workspace.taskRunAuthority(workspace.id, workspace.epoch);
         var image = self.prepareRunImage(image_workspace);
         defer if (image) |*value| value.deinit();
+        var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(image_workspace) else null;
+        defer if (delivery) |*value| value.deinit();
         run_effects.image_execution = &image;
+        run_effects.file_delivery = &delivery;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
         var run = try self.task_runtime.startRun(
             task.id(),
@@ -4946,6 +5336,9 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.office.beginShutdown();
+        self.output_checks.stopAdmission();
+        self.documents.stopAdmission(.cancelled);
         self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
@@ -5107,7 +5500,10 @@ pub const Runtime = struct {
         var operation_effects = self.taskRuntimeOperationEffects();
         var image = self.prepareRunImage(workspace);
         defer if (image) |*value| value.deinit();
+        var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(workspace) else null;
+        defer if (delivery) |*value| value.deinit();
         operation_effects.image_execution = &image;
+        operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (staged.borrow != null) {
             acceptance_context = .{
@@ -6568,7 +6964,7 @@ pub const Runtime = struct {
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
         writer.writeByte('{') catch return error.SnapshotTooLarge;
         if (include_revision) writer.print("\"revision\":\"{d}\",", .{self.revision}) catch return error.SnapshotTooLarge;
-        writer.print("\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":true,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             task_persistence_ready,
             @tagName(self.task_persistence_health),
             self.taskHistoryRecoveryAvailable(),
@@ -6610,6 +7006,8 @@ pub const Runtime = struct {
         try self.writeAccount(writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer);
+        writer.writeAll(",\"office\":") catch return error.SnapshotTooLarge;
+        std.json.Stringify.value(OfficeWire.View.from(self.office.view()), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
@@ -7410,6 +7808,8 @@ pub const Runtime = struct {
         self.execution_state.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
+        self.output_checks.deinit();
+        self.documents.deinit() catch std.log.warn("document preview resources retained until process exit", .{});
         self.executor.deinit();
         self.approval_executor.deinit();
         for (&self.preview_images) |*slot| if (slot.*) |image| {
@@ -7465,6 +7865,8 @@ pub const Runtime = struct {
         self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
+        self.shutdownOutputChecks();
+        self.shutdownDocumentPreviews();
         self.drainFileChangeCompletions(.{
             .context = self,
             .complete_fn = discardFileChangeDiffCompletion,
@@ -9238,6 +9640,7 @@ pub const Runtime = struct {
     fn invalidateProjectionSecurity(self: *Runtime) void {
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
+        self.documents.closeAll(.stale_security);
         if (self.projection_security_epoch != 0)
             self.projection_security_epoch = std.math.add(u64, self.projection_security_epoch, 1) catch 0;
         // Security revocation must be published even if the surrounding command
@@ -9888,6 +10291,10 @@ pub const Runtime = struct {
         self.image_run_preparation = preparation;
     }
 
+    pub fn setFileDeliveryPreparation(self: *Runtime, preparation: ?control_ports.FileDeliveryPreparation) void {
+        self.file_delivery_preparation = preparation;
+    }
+
     fn prepareRunImage(self: *Runtime, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
         const preparation = self.image_run_preparation orelse return null;
         const image = preparation.prepare(workspace) orelse return null;
@@ -9988,8 +10395,37 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub const OutputFileEffect = OutputCheckHarness;
+    pub const DocumentEffect = DocumentRuntimeHarness;
+    pub fn documentPreviewFixture(effect: *DocumentEffect) !Runtime {
+        var control = try testRuntime();
+        errdefer control.deinit();
+        testDocumentOffice(&control);
+        try recordTestOutput(&control, @splat(3), "report.docx");
+        control.setDocumentPreviewPreparation(.{ .context = effect, .prepare_fn = DocumentRuntimeHarness.factory });
+        return control;
+    }
+    pub const OutputSaveEffect = OutputSaveHarness;
+    pub fn bindOutputSaveEffect(control: *Runtime, effect: *OutputSaveEffect) void {
+        effect.bind(control);
+    }
+
+    pub fn bindOutputFileEffect(control: *Runtime, effect: *OutputFileEffect) void {
+        effect.bind(control);
+        control.setOutputFileReveal(.{ .context = effect, .reveal_fn = OutputCheckHarness.reveal });
+    }
+
+    pub fn recordDeliveredOutputFixture(control: *Runtime) !void {
+        try recordTestOutput(control, @splat(3), "results/年度报告.docx");
+    }
+
     pub fn filePreviewFixture(root: []const u8) !Runtime {
         return testImagePreviewRuntime(root);
+    }
+    pub fn expireDocumentPreview(control: *Runtime) void {
+        for (control.documents.slots) |entry| if (entry) |session| {
+            session.touched.nanoseconds -= (@as(i96, DocumentPreviewLimits.idle_ms) + 1) * std.time.ns_per_ms;
+        };
     }
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
@@ -21273,5 +21709,716 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
         } else control.cancelSnapshot();
         try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .task_id = 1 }, .taskPage)) == null);
         for (control.view_blocks) |slot| try std.testing.expect(slot == null);
+    }
+}
+
+test "Outputs require trusted delivery sideband and reject conflicting or excessive receipts" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const encoded = "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expect(run.outputs[0] == null);
+    const baseline_bytes = control.projection_bytes;
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
+    try control.applyEvent(&envelope);
+    try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
+    try std.testing.expectEqual(@as(u64, 42), run.outputs[0].?.size_bytes);
+    const admitted_bytes = control.projection_bytes;
+    try std.testing.expectEqual(baseline_bytes + "成果/final.docx".len, admitted_bytes);
+    try control.applyEvent(&envelope);
+    try std.testing.expectEqual(admitted_bytes, control.projection_bytes);
+    try std.testing.expect(run.outputs[1] == null);
+    envelope.delivered_file.?.size_bytes += 1;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&envelope));
+    envelope.delivered_file.?.size_bytes -= 1;
+    envelope.delivered_file.?.path_len = 513;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&envelope));
+    for (1..lifecycle.max_file_deliveries_per_run) |index| {
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(@intCast(index + 1)), "next.xlsx", index, @splat(3));
+        try control.applyEvent(&envelope);
+    }
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(99), "overflow.pptx", 1, @splat(4));
+    try std.testing.expectError(error.ToolCapacity, control.applyEvent(&envelope));
+    var wrong_tool = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"read-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"file\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer wrong_tool.deinit();
+    wrong_tool.delivered_file = envelope.delivered_file;
+    try std.testing.expectError(error.InvalidDeliveryReceipt, control.applyEvent(&wrong_tool));
+}
+
+test "Outputs persist through real history restore and sanitized locators lose file authority" {
+    var storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &storage };
+    {
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+        defer control.deinit();
+        var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+        defer envelope.deinit();
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
+        try control.applyEvent(&envelope);
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "SECRET-KEY/final.xlsx", 100, @splat(4));
+        try control.applyEvent(&envelope);
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(run.outputs[1].?.redacted);
+        try TestSupport.commitTaskHistory(&control);
+        try std.testing.expect(history.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, storage[0..history.len], "SECRET-KEY") == null);
+        var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+        defer decoded.deinit();
+        try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[1].locator);
+    }
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = history.capability(storage[0..history.len]),
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+    });
+    defer restored.deinit();
+    const run = &restored.task_runtime.find(3).?.durable.runs[0].?;
+    try std.testing.expectEqualStrings("成果/final.docx", run.outputs[0].?.locator);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(2))), &run.outputs[0].?.sha256);
+    try std.testing.expect(run.outputs[1].?.redacted);
+    try std.testing.expectEqualStrings("", run.outputs[1].?.locator);
+    try std.testing.expect(run.outputs[2] == null);
+}
+
+test "late credential discovery revokes Output locators in current and durable projections" {
+    var storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &storage };
+    var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+    defer control.deinit();
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "late-secret/report.docx", 42, @splat(2));
+    try control.applyEvent(&envelope);
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expect(!run.outputs[0].?.redacted);
+    control.redactAllProductProjectionsNoFail("late-secret");
+    try std.testing.expect(run.outputs[0].?.redacted);
+    try TestSupport.commitTaskHistory(&control);
+    var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("", decoded.value.tasks[0].runs[0].outputs[0].locator);
+}
+
+test "delivered Output projection matches the strict Renderer fixture without exposing file authority" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.delivered_output, .{});
+    defer expected.deinit();
+    const row = expected.value.object;
+    var id: [16]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&id, row.get("id").?.string);
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, row.get("displayPath").?.string, 42, @splat(2));
+    try control.applyEvent(&envelope);
+    var storage: [96 * 1024]u8 = undefined;
+    const raw = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
+    defer parsed.deinit();
+    const output = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, output, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.delivered_output, " \r\n\t"), encoded);
+    try std.testing.expectEqual(@as(usize, 4), output.object.count());
+    try std.testing.expect(output.object.get("locator") == null);
+    try std.testing.expect(output.object.get("sha256") == null);
+    // Even an inconsistent stale flag must not expose a newly known credential.
+    const record = &control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?;
+    @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
+    try std.testing.expect(!record.redacted);
+    const safe = try control.writeAggregateFixture(&storage);
+    var redacted = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, safe, .{});
+    defer redacted.deinit();
+    const hidden = redacted.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
+    try std.testing.expect(hidden.object.get("redacted").?.bool);
+    try std.testing.expectEqualStrings("", hidden.object.get("displayPath").?.string);
+}
+
+fn recordTestOutput(control: *Runtime, id: [16]u8, path: []const u8) !void {
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-authority\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer envelope.deinit();
+    envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, path, 42, @splat(2));
+    try control.applyEvent(&envelope);
+}
+
+test "Output file target requires an explicit receipt in the exact owning Task and Run" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const id: [16]u8 = @splat(3);
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, id));
+    try recordTestOutput(&control, id, "results/年度报告.docx");
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, id);
+    defer target.deinit();
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
+    try std.testing.expectEqual([_]u8{2} ** 32, target.sha256);
+    try control.revalidateOutputFileTarget(&target);
+    for ([_][2]u64{ .{ 0, 7 }, .{ 4, 7 }, .{ 3, 0 }, .{ 3, 8 } }) |scope|
+        try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, scope[0], scope[1], id));
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(0)));
+    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(4)));
+
+    const task = &control.task_runtime.tasks[0].?;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    try std.testing.expect(target.relative_path.ptr != record.locator.ptr);
+    try std.testing.expect(target.workspace_root.ptr != task.durable.workspace_root.ptr);
+    // The worker keeps stable input, while completion must reject changed facts.
+    record.locator[0] = 'R';
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.locator[0] = 'r';
+    record.sha256[0] ^= 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.sha256[0] ^= 1;
+    record.size_bytes += 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.size_bytes -= 1;
+    task.durable.workspace_epoch += 1;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    task.durable.workspace_epoch -= 1;
+    try control.revalidateOutputFileTarget(&target);
+}
+
+test "Output file target rechecks revocation deletion redaction and security before use" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer target.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    task.deletion = .deleting;
+    try std.testing.expectError(error.UnknownOutput, control.revalidateOutputFileTarget(&target));
+    task.deletion = .idle;
+    record.redacted = true;
+    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    record.redacted = false;
+    // A stale redacted flag cannot confer authority over a sensitive locator.
+    @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
+    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    @memcpy(record.locator, target.relative_path);
+    try control.revalidateOutputFileTarget(&target);
+    control.learnProjectionCredential("new-file-operation-security-boundary");
+    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateOutputFileTarget(&target));
+    var fresh = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer fresh.deinit();
+    try control.revalidateOutputFileTarget(&fresh);
+    control.shutting_down = true;
+    try std.testing.expectError(error.ExecutorShuttingDown, control.revalidateOutputFileTarget(&fresh));
+    control.shutting_down = false;
+    control.projection_security_epoch = 0;
+    try std.testing.expectError(error.StaleSecurityEpoch, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+}
+
+test "Output file target owns its input after the aggregate is released and handles allocation failure" {
+    const Harness = struct {
+        fn copy(allocator: std.mem.Allocator, control: *const Runtime) !void {
+            var target = try control.copyOutputFileTarget(allocator, 3, 7, @splat(3));
+            defer target.deinit();
+            try control.revalidateOutputFileTarget(&target);
+        }
+    };
+    var control = try testRuntime();
+    var live = true;
+    defer if (live) control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.copy, .{&control});
+    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    defer target.deinit();
+    control.deinit();
+    live = false;
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
+    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
+}
+
+const OutputCheckHarness = struct {
+    main_thread_id: std.Thread.Id,
+    workspace_id: u64 = 1,
+    outcome: lifecycle.FileDeliveryInspection = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } },
+    entered: std.atomic.Value(bool) = .init(false),
+    blocked: std.atomic.Value(bool) = .init(false),
+    inspections: std.atomic.Value(usize) = .init(0),
+    prepares: usize = 0,
+    releases: usize = 0,
+    requester_active: bool = true,
+    reveals: usize = 0,
+    results: [16]?OutputCheckResult = @splat(null),
+    count: usize = 0,
+
+    fn prepare(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        std.debug.assert(workspace.id == self.workspace_id and workspace.epoch == 1);
+        self.prepares += 1;
+        return .{ .input = .{ .context = self, .inspect_fn = inspect }, .release_fn = release };
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) lifecycle.FileDeliveryInspection {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() != self.main_thread_id);
+        std.debug.assert(std.mem.eql(u8, path, "results/年度报告.docx"));
+        _ = self.inspections.fetchAdd(1, .acq_rel);
+        self.entered.store(true, .release);
+        while (self.blocked.load(.acquire) and !cancelled.load(.acquire)) std.Thread.yield() catch {};
+        return if (cancelled.load(.acquire)) .{ .failed = .cancelled } else self.outcome;
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        self.releases += 1;
+    }
+
+    fn complete(context: *anyopaque, result: OutputCheckResult) void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        self.results[self.count] = result;
+        self.count += 1;
+    }
+
+    fn sink(self: *OutputCheckHarness) OutputCheckSink {
+        return .{ .context = self, .request_active_fn = requestActive, .complete_fn = complete };
+    }
+
+    fn requestActive(context: *anyopaque, _: u64) bool {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        return self.requester_active;
+    }
+    fn reveal(context: *anyopaque, _: []const u8, path: []const u8) !void {
+        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        try std.testing.expectEqualStrings("results/年度报告.docx", path);
+        self.reveals += 1;
+    }
+
+    fn bind(self: *OutputCheckHarness, control: *Runtime) void {
+        control.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepare });
+    }
+
+    fn waitEntered(self: *OutputCheckHarness) !void {
+        for (0..5000) |_| {
+            if (self.entered.load(.acquire)) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+
+    fn drainAll(self: *OutputCheckHarness, control: *Runtime) !void {
+        for (0..5000) |_| {
+            control.drainOutputChecks(self.sink());
+            if (!control.hasOutputChecks()) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+};
+
+test "Output check worker distinguishes current bytes from changed or unavailable files" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    try std.testing.expectEqual(OutputCheckState.unavailable, control.beginOutputCheck(1, 3, 7, @splat(3), .check).immediate);
+    try std.testing.expect(control.output_checks.executor == null);
+    harness.bind(&control);
+    const Case = struct { outcome: lifecycle.FileDeliveryInspection, expected: OutputCheckState };
+    const cases = [_]Case{
+        .{ .outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } }, .expected = .ready },
+        .{ .outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(2) } }, .expected = .changed },
+        .{ .outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } }, .expected = .changed },
+        .{ .outcome = .{ .failed = .missing }, .expected = .missing },
+        .{ .outcome = .{ .failed = .restricted }, .expected = .restricted },
+        .{ .outcome = .{ .failed = .too_large }, .expected = .too_large },
+        .{ .outcome = .{ .failed = .read_failed }, .expected = .failed },
+    };
+    for (cases, 0..) |case, i| {
+        harness.outcome = case.outcome;
+        try std.testing.expect(control.beginOutputCheck(i + 1, 3, 7, @splat(3), .check) == .queued);
+        try harness.drainAll(&control);
+        try std.testing.expectEqual(case.expected, harness.results[i].?.state);
+        try std.testing.expectEqual(i + 1, harness.results[i].?.completion_id);
+        try std.testing.expectEqual(i + 1, harness.releases);
+    }
+    try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
+}
+
+test "Output check cancellation bounds active and queued work without retaining effects" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.blocked.store(true, .release);
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try harness.waitEntered();
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3), .check).immediate);
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    try std.testing.expect(control.cancelOutputCheck(2));
+    try std.testing.expect(control.cancelOutputCheck(1));
+    try std.testing.expect(!control.cancelOutputCheck(3));
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(@as(usize, 2), harness.count);
+    for (harness.results[0..harness.count]) |result| try std.testing.expectEqual(OutputCheckState.cancelled, result.?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.inspections.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), harness.releases);
+}
+
+test "Output check completion revalidates authority changed while the worker was active" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try harness.waitEntered();
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    harness.blocked.store(false, .release);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.restricted, harness.results[0].?.state);
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    harness.entered.store(false, .release);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try harness.waitEntered();
+    control.learnProjectionCredential("new-check-security-boundary");
+    harness.blocked.store(false, .release);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.stale_security, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), harness.releases);
+}
+
+test "Output check deadline and shutdown cancel then join before releasing frozen effects" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    harness.blocked.store(true, .release);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try harness.waitEntered();
+    control.output_checks.jobs[0].?.created_at.nanoseconds -= 31 * std.time.ns_per_s;
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.timed_out, harness.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    harness.entered.store(false, .release);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try harness.waitEntered();
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .check) == .queued);
+    control.shutdownOutputChecks();
+    // Joined jobs retain their owned effects until the main loop drains them.
+    try std.testing.expectEqual(@as(usize, 1), harness.releases);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(@as(usize, 3), harness.releases);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[1].?.state);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
+    try std.testing.expectEqual(OutputCheckState.failed, control.beginOutputCheck(4, 3, 7, @splat(3), .check).immediate);
+}
+
+test "Output reveal requires both verified bytes and an active requester immediately before the main loop effect" {
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    harness.bind(&control);
+    control.setOutputFileReveal(.{ .context = &harness, .reveal_fn = OutputCheckHarness.reveal });
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } };
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.changed, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } };
+    harness.requester_active = false;
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .reveal) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
+    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+}
+
+const OutputSaveHarness = struct {
+    main_thread_id: std.Thread.Id,
+    stage_entered: std.atomic.Value(bool) = .init(false),
+    publish_entered: std.atomic.Value(bool) = .init(false),
+    publishing_blocked: std.atomic.Value(bool) = .init(false),
+    published: std.atomic.Value(usize) = .init(0),
+    discarded: std.atomic.Value(usize) = .init(0),
+    releases: usize = 0,
+    picker_cancel: bool = false,
+    publish_error: bool = false,
+    fn prepare(context: *anyopaque, input: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        try std.testing.expectEqual(@as(u64, 42), input.size_bytes);
+        if (self.picker_cancel) return null;
+        return .{ .context = self, .stage_fn = stage, .publish_fn = publish, .discard_fn = discard, .release_fn = release };
+    }
+    fn stage(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        self.stage_entered.store(true, .release);
+    }
+    fn publish(context: *anyopaque) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        self.publish_entered.store(true, .release);
+        while (self.publishing_blocked.load(.acquire)) std.Thread.yield() catch {};
+        if (self.publish_error) return error.AccessDenied;
+        _ = self.published.fetchAdd(1, .acq_rel);
+    }
+    fn discard(context: *anyopaque) !void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
+        _ = self.discarded.fetchAdd(1, .acq_rel);
+    }
+    fn release(context: *anyopaque) void {
+        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
+        self.releases += 1;
+    }
+    fn bind(self: *OutputSaveHarness, control: *Runtime) void {
+        control.setOutputFileSave(.{ .context = self, .prepare_fn = prepare });
+    }
+    fn waitApproval(control: *Runtime) !void {
+        for (0..5000) |_| {
+            if (control.output_checks.awaitingPublication() != null) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+};
+
+test "Save As waits for current publication authority and discards staged bytes when revoked" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.restricted, requester.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save.releases);
+    product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    requester.requester_active = false;
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), save.releases);
+}
+
+test "Save As accepted publication refuses late cancellation and reports its actual terminal result" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save.publishing_blocked.store(true, .release);
+    var control = try testRuntime();
+    defer control.deinit();
+    defer save.publishing_blocked.store(false, .release);
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.drainOutputChecks(requester.sink());
+    for (0..5000) |_| {
+        if (save.publish_entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestTimeout;
+    try std.testing.expect(control.outputPublicationCommitted(1));
+    try std.testing.expect(!control.cancelOutputCheck(1));
+    control.learnProjectionCredential("changed-after-save-commit");
+    requester.requester_active = false;
+    save.publishing_blocked.store(false, .release);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.saved, requester.results[0].?.state);
+    try std.testing.expect(requester.results[0].?.committed);
+    try std.testing.expectEqual(@as(usize, 1), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save.releases);
+}
+
+test "Save As picker cancellation deadline and shutdown preserve the pre-publication boundary" {
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    save.picker_cancel = true;
+    try std.testing.expectEqual(OutputCheckState.cancelled, control.beginOutputCheck(1, 3, 7, @splat(3), .save).immediate);
+    try std.testing.expect(!control.hasOutputChecks());
+    save.picker_cancel = false;
+    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.output_checks.decide(control.output_checks.awaitingPublication().?, .timed_out);
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.timed_out, requester.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
+    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .save) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    control.shutdownOutputChecks();
+    try requester.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), save.releases);
+}
+
+fn testDocumentOffice(control: *Runtime) void {
+    control.office.supported = true;
+    control.office.available = true;
+    control.office.health = .ready;
+    control.office.current = .{ .identity = @splat(1), .state = .ready };
+}
+test "document target freezes receipt identity and ordinary references without borrowing Task memory" {
+    var control = try testRuntime();
+    defer control.deinit();
+    testDocumentOffice(&control);
+    try recordTestOutput(&control, @splat(3), "report.docx");
+    var target = try control.copyDocumentPreviewTarget(std.testing.allocator, 3, 7, .{ .output = @splat(3) });
+    defer target.deinit();
+    try std.testing.expectEqual(@as(u64, 42), target.input.expected.?.size_bytes);
+    try control.revalidateDocumentPreviewTarget(&target);
+    control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?.sha256[0] ^= 1;
+    try std.testing.expectError(error.RestrictedPreview, control.revalidateDocumentPreviewTarget(&target));
+    control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?.sha256[0] ^= 1;
+    control.task_runtime.tasks[0].?.deletion = .deleting;
+    try std.testing.expectError(error.MissingPreview, control.revalidateDocumentPreviewTarget(&target));
+    control.task_runtime.tasks[0].?.deletion = .idle;
+    control.office.current.?.identity[0] ^= 1;
+    try std.testing.expectError(error.OfficePreviewUnavailable, control.revalidateDocumentPreviewTarget(&target));
+    control.office.current.?.identity[0] ^= 1;
+    control.invalidateProjectionSecurity();
+    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateDocumentPreviewTarget(&target));
+
+    var references = try testImagePreviewRuntime("C:/workspace");
+    defer references.deinit();
+    testDocumentOffice(&references);
+    var ordinary = try references.copyDocumentPreviewTarget(std.testing.allocator, 3, 7, .{ .reference = "file-3-1-1-1" });
+    defer ordinary.deinit();
+    try std.testing.expect(ordinary.input.expected == null);
+    try std.testing.expectEqualStrings("image.jpg", ordinary.input.relative_path);
+    try std.testing.expectEqualStrings("file-3-1-1-1", ordinary.selector.reference);
+    try references.revalidateDocumentPreviewTarget(&ordinary);
+    const original = references.task_runtime.fileReference(3, 7, ordinary.selector.reference).?;
+    try std.testing.expect(ordinary.input.workspace_root.ptr != original.workspace_root.ptr);
+    try std.testing.expect(ordinary.input.relative_path.ptr != original.locator.ptr);
+    try std.testing.expect(ordinary.selector.reference.ptr != original.id.ptr);
+    @constCast(original.locator)[0] = 'I';
+    try std.testing.expectError(error.RestrictedPreview, references.revalidateDocumentPreviewTarget(&ordinary));
+    @constCast(original.locator)[0] = 'i';
+}
+const DocumentRuntimeHarness = struct {
+    cleanup_failure: bool = false,
+    main_thread: std.Thread.Id,
+    text: []const u8,
+    cleaned: bool = false,
+    releases: usize = 0,
+    calls: usize = 0,
+    released: usize = 0,
+    last: document_sessions.State = .failed,
+    active: bool = true,
+    const pages = [_]document_sessions.contract.Page{.{ .file = "page-0001.png", .bytes = 4, .sha256 = "2" ** 64, .width = 1280, .height = 1656 }};
+    const manifest: document_sessions.contract.Manifest = .{ .schema = 1, .format = .docx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "2" ** 64 }, .textScope = "ooxml_xml_text_and_attributes_without_ocr", .omissions = &.{}, .kind = .pages, .pages = @constCast(&pages) };
+    fn get(context: *anyopaque) *DocumentRuntimeHarness {
+        return @ptrCast(@alignCast(context));
+    }
+    fn factory(context: *anyopaque, input: document_sessions.contract.Input) !document_sessions.contract.Owned {
+        const self = get(context);
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
+        try std.testing.expectEqualStrings("report.docx", input.relative_path);
+        try std.testing.expectEqual(@as(u64, 42), input.expected.?.size_bytes);
+        return .{ .context = self, .prepare_fn = prepare, .material_fn = material, .read_fn = read, .cancel_fn = cancel, .cleanup_fn = cleanup, .release_fn = release };
+    }
+    fn prepare(context: *anyopaque) !void {
+        std.debug.assert(std.Thread.getCurrentId() != get(context).main_thread);
+    }
+    fn material(context: *anyopaque) !document_sessions.contract.Material {
+        const self = get(context);
+        return .{ .source = .{ .size_bytes = 42, .sha256 = @splat(2) }, .manifest = &manifest, .grid = null, .source_text = self.text };
+    }
+    fn read(_: *anyopaque, _: document_sessions.contract.Request) !document_sessions.contract.Read {
+        return .{ .allocator = std.testing.allocator, .value = .{ .page = try std.testing.allocator.dupe(u8, "page") } };
+    }
+    fn cancel(_: *anyopaque) void {}
+    fn cleanup(context: *anyopaque) !void {
+        const self = get(context);
+        std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
+        if (self.cleanup_failure) return error.PreviewRestartRequired;
+        self.cleaned = true;
+    }
+    fn release(context: *anyopaque) void {
+        const self = get(context);
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread and self.cleaned);
+        self.releases += 1;
+    }
+    fn isActive(context: *anyopaque, _: u64) bool {
+        return get(context).active;
+    }
+    fn complete(context: *anyopaque, result: document_sessions.Result) void {
+        const self = get(context);
+        self.calls += 1;
+        self.last = result.state;
+    }
+    fn releasedFn(context: *anyopaque, _: u64, _: document_sessions.State) void {
+        get(context).released += 1;
+    }
+    fn sink(self: *DocumentRuntimeHarness) document_sessions.Sink {
+        return .{ .context = self, .active_fn = isActive, .complete_fn = complete, .released_fn = releasedFn };
+    }
+    fn wait(self: *DocumentRuntimeHarness, control: *Runtime, calls: usize, releases: usize) !void {
+        const start: std.Io.Timestamp = .now(std.testing.io, .awake);
+        while (start.durationTo(.now(std.testing.io, .awake)).toMilliseconds() < 5000) {
+            control.drainDocumentPreviews(self.sink());
+            if (self.calls >= calls and self.released >= releases) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestTimeout;
+    }
+};
+test "Runtime document policy consumes real known credentials and revokes a ready page" {
+    for ([_][]const u8{ "safe body", "document SECRET-KEY body" }) |body| {
+        var control = try testRuntime();
+        defer control.deinit();
+        testDocumentOffice(&control);
+        try recordTestOutput(&control, @splat(3), "report.docx");
+        var harness: DocumentRuntimeHarness = .{ .main_thread = std.Thread.getCurrentId(), .text = body };
+        control.setDocumentPreviewPreparation(.{ .context = &harness, .prepare_fn = DocumentRuntimeHarness.factory });
+        const admission = control.beginDocumentPreview(10, 3, 7, .{ .output = @splat(3) });
+        try std.testing.expect(admission == .queued);
+        if (std.mem.startsWith(u8, body, "document")) {
+            try harness.wait(&control, 1, 1);
+            try std.testing.expectEqual(document_sessions.State.restricted, harness.last);
+        } else {
+            try harness.wait(&control, 1, 0);
+            try std.testing.expectEqual(document_sessions.State.ready, harness.last);
+            const id = admission.queued;
+            try control.readDocumentPreview(id, 11, .{ .page = 0 });
+            try harness.wait(&control, 2, 0);
+            try std.testing.expectEqualStrings("page", try control.readDocumentPreviewChunk(id, 0));
+            control.learnProjectionCredential("new-document-security-boundary");
+            try std.testing.expectError(error.StaleSecurityEpoch, control.readDocumentPreviewChunk(id, 4));
+            try harness.wait(&control, 2, 1);
+        }
+        try std.testing.expectEqual(1, harness.releases);
     }
 }

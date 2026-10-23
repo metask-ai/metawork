@@ -7,9 +7,11 @@ const sources = @import("product_skill_sources");
 
 /// Bounded filesystem observation, independently injectable from Core queries.
 pub const SourceRoots = struct {
-    /// Application-owned immutable root, valid until Runtime shutdown joins
-    /// all catalog jobs. Each job copies it before leaving the owner thread.
+    /// Borrowed immutable root, valid until replaced on the owner thread.
+    /// Each job copies the path and retains its lifetime before dispatch. The
+    /// source owner keeps a current-version reference until replacement.
     builtin_root: ?[]const u8 = null,
+    builtin_lifetime: ?agent.CatalogSourceLifetime = null,
     context: ?*anyopaque = null,
     discover_fn: *const fn (?*anyopaque, std.Io, std.mem.Allocator, []const u8, ?[]const u8, sources.Selection) anyerror!sources.Discovery = discover,
 

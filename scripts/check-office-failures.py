@@ -1,56 +1,85 @@
-"""Failure-path checks for migrated helpers; run through office:check."""
+"""XLSX postconditions retained after retiring the old process wrappers.
+
+Actual conversion/cancellation/publication checks live in check-office-engine.
+"""
 import importlib.util
-import subprocess
+from pathlib import Path
 import sys
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
+import xml.etree.ElementTree as ET
+import zipfile
 from openpyxl import Workbook
 
 assets = Path(sys.argv.pop(1))
+spec = importlib.util.spec_from_file_location('office_formulas', assets/'xlsx/scripts/office/formulas.py')
+checks = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checks)
 
 
-def load(name, path):
-    sys.path.insert(0, str(path.parent))
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+class RecalculationPostconditions(unittest.TestCase):
+    def fixture(self, directory, formula='=1+1'):
+        path=Path(directory)/'working.xlsx'
+        workbook=Workbook()
+        workbook.active['A1']=formula
+        workbook.active['B1']='Plain text mentioning #REF!'
+        workbook.save(path)
+        workbook.close()
+        return path
 
+    def cache(self, path, *, kind=None, value='2', missing=False):
+        with zipfile.ZipFile(path) as archive:
+            parts={name:archive.read(name) for name in archive.namelist()}
+        namespace='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        root=ET.fromstring(parts['xl/worksheets/sheet1.xml'])
+        cell=root.find('.//'+namespace+'c')
+        if kind: cell.set('t',kind)
+        if missing: cell.remove(cell.find(namespace+'v'))
+        else: cell.find(namespace+'v').text=value
+        parts['xl/worksheets/sheet1.xml']=ET.tostring(root)
+        with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as archive:
+            for name,data in parts.items():archive.writestr(name,data)
 
-recalc = load("office_recalc", assets / "xlsx/scripts/recalc.py")
-accept = load("office_accept", assets / "docx/scripts/accept_changes.py")
-
-
-class OfficeFailures(unittest.TestCase):
-    def test_recalculation_failure_preserves_original(self):
+    def test_formula_identity_and_valid_cache(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "original.xlsx"
-            workbook = Workbook()
-            workbook.active["A1"] = "=1+1"
-            workbook.save(source)
+            path=self.fixture(directory)
+            expected=checks._formulas(path)
+            self.cache(path)
+            checks._check_formula_caches(path)
+            self.assertEqual(checks._formulas(path),expected)
+            self.assertEqual(checks._summary(path,1),{'status':'success','total_errors':0,'error_summary':{},'total_formulas':1})
+
+    def test_missing_and_empty_numeric_cache_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for options in ({'missing':True},{'value':None}):
+                path=self.fixture(directory)
+                self.cache(path,**options)
+                with self.assertRaisesRegex(ValueError,'Missing recalculated formula cache'):
+                    checks._check_formula_caches(path)
+
+    def test_empty_string_is_a_real_cached_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=self.fixture(directory,'=""')
+            self.cache(path,kind='str',value=None)
+            checks._check_formula_caches(path)
+            self.assertEqual(checks._summary(path,1)['status'],'success')
+
+    def test_actual_errors_are_not_confused_with_documentation_strings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=self.fixture(directory,'=1/0')
+            self.cache(path,kind='e',value='#DIV/0!')
+            checks._check_formula_caches(path)
+            self.assertEqual(checks._summary(path,1),{'status':'errors_found','total_errors':1,'error_summary':{'#DIV/0!':{'count':1,'locations':['Sheet!A1']}},'total_formulas':1})
+
+    def test_sparse_far_coordinates_are_bounded_before_dense_iteration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'far.xlsx'
+            workbook=Workbook()
+            workbook.active['A1000001']='=1+1'
+            workbook.save(path)
             workbook.close()
-            original = source.read_bytes()
-            cases = [
-                {"side_effect": subprocess.TimeoutExpired("soffice", 1)},
-                {"return_value": subprocess.CompletedProcess("soffice", 1, "", "conversion failed")},
-                {"return_value": subprocess.CompletedProcess("soffice", 0, "", "")},
-            ]
-            for case in cases:
-                with self.subTest(case=case), patch.object(recalc.subprocess, "run", **case):
-                    self.assertIn("error", recalc.recalc(source, 1))
-                    self.assertEqual(original, source.read_bytes())
-
-    def test_tracked_changes_timeout_is_not_success(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "original.docx"
-            source.write_bytes(b"timeout fixture")
-            with patch.object(accept, "_setup_libreoffice_macro", return_value=True), patch.object(accept.subprocess, "run", side_effect=subprocess.TimeoutExpired("soffice", 30)):
-                _, message = accept.accept_changes(str(source), str(Path(directory) / "result.docx"))
-                self.assertTrue(message.startswith("Error:"))
-                self.assertIn("timed out", message)
+            with self.assertRaisesRegex(ValueError,'cell budget'):
+                checks._formulas(path)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__=='__main__':unittest.main()

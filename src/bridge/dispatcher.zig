@@ -17,9 +17,11 @@ const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
+const document_preview = @import("document_preview.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 9;
+const async_product_handler_count = 13;
+const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
 const max_preview_in_flight: usize = 8;
@@ -166,6 +168,12 @@ pub const ModelsHost = struct {
     }
 };
 
+pub const OfficeHost = struct {
+    context: *anyopaque,
+    begin_fn: *const fn (*anyopaque, product_control.OfficeKind, u64) product_control.OfficeAdmission,
+    cancel_fn: *const fn (*anyopaque, u64) product_control.OfficeAdmission,
+};
+
 /// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
@@ -204,6 +212,16 @@ pub const Dispatcher = struct {
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
+    const OutputInFlight = struct {
+        completion_id: u64,
+        generation: u64,
+        operation_id: u64,
+        window_id: native_sdk.platform.WindowId,
+        cancelled: bool = false,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: [native_sdk.bridge.max_id_bytes]u8,
+        request_len: usize,
+    };
     const DiffInFlight = struct {
         active: bool = false,
         completion_id: u64 = 0,
@@ -238,12 +256,14 @@ pub const Dispatcher = struct {
     };
 
     control: ?*product_control.Runtime,
+    documents: document_preview.Controller,
     account_commands: account_contract.AccountCommandSink,
     custom_provider_commands: models_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
     models_host: ?ModelsHost = null,
+    office_host: ?OfficeHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -265,6 +285,10 @@ pub const Dispatcher = struct {
     preview_high_water: u64 = 0,
     preview_grants: [2]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
+    output_timer_armed: bool = false,
+    output_in_flight: [2]?OutputInFlight = @splat(null),
+    output_high_water: u64 = 0,
+    next_output_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
     next_diff_completion_id: u64 = 1,
     attachment_in_flight: [max_attachment_in_flight]AttachmentInFlight = @splat(.{}),
@@ -282,6 +306,7 @@ pub const Dispatcher = struct {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
             .control = control,
+            .documents = .{ .allocator = allocator, .control = control, .platform = .{ .context = platform.context, .random_fn = platform.random_fn, .emit_fn = platform.emit_fn, .start_timer_fn = platform.start_timer_fn, .cancel_timer_fn = platform.cancel_timer_fn } },
             .account_commands = account_commands,
             .custom_provider_commands = custom_provider_commands,
             .platform = platform,
@@ -294,6 +319,7 @@ pub const Dispatcher = struct {
     pub fn deinit(self: *Dispatcher) void {
         self.callbacks.stopIngress();
         self.callbacks.assertQuiescent();
+        self.documents.settle();
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
@@ -307,6 +333,10 @@ pub const Dispatcher = struct {
 
     pub fn setModelsHost(self: *Dispatcher, host: ?ModelsHost) void {
         self.models_host = host;
+    }
+
+    pub fn setOfficeHost(self: *Dispatcher, host: ?OfficeHost) void {
+        self.office_host = host;
     }
 
     /// Registers the complete product command table. Automation may change
@@ -328,7 +358,10 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
+            .{ .name = commands.read_document_chunk, .function = readDocumentChunk },
+            .{ .name = commands.release_document_read, .function = releaseDocumentRead },
             .{ .name = commands.open_external_link, .function = openExternalLink },
+            .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
@@ -368,6 +401,12 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_summary, .function = accountRefreshSummary },
             .{ .name = commands.account_open_recharge, .function = accountOpenRecharge },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
+            .{ .name = commands.office_install, .function = officeInstall },
+            .{ .name = commands.office_repair, .function = officeRepair },
+            .{ .name = commands.office_remove, .function = officeRemove },
+            .{ .name = commands.office_retry, .function = officeRetry },
+            .{ .name = commands.office_cleanup, .function = officeCleanup },
+            .{ .name = commands.office_cancel, .function = officeCancel },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
@@ -442,6 +481,10 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[6] = .{ .name = commands.finish_attachment_add, .context = self, .invoke_fn = finishAttachmentAdd };
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
+        self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
+        self.registered_async_handlers[10] = .{ .name = commands.open_document, .context = self, .invoke_fn = openDocument };
+        self.registered_async_handlers[11] = .{ .name = commands.read_document, .context = self, .invoke_fn = readDocument };
+        self.registered_async_handlers[12] = .{ .name = commands.close_document, .context = self, .invoke_fn = closeDocument };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -467,6 +510,7 @@ pub const Dispatcher = struct {
     pub fn detachProductControl(self: *Dispatcher) void {
         if (self.control) |control| control.cancelSnapshot();
         self.mcp_management_host = null;
+        self.documents.control = null;
         self.control = null;
     }
 
@@ -480,6 +524,8 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        self.documents.disconnect();
+        self.cancelOutputConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
@@ -525,6 +571,15 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
+        if (timer_id == document_preview.timer_id) {
+            self.drainDocumentPreviews();
+            return true;
+        }
+        if (timer_id == output_timer_id) {
+            if (self.control) |control| control.drainOutputChecks(self.outputCheckSink());
+            self.updateOutputTimer();
+            return true;
+        }
         if (timer_id == preview_timer_id) {
             if (self.control) |control| {
                 control.drainFilePreviewCompletions(self.filePreviewSink());
@@ -644,7 +699,9 @@ pub const Dispatcher = struct {
         if (self.control) |control| control.cancelSnapshot();
         self.cancelPreviewConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
+        self.documents.connect(.{ .generation = generation, .window_id = invocation.source.window_id });
         self.preview_high_water = 0;
+        self.output_high_water = 0;
         self.grants.invalidate();
         self.skill_grants.invalidate();
         self.releaseAllAttachmentGrants();
@@ -906,6 +963,224 @@ pub const Dispatcher = struct {
         std.base64.standard.Encoder.encodeWriter(&writer, chunk) catch return error.NoSpaceLeft;
         writer.writeAll("\"}") catch return error.NoSpaceLeft;
         return writer.buffered();
+    }
+
+    fn outputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginOutputAction(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Output action rejected") catch {};
+        };
+    }
+
+    fn requireOutputConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64, operation: u64) !void {
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        if (generation == 0 or operation == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+    }
+
+    fn beginOutputAction(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.OutputAction, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        const generation = request.generation.value;
+        const operation = request.operationId.value;
+        try self.requireOutputConnection(invocation, generation, operation);
+        if (operation <= self.output_high_water or request.taskId.value == 0 or request.runId.value == 0) return error.InvalidBridgeId;
+        const id = try handlers.parseOutputId(request.outputId.value);
+        self.output_high_water = operation;
+        const control = try self.requireProductControl();
+        const vacant = for (&self.output_in_flight) |*slot| {
+            if (slot.* == null) break slot;
+        } else {
+            respondOutputAction(responder, invocation.request.id, generation, operation, .busy);
+            return;
+        };
+        if (self.next_output_completion_id == std.math.maxInt(u64)) return error.Capacity;
+        const completion = self.next_output_completion_id;
+        self.next_output_completion_id += 1;
+        vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
+        @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
+        switch (control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value)) {
+            .queued => {
+                if (vacant.* == null or vacant.*.?.cancelled) _ = control.cancelOutputCheck(completion);
+                self.updateOutputTimer();
+            },
+            .immediate => |state| self.completeOutputAction(.{ .completion_id = completion, .state = state }),
+        }
+    }
+
+    pub fn outputCheckSink(self: *Dispatcher) product_control.OutputCheckSink {
+        return .{ .context = self, .request_active_fn = outputRequestActive, .complete_fn = completeOutputFromSink };
+    }
+
+    fn outputRequestActive(context: *anyopaque, completion_id: u64) bool {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        for (self.output_in_flight) |entry| if (entry) |slot| {
+            if (slot.completion_id != completion_id) continue;
+            if (slot.cancelled) return false;
+            self.delivery.validateConnection(slot.generation, slot.window_id) catch return false;
+            return true;
+        };
+        return false;
+    }
+
+    fn completeOutputFromSink(context: *anyopaque, result: product_control.OutputCheckResult) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.completeOutputAction(result);
+    }
+
+    fn completeOutputAction(self: *Dispatcher, result: product_control.OutputCheckResult) void {
+        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            if (slot.completion_id != result.completion_id) continue;
+            const active = outputRequestActive(self, result.completion_id);
+            entry.* = null;
+            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active or result.committed or result.state == .cleanup_failed) result.state else .cancelled);
+            self.updateOutputTimer();
+            return;
+        };
+    }
+
+    fn respondOutputAction(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, generation: u64, operation: u64, state: product_control.OutputCheckState) void {
+        var buffer: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&buffer, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"state\":\"{s}\"}}", .{ generation, operation, @tagName(state) }) catch unreachable;
+        responder.success(request_id, result) catch {};
+    }
+
+    fn cancelOutputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.OutputActionCancel, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = parsed.value.generation.value;
+        const operation = parsed.value.operationId.value;
+        try self.requireOutputConnection(invocation, generation, operation);
+        var cancelled = false;
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
+            if (self.control) |control| {
+                if (control.outputPublicationCommitted(slot.completion_id)) break;
+                _ = control.cancelOutputCheck(slot.completion_id);
+            }
+            slot.cancelled = true;
+            cancelled = true;
+            break;
+        };
+        return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"cancelled\":{}}}", .{ generation, operation, cancelled });
+    }
+
+    fn updateOutputTimer(self: *Dispatcher) void {
+        const active = if (self.control) |control| control.hasOutputChecks() else false;
+        if (active and !self.output_timer_armed) {
+            self.platform.start_timer_fn(self.platform.context, output_timer_id, 250 * std.time.ns_per_ms, true) catch {
+                self.cancelOutputConnection();
+                return;
+            };
+            self.output_timer_armed = true;
+        } else if (!active and self.output_timer_armed) {
+            self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
+            self.output_timer_armed = false;
+        }
+    }
+
+    fn cancelOutputConnection(self: *Dispatcher) void {
+        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+            slot.cancelled = true;
+            if (self.control) |control| _ = control.cancelOutputCheck(slot.completion_id);
+        };
+    }
+
+    pub fn settleOutputActionsForShutdown(self: *Dispatcher) void {
+        if (self.output_timer_armed) self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
+        self.output_timer_armed = false;
+        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+            entry.* = null;
+            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
+        };
+    }
+
+    pub fn documentPreviewSink(self: *Dispatcher) product_control.DocumentPreviewSink {
+        return self.documents.sink();
+    }
+    pub fn drainDocumentPreviews(self: *Dispatcher) void {
+        self.documents.drain();
+        if (self.documents.transport_failed) {
+            self.documents.transport_failed = false;
+            self.breakConnection();
+        }
+    }
+    pub fn settleDocumentPreviewsForShutdown(self: *Dispatcher) void {
+        self.documents.settle();
+    }
+    fn documentConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64) !document_preview.Connection {
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        if (generation == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        return .{ .generation = generation, .window_id = invocation.source.window_id };
+    }
+    fn openDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.openDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn openDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentOpen, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.open(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn readDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.readDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn readDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentRead, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.read(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn closeDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.closeDocumentChecked(invocation, responder) catch {
+            document_preview.respondState(responder, invocation.request.id, .failed);
+        };
+    }
+    fn closeDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentKey, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        try self.documents.close(connection, parsed.value, responder, invocation.request.id);
+    }
+    fn readDocumentChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentChunk, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        return self.documents.chunk(connection, parsed.value, output);
+    }
+    fn releaseDocumentRead(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.DocumentReadKey, invocation.request.payload);
+        defer parsed.deinit();
+        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
+        return self.documents.releaseRead(connection, parsed.value, output);
     }
 
     fn requirePreviewKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, preview_text: []const u8) !struct { generation: u64, preview_id: u64 } {
@@ -2320,6 +2595,59 @@ pub const Dispatcher = struct {
         const host = self.models_host orelse
             return encodeExecutionResult(output, .rejected(.catalog_unavailable));
         return encodeExecutionResult(output, host.refreshCatalog());
+    }
+
+    fn officeInstall(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .install);
+    }
+    fn officeRepair(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .repair);
+    }
+    fn officeRemove(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .remove);
+    }
+    fn officeRetry(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .check);
+    }
+    fn officeCleanup(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return officeBegin(context, invocation, output, .cleanup);
+    }
+
+    fn officeBegin(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8, kind: product_control.OfficeKind) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.OfficeOperation, invocation.request.payload);
+        defer parsed.deinit();
+        const generation = try officeId(parsed.value.expectedGeneration);
+        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.begin_fn(host.context, kind, generation) else .{ .reason = .unavailable };
+        return self.encodeOffice(output, result);
+    }
+
+    fn officeCancel(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.OfficeCancel, invocation.request.payload);
+        defer parsed.deinit();
+        const id = try officeId(parsed.value.operationId);
+        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.cancel_fn(host.context, id) else .{ .reason = .unavailable };
+        return self.encodeOffice(output, result);
+    }
+
+    fn officeId(value: []const u8) !u64 {
+        const id = try handlers.parseWireId(value);
+        if (id == 0) return error.InvalidBridgePayload;
+        return id;
+    }
+
+    fn encodeOffice(self: *Dispatcher, output: []u8, result: product_control.OfficeAdmission) ![]const u8 {
+        const control = self.control orelse return error.DispatcherUnavailable;
+        var writer = std.Io.Writer.fixed(output);
+        try std.json.Stringify.value(product_control.OfficeWire.Result.from(result, control.officeComponentView().generation), .{}, &writer);
+        return writer.buffered();
     }
 
     fn modelsResetStore(
@@ -6639,6 +6967,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
         wake_calls: usize = 0,
         account_calls: usize = 0,
         models_calls: usize = 0,
+        office_calls: usize = 0,
+        office_generation: u64 = 0,
+        office_kind: product_control.OfficeKind = .check,
         chrome_connect_calls: usize = 0,
         chrome_refresh_calls: usize = 0,
         chrome_control_calls: usize = 0,
@@ -6772,6 +7103,19 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .rejected(.invalid_provider);
         }
 
+        fn beginOffice(context: *anyopaque, kind: product_control.OfficeKind, generation: u64) product_control.OfficeAdmission {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.office_calls += 1;
+            self.office_generation = generation;
+            self.office_kind = kind;
+            return .{ .accepted = true, .operation_id = 117 };
+        }
+        fn cancelOffice(context: *anyopaque, id: u64) product_control.OfficeAdmission {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.office_calls += 1;
+            return .{ .accepted = true, .operation_id = id };
+        }
+
         fn refreshModels(context: *anyopaque) models_contract.CommandResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.models_calls += 1;
@@ -6839,6 +7183,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .refresh_catalog_fn = Harness.refreshModels,
         .reset_store_fn = Harness.resetModels,
     });
+    dispatcher.setOfficeHost(.{ .context = &harness, .begin_fn = Harness.beginOffice, .cancel_fn = Harness.cancelOffice });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -7019,6 +7364,42 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    const office_cases = [_]struct { name: []const u8, kind: product_control.OfficeKind }{
+        .{ .name = commands.office_install, .kind = .install }, .{ .name = commands.office_repair, .kind = .repair },
+        .{ .name = commands.office_remove, .kind = .remove },   .{ .name = commands.office_retry, .kind = .check },
+        .{ .name = commands.office_cleanup, .kind = .cleanup },
+    };
+    for (office_cases) |case| {
+        const handler = native_dispatcher.registry.find(case.name).?;
+        const invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "office", .command = case.name, .payload = "{\"expectedGeneration\":\"9\"}" } };
+        var foreign = invocation;
+        foreign.source.window_id += 1;
+        const before = harness.office_calls;
+        if (handler.invoke_fn(handler.context, foreign, &response)) |_| return error.ForeignOfficeCommandAllowed else |_| {}
+        try std.testing.expectEqual(before, harness.office_calls);
+        for ([_][]const u8{ "{}", "{\"expectedGeneration\":0}", "{\"expectedGeneration\":\"0\"}", "{\"expectedGeneration\":\"01\"}", "{\"expectedGeneration\":\"18446744073709551616\"}", "{\"expectedGeneration\":\"9\",\"url\":\"https://example.invalid/\"}" }) |payload| {
+            var invalid_office = invocation;
+            invalid_office.request.payload = payload;
+            if (handler.invoke_fn(handler.context, invalid_office, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
+            try std.testing.expectEqual(before, harness.office_calls);
+        }
+        _ = try handler.invoke_fn(handler.context, invocation, &response);
+        try std.testing.expectEqual(before + 1, harness.office_calls);
+        try std.testing.expectEqual(@as(u64, 9), harness.office_generation);
+        try std.testing.expectEqual(case.kind, harness.office_kind);
+    }
+    const cancel_office = native_dispatcher.registry.find(commands.office_cancel).?;
+    const cancel_invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "cancel-office", .command = commands.office_cancel, .payload = "{\"operationId\":\"117\"}" } };
+    _ = try cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &response);
+    const before_loss = harness.office_calls;
+    var tiny_office: [1]u8 = undefined;
+    try std.testing.expectError(error.WriteFailed, cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &tiny_office));
+    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
+    var redundant = cancel_invocation;
+    redundant.request.payload = "{\"operationId\":\"117\",\"expectedGeneration\":\"9\"}";
+    if (cancel_office.invoke_fn(cancel_office.context, redundant, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
+    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
+
     for ([_][]const u8{
         "{\"id\":\"open-https\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com/a?q=1#result\"}}",
         "{\"id\":\"open-http\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"http://localhost:3000/\"}}",
@@ -7862,4 +8243,202 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     try std.testing.expectEqual(bytes, control.view_read.produced);
     dispatcher.breakConnection();
     try std.testing.expectEqual(@as(u64, 0), control.view_read.id);
+}
+
+test "Output action Bridge binds fixture identities and refuses replay cancellation and disconnected reveal" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: native_sdk.platform.WindowId, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        count: usize = 0,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+            self.count += 1;
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8, window: u64) !void {
+            const handler = native.async_registry.find(commands.output_action).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = window };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "output-test", .command = commands.output_action, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), control: *product_control.Runtime, boundary: *Dispatcher, count: usize) !void {
+            for (0..5000) |_| {
+                _ = boundary.onTimer(output_timer_id);
+                if (self.count >= count) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            _ = control;
+            return error.TestTimeout;
+        }
+    };
+    var effect: product_control.TestSupport.OutputFileEffect = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2 };
+    var capture: Capture = .{};
+    defer if (capture.response) |bytes| std.testing.allocator.free(bytes);
+    var control = try product_control.TestSupport.filePreviewFixture("/tmp/metawork-test");
+    try product_control.TestSupport.recordDeliveredOutputFixture(&control);
+    defer control.deinit();
+    product_control.TestSupport.bindOutputFileEffect(&control, &effect);
+    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    defer boundary.deinit();
+    defer {
+        control.shutdownOutputChecks();
+        control.drainOutputChecks(boundary.outputCheckSink());
+        boundary.settleOutputActionsForShutdown();
+    }
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_action, .{});
+    defer fixture.deinit();
+    const request = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("request").?, .{});
+    defer std.testing.allocator.free(request);
+    try capture.invoke(native, request, 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), effect.prepares);
+    try capture.invoke(native, request, 3);
+    try capture.wait(&control, &boundary, 2);
+    var response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer response.deinit();
+    const result = try std.json.Stringify.valueAlloc(std.testing.allocator, response.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(result);
+    const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, result);
+    try capture.invoke(native, request, 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.prepares);
+    const reveal = "{\"generation\":\"1\",\"operationId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(true, .release);
+    try capture.invoke(native, reveal, 3);
+    var output: [256]u8 = undefined;
+    const cancel = native.registry.find(commands.output_action_cancel).?;
+    const ack = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-output", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"2\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    try std.testing.expect(std.mem.indexOf(u8, ack, "\"cancelled\":true") != null);
+    try capture.wait(&control, &boundary, 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), effect.reveals);
+    const third = "{\"generation\":\"1\",\"operationId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(false, .release);
+    try capture.invoke(native, third, 3);
+    try capture.wait(&control, &boundary, 5);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"revealed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.reveals);
+    var save_effect: product_control.TestSupport.OutputSaveEffect = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save_effect.publishing_blocked.store(true, .release);
+    defer save_effect.publishing_blocked.store(false, .release);
+    product_control.TestSupport.bindOutputSaveEffect(&control, &save_effect);
+    var save_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_save, .{});
+    defer save_wire.deinit();
+    const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
+    defer std.testing.allocator.free(save_request);
+    try capture.invoke(native, save_request, 3);
+    for (0..5000) |_| {
+        _ = boundary.onTimer(output_timer_id);
+        if (save_effect.publish_entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestTimeout;
+    const late_cancel = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-save", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"4\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    const expected_cancel = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("cancelTooLate").?, .{});
+    defer std.testing.allocator.free(expected_cancel);
+    try std.testing.expectEqualStrings(expected_cancel, late_cancel);
+    save_effect.publishing_blocked.store(false, .release);
+    try capture.wait(&control, &boundary, 6);
+    var saved = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+    defer saved.deinit();
+    const actual_save = try std.json.Stringify.valueAlloc(std.testing.allocator, saved.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(actual_save);
+    const expected_save = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("result").?, .{});
+    defer std.testing.allocator.free(expected_save);
+    try std.testing.expectEqualStrings(expected_save, actual_save);
+    try std.testing.expectEqual(@as(usize, 1), save_effect.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), save_effect.releases);
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    effect.blocked.store(true, .release);
+    try capture.invoke(native, fourth, 3);
+    boundary.breakConnection();
+    try capture.wait(&control, &boundary, 7);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), effect.reveals);
+    try std.testing.expect(!control.hasOutputChecks());
+}
+
+test "registered document commands use the connection and native deadline lane" {
+    const Host = struct {
+        starts: usize = 0,
+        invalidations: usize = 0,
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(context: ?*anyopaque, _: u64, name: []const u8, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, name, document_preview.event_name)) self.invalidations += 1;
+        }
+        fn timer(context: ?*anyopaque, id: u64, _: u64, _: bool) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (id == document_preview.timer_id) self.starts += 1;
+        }
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 7);
+            return true;
+        }
+    };
+    const Capture = struct {
+        calls: usize = 0,
+        bytes: ?[]u8 = null,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.bytes) |old| std.testing.allocator.free(old);
+            self.bytes = try std.testing.allocator.dupe(u8, bytes);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.bytes) |bytes| std.testing.allocator.free(bytes);
+        }
+    };
+    var effect: product_control.TestSupport.DocumentEffect = .{ .main_thread = std.Thread.getCurrentId(), .text = "safe body" };
+    var control = try product_control.TestSupport.documentPreviewFixture(&effect);
+    defer control.deinit();
+    var host: Host = .{};
+    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = &host, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .random_fn = Host.random, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    defer boundary.deinit();
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var response: [1024]u8 = undefined;
+    _ = try native.registry.find(commands.connect).?.invoke_fn(&boundary, .{ .request = .{ .id = "connect-doc", .command = commands.connect, .payload = "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &response);
+    var capture: Capture = .{};
+    defer capture.deinit();
+    const responder: native_sdk.bridge.AsyncResponder = .{ .context = &capture, .source = .{ .origin = "zero://app", .window_id = 3 }, .respond_fn = Capture.receive };
+    const payload = "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"output\",\"id\":\"03030303030303030303030303030303\"}}";
+    try native.async_registry.find(commands.open_document).?.invoke_fn(&boundary, .{ .request = .{ .id = "doc", .command = commands.open_document, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, responder);
+    for (0..5000) |_| {
+        try std.testing.expect(boundary.onTimer(document_preview.timer_id));
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, capture.calls);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes.?, "\"sourceVersion\"") != null);
+    try std.testing.expectEqual(1, host.starts);
+    product_control.TestSupport.expireDocumentPreview(&control);
+    for (0..5000) |_| {
+        _ = boundary.onTimer(document_preview.timer_id);
+        if (effect.releases != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(1, effect.releases);
+    try std.testing.expectEqual(1, host.invalidations);
+    try std.testing.expect(!control.documentPreviewNeedsWake());
 }

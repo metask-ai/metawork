@@ -13,7 +13,7 @@
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
 5. AgentCore/tool callback 不直接调用 WebView；
 6. MetaWork 只补充产品路由、生命周期、所有权、传输 envelope 和安全校验；
-7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
+7. Agent 统一拥有固定 built-in 集合和固定 `GenerateImage`、`DeliverFile` Host Tool，工具声明不随登录、模型选择或 Run readiness 变化；
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
@@ -194,9 +194,13 @@ PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 
 
 ### Host tools
 
-普通 Runtime 固定注册 `GenerateImage`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account 或 Models 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`；只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
+普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
+
+`DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
+
+Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才一次性消费该回执，以独立 sideband 交给 Product 的成果登记入口；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
 
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
@@ -324,6 +328,8 @@ Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界�
 - opaque catalog lease：内部持有 AgentCore handle 及查询用途、root/home/epoch/Runtime owner 绑定；只有 Workspace 用途可绑定 Session。每个 owned Host 引用由原 Runtime 消费一次；最后一个引用才精确调用一次 Core release，即使该调用报告失败也不重复释放。
 
 projection 与 lease 引用的生命周期独立，释放 query owner 不使已经复制的 projection 或 Session 持有的原 snapshot 失效。Create、Agent restore 与 idle refresh 均须拒绝管理用途或其他 Runtime、Workspace、home、epoch 的 lease。Session 在成功 create/restore/idle replacement 时保留原 lease 和 grant IDs 的 owned 副本，失败保持原输入；Session close 收口自己的引用，独立捕获的输入继续保留原 query snapshot。来源集合不是 Session identity；显式 idle refresh 可以替换同一绑定下的 catalog。Skill policy 仍由 Product 根据稳定 skill_policy_key 编译为 concrete ID；Agent 捕获精确 default-deny grant 集合，narrow 只取该集合与当前 Host ceiling 的交集，不绑定更宽的当前全局目录。冷恢复可用 null catalog/policy 并在恢复后显式准备；同进程切换必须使用原 captured 输入或经明确收缩的副本，不能把丢失输入视为正常空能力。Runtime shutdown 阻止新 query，等待调用收敛并关闭 Sessions；任何仍存活的外部捕获引用继续触发 CatalogLeasesOutstanding，上层释放后重试 shutdown。Agent 不拥有启用 policy、持久 revision、UI 或文件监听，permission_rules 保持 null。
+
+可删除的内置组件来源必须随 query 提供进程内 source lifetime：调用方在查询期间保留其引用，成功 acquisition 由 Agent 再保留一次，直到对应 Core catalog 的最后一个 Host 引用被消费才释放，包括 Session 和同进程捕获的恢复输入。查询失败不留下引用；最终 Core release 报错仍遵守已消费 handle 的一次释放语义。回调只允许 thread-safe、nonblocking 的引用计数，不执行文件、分配、Product mutation 或 Agent 重入。该引用不编码到 SDK、checkpoint、Task 或 Session 持久数据，也不授予来源解析或 winner authority。
 
 本地 Skill 管理不改变上述 Agent 边界。Product Control package/inventory 层可以在 Application 授予的 personal root 与已授权 Manual Workspace root 内执行机械文件检查和事务，但不能生成 AgentCore handle、复制 catalog parser、决定 winner/conflict 或把管理 `install_id` 传给 Session。每次 import/reimport/uninstall publish 后由既有 bounded Executor 发起精确 scope 的 catalog query；只有 AgentCore 返回的 projection 才能把管理资产标记为 runtime ready/degraded。明确属于候选的 definition/resource/conflict issue 触发 Product Control filesystem rollback；query 本身暂不可用只产生 `pending_verification`，不能伪造成空 catalog 或成功。AgentCore 不需要 staged install API，也不承担下载、归档、provenance、导出或删除职责。
 

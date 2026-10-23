@@ -1,5 +1,6 @@
 import {
   emptyComposerDraft,
+  parseSlashInput,
   composerDraftWithinLimits,
   maxComposerCharacters,
   maxSkillArguments,
@@ -51,6 +52,31 @@ export function prepareRetryDraft(
     draft: { kind: "text", text: instruction },
     kind: "prepared",
   };
+}
+
+// A visible, editable instruction reference in the existing Task input. This
+// does not create an attachment, locator grant or automatic model submission.
+export function prepareOutputEditDraft(
+  currentDraft: ComposerDraft,
+  referenceLine: string,
+): {
+  draft: ComposerDraft;
+  kind: "prepared" | "preserved" | "too_long";
+} {
+  if (
+    currentDraft.kind === "skill" ||
+    (currentDraft.kind === "text" && parseSlashInput(currentDraft.text))
+  )
+    return { draft: currentDraft, kind: "preserved" };
+  const text =
+    currentDraft.text === referenceLine ||
+    currentDraft.text.startsWith(`${referenceLine}\n`)
+      ? currentDraft.text
+      : `${referenceLine}\n${currentDraft.text}`;
+  const draft = { ...currentDraft, text };
+  if (!composerDraftWithinLimits(draft))
+    return { draft: currentDraft, kind: "too_long" };
+  return { draft, kind: "prepared" };
 }
 
 function draftHasContent(draft: ComposerDraft) {

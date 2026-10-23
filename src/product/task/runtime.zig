@@ -57,6 +57,19 @@ pub const FileReference = struct {
     range: ?FileRange,
 };
 
+/// Callback-scoped Host metadata; callers must copy before asynchronous work.
+/// A display projection or ordinary File Reference cannot create this identity.
+pub const OutputFileReference = struct {
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    id: [16]u8,
+    locator: []const u8,
+    size_bytes: u64,
+    sha256: [32]u8,
+    redacted: bool,
+};
+
 pub const FileChangeArtifactReference = struct {
     artifact: task_state.FileChangeArtifact,
     diff_complete: bool,
@@ -362,6 +375,7 @@ pub const OperationEffects = struct {
     /// Caller owns until a Run record is installed; preparation consumes it.
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
+    file_delivery: ?*?task_state.OwnedFileDelivery = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
     model_target: ?models_contract.SourceCandidateInput = null,
     text: TextProjection,
@@ -2320,7 +2334,8 @@ pub const Runtime = struct {
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
-        const run_id = try access.prepareRunWithImage(agent_input, image);
+        const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
+        const run_id = try access.prepareRunWithTools(agent_input, image, delivery);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -2334,6 +2349,10 @@ pub const Runtime = struct {
         if (origin == .queued) run_record.submission = task.input_submissions.items[origin.queued].submission;
         if (effects.image_execution) |owned| {
             run_record.image_execution = owned.*;
+            owned.* = null;
+        }
+        if (effects.file_delivery) |owned| {
+            run_record.file_delivery = owned.*;
             owned.* = null;
         }
 
@@ -2728,7 +2747,7 @@ pub const Runtime = struct {
         const intent = intent_writer.buffered();
         if (std.mem.trim(u8, intent, " \t\r\n").len == 0) return error.ReviewIntentUnavailable;
         const context = latestReviewContext(run);
-        const constraints = if (agent.imageGenerationPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
+        const constraints = if (agent.hostToolPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
             const start = writer.end;
             try writer.print("{s}\n{s}", .{ review_constraints, effects });
             break :blk writer.buffered()[start..];
@@ -3049,6 +3068,33 @@ pub const Runtime = struct {
             .protocol = run.execution_protocol,
             .model = run.execution_model,
         };
+    }
+
+    pub fn outputFileReference(
+        self: *const Runtime,
+        task_id: u64,
+        run_id: u64,
+        output_id: [16]u8,
+    ) ?OutputFileReference {
+        if (std.mem.allEqual(u8, &output_id, 0)) return null;
+        const task = self.findConst(task_id) orelse return null;
+        if (task.deletion != .idle) return null;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        for (run.outputs) |entry| {
+            const output = entry orelse continue;
+            if (!std.mem.eql(u8, &output.id, &output_id)) continue;
+            return .{
+                .workspace_id = task.durable.workspace_id,
+                .workspace_epoch = task.durable.workspace_epoch,
+                .workspace_root = task.durable.workspace_root,
+                .id = output.id,
+                .locator = output.locator,
+                .size_bytes = output.size_bytes,
+                .sha256 = output.sha256,
+                .redacted = output.redacted,
+            };
+        }
+        return null;
     }
 
     pub fn fileReference(
@@ -3636,6 +3682,7 @@ pub const Runtime = struct {
             .replace_text_fn = replaceEventText,
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
+            .record_output_fn = recordEventOutput,
             .record_file_changes_fn = recordEventFileChanges,
         };
         const versioned_run = task_state.findRun(task.durable.runs, envelope.run_id);
@@ -3888,16 +3935,16 @@ pub const Runtime = struct {
         return result;
     }
 
-    /// Image effects and projection scrub credentials outlive both execution
+    /// Frozen tool effects and projection scrub credentials outlive execution
     /// and event drain. Worker leases also cover automatic title production.
-    pub fn releaseQuiescentImages(self: *Runtime, effects: ReleaseEffects) void {
+    pub fn releaseQuiescentRunEffects(self: *Runtime, effects: ReleaseEffects) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 if (run.event_stream_finalized and run.automatic_title.state.load(.acquire) != .running)
-                    releaseImageExecution(run, effects);
+                    releaseRunEffects(run, effects);
             }
         }
     }
@@ -5798,7 +5845,7 @@ pub const Runtime = struct {
         result.durable_changed = closes.durable_changed or result.durable_changed;
         // Checkpoint/close reconciliation above can retire the final lease on
         // this very pass. Do not retain the scrub credential until another wake.
-        self.releaseQuiescentImages(effects.release);
+        self.releaseQuiescentRunEffects(effects.release);
         return result;
     }
 };
@@ -6026,6 +6073,9 @@ fn redactTaskProjection(
                 redacted = effects.redact(from, credential) or redacted;
             change.redacted = redacted or change.redacted;
         }
+        for (&run.outputs) |*output_entry| if (output_entry.*) |*output| {
+            output.redacted = effects.redact(output.locator, credential) or output.redacted;
+        };
         if (task_state.terminalPayload(run)) |terminal| {
             const mutable = @constCast(terminal);
             mutable.diagnostic_redacted = effects.redact(
@@ -6318,6 +6368,40 @@ fn findOrCreateEventTool(
         .redacted = owned_name.redacted or owned_input.redacted,
     };
     return &run_record.tools[slot].?;
+}
+
+fn recordEventOutput(
+    raw_context: *anyopaque,
+    run: *task_state.RunRecord,
+    receipt: *const agent.FileDeliveryReceipt,
+) task_state.EventProjectionError!void {
+    receipt.validate() catch return error.InvalidDeliveryReceipt;
+    const context: *EventContext = @ptrCast(@alignCast(raw_context));
+    var empty: ?*?task_state.OutputRecord = null;
+    for (&run.outputs) |*entry| {
+        if (entry.*) |*existing| {
+            if (!std.mem.eql(u8, &existing.id, &receipt.id)) continue;
+            if (existing.size_bytes != receipt.size_bytes or
+                !std.mem.eql(u8, &existing.sha256, &receipt.sha256) or
+                (!existing.redacted and !std.mem.eql(u8, existing.locator, receipt.pathView())))
+                return error.InvalidDeliveryReceipt;
+            return;
+        } else if (empty == null) empty = entry;
+    }
+    const slot = empty orelse return error.ToolCapacity;
+    const path = try context.effects.text.project(
+        receipt.pathView(),
+        agent.FileDeliveryReceipt.max_path_bytes,
+        &run.redactionSecrets(),
+        0,
+    );
+    slot.* = .{
+        .id = receipt.id,
+        .locator = path.value,
+        .size_bytes = receipt.size_bytes,
+        .sha256 = receipt.sha256,
+        .redacted = path.redacted or path.truncated,
+    };
 }
 
 fn replaceEventFileReferences(
@@ -6866,11 +6950,15 @@ fn releaseExecutionValueNoFail(
     execution.deinit();
 }
 
-fn releaseImageExecution(run: *task_state.RunRecord, effects: ReleaseEffects) void {
+fn releaseRunEffects(run: *task_state.RunRecord, effects: ReleaseEffects) void {
     if (run.image_execution) |*image| {
         effects.redactAll(image.candidate.input().bearer);
         image.deinit();
         run.image_execution = null;
+    }
+    if (run.file_delivery) |*delivery| {
+        delivery.deinit();
+        run.file_delivery = null;
     }
 }
 
@@ -7429,6 +7517,7 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     var clean = effects;
     clean.model_target = null;
     clean.image_execution = null;
+    clean.file_delivery = null;
     return clean;
 }
 
@@ -8021,7 +8110,7 @@ fn deinitRun(
     run: *task_state.RunRecord,
 ) void {
     std.debug.assert(run.checkpoint.lease == null);
-    releaseImageExecution(run, effects);
+    releaseRunEffects(run, effects);
     releaseAutomaticTitle(&run.automatic_title);
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
@@ -8029,6 +8118,8 @@ fn deinitRun(
     for (run.file_changes) |*entry| if (entry.*) |*change|
         deinitFileChange(self, effects, change);
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
+    for (run.outputs) |entry| if (entry) |output|
+        releaseProjectedSlice(self, effects, output.locator);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     self.discardInputPayloads(run);

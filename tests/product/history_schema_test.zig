@@ -949,3 +949,12 @@ test "history file reference JSON preserves Host image provenance and defaults o
         try std.testing.expectEqual(generated, loaded.tasks[0].runs[0].tools[0].file_refs.?[0].generated_image);
     }
 }
+
+test "isolated SQL experiment explicitly rejects Outputs instead of discarding production metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const state = try history.fixture(arena.allocator());
+    var outputs = [_]history.wire.OutputWire{.{ .id = "01" ** 16, .locator = "report.docx", .size_bytes = 42, .sha256 = "ab" ** 32, .redacted = false }};
+    state.tasks[0].runs[0].outputs = &outputs;
+    try std.testing.expectError(error.UnsupportedOutputRecords, history.batchFor(std.testing.allocator, state));
+}

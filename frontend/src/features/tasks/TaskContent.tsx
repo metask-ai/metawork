@@ -18,6 +18,7 @@ import {
 
 import type {
   FileReferenceView,
+  OutputActionHandler,
   PendingUi,
   RunInputView,
   RunOutcome,
@@ -38,6 +39,12 @@ import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
+import {
+  RunOutputs,
+  type OutputEditHandler,
+  type OutputPreviewHandler,
+  type OutputPreviewRenderer,
+} from "./RunOutputs.tsx";
 import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
@@ -249,6 +256,11 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
+  outputsEnabled,
+  onOutputAction,
+  onPrepareOutputEdit,
+  onPreviewOutput,
+  renderOutputPreview,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -272,6 +284,11 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
+  outputsEnabled: boolean;
+  onOutputAction?: OutputActionHandler;
+  onPrepareOutputEdit?: OutputEditHandler;
+  onPreviewOutput?: OutputPreviewHandler;
+  renderOutputPreview?: OutputPreviewRenderer;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -780,6 +797,18 @@ export function TaskContent({
                   <p>{record.reviewReason}</p>
                 </details>
               ))}
+            {outputsEnabled && (
+              <RunOutputs
+                outputs={run.outputs}
+                taskId={task.id}
+                runId={run.id}
+                disabled={responseDisabled || !synchronized}
+                onAction={onOutputAction}
+                onPrepareEdit={onPrepareOutputEdit}
+                onPreview={onPreviewOutput}
+                renderPreview={renderOutputPreview}
+              />
+            )}
             {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}

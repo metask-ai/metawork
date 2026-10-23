@@ -36,6 +36,8 @@ import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
+import { runOutputDeliveryVertical } from "./output-delivery-vertical.mjs";
+import { runOfficeInstallVertical } from "./office-install-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -138,9 +140,15 @@ appEnvironment.PATH =
       ].join(path.delimiter)
     : "/usr/bin:/bin";
 
-const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
-  ? ["docx", "pptx", "xlsx"]
-  : [];
+const builtinSkillNames =
+  process.platform === "win32" || process.env.METAWORK_LOCAL_SKILL_ROOT
+    ? ["docx", "pptx", "xlsx"]
+    : [];
+const basicOfficeOnly = process.env.METAWORK_BASIC_OFFICE_ONLY === "1";
+if (basicOfficeOnly) {
+  assert.equal(process.platform, "win32");
+  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
+}
 const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
@@ -412,6 +420,12 @@ let lastCheckpointObservation = null;
 let app;
 let exited;
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
+const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
+const officeInstallOnly = process.env.METAWORK_OFFICE_INSTALL_ONLY === "1";
+if (officeInstallOnly) {
+  assert.equal(process.platform, "win32");
+  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
+}
 startApplication();
 
 desktopVertical: try {
@@ -421,7 +435,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly) {
+  if (!activeInputOnly && !outputOnly && !officeInstallOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -466,6 +480,165 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (officeInstallOnly) {
+    await runOfficeInstallVertical({
+      root,
+      dataRoot,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+      connectWebView: () =>
+        connectTestWebView(chromeProbePort, {
+          requestTimeoutMs: commandTimeoutMs,
+        }),
+      restart: async () => {
+        await stopApplication("Office install cold restart");
+        await rm(automationDir, { recursive: true, force: true });
+        startApplication();
+        await waitForBridge();
+      },
+      hostPid: () => app.pid,
+      evidenceDirectory: join(root, ".zig-cache/office-app-install"),
+    });
+    await stopApplication("Office install desktop verification complete");
+    process.stdout.write(
+      "Office Windows App installation passed: real public signed install, basic/full catalog binding, explicit refresh, ordinary Task during installation and cold startup.\n",
+    );
+    break desktopVertical;
+  }
+  if (outputOnly) {
+    assert.equal(process.platform, "win32");
+    const catalog = await poll(
+      async () => {
+        const selected = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        );
+        return selected?.skillCatalog.availability === "ready"
+          ? selected.skillCatalog
+          : null;
+      },
+      commandTimeoutMs,
+      "Output Workspace catalog",
+    );
+    await runOutputDeliveryVertical({
+      workspaceRoot: canonicalWorkspace,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog,
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+      nativeOutputProbe:
+        process.env.METAWORK_OUTPUT_NATIVE === "1"
+          ? async ({ mode, source, destination, trigger }) => {
+              const args = [
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                join(root, "scripts/probe-windows-output-native.ps1"),
+                "-ProcessId",
+                String(app.pid),
+                "-ExpectedExecutable",
+                binary,
+                "-WorkspaceRoot",
+                canonicalWorkspace,
+                "-SourcePath",
+                source,
+                "-Mode",
+                mode,
+              ];
+              if (destination) args.push("-Destination", destination);
+              const child = spawn("powershell.exe", args, {
+                cwd: root,
+                windowsHide: true,
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              let output = "",
+                errors = "",
+                readyResolve,
+                readyReject;
+              const ready = new Promise((resolve, reject) => {
+                readyResolve = resolve;
+                readyReject = reject;
+              });
+              child.stdout.on("data", (chunk) => {
+                output += chunk.toString("utf8");
+                if (output.length > 65536) {
+                  child.kill();
+                  readyReject(
+                    new Error(
+                      "Native output probe exceeded its capture budget",
+                    ),
+                  );
+                }
+                for (const line of output.split(/\r?\n/)) {
+                  try {
+                    if (JSON.parse(line).phase === "ready") readyResolve();
+                  } catch {}
+                }
+              });
+              child.stderr.on("data", (chunk) => {
+                errors += chunk.toString("utf8");
+                if (errors.length > 65536) child.kill();
+              });
+              const finished = new Promise((resolve, reject) => {
+                child.once("error", reject);
+                child.once("close", (code, signal) => {
+                  if (code !== 0 || signal !== null)
+                    reject(
+                      new Error(
+                        `Native output probe failed: ${code}/${signal}: ${errors}\n${output}`,
+                      ),
+                    );
+                  else resolve();
+                });
+              });
+              void finished.catch(readyReject);
+              const timer = setTimeout(() => child.kill(), 40_000);
+              try {
+                await ready;
+                await Promise.all([trigger(), finished]);
+                return JSON.parse(output.trim().split(/\r?\n/).at(-1));
+              } finally {
+                clearTimeout(timer);
+                if (child.exitCode === null && child.signalCode === null) {
+                  child.kill();
+                  await finished.catch(() => undefined);
+                }
+              }
+            }
+          : undefined,
+      connectWebView: () =>
+        connectTestWebView(chromeProbePort, {
+          requestTimeoutMs: commandTimeoutMs,
+        }),
+      restart: async () => {
+        await stopApplication("Output cold restart");
+        await rm(automationDir, { recursive: true, force: true });
+        startApplication();
+        await waitForBridge();
+      },
+      evidenceDirectory: join(
+        root,
+        process.env.METAWORK_OUTPUT_NATIVE === "1"
+          ? ".zig-cache/output-native-desktop"
+          : ".zig-cache/output-delivery-desktop",
+      ),
+    });
+    await stopApplication("Output desktop verification complete");
+    process.stdout.write(
+      `Output Windows desktop vertical passed: real Core delivery, Renderer checks/edit draft, cold history and source preservation${process.env.METAWORK_OUTPUT_NATIVE === "1" ? ", native Save As/cancel/overwrite protection and exact Explorer selection" : ""}.\n`,
+    );
+    break desktopVertical;
+  }
   const initialSources = afterChoose.skillManagement.sourceSettings;
   assert.equal(initialSources.health, "ready");
   assert.equal(initialSources.entries.length, 4);
@@ -568,8 +741,8 @@ desktopVertical: try {
       "Workspace Skill catalog",
     );
   let catalogSnapshot = await readCatalog();
-  if (process.env.METAWORK_LOCAL_SKILL_ROOT) {
-    for (const name of ["docx", "xlsx", "pptx"]) {
+  if (builtinSkillNames.length > 0) {
+    for (const name of builtinSkillNames) {
       const office = catalogSnapshot.catalog.skills.find(
         (item) => item.invocationName === name,
       );
@@ -578,8 +751,15 @@ desktopVertical: try {
       assert.equal(office.enabled, true);
     }
     process.stdout.write(
-      "Local Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
+      "Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
     );
+  }
+  if (basicOfficeOnly) {
+    await stopApplication("basic Office catalog verification complete");
+    process.stdout.write(
+      "Basic Office desktop catalog passed without a selected Office environment.\n",
+    );
+    break desktopVertical;
   }
   if (
     !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||

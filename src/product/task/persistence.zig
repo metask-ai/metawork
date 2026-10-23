@@ -694,12 +694,77 @@ pub const RunWire = struct {
     tools: []ToolWire,
     file_change_observation: ?[]const u8 = null,
     file_changes: ?[]FileChangeWire = null,
+    outputs: []OutputWire = &.{},
     diagnostic: []const u8,
     diagnostic_truncated: bool,
     diagnostic_redacted: bool,
     event_projection_failure: ?[]const u8,
     next_activity_order: u64,
 };
+
+pub const OutputWire = struct {
+    id: []const u8,
+    locator: []const u8,
+    size_bytes: u64,
+    sha256: []const u8,
+    redacted: bool,
+};
+
+fn freeOutputWires(allocator: std.mem.Allocator, outputs: []OutputWire) void {
+    for (outputs) |output| {
+        allocator.free(@constCast(output.id));
+        allocator.free(@constCast(output.sha256));
+    }
+    allocator.free(outputs);
+}
+
+fn projectOutputs(allocator: std.mem.Allocator, run: *const task_state.RunRecord) ![]OutputWire {
+    const outputs = try allocator.alloc(OutputWire, countPresent(task_state.OutputRecord, &run.outputs));
+    errdefer allocator.free(outputs);
+    var count: usize = 0;
+    errdefer for (outputs[0..count]) |output| {
+        allocator.free(@constCast(output.id));
+        allocator.free(@constCast(output.sha256));
+    };
+    for (run.outputs) |entry| if (entry) |output| {
+        const id = try allocator.dupe(u8, &std.fmt.bytesToHex(output.id, .lower));
+        errdefer allocator.free(id);
+        const digest = try allocator.dupe(u8, &std.fmt.bytesToHex(output.sha256, .lower));
+        outputs[count] = .{
+            .id = id,
+            .locator = if (output.redacted) "" else output.locator,
+            .size_bytes = output.size_bytes,
+            .sha256 = digest,
+            .redacted = output.redacted,
+        };
+        count += 1;
+    };
+    return outputs;
+}
+
+fn outputIdentity(comptime len: usize, value: []const u8) error{Invalid}![len]u8 {
+    if (value.len != len * 2) return error.Invalid;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return error.Invalid;
+    var bytes: [len]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, value) catch return error.Invalid;
+    return bytes;
+}
+
+fn validateOutputs(outputs: []const OutputWire) error{Invalid}!void {
+    if (outputs.len > agent.max_file_deliveries_per_run) return error.Invalid;
+    for (outputs, 0..) |output, index| {
+        const id = try outputIdentity(16, output.id);
+        const digest = try outputIdentity(32, output.sha256);
+        if (std.mem.allEqual(u8, &id, 0)) return error.Invalid;
+        if (output.redacted) {
+            if (output.locator.len != 0) return error.Invalid;
+        } else {
+            _ = agent.FileDeliveryReceipt.init(id, output.locator, output.size_bytes, digest) catch return error.Invalid;
+        }
+        for (outputs[0..index]) |previous|
+            if (std.mem.eql(u8, previous.id, output.id)) return error.Invalid;
+    }
+}
 
 pub const SubmissionWire = struct {
     operation_id: []const u8,
@@ -889,6 +954,7 @@ pub const TaskStateWireScratch = struct {
 pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
     for (tasks) |task| {
         for (task.runs) |run| {
+            freeOutputWires(allocator, run.outputs);
             if (run.input.argument_values) |values| allocator.free(values);
             if (run.input.attachments) |items| allocator.free(items);
             for (run.tools) |tool|
@@ -946,6 +1012,7 @@ pub fn projectTask(
     errdefer allocator.free(runs);
     var run_index: usize = 0;
     errdefer for (runs[0..run_index]) |run| {
+        freeOutputWires(allocator, run.outputs);
         if (run.input.argument_values) |values| allocator.free(values);
         if (run.input.attachments) |items| allocator.free(items);
         for (run.tools) |tool|
@@ -1302,6 +1369,8 @@ fn projectRun(
         allocator.free(changes);
     };
 
+    const outputs = try projectOutputs(allocator, run);
+    errdefer freeOutputWires(allocator, outputs);
     const input = try projectInput(allocator, run.input);
     errdefer freeInputWire(allocator, input);
     const projection = task_state.runProjectionFacts(run);
@@ -1347,6 +1416,7 @@ fn projectRun(
         else
             null,
         .file_changes = file_changes,
+        .outputs = outputs,
         .diagnostic = if (terminal_payload) |payload|
             run.terminal_diagnostic[0..payload.diagnostic_len]
         else
@@ -1792,6 +1862,19 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             restored_file_changes += 1;
         }
     }
+    validateOutputs(wire.outputs) catch return error.TaskStoreCorrupt;
+    var outputs: [agent.max_file_deliveries_per_run]?task_state.OutputRecord = @splat(null);
+    errdefer for (outputs) |entry| if (entry) |output| projection.free(output.locator);
+    for (wire.outputs, 0..) |output, index| {
+        const locator = try projection.copy(output.locator, agent.FileDeliveryReceipt.max_path_bytes);
+        outputs[index] = .{
+            .id = outputIdentity(16, output.id) catch unreachable,
+            .locator = locator,
+            .size_bytes = output.size_bytes,
+            .sha256 = outputIdentity(32, output.sha256) catch unreachable,
+            .redacted = output.redacted or !std.mem.eql(u8, locator, output.locator),
+        };
+    }
     const phase: task_state.RunPhase = if (interrupted)
         .interrupted
     else
@@ -1852,6 +1935,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         else
             null,
         .file_changes = file_changes,
+        .outputs = outputs,
         .file_changes_known_loss = interrupted or
             (wire.file_change_observation != null and
                 std.mem.eql(u8, wire.file_change_observation.?, "incomplete")),
@@ -2310,6 +2394,7 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
         deinitRestoredFileChange(projection, change);
     }
     projection.allocator.free(run.file_changes);
+    for (run.outputs) |entry| if (entry) |output| projection.free(output.locator);
     projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
     for (run.additional_inputs) |entry| if (entry) |record| {
@@ -3220,6 +3305,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 if (std.mem.eql(u8, previous.id, tool.id) or previous.order == tool.order)
                     return error.Invalid;
         }
+        try validateOutputs(run.outputs);
         if ((run.file_change_observation == null) != (run.file_changes == null))
             return error.Invalid;
         if (run.file_change_observation) |observation| {
@@ -5203,4 +5289,67 @@ test "canonical approval resolution distinguishes the prior record from an unrel
     defer std.testing.allocator.free(canonical);
     try std.testing.expectEqualStrings("previous", canonical);
     try std.testing.expectEqual(Commit.outcome_unknown, (Capability{ .enabled = true }).resolveCommit("candidate"));
+}
+
+test "Output metadata validates identities, safe locators, redaction, duplicates and capacity" {
+    var values = [_]OutputWire{.{ .id = "01" ** 16, .locator = "成果/report.docx", .size_bytes = 42, .sha256 = "ab" ** 32, .redacted = false }};
+    try validateOutputs(&values);
+    for ([_][]const u8{ "", "0" ** 32, "A" ** 32, "01" ** 15, "01" ** 17 }) |id| {
+        values[0].id = id;
+        try std.testing.expectError(error.Invalid, validateOutputs(&values));
+    }
+    values[0].id = "01" ** 16;
+    for ([_][]const u8{ "AB" ** 32, "zz" ** 32, "ab" ** 31 }) |digest| {
+        values[0].sha256 = digest;
+        try std.testing.expectError(error.Invalid, validateOutputs(&values));
+    }
+    values[0].sha256 = "ab" ** 32;
+    for ([_][]const u8{ "", "../x", "C:/x", "/x", "a//b", "a:stream" }) |path| {
+        values[0].locator = path;
+        try std.testing.expectError(error.Invalid, validateOutputs(&values));
+    }
+    values[0].redacted = true;
+    values[0].locator = "masked";
+    try std.testing.expectError(error.Invalid, validateOutputs(&values));
+    values[0].locator = "";
+    try validateOutputs(&values);
+    var duplicate = [_]OutputWire{ values[0], values[0] };
+    try std.testing.expectError(error.Invalid, validateOutputs(&duplicate));
+    var excess = [_]OutputWire{values[0]} ** (agent.max_file_deliveries_per_run + 1);
+    try std.testing.expectError(error.Invalid, validateOutputs(&excess));
+}
+
+fn outputProjectionAllocationCase(allocator: std.mem.Allocator) !void {
+    var run: task_state.RunRecord = undefined;
+    run.outputs = @splat(null);
+    var locator = [_]u8{'x'};
+    run.outputs[0] = .{ .id = @splat(1), .locator = &locator, .size_bytes = 1, .sha256 = @splat(2) };
+    run.outputs[1] = .{ .id = @splat(3), .locator = &locator, .size_bytes = 2, .sha256 = @splat(4), .redacted = true };
+    const values = try projectOutputs(allocator, &run);
+    defer freeOutputWires(allocator, values);
+    try std.testing.expectEqualStrings("x", values[0].locator);
+    try std.testing.expectEqualStrings("", values[1].locator);
+    try validateOutputs(values);
+}
+
+test "Output wire projection never persists redacted locators and cleans partial allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, outputProjectionAllocationCase, .{});
+}
+
+test "Run history without Outputs retains its original fields and restores an empty set" {
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, reviewTestRun(), .{});
+    defer std.testing.allocator.free(encoded);
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+    defer value.deinit();
+    try std.testing.expect(value.value.object.swapRemove("outputs"));
+    const legacy = try std.json.Stringify.valueAlloc(std.testing.allocator, value.value, .{});
+    defer std.testing.allocator.free(legacy);
+    var parsed = try std.json.parseFromSlice(RunWire, std.testing.allocator, legacy, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.outputs.len);
+    try std.testing.expectEqualStrings("done", parsed.value.assistant);
+    var task = reviewTestTask();
+    task.next_run_generation = 1;
+    task.runs = @constCast(&[_]RunWire{parsed.value});
+    try validateTask(task, testLimits());
 }

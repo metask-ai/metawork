@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    addOfficeQualification(b, modules.app, lifecycle_fixture, bundle.link_libc, &artifacts.tests.step);
     const image_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/generate_image.zig"),
         .target = test_modules.agent.resolved_target,
@@ -186,6 +187,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-product-office-component", .root_module = test_modules.product_office_component },
         .{ .name = "metawork-app-models-coordinator", .root_module = test_modules.models_coordinator },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -202,16 +204,20 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
+        .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
+        .{ .name = "metawork-product-document-preview", .root_module = test_modules.product_document_preview },
+        .{ .name = "metawork-product-document-preview-session", .root_module = test_modules.product_document_preview_session },
         .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
         .{ .name = "metawork-product-workspace-configuration", .root_module = test_modules.product_workspace_configuration },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
         .{ .name = "metawork-app-image-output", .root_module = test_modules.image_output },
+        .{ .name = "metawork-app-output-file", .root_module = test_modules.output_file },
         .{ .name = "metawork-product-workspace-view", .root_module = test_modules.product_workspace_view },
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
         .{ .name = "metawork-product-schedule-state", .root_module = test_modules.product_schedule_state },
@@ -256,6 +262,8 @@ pub fn build(b: *std.Build) void {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_office_component)
+            b.step("test-office-component-state", "Run optional Office product-state tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -458,9 +466,14 @@ fn addRendererWireGenerator(b: *std.Build) void {
     snapshot.addImport("product_view_encoding", encoding);
     const task_view = b.createModule(.{ .root_source_file = b.path("src/product/task/view_contract.zig"), .target = b.graph.host });
     task_view.addImport("product_view_encoding", encoding);
+    const office_model = b.createModule(.{ .root_source_file = b.path("src/product/control/office_component.zig"), .target = b.graph.host });
+    const office_view = b.createModule(.{ .root_source_file = b.path("src/product/control/office_view_contract.zig"), .target = b.graph.host });
+    office_view.addImport("product_view_encoding", encoding);
+    office_view.addImport("product_office_component", office_model);
     const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
+    module.addImport("office_view_contract", office_view);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -572,6 +585,7 @@ const WiredModules = struct {
     image_container: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
+    agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
     agent_provider_probe: *std.Build.Module,
@@ -591,8 +605,11 @@ const WiredModules = struct {
     product_attachment: *std.Build.Module,
     product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
+    product_office_component: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
+    product_document_preview: *std.Build.Module,
+    product_document_preview_session: *std.Build.Module,
     product_control_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
@@ -600,6 +617,7 @@ const WiredModules = struct {
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
     image_output: *std.Build.Module,
+    output_file: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -932,6 +950,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
     cases.addImport("image_output", modules.image_output);
+    cases.addImport("app_output_file", modules.output_file);
     cases.addImport("models_coordinator", modules.models_coordinator);
     cases.addImport("metawork_account", modules.account);
     cases.addImport("product_models_metask", modules.models_metask);
@@ -1104,12 +1123,18 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_permission_review.addImport("agent_completion", agent_completion);
+    const agent_file_delivery = b.createModule(.{
+        .root_source_file = b.path("src/agent/deliver_file.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const event_sink = b.createModule(.{
         .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     event_sink.addImport("metask_agentcore", sdk);
+    event_sink.addImport("agent_file_delivery", agent_file_delivery);
     const event_pump = b.createModule(.{
         .root_source_file = b.path("src/agent/event_pump.zig"),
         .target = target,
@@ -1181,6 +1206,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     session.addImport("metask_agentcore", sdk);
+    session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
@@ -1432,6 +1458,24 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     attachment_staging.addImport("metawork_product_attachment", product_attachment);
+    const document_contract = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview_contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const document_preview = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    document_preview.addImport("product_document_preview_contract", document_contract);
+    document_preview.addImport("product_control_executor", executor);
+    const document_sessions = b.createModule(.{
+        .root_source_file = b.path("src/product/control/document_preview_session.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    document_sessions.addImport("product_document_preview", document_preview);
     const file_preview = b.createModule(.{
         .root_source_file = b.path("src/product/control/file_preview.zig"),
         .target = target,
@@ -1878,12 +1922,26 @@ fn wireAgentCore(
         "metawork_product_models_contract",
         models_contract,
     );
+    const product_office_component = b.createModule(.{
+        .root_source_file = b.path("src/product/control/office_component.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const office_view = b.createModule(.{
+        .root_source_file = b.path("src/product/control/office_view_contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    office_view.addImport("product_view_encoding", view_encoding);
+    office_view.addImport("product_office_component", product_office_component);
     const product_control_ports = b.createModule(.{
         .root_source_file = b.path("src/product/control/ports.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_control_ports.addImport("metawork_agent", agent);
+    product_control_ports.addImport("product_office_component", product_office_component);
+    product_control_ports.addImport("product_document_preview_contract", document_contract);
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_models_contract", models_contract);
     product_control_ports.addImport("product_models_ports", models_ports);
@@ -1921,6 +1979,11 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const output_file = b.createModule(.{
+        .root_source_file = b.path("src/app/output_file.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
     image_output.addImport("metawork_product_workspace", product_workspace);
@@ -1930,6 +1993,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("product_office_component", product_office_component);
+    product_control_runtime.addImport("product_office_view_contract", office_view);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);
@@ -1946,6 +2011,8 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
     product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_document_preview", document_preview);
+    product_control_runtime.addImport("product_document_preview_session", document_sessions);
     product_control_runtime.addImport("product_permission_review", product_permission_review);
     product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
@@ -1963,6 +2030,9 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "output_save", @embedFile("frontend/src/bridge/__fixtures__/output-save.fixture"));
+    product_control_contract_fixture.addOption([]const u8, "output_action", @embedFile("frontend/src/bridge/__fixtures__/output-action.fixture"));
+    product_control_contract_fixture.addOption([]const u8, "delivered_output", @embedFile("frontend/src/bridge/__fixtures__/delivered-output.fixture"));
     product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));
@@ -1981,15 +2051,13 @@ fn wireAgentCore(
         "permission_file_target",
         @embedFile("frontend/src/bridge/__fixtures__/permission-file-target.fixture"),
     );
-    product_control_runtime.addOptions(
-        "product_control_contract_fixture",
-        product_control_contract_fixture,
-    );
     product_control_contract_fixture.addOption(
         []const u8,
         "skill_recovery_required",
         @embedFile("frontend/src/bridge/__fixtures__/skill-recovery-required.fixture"),
     );
+    const shared_contract_fixture_module = product_control_contract_fixture.createModule();
+    product_control_runtime.addImport("product_control_contract_fixture", shared_contract_fixture_module);
     const product_control = b.createModule(.{
         .root_source_file = b.path("src/product/control.zig"),
         .target = target,
@@ -2006,6 +2074,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     bridge.addImport("product_view_encoding", view_encoding);
+    bridge.addImport("contract_fixture", shared_contract_fixture_module);
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_product_models_contract", models_contract);
@@ -2083,6 +2152,10 @@ fn wireAgentCore(
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
+    app.addImport("app_output_file", output_file);
+    app.addImport("product_document_preview_contract", document_contract);
+    app.addImport("product_document_preview", document_preview);
+    app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);
     app.addImport(
         "product_schedule_persistence",
@@ -2090,6 +2163,7 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
+    app.addImport("product_office_component", product_office_component);
     app.addImport("models_coordinator", models_coordinator);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
@@ -2116,6 +2190,30 @@ fn wireAgentCore(
         "metawork_app_single_instance_compat",
         app_single_instance_compat,
     );
+    app.addImport("office_process_windows", b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/office_process_windows.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    }));
+    const office_component_windows = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/office_component_windows.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    if (target.result.os.tag == .windows) office_component_windows.linkSystemLibrary("wintrust", .{});
+    app.addImport("office_component_windows", office_component_windows);
+    const office_process = b.createModule(.{
+        .root_source_file = b.path("src/app/office_process.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    office_process.addImport("office_process_windows", existingImport(app, "office_process_windows"));
+    app.addImport("office_process", office_process);
+    app.addImport("image_container", image_container);
+    @import("build_support/office_component_release.zig").bind(b, app);
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);
 
@@ -2159,6 +2257,7 @@ fn wireAgentCore(
         .image_container = image_container,
         .product_permission_review = product_permission_review,
         .agent_session = session,
+        .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,
         .agent_provider_probe = agent_provider_probe,
@@ -2178,8 +2277,11 @@ fn wireAgentCore(
         .product_attachment = product_attachment,
         .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
+        .product_office_component = product_office_component,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
+        .product_document_preview = document_preview,
+        .product_document_preview_session = document_sessions,
         .product_control_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
@@ -2187,6 +2289,7 @@ fn wireAgentCore(
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
         .image_output = image_output,
+        .output_file = output_file,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,
@@ -2257,6 +2360,110 @@ fn selectedArtifact(b: *std.Build) ArtifactOption {
     if (artifact == .release)
         @panic("MetaWork release identity is not configured; register the release Bundle ID, data directory, and credential services before enabling -Dartifact=release");
     return artifact;
+}
+
+fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.Build.Module, link_libc: bool, tests: *std.Build.Step) void {
+    if (app.resolved_target.?.result.os.tag == .windows) {
+        const job_tests = b.addTest(.{ .name = "office-process-job", .root_module = existingImport(app, "office_process_windows") });
+        tests.dependOn(&b.addRunArtifact(job_tests).step);
+        const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
+        tests.dependOn(&b.addRunArtifact(validation_tests).step);
+        const process_tests = b.addTest(.{ .name = "office-process", .root_module = existingImport(app, "office_process") });
+        tests.dependOn(&b.addRunArtifact(process_tests).step);
+        const core_shell = b.addExecutable(.{ .name = "office-core-shell", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/office_core_shell.zig"),
+            .target = app.resolved_target,
+            .optimize = app.optimize,
+            .link_libc = link_libc,
+        }) });
+        core_shell.root_module.addImport("lifecycle_fixture", fixture);
+        core_shell.root_module.addImport("office_process", existingImport(app, "office_process"));
+        b.step("build-office-core-shell-probe", "Build the canonical Core Shell Office lifecycle qualifier").dependOn(&b.addInstallArtifact(core_shell, .{}).step);
+    }
+    const archive = b.createModule(.{
+        .root_source_file = b.path("src/app/office_component_archive.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    });
+    const bootstrap = b.addExecutable(.{ .name = "office-bootstrap", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_component_bootstrap.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    bootstrap.root_module.addImport("office_component_archive", archive);
+    const bootstrap_run = b.addRunArtifact(bootstrap);
+    if (b.args) |args| bootstrap_run.addArgs(args);
+    b.step("office-bootstrap", "Verify and unpack an actual Office producer archive").dependOn(&bootstrap_run.step);
+    const process = existingImport(app, "office_process");
+    const host = b.addExecutable(.{ .name = "office-process-probe", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_process_host.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    host.root_module.addImport("office_process", process);
+    b.step("build-office-process-probe", "Build the real Application Office lifecycle qualifier").dependOn(&b.addInstallArtifact(host, .{}).step);
+    const preview = b.createModule(.{
+        .root_source_file = b.path("src/app/office_preview.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    });
+    preview.addImport("office_process", process);
+    preview.addImport("app_output_file", existingImport(app, "app_output_file"));
+    preview.addImport("product_document_preview_contract", existingImport(app, "product_document_preview_contract"));
+    preview.addImport("image_container", existingImport(app, "image_container"));
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "office-preview-resource", .root_module = preview })).step);
+    const preview_host = b.addExecutable(.{ .name = "office-preview-resource", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_preview_resource.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    preview_host.root_module.addImport("office_preview", preview);
+    preview_host.root_module.addImport("product_document_preview", existingImport(app, "product_document_preview"));
+    preview_host.root_module.addImport("office_process", process);
+    b.step("build-office-preview-resource", "Build the owned Application preview resource qualifier").dependOn(&b.addInstallArtifact(preview_host, .{}).step);
+    const store = b.createModule(.{
+        .root_source_file = b.path("src/app/office_component_store.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    });
+    store.addImport("office_process", process);
+    store.addImport("product_office_component", existingImport(app, "product_office_component"));
+    store.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    b.step("test-office-component-store", "Test Office public installation and atomic component records").dependOn(&b.addRunArtifact(b.addTest(.{ .name = "office-component-store", .root_module = store })).step);
+    const python_zip_tests = b.addTest(.{ .name = "office-python-archive", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/app/office_python_archive.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    const python_zip_run = b.addRunArtifact(python_zip_tests);
+    tests.dependOn(&python_zip_run.step);
+    b.step("test-office-python-archive", "Test bounded first-stage Python ZIP extraction").dependOn(&python_zip_run.step);
+    const python_bootstrap = b.addExecutable(.{ .name = "office-python-bootstrap", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_python_bootstrap.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    python_bootstrap.root_module.addImport("office_component_store", store);
+    python_bootstrap.root_module.addImport("office_process", process);
+    b.step("build-office-python-bootstrap", "Build the native first-stage Python preparation qualifier").dependOn(&b.addInstallArtifact(python_bootstrap, .{}).step);
+    const install = b.addExecutable(.{ .name = "office-component-install", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_component_install.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    install.root_module.addImport("office_component_store", store);
+    install.root_module.addImport("office_process", process);
+    install.root_module.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    b.step("build-office-component-install", "Build the isolated component installation qualifier").dependOn(&b.addInstallArtifact(install, .{}).step);
 }
 
 fn existingImport(module: *std.Build.Module, name: []const u8) *std.Build.Module {

@@ -9,17 +9,31 @@ description: Create, read, edit, combine, split, and refine PowerPoint presentat
 
 Skill resource directory: `${CLAUDE_SKILL_DIR}`
 
-Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy..
+This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
 
-Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
+Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
 
-Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during presentation processing.
+The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
+
+Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
+
+Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
+
+## Explicit file delivery
+
+Validate and reopen the PPTX, verify slide order, notes and requested changes, and inspect the rendered slides for overflow and clipping. State any checks you could not perform. Host file verification does not establish document quality.
+
+After checking the final file, call the Host tool `DeliverFile` with arguments `{"path":"results/presentation.pptx"}`, using the actual Task Workspace-relative path with forward slashes. This is a tool call, not a Shell command or text to print. Submit only the finished files requested by the user; keep unpacked XML, scripts, temporary files and preview images as working material unless explicitly requested.
+
+Observe the actual tool result. `verified_for_delivery` confirms the Host checked the bytes and issued a receipt; the Task Outputs record determines registration. If the tool is unavailable or fails, report that delivery was not confirmed. A Markdown path or Shell output cannot register an Output. Describe the changes and any remaining limitations after the real result.
+
+Do not change a file after submitting it; finish further edits and checks before submitting the new result. A read-only analysis can end with a conversational answer and does not require a new file.
 
 ## Quick Reference
 
 | Task | Guide |
 |------|-------|
-| Read/analyze content | `python -m markitdown presentation.pptx` |
+| Read/analyze content | Component `text` command |
 | Edit or create from template | Read [editing.md](editing.md) |
 | Create from scratch | Read [pptxgenjs.md](pptxgenjs.md) |
 
@@ -29,13 +43,13 @@ Check the dependencies needed by the selected workflow before starting. Use the 
 
 ```bash
 # Text extraction
-python -m markitdown presentation.pptx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text presentation.pptx content.json
 
 # Visual overview
-python scripts/thumbnail.py presentation.pptx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render presentation.pptx preview-pages/
 
 # Raw XML
-python scripts/office/unpack.py presentation.pptx unpacked/
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" presentation.pptx unpacked/
 ```
 
 ---
@@ -44,7 +58,7 @@ python scripts/office/unpack.py presentation.pptx unpacked/
 
 **Read [editing.md](editing.md) for full details.**
 
-1. Analyze template with `thumbnail.py`
+1. Analyze template with component page images and structured text
 2. Unpack → manipulate slides → edit content → clean → pack
 
 ---
@@ -156,7 +170,7 @@ Your first render is almost never correct. Approach QA as a bug hunt, not a conf
 ### Content QA
 
 ```bash
-python -m markitdown output.pptx
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text output.pptx content.json
 ```
 
 Check for missing content, typos, wrong order.
@@ -164,7 +178,7 @@ Check for missing content, typos, wrong order.
 **When using templates, check for leftover placeholder text:**
 
 ```bash
-python -m markitdown output.pptx | grep -iE "xxxx|lorem|ipsum|this.*(page|slide).*layout"
+rg -i "xxxx|lorem|ipsum|this.*(page|slide).*layout" content.json
 ```
 
 If grep returns results, fix them before declaring success.
@@ -215,28 +229,13 @@ Report success only after content and visual checks pass. When a check finds an 
 
 ## Converting to Images
 
-Convert presentations to individual slide images for visual inspection:
-
 ```bash
-python scripts/office/soffice.py --headless --convert-to pdf output.pptx
-pdftoppm -jpeg -r 150 output.pdf slide
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render output.pptx preview-pages/
+"${CLAUDE_SKILL_DIR}/../../bin/office.exe" pdf output.pptx exported.pdf
 ```
 
-This creates `slide-01.jpg`, `slide-02.jpg`, etc.
+Read `preview-pages/pages.json` and inspect every listed page image. The component prepares the document once per operation and exports explicit page objects; it verifies the page count, image dimensions and byte budgets. Render again into a new directory after edits. A successful process exit alone is not visual QA.
 
-To re-render specific slides after fixes:
+## Authoring runtime
 
-```bash
-pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
-```
-
----
-
-## Dependencies
-
-- Python 3.10+ with `markitdown[pptx]` - text extraction
-- Python with Pillow - thumbnail grids
-- Python with `defusedxml` and `lxml` - XML processing and validation
-- Node.js with `pptxgenjs` - creating from scratch
-- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
-- Poppler (`pdftoppm`) - PDF to images
+Use the component's packaged PptxGenJS: save the JavaScript as `create.cjs`, then run `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`. The component contains the Python libraries required by the XML helpers. Do not install global tools or change the Task-wide environment.

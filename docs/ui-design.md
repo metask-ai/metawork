@@ -61,7 +61,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
-因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需在所属 Tool 行下方展开，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、Outputs、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需在所属 Tool 行下方展开，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。成果只在所属 Run 存在可信交付记录时展示紧凑文件列表，不显示空模块；文件名、相对路径和大小描述交付时的记录，不能当作当前文件仍存在或未变更的证明。脱敏时隐藏整条路径，不显示猜测的文件名。文件动作由 Host 重新验证后开放，普通工具文字和文件变化不产生该列表。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，存在 Tool 时在 terminal 后继续提供折叠的历史检查入口；过程与正式回复保持主次层级，用户可以检查 Tool 证据而无需离开阅读上下文。仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
@@ -548,7 +548,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ## 7. 中间区域：Task 内容
 
-> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity、Tool 摘要与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 仍是未来 capability，当前不得从 Agent 文本或 Tool 记录推断。
+> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity、Tool 摘要与 Run 状态属于当前产品路径；可信文件交付记录与 File Changes 只按各自 typed 合同呈现；其他 typed Delivery 与 Plan 仍是未来 capability，不得从 Agent 文本或普通 Tool 记录推断。
 
 中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
 
@@ -892,6 +892,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - 文件预览使用 Task Panel 顶部对象标签表达当前路径，活动标签右侧只提供刷新和标签关闭/面板隐藏动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供更弱层级的“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换标签后恢复各文件自己的模式和滚动位置，关闭后重开恢复默认模式；非活动视图不保留隐藏正文；
 - Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，只有 HTTP(S) 链接可按主阅读流相同的 Host handoff 与就地失败反馈打开，不接受 `mailto` 或新增资源读取、网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
 - 静态 PNG、JPEG 与静态 WebP 文件在同一预览标签中显示 Host 交付的完整原图，实际 WebView 解码完成前保持 loading，完成后按解码尺寸保持比例并使用容器内可用空间，不显示源码模式或原始 Base64。APNG/动画 WebP、单图超限和窗口累计容量不足分别解释原因，不静默缩图；容量不足允许用户关闭现有预览后重试。内联图片离开保留区域释放资源，重新接近时按需读取；
+- Windows 的 DOCX/PPTX/PDF 与 XLSX 在 Office 环境就绪且 Host 准入通过后使用文档预览会话。DOCX/PPTX/PDF 提供当前页、总页数与前后翻页；实际图片解码前保持加载。XLSX 默认按工作表与有界区域显示只读网格，标明隐藏工作表；在同一预览内提供“只读单元格/打印版面”视图切换，版面按工作簿的可见工作表和打印设置分页，不复用网格的省略说明。切换保持源身份和会话，读取与解码过程中保持忙态并丢弃旧视图内容；单元格详情分别显示公式、保存值和数字格式，缺少保存值不得伪装成零或已重算。图表、合并单元格等省略内容就地说明；不执行公式、外部链接或脚本，不在 Renderer 解析 Office 文件。未就绪、受限、变化、超限、到期与清理未确认有独立文字反馈；刷新关闭旧会话并重新准备，关闭标签、切换 Task 或授权失效后清空内容。文档页面与普通图片共享窗口额度、传输和解码准入。XLSX 版面只使用保存值，缺缓存留空；版面不支持或超限时说明网格仍可使用，空工作表与空白打印页不混为处理失败；
 - 普通文本、代码文件及其他已支持的文本格式显示中性等宽源码，保留空白并允许自身横向滚动，不增加模式切换。源码左侧显示从 1 开始的单列行号；行号与正文共用滚动容器，横向滚动时固定在左侧，不进入文本选择、复制内容或辅助技术朗读，只编号当前实际显示的文件前缀且不推断截断后的未读取行数。已识别且处于 Renderer 高亮预算内的代码文件自动渐进增强为主题适配的语法颜色，Markdown 的“源码”模式同样适用；未知格式、超出预算、模块加载失败、grammar 异常或高亮结果校验失败时静默保留完整纯文本，不自动猜测语言、不增加状态、重试、开关或语言选择。HTML、SVG 与 XML 即使显示 markup 语法颜色也始终只渲染惰性源码，不形成真实元素、执行脚本或加载资源，界面不为这一限制增加常驻提示或说明入口。只有具备经验证的独立隔离容器和受控资源读取能力后才能开放页面渲染，不能复用应用主页面执行 HTML 或放宽安全策略作为临时方案。文件预览不做 diff、range 高亮、自动刷新或文件 watcher；
 - UI-only `loading` 不进入 Host wire；稳定呈现状态为 `ready | missing | restricted | unsupported | changing | error`，传输的 `busy` 有界重新排队并保持 loading，安全代次重试规则由 [Renderer Bridge 合同](renderer-bridge-contract.md#file-preview-command) 定义。`changing`、`error` 与累计容量不足可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
 - Renderer 为每个文件标签独立维护 request generation。首次打开和刷新推进该标签 generation；关闭标签、切换 Task、reference 从新 snapshot 消失或该标签后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容。切换到其他标签只卸载当前文件 DOM，不清除仍打开标签的已读取 bytes；重新激活 ready 标签不请求，关闭后显式重开才重新请求；
@@ -899,7 +900,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 ### 12.2 Files changed 与 Outputs
 
-> Capability：File Changes **当前**；typed Output **未来**。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
+> Capability：File Changes 与可信文件交付记录 **当前**；其余 typed Output 形式尚未开放。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
 
 - 每个 Run 在 Assistant response 及其复制元数据后、必要 terminal notice 之前显示紧凑的单行“文件更改”入口。至少一条记录时，整行使用一个原生按钮，只显示中性 diff 图标、“文件更改 · 唯一文件数”和“审查更改”动作；不使用卡片、图标底板、过程竖线或第二行状态，也不暴露内部修改记录次数。`incomplete` 在同一行明确提示记录可能不完整；`incomplete` 且零记录时只显示非交互警告，不提供空 Review 动作；其他零记录状态不占位；
 - “审查更改”在既有右侧 Task Panel 打开为 singleton 对象标签，不建立独立 route 或占用整个工作区。Review 绑定一个明确 Task + Run，标签使用“审查更改”，活动正文立即进入按文件首次出现顺序排列的连续差异文档；不重复显示类型、标题或常规说明区。Run 级入口打开即请求并展示首个文件的首条 diff；Edit/Write 的已验证路径入口则展开、滚动并聚焦对应文件头，优先请求该文件的首条 diff。同文件后续记录在该文件区块接近可见区域时按稳定 `order` 逐条接入，后续文件纵向衔接，不经过列表页、单条详情页或返回动作。打开时显式展开右栏；切换其他标签保留已读 diff、折叠与滚动状态，关闭 Review 标签才释放这些内容；
@@ -907,7 +908,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前 Task 的 Review 标签内并存，不形成跨 Task、跨关闭或持久化的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭 Review 标签、替换其 Run、切换 Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；
 - ready diff 使用等宽 unified-diff 视图，显示新旧双行号与整行增删背景；Renderer 使用 hunk header 计算行号和可证明的未修改行缺口，但不重复显示原始 `@@ … @@` 文本。长行在正文区域横向滚动，路径可截断但必须能取得完整值。malformed 或未识别行安全降级为原文，不执行正文或依赖颜色表达唯一语义；
 - `diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；ready artifact 不提供刷新，只有瞬时 capacity 或普通请求失败提供重试。第一版不合并为累计或 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供语法 token 高亮、Accept/Reject、revert、stage 或 Output 标记；
-- `Outputs` 仍指用户关心的最终交付文件、链接或结构化结果。不能仅凭 created 记录自动判断它是 Output；需要未来 typed Output 标记或用户明确标记。
+- `Outputs` 当前只展示固定 Host 交付动作已验证登记的文件，不从 created 记录、普通引用或工具文本推断。仅真实记录非空时显示紧凑列表；显示交付时大小，路径脱敏时隐藏名称和位置。每项提供“检查文件”“定位文件”和“另存为”，当前 Task 可接收输入时还提供“继续修改”：每次点击独立调用 Host 校验，忙时禁用重复动作并提供取消；取消等待 Host 实际终态，不能立即伪称已取消；检查只表示检查时一致，变化、缺失、受限、超时与失败在该行明确呈现。定位结果只说明系统已接收请求；断连禁用操作，换 Task、失效或卸载取消在途请求并丢弃旧响应。另存只在系统对话框选择目标，不在 Renderer 编辑或显示目标路径；对话框允许正常停留，取消或关闭由系统交互完成。复制后只按 Host 终态显示已保存、目标已变化、失败或清理未完成；发布提交点之后取消被拒绝时继续呈现实际结果。未取得保存终态的 transport 失败只能显示结果未确认并提示检查所选位置，不能断言目标未变化或操作已取消，也不自动重试。继续修改须先检查源文件，再在同一 Task 的 Composer 加入用户可编辑的文件引用并聚焦输入；保留已有文字和附件，不覆盖 Skill 或未完成的斜杠输入，也不自动发送。冲突、容量不足和陈旧 audience 在成果行解释，切换 Task 或断连后的旧结果不得填入新输入框。Office 格式的成果提供显式“预览”动作，在成果行内展开同一文档预览组件；请求使用精确成果身份，不能降为普通文件引用绕过交付摘要。关闭返回该动作焦点，换 Task、断连或卸载关闭预览；预览读取或展示不得改变成果本身。链接与结构化成果尚未开放。
 
 ### 12.3 Output 卡片
 
@@ -990,7 +991,8 @@ Account 状态在 Workbench 账号入口、Account 设置及新任务输入区�
 
 ```text
 General
-└── Language
+├── Language
+└── Office documents
 
 Account
 ├── Account information（authenticated identity and balance; sign-in state when unauthenticated）
@@ -1016,6 +1018,10 @@ Providers（capability-gated）
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
 设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 的会话模式选择与当前值展示见[审批模式](#102-审批模式)。
+
+`General / 常规` 的 Office 文档分组说明三个基础 Skill 已内置，独立运行环境由用户主动安装。安装前展示 Host 提供的下载量与安装后占用；没有可信发布物或平台不支持时如实说明，不提供假下载入口。当前环境状态与在途操作分别呈现，更新失败不能把旧的可用环境显示为损坏。仅在 Host 给出总量时显示百分比，其余阶段显示文字；取消等待真实收口，不能点击后立即显示已取消。操作失败就地展示可恢复说明，超时只重新读取状态，不自动重发。
+
+安装、更新、重新安装、检查与清理由 Host action facts 决定是否可用，不因 Task 正在运行而整体禁用。移除使用危险动作和确认弹层，默认焦点为取消；说明新 Task 回到基础 Skill，仍被使用的资源待清理，必要时重启完成。清理与移除须提示本机其他 MetaWork 构建可能需要重新安装环境。环境就绪时说明新 Task 使用新资源、既有 Task 须在空闲时显式刷新 Skill，不宣称正在运行的 Session 已切换。该分组遵循现有设置行、错误、焦点、深浅主题及窄窗规则，不建立插件商店或通用拓展管理页面。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 

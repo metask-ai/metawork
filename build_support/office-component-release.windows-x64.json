@@ -1,0 +1,21 @@
+{
+  "schema": 2,
+  "protocolRevision": 1,
+  "target": "x86_64-windows-msvc",
+  "seed": {
+    "archiveSha256": "bf613c092aa4ab67cc92beb64a960f0b1273c909325828fb8e4499fb8312a6a1",
+    "manifestSha256": "649d76f4e91f214d67a2536399831efa8366d03f0b68699f565f24281fa1532c",
+    "archiveBytes": 687957,
+    "unpackedBytes": 4181016,
+    "files": 193
+  },
+  "release": {
+    "archiveSha256": "07286965019602e6f6cc90ec95fefdffa443d6d12da97ce7022696b69f93cbcf",
+    "manifestSha256": "daa211e2a3e60e091d5c8536e7760b9018bb8796726c488c0dedea9a5aebe113",
+    "archiveBytes": 627592698,
+    "unpackedBytes": 1915231676,
+    "files": 25969,
+    "downloadBytes": 479939197
+  },
+  "retained": []
+}

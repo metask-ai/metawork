@@ -20,3 +20,21 @@ pub const PositiveNumber = struct {
         try json.write(self.value);
     }
 };
+
+pub const U64 = struct {
+    value: u64,
+    pub const wire_scalar = "u64WireInteger";
+
+    pub fn jsonStringify(self: @This(), json: *std.json.Stringify) std.Io.Writer.Error!void {
+        try json.print("\"{d}\"", .{self.value});
+    }
+};
+
+pub const PositiveU64 = struct {
+    value: u64,
+    pub const wire_scalar = "positiveU64WireId";
+
+    pub fn jsonStringify(self: @This(), json: *std.json.Stringify) std.Io.Writer.Error!void {
+        try (PositiveId{ .value = self.value }).jsonStringify(json);
+    }
+};
