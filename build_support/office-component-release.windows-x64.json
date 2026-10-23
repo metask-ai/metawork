@@ -9,13 +9,6 @@
     "unpackedBytes": 4181016,
     "files": 193
   },
-  "release": {
-    "archiveSha256": "07286965019602e6f6cc90ec95fefdffa443d6d12da97ce7022696b69f93cbcf",
-    "manifestSha256": "daa211e2a3e60e091d5c8536e7760b9018bb8796726c488c0dedea9a5aebe113",
-    "archiveBytes": 627592698,
-    "unpackedBytes": 1915231676,
-    "files": 25969,
-    "downloadBytes": 479939197
-  },
+  "release": null,
   "retained": []
 }
