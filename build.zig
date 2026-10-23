@@ -2367,11 +2367,11 @@ fn selectedArtifact(b: *std.Build) ArtifactOption {
 }
 
 fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.Build.Module, link_libc: bool, tests: *std.Build.Step) void {
+    const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
+    tests.dependOn(&b.addRunArtifact(validation_tests).step);
     if (app.resolved_target.?.result.os.tag == .windows) {
         const job_tests = b.addTest(.{ .name = "office-process-job", .root_module = existingImport(app, "office_process_windows") });
         tests.dependOn(&b.addRunArtifact(job_tests).step);
-        const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
-        tests.dependOn(&b.addRunArtifact(validation_tests).step);
         const process_tests = b.addTest(.{ .name = "office-process", .root_module = existingImport(app, "office_process") });
         tests.dependOn(&b.addRunArtifact(process_tests).step);
         const core_shell = b.addExecutable(.{ .name = "office-core-shell", .root_module = b.createModule(.{
