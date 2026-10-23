@@ -82,7 +82,7 @@ Account commits verified identity/credential generation
 → Product Control reconciles Models desired authority into active execution
 ```
 
-authorization lease 由 Account 构造、Application 在单个 catalog job 中线性持有并清零。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
+authorization lease 由 Account 构造、Application 在单个 catalog job 中线性持有并清零。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。credential 改变必须建立新的 source generation，不能因 principal、模型或 protocol 相同而复用旧 authority；已选模型失格或合法空目录也不阻止来源版本更新，保留的模型意图仍不可执行，其他合格模型按新 authority 解析。纯 credential 轮换不改变用户的模型 selection revision；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
 
 authorization loss 的顺序相反：Application cancel/join 仍在运行的 Metask catalog job并销毁 lease，Models 将 Metask provider 置为 `needs_authentication`、清除 transient catalog credential与可解析目录。无 secret 的 Metask Provider-local/global selection intent 保留；custom source 不变。若 global default 指向 Metask，Product Control 随后关闭新的 Task admission并清除 active default；已经交给 Task/Run 的 binding 不回收、不改写。
 

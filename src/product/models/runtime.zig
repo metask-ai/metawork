@@ -20,6 +20,15 @@ pub const TestSupport = if (builtin.is_test) struct {
         principal_ref: []const u8,
         models: []const contract.ModelView,
     ) !contract.ModelsError {
+        return refreshMetaskCatalogWithCredential(runtime, principal_ref, "refreshed-secret", models);
+    }
+
+    pub fn refreshMetaskCatalogWithCredential(
+        runtime: *Runtime,
+        principal_ref: []const u8,
+        credential: []const u8,
+        models: []const contract.ModelView,
+    ) !contract.ModelsError {
         const preparation = switch (runtime.prepareMetaskCatalogRefresh(principal_ref, 17)) {
             .ready => |value| value,
             .rejected => return error.TestUnexpectedResult,
@@ -29,7 +38,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         try metask_provider.TestSupport.replaceOwnedCatalog(
             &session,
             principal_ref,
-            "refreshed-secret",
+            credential,
             models,
         );
         var completion = metask_provider.OwnedCatalogCompletion.init(&session);
@@ -388,10 +397,17 @@ pub const Runtime = struct {
                 session.firstModelId()
         else
             session.firstModelId();
-        const protocol = if (restored_model_id) |model_id| session.modelProtocol(model_id) else null;
+        // Preserve the intent's last declared route when it leaves the catalog.
+        // It remains unresolvable, but credential authority must still advance
+        // for other explicitly selected models on this source.
+        const protocol = (if (restored_model_id) |model_id| session.modelProtocol(model_id) else null) orelse if (current_intent) |intent|
+            if (std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view())) intent.protocol else null
+        else
+            null;
         const keeps_authority = if (current_intent) |intent|
             std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()) and
-                intent.protocol == protocol and intent.source_generation != 0
+                intent.protocol == protocol and intent.source_generation != 0 and
+                self.metask_catalog.sameCredential(session)
         else
             false;
         if (!keeps_authority) if (protocol) |selected_protocol| {
@@ -2186,7 +2202,7 @@ test "Models owns Metask catalog authority without changing global default" {
         ),
     );
     const second = runtime.view();
-    try std.testing.expectEqual(first_source_generation, second.providers[0].source_generation);
+    try std.testing.expect(first_source_generation != second.providers[0].source_generation);
     try std.testing.expectEqual(first_selection_revision, second.metask_selection_revision);
     try std.testing.expect(first_catalog_generation != second.providers[0].catalog_generation);
 
@@ -2207,7 +2223,7 @@ test "Models owns Metask catalog authority without changing global default" {
         default_authority.selection.source_id,
     );
     try std.testing.expectEqualStrings("model-1", default_authority.selection.model_id);
-    try std.testing.expectEqual(first_source_generation, default_authority.source_generation);
+    try std.testing.expectEqual(second.providers[0].source_generation, default_authority.source_generation);
     var first_candidate = (try runtime.resolveDefault()) orelse
         return error.TestUnexpectedResult;
     defer first_candidate.deinit();
@@ -2223,7 +2239,7 @@ test "Models owns Metask catalog authority without changing global default" {
         second_candidate.input().api_key,
     );
     try std.testing.expectEqual(
-        first_source_generation,
+        default_authority.source_generation,
         second_candidate.input().source_generation,
     );
     try std.testing.expectEqual(
@@ -2586,8 +2602,17 @@ fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {
 }
 
 test "successful empty Metask catalog preserves intent but removes all resolvable members" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var vault = TestVault{};
     var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
-    defer runtime.deinit();
+    try runtime.start(home, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
     try TestSupport.installMetaskDefault(
         &runtime,
         "principal-1",
@@ -2605,7 +2630,7 @@ test "successful empty Metask catalog preserves intent but removes all resolvabl
     try std.testing.expectEqual(contract.ModelsError.no_models, view.providers[0].error_code);
     try std.testing.expectEqual(@as(usize, 0), view.providers[0].models.len);
     try std.testing.expect(view.providers[0].catalog_generation != 4);
-    try std.testing.expectEqual(@as(u64, 1), view.providers[0].source_generation);
+    try std.testing.expect(view.providers[0].source_generation != 0 and view.providers[0].source_generation != 1);
     try std.testing.expectEqual(@as(u64, 2), view.metask_selection_revision);
     try std.testing.expectEqual(@as(u64, 3), view.selection_revision);
     try std.testing.expectEqualStrings("model-1", view.metask_selection.?.model_id);
@@ -2891,4 +2916,81 @@ test "image model policy prefers the default and then the first declared generat
     defer fallback.deinit();
     try std.testing.expectEqualStrings("first-image", fallback.input().selection.model_id);
     try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
+}
+
+test "Metask credential authority advances even when the selected catalog model is unavailable" {
+    const Refresh = struct {
+        fn run(runtime: *Runtime, token: []const u8, body: []const u8) !void {
+            const attempt = switch (runtime.prepareMetaskCatalogRefresh("principal", 17)) {
+                .ready => |value| value,
+                .rejected => return error.TestUnexpectedResult,
+            };
+            var session = metask_provider.CatalogSession.init(std.testing.allocator);
+            defer session.deinit();
+            try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", token, body);
+            var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+            var port = completion.ownedPort();
+            try std.testing.expectEqual(contract.ModelsError.none, runtime.completeMetaskCatalogRefresh(attempt.attempt_id, attempt.authorization_generation, &port));
+        }
+    };
+    const initial =
+        \\{"object":"list","has_more":false,"data":[{"id":"selected","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}},{"id":"other","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}}]}
+    ;
+    const removed =
+        \\{"object":"list","has_more":false,"data":[{"id":"other","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}}]}
+    ;
+    const excluded =
+        \\{"object":"list","has_more":false,"data":[{"id":"selected","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true},"images_generations":{"supported":true}}}},{"id":"other","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}}]}
+    ;
+    const empty =
+        \\{"object":"list","has_more":false,"data":[]}
+    ;
+    for ([_][]const u8{ removed, excluded, empty }) |updated| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var vault = TestVault{};
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(home, vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        try Refresh.run(&runtime, "synthetic-authority-a", initial);
+        const before = runtime.view();
+        try std.testing.expect(runtime.selectMetaskDefault(.{
+            .selection = .{ .source_id = "metask", .model_id = "selected" },
+            .expected_selection_revision = before.selection_revision,
+            .expected_source_generation = before.providers[0].source_generation,
+            .expected_catalog_generation = before.providers[0].catalog_generation,
+        }).accepted);
+        const source_a = runtime.view().providers[0].source_generation;
+        const selection = runtime.view().selection_revision;
+        const intent_revision = runtime.view().metask_selection_revision;
+        try Refresh.run(&runtime, "synthetic-authority-b", updated);
+        const source_b = runtime.view().providers[0].source_generation;
+        try std.testing.expect(source_b != 0 and source_b != source_a);
+        try std.testing.expectEqual(selection, runtime.view().selection_revision);
+        try std.testing.expectEqual(intent_revision, runtime.view().metask_selection_revision);
+        try std.testing.expectEqualStrings("selected", runtime.view().metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("selected", runtime.view().default_selection.?.model_id);
+        try std.testing.expect((try runtime.resolveDefault()) == null);
+        if (!std.mem.eql(u8, updated, empty)) {
+            var other = (try runtime.resolveModel(.{ .source_id = "metask", .model_id = "other" }, source_b, runtime.view().providers[0].catalog_generation)).?;
+            defer other.deinit();
+            try std.testing.expectEqualStrings("synthetic-authority-b", other.input().api_key);
+            try std.testing.expectEqual(source_b, other.input().source_generation);
+        }
+        // No new persistent shape or implicit selection is needed. An unchanged
+        // credential does not rotate authority on another catalog-only refresh.
+        const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &runtime.registry);
+        defer std.testing.allocator.free(encoded);
+        var decoded = try registry_impl.decode(std.testing.allocator, encoded);
+        defer decoded.deinit();
+        try std.testing.expectEqual(source_b, decoded.metaskIntent().?.source_generation);
+        try std.testing.expectEqualStrings("selected", decoded.defaultSelection().?.model_id);
+        try Refresh.run(&runtime, "synthetic-authority-b", updated);
+        try std.testing.expectEqual(source_b, runtime.view().providers[0].source_generation);
+    }
 }

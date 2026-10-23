@@ -20688,7 +20688,8 @@ test "authoritative empty catalog closes new default admission and preserves Tas
     const task_id = control.task_runtime.tasks[0].?.durable.id;
     const old_admission = control.newTaskAdmissionView();
     try std.testing.expect(old_admission.available);
-    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalog(&control.custom_providers, "account-1", &.{}));
+    // This case changes only the catalog; credential rotation is tested separately.
+    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&control.custom_providers, "account-1", "fixture-secret", &.{}));
     control.reconcileModelsDefaultNoFail(true, false);
     control.finishExecutionCommitNoFail();
     try std.testing.expect(!control.newTaskAdmissionView().available);

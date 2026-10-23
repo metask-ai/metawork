@@ -139,6 +139,10 @@ pub const CatalogSession = struct {
         self.* = undefined;
     }
 
+    pub fn sameCredential(self: *const CatalogSession, other: *const CatalogSession) bool {
+        return std.mem.eql(u8, self.credential.view(), other.credential.view());
+    }
+
     pub fn take(self: *CatalogSession) CatalogSession {
         const result = self.*;
         self.* = .{ .allocator = result.allocator };
