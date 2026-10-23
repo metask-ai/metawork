@@ -124,6 +124,10 @@ const taskInformationModels = JSON.parse(
   ),
 ).models;
 
+test.beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+});
 test.afterEach(() => cleanup());
 test.after(async () => {
   await vite.close();
@@ -5801,12 +5805,53 @@ test("App pages through all retained history while keeping the current Run live"
   await publishAppFixture(fixture);
   for (const id of [1, 5, 9, 16])
     await screen.findByText(`History input ${id}`);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const fetchSnapshot = BridgeClient.prototype.fetchSnapshot;
+  let releaseOldestPage;
+  const oldestPageReady = new Promise((resolve) => {
+    releaseOldestPage = resolve;
+  });
+  ctx.after(() => releaseOldestPage());
+  let oldestPageRequested = false;
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "fetchSnapshot",
+    async function (scope) {
+      const snapshot = await fetchSnapshot.call(this, scope);
+      if (scope.beforeRunId === "5") {
+        oldestPageRequested = true;
+        await oldestPageReady;
+      }
+      return snapshot;
+    },
+  );
   source.runs[5].contentVersion = "2";
   source.runs[5].input.text = "Updated historical Run 6";
   await publishAppFixture(fixture);
   await screen.findByText("Updated historical Run 6");
-  for (const id of [1, 5, 9, 16])
-    assert.ok(screen.getByText(`History input ${id}`));
+  // Run 6 arrives on an intermediate page; the saved reading goal still
+  // requires the oldest page before the full loaded interval is restored.
+  await waitFor(() => assert.equal(oldestPageRequested, true));
+  assert.equal(screen.queryByText("History input 1"), null);
+  assert.equal(
+    screen.getByRole("button", { name: translate("en-US", "common.loading") })
+      .disabled,
+    true,
+  );
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    false,
+  );
+  releaseOldestPage();
+  await waitFor(() => {
+    assert.deepEqual(
+      [...document.querySelectorAll(".ai-exchange")].map(
+        (node) => node.dataset.runId,
+      ),
+      Array.from({ length: 16 }, (_, index) => String(index + 1)),
+    );
+  });
+  assert.ok(screen.getByText("Updated historical Run 6"));
   const viewport = document.querySelector(".ai-conversation-viewport");
   Object.defineProperties(viewport, {
     scrollHeight: { configurable: true, value: 2000 },
