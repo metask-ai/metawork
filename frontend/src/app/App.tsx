@@ -189,6 +189,22 @@ import {
 } from "./new-task-model-selection.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
+import {
+  modelSetupNotice,
+  supportsCustomProviders,
+  type ModelSetupAction,
+} from "../workbench/model-setup.ts";
+import {
+  ModelSetupDialog,
+  ModelSetupNotice,
+  modelSetupMessage,
+} from "../features/models/ModelSetup.tsx";
+import {
+  readLocalPreference,
+  writeLocalPreference,
+} from "../platform/local-preferences.ts";
+
+const modelSetupPreferenceKey = "metawork.model-setup-handled";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -275,6 +291,12 @@ export default function App() {
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelSetupOpen, setModelSetupOpen] = useState(false);
+  const [modelSetupHandled, setModelSetupHandled] = useState(
+    () => readLocalPreference(modelSetupPreferenceKey) === "true",
+  );
+  const modelSetupReturnFocus = useRef<HTMLElement | null>(null);
+  const [modelSetupComposing, setModelSetupComposing] = useState(false);
   const settingsRestoreFocus = useRef<HTMLElement | null>(null);
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
@@ -1055,17 +1077,150 @@ export default function App() {
     : null;
   const selectedModelLabel =
     newTaskModelState.selectedModelLabel || t("account.choose_model");
-  const metaskDefaultRecoveryAvailable = Boolean(
-    newTaskDraftActive &&
-    snapshot.models.persistenceHealth === "ready" &&
-    snapshot.models.defaultSelection === null &&
-    snapshot.models.metaskSelection !== null &&
-    metaskProvider?.catalogState === "ready" &&
-    snapshot.models.metaskSelection.sourceId === "metask" &&
-    metaskProvider.models.some(
-      (model) => model.id === snapshot.models.metaskSelection?.modelId,
-    ),
+  const hasReadyModels = useMemo(
+    () =>
+      [...snapshot.models.providers, ...snapshot.models.customProviders].some(
+        (provider) =>
+          readyModelOptions(snapshot.models, provider.id).length > 0,
+      ),
+    [snapshot.models],
   );
+  const customProvidersAvailable = supportsCustomProviders({
+    management: snapshot.capabilities.customProviderManagement,
+    secretCapture: snapshot.capabilities.customProviderSecretCapture,
+    modelTest: snapshot.capabilities.customModelTest,
+  });
+  const setupNotice =
+    bridgeUnavailable || !newTaskDraftActive
+      ? null
+      : modelSetupNotice({
+          account: snapshot.account,
+          models: snapshot.models,
+          admission: snapshot.newTaskAdmission,
+          selected:
+            newTaskRequestedModel ??
+            snapshot.newTaskAdmission.activeModelRef ??
+            snapshot.models.defaultSelection,
+          valid: newTaskModelState.valid,
+          hasReadyModels,
+          customProvidersAvailable,
+          schedulesAvailable:
+            snapshot.capabilities.scheduledTasks ||
+            snapshot.capabilities.scheduledTaskRecoveryAvailable,
+        });
+
+  function rememberModelSetupIntroduction() {
+    if (modelSetupHandled) return;
+    setModelSetupHandled(true);
+    writeLocalPreference(modelSetupPreferenceKey, "true");
+  }
+
+  function finishModelSetupIntroduction() {
+    rememberModelSetupIntroduction();
+    setModelSetupOpen(false);
+  }
+
+  function openModelSetup() {
+    modelSetupReturnFocus.current =
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body
+        ? document.activeElement
+        : composer.current;
+    setModelSetupOpen(true);
+  }
+
+  useEffect(() => {
+    const start = () => setModelSetupComposing(true);
+    const end = () => setModelSetupComposing(false);
+    document.addEventListener("compositionstart", start);
+    document.addEventListener("compositionend", end);
+    return () => {
+      document.removeEventListener("compositionstart", start);
+      document.removeEventListener("compositionend", end);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (bridgeUnavailable) return;
+    if (hasReadyModels || newTaskModelState.valid) {
+      rememberModelSetupIntroduction();
+      // Available alternatives suppress automatic onboarding; they do not
+      // dismiss a dialog the user opened to resolve an unusable selection.
+      if (newTaskModelState.valid && modelSetupOpen) setModelSetupOpen(false);
+      return;
+    }
+    if (
+      modelSetupHandled ||
+      modelSetupOpen ||
+      route !== "workbench" ||
+      !newTaskDraftActive ||
+      settingsOpen ||
+      searchOpen ||
+      confirmDelete ||
+      accountBusy ||
+      executionBusy ||
+      modelSetupComposing ||
+      composerDraftHasContent(composerDraft) ||
+      document.querySelector(
+        '[role="dialog"], [role="alertdialog"], [role="menu"]',
+      ) ||
+      snapshot.account.state !== "signed_out" ||
+      (snapshot.account.errorCode !== "none" &&
+        snapshot.account.errorCode !== "user_cancelled") ||
+      snapshot.models.customProviders.length > 0 ||
+      newTaskRequestedModel !== null ||
+      (setupNotice?.action !== "start" && setupNotice?.action !== "login")
+    )
+      return;
+    openModelSetup();
+  }, [
+    bridgeUnavailable,
+    hasReadyModels,
+    newTaskModelState.valid,
+    modelSetupHandled,
+    modelSetupOpen,
+    route,
+    newTaskDraftActive,
+    settingsOpen,
+    searchOpen,
+    confirmDelete,
+    accountBusy,
+    executionBusy,
+    modelSetupComposing,
+    composerDraft,
+    snapshot.account.state,
+    snapshot.account.errorCode,
+    snapshot.models.customProviders.length,
+    newTaskRequestedModel,
+    setupNotice?.action,
+  ]);
+
+  function runModelSetupAction(action: ModelSetupAction) {
+    switch (action) {
+      case "start":
+        openModelSetup();
+        break;
+      case "login":
+        finishModelSetupIntroduction();
+        void runAccountCommand(() => client.beginLogin());
+        break;
+      case "cancel":
+        void cancelAccountOperation();
+        break;
+      case "refresh":
+        void runExecutionCommand(() => client.refreshModelsCatalog());
+        break;
+      case "providers":
+        if (customProvidersAvailable) openSettings("providers");
+        break;
+      case "models":
+        openSettings("models");
+        break;
+      case "schedules":
+        setRoute("scheduled-tasks");
+        break;
+    }
+  }
   const taskModelLabel = taskIntent
     ? modelDisplayLabel(snapshot.models, taskIntent.modelRef)
     : activeTask
@@ -1294,7 +1449,7 @@ export default function App() {
       const key = event.key.toLowerCase();
       if (key !== "k" && key !== "n") return;
       event.preventDefault();
-      if (bridgeUnavailable) return;
+      if (bridgeUnavailable || modelSetupOpen) return;
       if (key === "k") {
         setSearchOpen(true);
       } else {
@@ -1304,7 +1459,7 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [bridgeUnavailable]);
+  }, [bridgeUnavailable, modelSetupOpen]);
 
   useEffect(() => {
     if (!client.available()) return;
@@ -1925,9 +2080,14 @@ export default function App() {
   }
 
   function openSettings(target: SettingsFocusTarget = "title") {
+    if (modelSetupOpen) {
+      modelSetupReturnFocus.current = null;
+      finishModelSetupIntroduction();
+    }
     if (!settingsOpen) {
-      settingsRestoreFocus.current =
-        document.activeElement instanceof HTMLElement
+      settingsRestoreFocus.current = modelSetupOpen
+        ? composer.current
+        : document.activeElement instanceof HTMLElement
           ? document.activeElement
           : null;
     }
@@ -3138,7 +3298,12 @@ export default function App() {
         }
         workspaceEditable={newTaskDraftActive && !taskIdentityPending}
         modelLabel={
-          newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
+          newTaskDraftActive
+            ? setupNotice?.action === "start" &&
+              !newTaskModelState.selectedModelLabel
+              ? t("model_setup.unconfigured")
+              : selectedModelLabel
+            : taskModelLabel || null
         }
         modelOptions={
           newTaskDraftActive
@@ -3170,26 +3335,44 @@ export default function App() {
             : taskModelPolicy.pending
         }
         modelContextTitle={
-          newTaskDraftActive &&
-          newTaskRequestedModel !== null &&
-          !newTaskModelState.valid
-            ? t("settings.new_task_model_invalid")
-            : activeTask?.modelIntent?.state === "outcome_unknown"
-              ? t("mutation.reason.persistence_outcome_unknown")
-              : newTaskDraftActive
-                ? t("settings.new_task_model_help")
-                : t(
-                    taskModelPolicy.selectable && taskModelOptions.length === 0
-                      ? "settings.task_model_catalog_unavailable"
-                      : taskModelSelectionMessageId(
-                          activeTask?.modelSelectionAvailability,
-                        ),
-                  )
+          setupNotice
+            ? t(modelSetupMessage(setupNotice))
+            : newTaskDraftActive &&
+                newTaskRequestedModel !== null &&
+                !newTaskModelState.valid
+              ? t("settings.new_task_model_invalid")
+              : activeTask?.modelIntent?.state === "outcome_unknown"
+                ? t("mutation.reason.persistence_outcome_unknown")
+                : newTaskDraftActive
+                  ? t("settings.new_task_model_help")
+                  : t(
+                      taskModelPolicy.selectable &&
+                        taskModelOptions.length === 0
+                        ? "settings.task_model_catalog_unavailable"
+                        : taskModelSelectionMessageId(
+                            activeTask?.modelSelectionAvailability,
+                          ),
+                    )
         }
-        defaultSelectionMissing={
-          metaskDefaultRecoveryAvailable && newTaskModelState.intent === null
+        modelNotice={
+          setupNotice && (
+            <ModelSetupNotice
+              notice={setupNotice}
+              disabled={
+                bridgeUnavailable ||
+                accountBusy ||
+                executionBusy ||
+                accountCancelBusy
+              }
+              onAction={runModelSetupAction}
+              onChooseSetup={
+                setupNotice.action === "login" && customProvidersAvailable
+                  ? openModelSetup
+                  : undefined
+              }
+            />
+          )
         }
-        defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={
           taskOperationInFlight || localSubmissionCount > 0 ? "run" : null
@@ -3247,7 +3430,6 @@ export default function App() {
           }
           void selectModelForTask(id);
         }}
-        onOpenModels={() => openSettings("models")}
       />
     </>
   );
@@ -4077,6 +4259,22 @@ export default function App() {
           setSearchQuery("");
         }}
         onSelect={selectSearchResult}
+      />
+      <ModelSetupDialog
+        open={
+          modelSetupOpen &&
+          route === "workbench" &&
+          newTaskDraftActive &&
+          !settingsOpen &&
+          !searchOpen &&
+          !bridgeUnavailable
+        }
+        customProvidersAvailable={customProvidersAvailable}
+        returnFocus={modelSetupReturnFocus}
+        disabled={accountBusy || executionBusy}
+        onClose={finishModelSetupIntroduction}
+        onLogin={() => runModelSetupAction("login")}
+        onConfigure={() => openSettings("providers")}
       />
     </AppShell>
   );

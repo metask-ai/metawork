@@ -616,7 +616,7 @@ test("signed-out settings keep local history reachable and expose sign-in", () =
   });
   assert.match(markup, /Sign in to MetaWork/);
   assert.match(markup, />Sign in with Metask</);
-  assert.doesNotMatch(markup, /Sign out on this device/);
+  assert.doesNotMatch(markup, /id="settings-signout-title"/);
 });
 
 test("authenticated settings project current catalog defaults", () => {
@@ -627,7 +627,7 @@ test("authenticated settings project current catalog defaults", () => {
     initialSection: "models",
   });
   assert.match(accountMarkup, /Metask User/);
-  assert.match(accountMarkup, /Sign out on this device/);
+  assert.match(accountMarkup, /id="settings-signout-title">Sign out<\/h3>/);
   assert.match(modelsMarkup, /Model One/);
   assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-custom-providers/);
 });

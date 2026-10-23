@@ -464,7 +464,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 
 - “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，只展示 canonical Logo、产品名、Metask 开发者归属和从 `app.zon` 构建注入的版本；只有已有真实、安全 consumer 的官网、隐私、许可或更新能力才显示对应入口，不渲染宣传文案、占位动作或死链接；
 - About 不依赖 Account、Models 或登录状态，在 Workbench 的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
-- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前 Workbench 上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前 Workbench 上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案说明仅退出本机 Metask 账号、本地 Task 与历史记录会保留，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
 - 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
 
@@ -649,8 +649,9 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局，也不重复显示“你”等归属标签；在窄窗口下可以放宽到约 88%；
 - 首条指令建立 Task 目标，后续指令作为明确的补充或重试节点；普通界面不显示 Run ID；
 - 附件以文件/目录 chip 展示名称、数量和大小；
-- 每条指令正文下方靠右提供纯图标“复制输入”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；普通文本保持 Host 投影原文，Skill 输入复制为 `/调用名 参数…`，多模态输入复制已投影文本与附件显示名，不读取附件内容、内部 locator 或本地路径，也不从 DOM 反向提取；
-- Product 提供 Run 提交时间时，在复制图标左侧使用 12px muted 本地化相对时间，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name；时间缺失时不占位，禁止使用完成时间、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造。相对文案与回复完成时间共用每分钟低频更新，不发布 Snapshot、不自动滚动、不改变历史；
+- 用户消息与回复共用统一的“消息信息栏”，由整栏拥有显隐、间距、对齐与换行：用户消息按时间、复制排列并靠右，回复按复制、时间、实际模型排列。最新一条始终可见，历史条目仅在对应消息正文或信息栏 hover 或 focus-within 时整体显示，不因同一 Run 内其他消息或整个 Run 被悬停而显示；复制进行中及成功/失败反馈期间保留整栏，coarse pointer 设备始终显示。隐藏时保留布局占位；时间、模型与操作不各自维护显隐状态，信息栏元信息不进入正文复制。等待、取消和失败等消息状态在信息栏之外独立表达。
+- 每条指令的信息栏提供纯图标“复制输入”；普通文本保持 Host 投影原文，Skill 输入复制为 `/调用名 参数…`，多模态输入复制已投影文本与附件显示名，不读取附件内容、内部 locator 或本地路径，也不从 DOM 反向提取；
+- Product 提供 Run 提交时间时，在复制图标左侧使用 12px muted 本地化相对时间，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name；时间同属消息信息栏，遵守整栏的显隐规则。时间缺失时不占位，禁止使用完成时间、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造。相对文案与回复完成时间共用每分钟低频更新，不发布 Snapshot、不自动滚动、不改变历史；
 - 已发送内容不能静默编辑历史；
 - 未来的“编辑并重新运行”必须显式创建新的执行分支或新 Task。
 
@@ -661,8 +662,9 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `commentary | provisional | final | partial` 共用安全 Markdown 排版；尚未收到 output-segment 定性的 provisional 不称为草稿，保持惰性交互并在 discard 后随下一 Snapshot 立即消失；流式生成不增加光标、骨架或第二个活动指示；
 - 已闭合 commentary 与 final/partial 中的 `http`、`https`、`mailto` 链接保留链接色、下划线、键盘可达性和可复制 `href`，但点击必须同步阻止 WebView 默认导航并交给 Host；请求期间同一链接不重复提交，打开失败在原链接后以紧凑 danger 文案就地提示并允许再次点击，不使用与目标脱节的全局 Toast。非法协议、相对网页地址和 provisional 链接只显示文字；
-- 已 terminal 且非空的 `final | partial` response 在所属 Assistant 回复正文下方提供纯图标“复制回复”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
-- 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间始终可见而复制图标仍遵守最新/历史显隐规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
+- 已 terminal 且非空的 `final | partial` response 在所属 Assistant 回复的信息栏中提供纯图标“复制回复”，沿用[统一消息信息栏](#73-用户指令)的显隐与布局规则；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
+- 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间与同条复制图标共用显隐条件，遵循用户指令时间的相同规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
+- 回复完成时间后以同样的 12px muted 样式显示该 Run 的实际 `execution.model`，时间存在时用间隔点分隔；模型与时间和复制按钮同步显隐，长名称在窄窗口可换行。模型只读取该 Run 已保存的执行事实，不使用当前默认、Task 下一轮选择或当前目录名称补写历史，不在此展示 Provider、protocol 或 generation；时间缺失不隐藏已有模型事实，模型文字不属于回复正文或复制内容。
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
@@ -716,7 +718,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
+- New task 没有有效模型选择时，Composer 在输入框下方、Workspace 行附近显示单一、可换行的模型准备提示，按 §14.1 区分首次配置、登录、选择、加载与恢复，并提供对应动作；不只依赖发送按钮的禁用样式或 tooltip。已有有效的显式草稿模型选择可沿原准入规则发送，不要求先设置 global default；其他情况等待 Host 确认配置可用。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已保存且可用的 Manual Workspace 之间直接切换，也可以打开原生目录选择器添加目录或重新选择失效目录；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
@@ -970,7 +972,19 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-Account 状态只在 Workbench 的账号入口和 Account 设置中演进：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
+Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
+
+新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Providers 设置复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
+
+自动展示须在可信 Snapshot 与正常连接建立后，仅在新任务工作面、Account 已确认 signed_out、没有可用模型或更具体的配置恢复问题时发生。检查、授权、目录加载、执行配置替换、存储恢复、账号错误、已有自定义配置待修复和显式草稿选择失效优先呈现自己的状态。历史、执行中的 Task、设置、搜索、其他模态界面和正在输入的草稿不被首次引导打断。
+
+本机轻量 UI 偏好记住引导已处理，不保存账号、模型或 credential：用户选择任一入口、跳过或关闭后记为已处理；首次确认已有可用模型也视为已处理。记录跨 reload/重启保留，不随退出登录或模型失效重置；存储失败不阻止使用，当前 Renderer 会话仍抑制重复自动展示。关闭按钮、Esc 和遮罩关闭等同跳过。输入区“开始使用”可主动重新打开弹层。
+
+点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Providers 设置，保存服务后通过清晰的 Models 入口添加、测试和选择模型；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
+
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时提供模型设置；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Providers，服务已保存但模型尚未就绪时进入 Models 添加、测试或选择；模型存储异常进入 Models，定时任务存储阻止执行配置更新时说明具体原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+
+弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
 ### 14.2 设置结构
 
@@ -983,7 +997,7 @@ Account
 ├── Account usage（daily Token history and recorded cost）
 ├── Refresh account usage
 ├── Sign in
-└── Sign out and clear this device
+└── Sign out
 
 Models
 ├── Global default model（Metask + user-managed Providers）
@@ -1205,7 +1219,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ### 17.1 未登录
 
-未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；等待浏览器授权与取消在账号入口和 Account 设置中演进。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
+未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；新任务模型准备引导、等待浏览器授权与取消遵守 [首次启动](#141-首次启动)，复用账号动作。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
 
 ### 17.2 New task
 
@@ -1217,7 +1231,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 - 当前模型与 Workspace；
 - 当真实能力边界影响本次执行时，显示准确、可操作的 authority 限制提示；不得显示泛化的“信任此工作区”。
 
-没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。Account 此时已经 ready，不再出现登录 prerequisite。
+没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。模型尚未准备时同时遵守 §14.1 的模型提示，不把 Workspace 问题解释为登录问题。
 
 ### 17.3 错误原则
 
@@ -1294,7 +1308,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.4 Account 与首次启动
 
 - cold restore 保持稳定的 Workbench shell，可信 Snapshot 到达前不开放 mutation，也不闪现独立登录页；
-- 首次 signed out 且没有本地历史：保持 Workbench，并由账号入口提供统一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
+- 首次 signed out 且没有可用模型：保持 Workbench，按 §14.1 展示可跳过的开始弹层与输入区恢复提示；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；

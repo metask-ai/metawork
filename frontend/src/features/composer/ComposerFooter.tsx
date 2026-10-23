@@ -121,8 +121,7 @@ export function ComposerFooter({
   modelSelectionDisabled,
   modelSelectionPending,
   modelContextTitle,
-  defaultSelectionMissing,
-  defaultRecoveryDisabled,
+  modelNotice,
   actionDisabled,
   stopAction,
   stopDisabled,
@@ -141,7 +140,6 @@ export function ComposerFooter({
   onConfirmAccess,
   onSelectWorkspace,
   onSelectModel,
-  onOpenModels,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   approvalModeControl?: ReactNode;
@@ -188,8 +186,7 @@ export function ComposerFooter({
   modelSelectionDisabled: boolean;
   modelSelectionPending: boolean;
   modelContextTitle: string;
-  defaultSelectionMissing: boolean;
-  defaultRecoveryDisabled: boolean;
+  modelNotice?: ReactNode;
   actionDisabled: boolean;
   stopAction: "run" | "compact" | null;
   stopDisabled: boolean;
@@ -208,7 +205,6 @@ export function ComposerFooter({
   onConfirmAccess: () => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
-  onOpenModels: () => void;
 }) {
   const { t } = useI18n();
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -922,20 +918,6 @@ export function ComposerFooter({
               </div>
             ) : (
               <div className="composer-send-group">
-                {defaultSelectionMissing && (
-                  <span className="composer-default-recovery" role="status">
-                    <span>{t("settings.default_selection_missing")}</span>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={defaultRecoveryDisabled}
-                      onClick={onOpenModels}
-                    >
-                      {t("settings.open_models")}
-                    </Button>
-                  </span>
-                )}
                 <Button
                   type="button"
                   variant="primary"
@@ -975,6 +957,7 @@ export function ComposerFooter({
           onSelect={onSelectWorkspace}
         />
       </div>
+      {modelNotice}
       {sendDisabledReason && (
         <p className="composer-draft-note" role="status">
           {t(sendDisabledReason)}

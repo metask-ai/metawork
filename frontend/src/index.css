@@ -2419,63 +2419,73 @@ summary::-webkit-details-marker {
   margin-top: 38px;
 }
 
-.response-copy-actions {
+.message-info-bar {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 32px;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  min-height: 32px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message-info-bar[data-role="user"] {
+  width: fit-content;
+  margin: 4px 0 0 auto;
+}
+
+.message-info-bar[data-role="assistant"] {
   margin-top: 8px;
 }
 
-.input-copy-actions {
+.message-info-metadata {
   display: flex;
-  width: fit-content;
-  min-height: 32px;
-  margin: 4px 0 0 auto;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-}
-
-.input-submitted-time,
-.response-finished-time {
   color: var(--ui-content-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  line-height: 1.4;
   opacity: 0.72;
+}
+
+.message-info-metadata time {
   white-space: nowrap;
 }
 
-.input-copy-action,
-.response-copy-action {
+.message-info-model {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.message-info-copy {
   width: 32px;
   height: 32px;
   padding: 0;
   font-size: 14px;
   color: var(--ui-content-muted);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
 }
 
-.input-copy-action[data-latest="true"],
-.input-copy-action[data-copy-state="copying"],
-.input-copy-action[data-copy-state="copied"],
-.input-copy-action[data-copy-state="failed"],
-.ai-exchange:hover .input-copy-action,
-.ai-exchange:focus-within .input-copy-action,
-.response-copy-action[data-latest="true"],
-.response-copy-action[data-copy-state="copying"],
-.response-copy-action[data-copy-state="copied"],
-.response-copy-action[data-copy-state="failed"],
-.ai-exchange:hover .response-copy-action,
-.ai-exchange:focus-within .response-copy-action {
+.message-info-bar[data-latest="true"],
+.message-info-bar:has(
+  > .message-info-copy:is(
+      [data-copy-state="copying"],
+      [data-copy-state="copied"],
+      [data-copy-state="failed"]
+    )
+),
+.ai-message[data-role="user"]:is(:hover, :focus-within) + .message-info-bar,
+.message-info-bar:is(:hover, :focus-within),
+.run-assistant-output:is(:hover, :focus-within) > .message-info-bar {
   opacity: 1;
-  pointer-events: auto;
 }
 
-.input-copy-action[data-copy-state="failed"],
-.response-copy-action[data-copy-state="failed"] {
+.message-info-copy[data-copy-state="failed"] {
   color: var(--ui-content-error);
 }
 
@@ -7453,8 +7463,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (any-pointer: coarse) {
-  .input-copy-action,
-  .response-copy-action,
+  .message-info-bar {
+    opacity: 1;
+  }
+
   .code-block-copy-action {
     opacity: 1;
     pointer-events: auto;
@@ -8496,20 +8508,65 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 8px;
 }
 
-.composer-default-recovery {
-  display: inline-flex;
-  max-width: min(360px, 48vw);
+.composer-model-notice {
+  display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  color: var(--ui-content-warning);
+  margin-top: 8px;
+  color: var(--ui-content-muted);
   font-size: var(--text-label);
-  line-height: 1.3;
+  line-height: 1.5;
 }
 
-.composer-default-recovery > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.composer-model-notice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.composer-model-notice > button {
+  color: var(--ui-action-primary);
+}
+
+.model-setup-dialog {
+  width: min(440px, calc(100vw - 32px));
+  gap: 12px;
+}
+
+.model-setup-dialog h2 {
+  padding-right: 28px;
+  font-size: var(--text-lead);
+}
+
+.model-setup-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--ui-content-muted);
+}
+
+.model-setup-close:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.model-setup-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.model-setup-actions > button {
+  min-height: 44px;
+  height: auto;
+  padding-block: 12px;
+  white-space: normal;
+  line-height: 1.4;
 }
 
 .composer-send:hover:not(:disabled) {

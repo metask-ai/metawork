@@ -1,4 +1,47 @@
 export const enUS = {
+  "model_setup.title": "Get started with MetaWork",
+  "model_setup.body":
+    "Sign in with Metask to use models, or configure your own model service.",
+  "model_setup.body_metask":
+    "Sign in with Metask to choose a model and start a task.",
+  "model_setup.configure": "Configure your own models",
+  "model_setup.skip": "Skip for now",
+  "model_setup.start": "Get started",
+  "model_setup.other_options": "Other options",
+  "model_setup.retry": "Retry",
+  "model_setup.unconfigured": "No model configured",
+  "model_setup.provider_next":
+    "After saving a service, add and test its models in Models, then choose a default model.",
+  "model_setup.required":
+    "Sign in or configure a model before sending. Your draft will be kept.",
+  "model_setup.sign_in":
+    "Sign in with Metask to use this model. Your draft will be kept.",
+  "model_setup.authorizing":
+    "Complete sign-in in your browser. Your draft will be kept.",
+  "model_setup.cancel_login": "Cancel sign-in",
+  "model_setup.loading": "Loading models…",
+  "model_setup.preparing": "Preparing the model…",
+  "model_setup.choose": "Choose an available model before sending.",
+  "model_setup.choose_action": "Open model settings",
+  "model_setup.catalog_failed":
+    "Models could not be loaded. Retry loading them.",
+  "model_setup.no_models":
+    "No conversation models are available for this Metask account. Retry or review Models settings.",
+  "model_setup.model_unavailable":
+    "The selected model is unavailable. Review model settings before sending.",
+  "model_setup.provider_unavailable":
+    "Your model service is not ready. Review its configuration and test a model.",
+  "model_setup.execution_unavailable":
+    "The current default execution configuration is unavailable. Review the model selection.",
+  "model_setup.view_schedules": "View scheduled tasks",
+  "model_setup.schedule_unavailable":
+    "Schedule storage is unavailable, so the execution configuration could not be updated.",
+  "model_setup.schedule_failed":
+    "Schedule data could not be saved, so the execution configuration could not be updated.",
+  "model_setup.schedule_unknown":
+    "The schedule save outcome is unknown, so the execution configuration could not be updated.",
+  "model_setup.resources_unavailable":
+    "The execution configuration could not be prepared because local resources are insufficient.",
   "common.loading": "Loading…",
   "app.name": "MetaWork",
   "app.account_and_application_menu": "Account and application menu",
@@ -102,9 +145,9 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
   "account.retry_refresh": "Retry sign-in refresh",
-  "account.logout": "Sign out and clear this device",
+  "account.logout": "Sign out",
   "account.logout_confirm":
-    "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",
+    "You will be signed out of Metask on this device. Your local tasks and history will remain.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1309,9 +1352,9 @@ export const enUS = {
     "No default was changed. {api} · {model} remains active.",
   "settings.existing_tasks_unchanged":
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
-  "settings.signout_title": "Sign out on this device",
+  "settings.signout_title": "Sign out",
   "settings.signout_help":
-    "This clears Metask credentials from this device. New Metask model use becomes unavailable; custom models, task records, workspace files, and existing task bindings are preserved.",
+    "Sign in again to create new tasks using Metask models. Your custom models, local tasks, and workspace files will remain.",
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help":
