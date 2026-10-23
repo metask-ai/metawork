@@ -6,9 +6,38 @@ const builtin = @import("builtin");
 const archive = @import("office_component_archive.zig");
 const process = @import("office_process");
 const platform = @import("office_component_windows");
+const python_zip = @import("office_python_archive.zig");
 
 pub const Release = @import("office_component_contract.zig").Release;
 pub const Identity = @import("office_component_contract.zig").Identity;
+pub const BootstrapExpected = python_zip.Expected;
+pub const BootstrapSummary = python_zip.Summary;
+
+/// Installation worker only. The caller owns this new stage and its failure
+/// cleanup. No interpreter has run when PE and publisher trust are checked.
+pub fn prepareBootstrapPython(allocator: std.mem.Allocator, io: std.Io, input: *std.Io.Reader, stage: std.Io.Dir, stage_path: []const u8, expected: BootstrapExpected, cancellation: *const process.Cancellation) !BootstrapSummary {
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.UnsupportedComponentTarget;
+    if (!std.fs.path.isAbsolute(stage_path)) return error.InvalidComponentRoot;
+    const before = try stage.stat(io);
+    const named = try std.Io.Dir.cwd().statFile(io, stage_path, .{ .follow_symlinks = false });
+    if (named.kind != .directory or named.inode != before.inode) return error.ComponentChanged;
+    const summary = try python_zip.unpack(allocator, io, input, stage, "bootstrap", expected, .{}, .{ .context = @constCast(cancellation), .observe_fn = BootstrapObservation.observe });
+    if (cancellation.requested.load(.acquire)) return error.Cancelled;
+    const executable = try std.fs.path.join(allocator, &.{ stage_path, "bootstrap", "python.exe" });
+    defer allocator.free(executable);
+    try verifyPe(io, executable);
+    try platform.verifySignature(allocator, executable);
+    const after = try std.Io.Dir.cwd().statFile(io, stage_path, .{ .follow_symlinks = false });
+    if (after.kind != .directory or after.inode != before.inode) return error.ComponentChanged;
+    return summary;
+}
+
+const BootstrapObservation = struct {
+    fn observe(context: ?*anyopaque, _: python_zip.Summary) bool {
+        const cancellation: *const process.Cancellation = @ptrCast(@alignCast(context.?));
+        return !cancellation.requested.load(.acquire);
+    }
+};
 
 pub const Phase = @import("product_office_component").Phase;
 pub const Progress = struct { phase: Phase, bytes: u64 = 0, total: u64 = 0 };

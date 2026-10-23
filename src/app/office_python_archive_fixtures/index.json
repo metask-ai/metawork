@@ -1,0 +1,92 @@
+{
+  "valid": {
+    "bytes": 306,
+    "sha256": "3da07ea31b0c8de200a4e95a8211240598cd395fc7b63cc98a0ee79b73d851fa",
+    "error": null
+  },
+  "traversal": {
+    "bytes": 405,
+    "sha256": "6fe02526d76856d3db356150d62ec89d4bb17fb896ef36d6c4905044e5a69645",
+    "error": "ComponentPath"
+  },
+  "backslash": {
+    "bytes": 405,
+    "sha256": "387df0587b3c2495d42959b96eca541a224deb933f3d1d5b720527b497c3b09f",
+    "error": "ComponentPath"
+  },
+  "reserved": {
+    "bytes": 401,
+    "sha256": "fb0c781d21da12be0f393aba4c3e00346bf569204b589e8eea8a00ae36b8d3ef",
+    "error": "ComponentPath"
+  },
+  "nested": {
+    "bytes": 409,
+    "sha256": "652f1a596f3790e711ef47963732e1ef45fe1657591b5e330e078228752f8791",
+    "error": "PythonZipPath"
+  },
+  "case-alias": {
+    "bytes": 407,
+    "sha256": "708d40301c4c641e2532f6bcaaf307ba363f76060ac55ae6334dced830c0d00b",
+    "error": "PythonZipCollision"
+  },
+  "symlink": {
+    "bytes": 395,
+    "sha256": "f9a52e77a531530f7d0b8991588de7d74d0b74a7d6672e787db7728de15b9481",
+    "error": "PythonZipFormat"
+  },
+  "directory": {
+    "bytes": 395,
+    "sha256": "249a8cba90882a2ee863e1da2ac225e3ded72ddf70cadfbd0b22db4b457e0b34",
+    "error": "PythonZipFormat"
+  },
+  "crc": {
+    "bytes": 306,
+    "sha256": "f3baa798e4ebc4e8480848253d4cc6a0c66207bb696d347e58b182dbf2c6187f",
+    "error": "PythonZipPayload"
+  },
+  "local-name": {
+    "bytes": 306,
+    "sha256": "72a11c3341130ddc6a50e7b0e405d631b95a657145ec4d5ef77f78cf00a73e4f",
+    "error": "PythonZipFormat"
+  },
+  "encrypted": {
+    "bytes": 306,
+    "sha256": "ea16e95408e4b4c2189d6391d6defb0fe01180e2c11de189030238100575ace9",
+    "error": "PythonZipFormat"
+  },
+  "descriptor": {
+    "bytes": 306,
+    "sha256": "e7ebb9e07736845a55bc1260c2a42bc86e890858190f7d58661a71ad4cadc555",
+    "error": "PythonZipFormat"
+  },
+  "bad-deflate": {
+    "bytes": 306,
+    "sha256": "892bb263fae8c644e4df17d5df64d8ebad4bcf846927633130877864a1a8e3e1",
+    "error": "PythonZipPayload"
+  },
+  "actual-size": {
+    "bytes": 306,
+    "sha256": "6342896c91d97823e18bfc4f6f102ace2d02373228f5ecb4a70914e520fbf10f",
+    "error": "PythonZipPayload"
+  },
+  "zip64": {
+    "bytes": 306,
+    "sha256": "bfb635116847b50ae313eae20de2674ae587555199a82cccd8329af8eaf763f1",
+    "error": "PythonZipFormat"
+  },
+  "member-trailing": {
+    "bytes": 307,
+    "sha256": "ec92e8ad3e0133f4559cd79df0cd081cc906170c92565f55a6fa6998a8b53074",
+    "error": "PythonZipPayload"
+  },
+  "archive-trailing": {
+    "bytes": 312,
+    "sha256": "af1f5650d1e2fdd744067868160f3a74258f62e4b88b8af939b7861e4ad47402",
+    "error": "PythonZipFormat"
+  },
+  "archive-prefix": {
+    "bytes": 312,
+    "sha256": "a3fed795b0343bc7c2df8f312a0885a90d614fbbe20b946f4429f1ace3d382dc",
+    "error": "PythonZipFormat"
+  }
+}

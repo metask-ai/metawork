@@ -99,6 +99,8 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 
 构建期与离线 bootstrap 共用运行时布局和完整清单生成实现；bootstrap 在私有事务中重新核验全部固定源，组装期间不执行组件资源。完整清单可以由实际组装字节确定性重建，但其完整字节摘要必须与主包固定的 producer 清单摘要相同，失败不得写出可接受清单或启用组件；客户端生成的摘要不能成为新的信任来源。配套资源不必复制整份完整清单以扩大主包。该资格仍须与客户端 Zig 首阶段、下载、签名、最终位置自检及事务验收分别核对。
 
+官方便携 Python 的首阶段由主包 Zig 准备，不能借用尚未认证的解释器。该输入只接受固定 Windows 扁平 classic ZIP：复用 Zig 标准 ZIP 结构、raw Deflate 和 CRC，在有界 owned memory 中固定实际读出的完整归档字节及摘要，再校验 local/central 一致、实际输出、完整压缩流与路径/成员/metadata 预算。拒绝 ZIP64、descriptor、加密、链接/特殊项、目录、别名、额外字段、前缀与尾部数据；不把这项窄格式扩为通用解包工具。解包只创建一份新的 bootstrap 子目录，失败须验证所属身份后清理，不得覆盖或删除已有目录。安装 owner 随后复用既有 PE 与 Windows WinTrust 校验，全部成功前不能执行解释器；签名拒绝不能用其他用户上下文、PowerShell 策略变更或未登记验证入口转为接受。
+
 ## 客户端 Office 安装事务
 
 主包接受的 Windows x64 组件由 [`office-component-release.windows-x64.json`](../build_support/office-component-release.windows-x64.json) 唯一固定，并在构建时校验、编译到 Application。schema 1、protocolRevision 1 与 target `x86_64-windows-msvc` 固定；必填 `retained` 数组最多包含八个仍获主包信任的旧组件身份，每项精确为 `archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`，不含下载 URL。当前 release 与 retained 不允许重复或冲突身份。启动仅以 current 记录的精确归档摘要查找主包已固定身份，再验证所带清单和文件；retained 不用于目录发现、安装旧版本或下载 fallback。retained 是信任接受集合，不是磁盘引用；非当前旧目录仍按进程内引用静止规则清理，不能因该集合继续占用磁盘。它让升级失败后的仍可信旧组件继续工作；安全修复需要同时移除不再信任的旧身份，磁盘记录不能自行恢复该信任。`release: null` 表示尚未登记可供客户端安装的发布物，不得推测下载地址或转用开发归档。非空 release 必须同时提供 `url`、`archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`。URL 只接受固定 HTTPS 绝对地址，不含 credential、query 或 fragment；下载不接受重定向、远端 manifest、任意用户 URL 或恢复旧下载。组件安全修复需要重新发布包含新信任输入的主包。独立 producer 的供应商输入不能代替这个客户端发布输入。

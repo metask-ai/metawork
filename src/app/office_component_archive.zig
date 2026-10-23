@@ -361,7 +361,7 @@ fn verifyManifest(temporary: std.mem.Allocator, bytes: []const u8, expected: Exp
     return digest;
 }
 
-fn checkPath(name: []const u8) !void {
+pub fn checkPath(name: []const u8) !void {
     if (name.len == 0 or name.len > 512 or !std.unicode.utf8ValidateSlice(name)) return error.ComponentPath;
     var parts = std.mem.splitScalar(u8, name, '/');
     var depth: usize = 0;

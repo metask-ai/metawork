@@ -2435,6 +2435,24 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.B
     store.addImport("office_process", process);
     store.addImport("product_office_component", existingImport(app, "product_office_component"));
     store.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    const python_zip_tests = b.addTest(.{ .name = "office-python-archive", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/app/office_python_archive.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    const python_zip_run = b.addRunArtifact(python_zip_tests);
+    tests.dependOn(&python_zip_run.step);
+    b.step("test-office-python-archive", "Test bounded first-stage Python ZIP extraction").dependOn(&python_zip_run.step);
+    const python_bootstrap = b.addExecutable(.{ .name = "office-python-bootstrap", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_python_bootstrap.zig"),
+        .target = app.resolved_target,
+        .optimize = app.optimize,
+        .link_libc = link_libc,
+    }) });
+    python_bootstrap.root_module.addImport("office_component_store", store);
+    python_bootstrap.root_module.addImport("office_process", process);
+    b.step("build-office-python-bootstrap", "Build the native first-stage Python preparation qualifier").dependOn(&b.addInstallArtifact(python_bootstrap, .{}).step);
     const install = b.addExecutable(.{ .name = "office-component-install", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_component_install.zig"),
         .target = app.resolved_target,
