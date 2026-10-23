@@ -141,6 +141,8 @@ pub const PermissionReviewState = struct {
 };
 
 pub const State = struct {
+    /// Task continuity survives Session detachment. Host-only, never persisted.
+    metask_authorization_scope: u64 = 0,
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
     /// Main-thread projection retained across the old Session's close and a

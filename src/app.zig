@@ -297,6 +297,7 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileSave(self.platform.outputFileSave());

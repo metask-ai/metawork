@@ -5,12 +5,21 @@ pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const product_workspace = @import("metawork_product_workspace");
 pub const account_contract = @import("metawork_account_contract");
+pub const account = @import("metawork_account");
+pub const models_coordinator = @import("models_coordinator");
+pub const metask_transport = @import("metask_transport");
 pub const models_contract = @import("metawork_product_models_contract");
 pub const models_ports = @import("product_models_ports");
 pub const event_pump = @import("event_pump");
 pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
+
+pub fn credentialDigest(bytes: []const u8) [32]u8 {
+    var result: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+    return result;
+}
 
 pub fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.OwnedCoreEvent {
     const owned_json = try std.testing.allocator.dupe(u8, json);
@@ -230,6 +239,9 @@ pub const FakeSession = struct {
     forced_permission_mode_status: ?u32 = null,
     model: [256]u8 = [_]u8{0} ** 256,
     model_len: usize = 0,
+    /// Observe the immutable credential supplied at the ABI boundary without
+    /// retaining its bytes. Only synthetic test credentials are used here.
+    credential_digest: [32]u8 = @splat(0),
 
     pub fn lock(self: *FakeSession) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -301,6 +313,9 @@ pub const FakeCore = struct {
     last_abort_reason: ?u32 = null,
     buffer_releases: usize = 0,
     credential_seen: bool = false,
+    /// Models a provider rejecting one expired synthetic credential. This is
+    /// an injected Core outcome, not evidence of an actual HTTP status.
+    rejected_credential_digest: ?[32]u8 = null,
     image_tool_seen: bool = false,
     image_tool: ?wire.HostToolV1 = null,
     delivery_tool: ?wire.HostToolV1 = null,
@@ -1030,6 +1045,7 @@ pub fn sessionCreate(
                 .session_id_len = id.len,
                 .catalog = bound_catalog,
                 .permission_mode_code = host.permission_mode_code,
+                .credential_digest = credentialDigest(key),
             };
             @memcpy(session.model[0..model.len], model);
             session.model_len = model.len;
@@ -1528,6 +1544,7 @@ pub fn sessionRestore(
             .restored = true,
             .permission_mode_code = host.permission_mode_code,
             .prompt_profile = fake_core.restored_prompt_profile,
+            .credential_digest = credentialDigest(key),
             .restore_degraded = restore_degraded,
             .callbacks = callbacks.?.*,
             .session_id = session_id,
@@ -2016,6 +2033,7 @@ pub fn sessionRunInput(
     }
     fake_core.lock();
     fake_core.run_calls += 1;
+    const rejected_credential = fake_core.rejected_credential_digest;
     fake_core.unlock();
     session.lock();
     if (session.compacting) {
@@ -2028,6 +2046,10 @@ pub fn sessionRunInput(
     session.input_accepted = 0;
     session.input_adopted = 0;
     const plan = session.plan;
+    const credential_rejected = if (rejected_credential) |digest|
+        std.mem.eql(u8, &digest, &session.credential_digest)
+    else
+        false;
     const permission_generation = session.policy_generation;
     session.broadcast();
     session.unlock();
@@ -2340,6 +2362,8 @@ pub fn sessionRunInput(
         result.struct_size = if (plan == .invalid_result_layout) 0 else @sizeOf(wire.RunResultV1);
         result.stop_reason_code = if (aborted)
             wire.STOP_ABORTED
+        else if (credential_rejected)
+            wire.STOP_API_ERROR
         else switch (plan) {
             .unknown_stop_result => 42,
             .max_turns => wire.STOP_MAX_TURNS,

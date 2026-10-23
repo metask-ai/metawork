@@ -1,6 +1,7 @@
 //! Application-only Office installer validation. The current Native SDK does
 //! not expose available-volume bytes or Authenticode verification.
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Guid = extern struct { a: u32, b: u16, c: u16, d: [8]u8 };
 const FileInfo = extern struct {
@@ -31,6 +32,7 @@ extern "wintrust" fn WinVerifyTrust(?*anyopaque, *Guid, *TrustData) callconv(.wi
 extern "kernel32" fn GetDiskFreeSpaceExW([*:0]const u16, *u64, ?*u64, ?*u64) callconv(.winapi) i32;
 
 pub fn availableBytes(allocator: std.mem.Allocator, directory: []const u8) !u64 {
+    if (builtin.os.tag != .windows) return error.UnsupportedComponentTarget;
     const wide = try widePath(allocator, directory);
     defer allocator.free(wide);
     var available: u64 = 0;
@@ -43,6 +45,7 @@ pub fn verifySignature(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 pub fn signatureStatus(allocator: std.mem.Allocator, path: []const u8) !i32 {
+    if (builtin.os.tag != .windows) return error.UnsupportedComponentTarget;
     const wide = try widePath(allocator, path);
     defer allocator.free(wide);
     var file: FileInfo = .{ .path = wide };
@@ -63,8 +66,15 @@ fn widePath(allocator: std.mem.Allocator, path: []const u8) ![:0]u16 {
     return std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
 }
 
+test "Office Windows validation rejects unsupported targets before platform effects" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try std.testing.expectError(error.UnsupportedComponentTarget, availableBytes(std.testing.allocator, "."));
+    try std.testing.expectError(error.UnsupportedComponentTarget, signatureStatus(std.testing.allocator, "."));
+    try std.testing.expectError(error.UnsupportedComponentTarget, verifySignature(std.testing.allocator, "."));
+}
+
 test "Office disk observations are scoped to existing absolute directories" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     try std.testing.expect(try availableBytes(std.testing.allocator, root) > 0);

@@ -270,6 +270,17 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
+    pub fn metaskAuthorizationCheck(self: *Coordinator) control_ports.MetaskAuthorizationCheck {
+        return .{ .context = self, .current_fn = currentMetaskAuthorization };
+    }
+
+    fn currentMetaskAuthorization(context: *anyopaque) ?control_ports.MetaskAuthorization {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        const state = self.account.authorizationState() orelse return null;
+        return .{ .scope = state.scope, .generation = state.generation };
+    }
+
     pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
         return .{ .context = self, .prepare_fn = prepareImageRun };
     }
