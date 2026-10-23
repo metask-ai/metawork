@@ -4,16 +4,16 @@ The calling producer verifies fixed source digests before this script consumes
 them. Build inputs and an explicit fresh output tree are mandatory.
 """
 import argparse
-import gzip
 import hashlib
 import json
 from pathlib import Path
 import shutil
-import stat
-import tarfile
-import zipfile
+import sys
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src/app/office_bootstrap"))
+import payload
+from packages import load_archive_helper
 
 
 def digest(path):
@@ -26,35 +26,10 @@ def digest(path):
 
 def layout(root, node_zip, font, font_license):
     source = json.loads((REPO / "build_support/office-runtime.windows-x64.sources.json").read_text(encoding="utf-8"))
-    program = root / "engine/program"
-    python = root / "python"
-    if python.exists() or not (program / "soffice.com").is_file():
-        raise ValueError("Layout requires a fresh, read-only extracted Office tree")
-    shutil.copytree(program / source["libreoffice"]["pythonDirectory"], python)
-    # The MSI's app-local Microsoft runtime is required even on machines which
-    # have never installed Office or the VC runtime globally.
-    for library in (root / "engine/System64").glob("*.dll"):
-        shutil.copyfile(library, program / library.name)
-        shutil.copyfile(library, python / "bin" / library.name)
-    for name in ("python313.dll", "python3.dll"):
-        shutil.copyfile(program / name, python / "bin" / name)
-    (python / "bin/python313._pth").write_text("../lib\n", encoding="ascii")
-    node = root / "node"
-    node.mkdir()
-    with zipfile.ZipFile(node_zip) as archive:
-        for name in ("node.exe", "LICENSE"):
-            data = archive.read(source["node"]["archiveRoot"] + "/" + name)
-            (node / name).write_bytes(data)
-    fonts = root / "engine/share/fonts/truetype"
-    fonts.mkdir(parents=True, exist_ok=True)
-    for file in (root / "engine/Fonts").iterdir():
-        if not file.is_file():
-            raise ValueError("Unexpected vendor font directory")
-        shutil.copyfile(file, fonts / file.name)
-    shutil.copyfile(font, fonts / "NotoSansCJKsc-Regular.otf")
+    helper_path = REPO / "src/product/control/resources/archive.py"
+    helper = load_archive_helper(helper_path, digest(helper_path))
+    payload.layout(root, node_zip, font, font_license, source, helper)
     licenses = root / "licenses"
-    licenses.mkdir()
-    shutil.copyfile(font_license, licenses / "NotoSansCJK-OFL.txt")
     (licenses / "THIRD-PARTY.txt").write_text(
         "MetaWork Office component\n\n"
         "LibreOffice and its bundled Python and fonts: engine/license.txt and engine/LICENSE.html.\n"
@@ -102,45 +77,11 @@ def package(root, output):
     for directory in sorted(root.rglob("__pycache__"), reverse=True):
         directory.rmdir()
     (root / "bin/office.pdb").unlink(missing_ok=True)
-    files = []
-    total = 0
-    for file in sorted(root.rglob("*")):
-        info = file.lstat()
-        if file.is_symlink() or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
-            raise ValueError("Windows component contains a link or special file")
-        if file.is_file():
-            relative = file.relative_to(root).as_posix()
-            if relative == "office-runtime.json":
-                raise ValueError("Component was already finalized")
-            total += info.st_size
-            files.append({"path": relative, "bytes": info.st_size, "sha256": digest(file)})
-    if len(files) > 50000 or total > 3 * 1024**3:
-        raise ValueError("Office component release budget exceeded")
-    manifest = {"schema": 1, "target": "x86_64-windows-msvc", "payloadBytes": total,
-                "files": files}
-    (root / "office-runtime.json").write_text(json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with output.open("xb") as file, gzip.GzipFile(filename="", fileobj=file, mode="wb", mtime=0, compresslevel=6) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.USTAR_FORMAT) as archive:
-                for file in sorted(root.rglob("*")):
-                    entry = archive.gettarinfo(str(file), arcname=file.relative_to(root).as_posix())
-                    entry.uid = entry.gid = entry.mtime = 0
-                    entry.uname = entry.gname = ""
-                    entry.mode = 0o755 if file.is_dir() or file.suffix.lower() in (".exe", ".com") else 0o644
-                    if file.is_file():
-                        with file.open("rb") as data:
-                            archive.addfile(entry, data)
-                    else:
-                        archive.addfile(entry)
-        result = {"schema": 1, "target": manifest["target"], "bytes": output.stat().st_size,
-                  "sha256": digest(output), "unpackedBytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
-                  "files": len(files) + 1, "format": "tar.gz", "tarFormat": "ustar"}
-        output.with_suffix(output.suffix + ".json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(result), flush=True)
-    except BaseException:
-        output.unlink(missing_ok=True)
-        raise
+    payload.write_manifest(root)
+    result = payload.write_archive(root, output)
+    output.with_suffix(output.suffix + ".json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result), flush=True)
+
 
 
 if __name__ == "__main__":

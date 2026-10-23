@@ -111,6 +111,16 @@ await run(
   ],
   "Office offline dependency regressions",
 );
+await run(
+  python,
+  [
+    "-I",
+    "-S",
+    "-B",
+    path.join(root, "scripts/check-office-install-assembly.py"),
+  ],
+  "Office shared layout and seed regressions",
+);
 mkdirSync(cache, { recursive: true });
 
 async function fileDigest(filename, algorithm = "sha256") {
@@ -249,6 +259,11 @@ rmdirSync(msiScratch); // empty only, after the isolated extractor has exited
 await run(
   python,
   [
+    "-I",
+    "-S",
+    "-B",
+    "-X",
+    "utf8",
     path.join(root, "scripts/prepare-office-payload.py"),
     "layout",
     stage,
@@ -355,6 +370,11 @@ if (
 await run(
   python,
   [
+    "-I",
+    "-S",
+    "-B",
+    "-X",
+    "utf8",
     path.join(root, "scripts/prepare-office-payload.py"),
     "package",
     stage,
@@ -364,7 +384,13 @@ await run(
 );
 await run(
   python,
-  [path.join(root, "scripts/check-office-component-archive.py"), output],
+  [
+    "-I",
+    "-S",
+    "-B",
+    path.join(root, "scripts/check-office-component-archive.py"),
+    output,
+  ],
   "Office archive manifest verification",
 );
 console.log(`Office component built (${signing} signing): ${output}`);

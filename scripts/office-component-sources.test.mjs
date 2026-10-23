@@ -15,6 +15,7 @@ import {
   officeAuthoringLock,
   officePublicDownloads,
   officeDependencyRecipe,
+  officeDownloadLayout,
   queryOfficeAuthoring,
 } from "./office-component-sources.mjs";
 
@@ -177,6 +178,69 @@ test(
       assert.match(
         entry.digest,
         entry.algorithm === "sha256" ? /^[a-f0-9]{64}$/u : /^[a-f0-9]{128}$/u,
+      );
+    }
+    const downloads = officeDownloadLayout(root, authoring);
+    assert.deepEqual(
+      downloads.map(({ path: filename, ...entry }) => entry),
+      officePublicDownloads(root, authoring),
+    );
+    assert.equal(
+      new Set(downloads.map((entry) => entry.path.toLowerCase())).size,
+      downloads.length,
+    );
+    const byName = new Map(downloads.map((entry) => [entry.name, entry.path]));
+    for (const entry of recipe.python)
+      assert.equal(byName.get(`python:${entry.name}`), entry.source);
+    for (const entry of recipe.javascript)
+      assert.equal(byName.get(`javascript:${entry.location}`), entry.source);
+  },
+);
+
+test(
+  "seed download layout refuses credential-bearing or mutable vendor URLs",
+  { skip: process.platform !== "win32" },
+  (t) => {
+    const scratch = mkdtempSync(
+      path.join(os.tmpdir(), "metawork-office-seed-source-"),
+    );
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    for (const file of [
+      "build_support/office-runtime.windows-x64.sources.json",
+      "build_support/office-python.windows-x64.lock.json",
+      "scripts/office-requirements.txt",
+      "src/product/control/resources/archive.py",
+    ]) {
+      mkdirSync(path.dirname(path.join(scratch, file)), { recursive: true });
+      writeFileSync(
+        path.join(scratch, file),
+        readFileSync(path.join(root, file)),
+      );
+    }
+    const authoring = queryOfficeAuthoring(root);
+    const sourcePath = path.join(
+      scratch,
+      "build_support/office-runtime.windows-x64.sources.json",
+    );
+    for (const url of [
+      "https://user:secret@example.invalid/font",
+      "https://example.invalid/font?token=secret",
+      "https://example.invalid/font#latest",
+      "https://example.invalid/f\nont",
+    ]) {
+      const source = JSON.parse(
+        readFileSync(
+          path.join(
+            root,
+            "build_support/office-runtime.windows-x64.sources.json",
+          ),
+        ),
+      );
+      source.font.url = url;
+      writeFileSync(sourcePath, JSON.stringify(source));
+      assert.throws(
+        () => officeDownloadLayout(scratch, authoring),
+        /public source URL/u,
       );
     }
   },

@@ -274,3 +274,44 @@ export function officeDependencyRecipe(root, authoring) {
     authoring: { manifest: authoring.manifest, lock: authoring.lock },
   };
 }
+
+// The public installer uses the same relative archive names as the producer.
+// Only fixed source metadata enters this mapping; never a remote manifest.
+export function officeDownloadLayout(root, authoring) {
+  const { sources } = officeComponentSources(root);
+  const recipe = officeDependencyRecipe(root, authoring);
+  const vendorPaths = {
+    libreoffice: path.basename(new URL(sources.libreoffice.url).pathname),
+    node: path.basename(new URL(sources.node.url).pathname),
+    font: "NotoSansCJKsc-Regular.otf",
+    fontLicense: "NotoSansCJK-OFL.txt",
+    bootstrapPython: path.basename(
+      new URL(sources.bootstrapPython.url).pathname,
+    ),
+  };
+  const packages = new Map([
+    ...recipe.python.map((item) => [`python:${item.name}`, item.source]),
+    ...recipe.javascript.map((item) => [
+      `javascript:${item.location}`,
+      item.source,
+    ]),
+  ]);
+  return officePublicDownloads(root, authoring).map((item) => {
+    const url = new URL(item.url);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      item.url.length > 2048 ||
+      /[\u0000-\u0020\u007f]/u.test(item.url)
+    )
+      throw new Error(
+        "Office public source URL is not a fixed credential-free HTTPS address",
+      );
+    const filename = vendorPaths[item.name] ?? packages.get(item.name);
+    if (!filename) throw new Error("Unknown Office public source layout");
+    return { ...item, path: filename };
+  });
+}
