@@ -123,9 +123,10 @@ pub const Resource = struct {
         const input_name = try std.fmt.allocPrint(self.allocator, "input.{s}", .{@tagName(self.format)});
         defer self.allocator.free(input_name);
         {
-            var file = try root.directory.?.createFile(self.io, input_name, .{ .read = true, .exclusive = true });
+            const file = try root.directory.?.createFile(self.io, input_name, .{ .read = true, .exclusive = true });
             defer file.close(self.io);
-            if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+            // createFile returns a synchronous Windows handle. Treating it as
+            // asynchronous can wait forever for an APC that will never arrive.
             try source_file.copyVerified(self.io, self.sourceRequest(), &cancellation.requested, self.source.expected.?, file);
             try file.sync(self.io);
         }

@@ -4,7 +4,7 @@ const std = @import("std");
 const preview = @import("office_preview");
 const process = @import("office_process");
 const document = @import("product_document_preview");
-const Mode = enum { normal, current, current_changed, hold, sweep, changed, cancel, cancel_live, tamper, root_swap, poison, collision, path_limit, engine_fail };
+const Mode = enum { normal, current, current_changed, hold, sweep, changed, cancel, cancel_live, tamper, root_swap, poison, collision, path_limit, engine_fail, performance_single, performance_pair, performance_cancel };
 const Lease = struct {
     main: std.Thread.Id,
     released: bool = false,
@@ -23,6 +23,8 @@ pub fn main(init: std.process.Init) !void {
     _ = try std.fmt.hexToBytes(&digest, args[6]);
     _ = try std.fmt.hexToBytes(&identity, args[7]);
     const mode = std.meta.stringToEnum(Mode, args[8]) orelse return error.InvalidMode;
+    if (mode == .performance_single or mode == .performance_pair or mode == .performance_cancel)
+        return qualifyPerformance(init, args, digest, identity, mode);
     if (mode == .sweep) {
         var work: Sweep = .{ .allocator = init.gpa, .io = init.io, .main_thread = std.Thread.getCurrentId(), .root = args[4] };
         const thread = try std.Thread.spawn(.{}, Sweep.run, .{&work});
@@ -238,6 +240,103 @@ fn qualifyLane(init: std.process.Init, resource: *preview.Resource, lease: *Leas
 }
 fn laneWake(_: ?*anyopaque) bool {
     return true;
+}
+
+// The external Windows observer assigns this paused probe to an accounting Job
+// before any resource/worker/descendant exists. Measurements include the real
+// Application process owner, the complete engine tree and both Product slots.
+fn qualifyPerformance(init: std.process.Init, args: []const [:0]const u8, digest: [32]u8, identity: [32]u8, mode: Mode) !void {
+    try emit(init.io, .{ .observer_ready = true });
+    var go: [1]u8 = undefined;
+    if (try std.Io.File.stdin().readStreaming(init.io, &.{&go}) != 1 or go[0] != 'g') return error.ObserverNotAttached;
+    const started: std.Io.Timestamp = .now(init.io, .awake);
+    var lane: document.Lane = .{ .io = init.io, .allocator = init.gpa, .main_thread = std.Thread.getCurrentId(), .notifier = .{ .context = null, .wake_fn = laneWake } };
+    defer lane.deinit() catch @panic("performance qualification cleanup failed");
+    const count: usize = if (mode == .performance_single) 1 else 2;
+    var leases: [2]Lease = @splat(.{ .main = lane.main_thread });
+    for (0..count) |index| {
+        var operation: [16]u8 = undefined;
+        try std.Io.randomSecure(init.io, &operation);
+        var resource = try preview.Resource.init(init.gpa, init.io, lane.main_thread, init.environ_map, args[4], .{ .root = args[1], .identity = identity, .context = &leases[index], .release_fn = Lease.release }, .{ .root = args[2], .relative = args[3], .expected = .{ .size_bytes = try std.fmt.parseInt(u64, args[5], 10), .sha256 = digest } }, operation);
+        const effect = resource.intoOwned() catch |failure| {
+            try resource.deinit();
+            return failure;
+        };
+        lane.open(index + 1, effect) catch |failure| {
+            effect.release_fn(effect.context);
+            return failure;
+        };
+    }
+    // Capacity rejection must happen before touching a borrowed effect. This
+    // deliberate duplicate is never consumed and grants no third resource.
+    if (count == 2) {
+        const occupied = lane.sessions[0].?.effect;
+        if (lane.open(3, occupied)) |_| return error.ThirdResourceAccepted else |failure| if (failure != error.PreviewCapacity) return failure;
+    }
+    var prepared_ms: [2]?i64 = @splat(null);
+    var cancelled = false;
+    var cancellation_ms: ?i64 = null;
+    var preparation_count: usize = 0;
+    while (preparation_count < count) {
+        if (mode == .performance_cancel and !cancelled and elapsedMs(init.io, started) >= 800) {
+            cancellation_ms = elapsedMs(init.io, started);
+            cancelled = true;
+            for (1..count + 1) |id| _ = lane.close(id);
+        }
+        if (lane.take()) |taken| {
+            const id = taken.id;
+            const operation = taken.operation;
+            const failure = taken.failure;
+            lane.finish(taken);
+            if (operation == .prepare) {
+                preparation_count += 1;
+                prepared_ms[id - 1] = elapsedMs(init.io, started);
+                if (failure) |problem| {
+                    if (!(cancelled and problem == error.Cancelled)) return problem;
+                } else if (cancelled) return error.CancelledContentPublished;
+            } else if (failure) |problem| return problem;
+        } else try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(2), .clock = .awake } }, init.io);
+        if (elapsedMs(init.io, started) > 150_000) return error.QualificationTimeout;
+    }
+    var pages: [2]usize = @splat(0);
+    if (mode == .performance_cancel and !cancelled) return error.CancellationMissedExecution;
+    var read_ms: [12]i64 = undefined;
+    var read_count: usize = 0;
+    var region_count: usize = 0;
+    if (!cancelled) {
+        for (1..count + 1) |id| {
+            const material = try lane.material(id);
+            if (material.source.size_bytes != try std.fmt.parseInt(u64, args[5], 10) or !std.mem.eql(u8, &material.source.sha256, &digest)) return error.CapturedSourceMismatch;
+            pages[id - 1] = if (material.manifest.pages) |items| items.len else 0;
+            if (pages[id - 1] == 0) return error.MissingPrintPages;
+            for (0..6) |index| {
+                const use_grid = material.grid != null and index % 2 == 1;
+                const begin: std.Io.Timestamp = .now(init.io, .awake);
+                try lane.read(id, if (use_grid) .{ .region = .{ .sheet = 1, .row = @intCast(1 + index * 20), .column = 1, .rows = 20, .columns = 10 } } else .{ .page = index % pages[id - 1] });
+                const taken = try nextLane(init.io, &lane);
+                const failure = taken.failure;
+                if (taken.read == null and failure == null) return error.MissingRead;
+                lane.finish(taken);
+                if (failure) |problem| return problem;
+                read_ms[read_count] = elapsedMs(init.io, begin);
+                read_count += 1;
+                if (use_grid) region_count += 1;
+            }
+        }
+    }
+    const cleanup_begin: std.Io.Timestamp = .now(init.io, .awake);
+    for (1..count + 1) |id| _ = lane.close(id);
+    while (lane.hasResources()) {
+        const taken = try nextLane(init.io, &lane);
+        const failure = taken.failure;
+        lane.finish(taken);
+        if (failure) |problem| return problem;
+    }
+    for (leases[0..count]) |lease| if (!lease.released) return error.LeaseNotReleased;
+    try emit(init.io, .{ .mode = @tagName(mode), .resources = count, .prepared_ms = prepared_ms[0..count], .pages = pages[0..count], .read_ms = read_ms[0..read_count], .region_count = region_count, .cleanup_ms = elapsedMs(init.io, cleanup_begin), .cancel_requested_ms = cancellation_ms, .cancel_to_release_ms = if (cancellation_ms) |begin| elapsedMs(init.io, started) - begin else @as(?i64, null), .total_ms = elapsedMs(init.io, started), .lease_released = true, .product_lane = true });
+}
+fn elapsedMs(io: std.Io, start: std.Io.Timestamp) i64 {
+    return @intCast(start.durationTo(.now(io, .awake)).toMilliseconds());
 }
 fn nextLane(io: std.Io, lane: *document.Lane) !document.Taken {
     const start: std.Io.Timestamp = .now(io, .awake);
