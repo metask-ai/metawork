@@ -3,12 +3,22 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { localOfficeComponent } from "./office-environment.mjs";
+import {
+  localOfficeComponent,
+  readOfficeComponent,
+} from "./office-environment.mjs";
 import { officeWorkflowInventory } from "./office-workflows.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 officeWorkflowInventory(root);
-const component = localOfficeComponent(root);
+const args = process.argv.slice(2);
+if (args.length !== 0 && (args.length !== 2 || args[0] !== "--component"))
+  throw new Error(
+    "Usage: check-office-skills.mjs [--component <absolute-root>]",
+  );
+const component = args.length
+  ? readOfficeComponent(args[1])
+  : localOfficeComponent(root);
 if (!component)
   throw new Error(
     "Select a prepared Office component with office:setup -- --component <absolute-root>",

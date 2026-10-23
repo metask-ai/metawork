@@ -96,8 +96,7 @@ def package(root, output):
         raise ValueError("Component archive must not already exist")
     if root.parent != (REPO / ".zig-cache/office-components").resolve() or not root.name.startswith("build-"):
         raise ValueError("Finalization only owns a managed component producer staging directory")
-    # Interpreter startup during installation may create bytecode despite pip's
-    # --no-compile. Mutable caches and build debug symbols aren't release files.
+    # Builder caches and debug symbols are not immutable release resources.
     for file in root.rglob("*.pyc"):
         file.unlink()
     for directory in sorted(root.rglob("__pycache__"), reverse=True):

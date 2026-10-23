@@ -74,7 +74,9 @@ Office 重依赖由独立组件 producer 构建，不进入主程序 runtime sta
 node scripts/build-office-component.mjs --python <absolute-builder-python> --output <new-absolute-output.tar.gz>
 ```
 
-构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node、私有中文字体以及公开来源 bootstrap 所用临时便携 Python 的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包，以独立的 lock 和禁用安装脚本的 `npm ci` 构建。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。临时便携 Python 不进入完整组件的常驻运行时，固定来源不等于客户端已支持该 bootstrap。
+构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node、私有中文字体以及公开来源 bootstrap 所用临时便携 Python 的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包和嵌套位置。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。临时便携 Python 不进入完整组件的常驻运行时，固定来源不等于客户端已支持该 bootstrap。
+
+依赖布局由上述 canonical 输入生成；共享的离线组装器只消费固定摘要的 wheel ZIP 与 npm tar.gz，不调用 pip/npm 安装、不解析依赖或执行包安装脚本。Python 保留 wheel 原有代码、许可证、metadata、RECORD 和 `data/scripts` 资源，不生成带构建目录的启动包装器或安装记录；需要额外数据重定位的 wheel 须明确拒绝，不能假装安装成功。JavaScript 仅接受一个顶层目录，按 lock 固定的包位置写出并核验包名和版本，不生成 `.bin` 链接或消费包内嵌套依赖。源先复制到同一私有事务内并校验实际字节；压缩量、实际展开量、文件数、metadata 与路径有界，链接、reparse、碰撞和未知布局拒绝，失败不得启用半成品。producer 与后续客户端 bootstrap 使用同一组装实现；这不表示客户端多源安装已接通。最终启用仍须匹配主包固定的完整组件清单，不把客户端生成的 recipe 或清单当作新信任来源。
 
 公开源的独立资格检查入口为 `node scripts/check-office-public-sources.mjs`。它与 producer 共用根 lock 的 JavaScript 闭包选择，只从固定 HTTPS 地址逐项 GET，以实际读取字节校验 SHA-256 或根 npm lock 的 SHA-512，不接受动态重定向、依赖解析或安装脚本，不保存和执行下载内容。LibreOffice 来源固定官方公开镜像的直取地址，不能把下载路由的临时跳转结果当作客户端信任输入。结果写入 `.zig-cache/office-public-source-verification.json`，包括实际下载量和每项通过情况；HEAD 可达或 Content-Length 不构成字节身份通过证据。
 

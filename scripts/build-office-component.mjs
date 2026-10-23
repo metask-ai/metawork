@@ -26,6 +26,7 @@ import {
 import { runChild } from "./run-child-process.mjs";
 import {
   officeComponentSources,
+  officeDependencyRecipe,
   queryOfficeAuthoring,
 } from "./office-component-sources.mjs";
 import { officeWorkflowInventory } from "./office-workflows.mjs";
@@ -95,24 +96,46 @@ if (
   throw new Error(
     "Office workflows require an entry or authoring package not supplied by this producer",
   );
-// Builder tooling is not an installed-runtime dependency. Fail before creating
-// a multi-gigabyte staging tree if the explicitly selected builder lacks pip.
-await run(python, ["-I", "-m", "pip", "--version"], "Office builder pip");
+await run(
+  python,
+  ["-I", "-S", "-B", "-c", "import sys; assert sys.version_info >= (3, 9)"],
+  "Office builder Python",
+);
+await run(
+  python,
+  [
+    "-I",
+    "-S",
+    "-B",
+    path.join(root, "scripts/check-office-package-bootstrap.py"),
+  ],
+  "Office offline dependency regressions",
+);
 mkdirSync(cache, { recursive: true });
 
-async function fileDigest(filename) {
-  const digest = createHash("sha256");
+async function fileDigest(filename, algorithm = "sha256") {
+  const digest = createHash(algorithm);
   for await (const chunk of createReadStream(filename)) digest.update(chunk);
   return digest.digest("hex");
 }
 
 async function fetchSource(source, name) {
+  const algorithm = source.algorithm ?? "sha256";
+  const expectedDigest = source.digest ?? source.sha256;
+  const url = new URL(source.url);
   if (
-    !/^[a-f0-9]{64}$/u.test(source.sha256) ||
-    new URL(source.url).protocol !== "https:"
+    !["sha256", "sha512"].includes(algorithm) ||
+    !new RegExp(`^[a-f0-9]{${algorithm === "sha256" ? 64 : 128}}$`, "u").test(
+      expectedDigest,
+    ) ||
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
   )
     throw new Error(
-      "Office dependency requires a fixed HTTPS source and SHA256",
+      "Office dependency requires a fixed HTTPS source and cryptographic digest",
     );
   const filename = path.join(cache, name);
   if (!existsSync(filename)) {
@@ -120,9 +143,11 @@ async function fetchSource(source, name) {
     let complete = false;
     try {
       const response = await fetch(source.url, {
+        redirect: "error",
+        headers: { "Accept-Encoding": "identity" },
         signal: AbortSignal.timeout(180_000),
       });
-      if (!response.ok || new URL(response.url).protocol !== "https:")
+      if (response.status !== 200 || response.redirected || !response.body)
         throw new Error(`Office dependency download failed: ${name}`);
       let bytes = 0;
       await pipeline(
@@ -141,8 +166,8 @@ async function fetchSource(source, name) {
         createWriteStream(partial, { flags: "wx" }),
       );
       if (
-        (source.bytes !== undefined && bytes !== source.bytes) ||
-        (await fileDigest(partial)) !== source.sha256
+        (source.bytes != null && bytes !== source.bytes) ||
+        (await fileDigest(partial, algorithm)) !== expectedDigest
       )
         throw new Error(`Office dependency digest mismatch: ${name}`);
       renameSync(partial, filename);
@@ -152,8 +177,8 @@ async function fetchSource(source, name) {
     }
   }
   if (
-    (source.bytes !== undefined && statSync(filename).size !== source.bytes) ||
-    (await fileDigest(filename)) !== source.sha256
+    (source.bytes != null && statSync(filename).size !== source.bytes) ||
+    (await fileDigest(filename, algorithm)) !== expectedDigest
   )
     throw new Error(
       `Cached Office dependency is corrupt; remove it explicitly: ${filename}`,
@@ -235,7 +260,6 @@ await run(
 );
 const wheelDirectory = path.join(cache, "wheels");
 mkdirSync(wheelDirectory, { recursive: true });
-let hashedRequirements = "";
 for (const wheel of wheels.wheels) {
   const name = path.basename(new URL(wheel.url).pathname);
   if (!name.endsWith(".whl"))
@@ -243,72 +267,38 @@ for (const wheel of wheels.wheels) {
   const downloaded = await fetchSource(wheel, `wheels/${name}`);
   if (path.dirname(downloaded) !== wheelDirectory)
     throw new Error("Invalid wheel cache path");
-  hashedRequirements += `${wheel.name}==${wheel.version} --hash=sha256:${wheel.sha256}\n`;
 }
-const requirementsPath = path.join(
+const authoring = queryOfficeAuthoring(root);
+const dependencyRecipe = officeDependencyRecipe(root, authoring);
+mkdirSync(path.join(cache, "npm-archives"), { recursive: true });
+for (const item of dependencyRecipe.javascript) {
+  const entry = authoring.lock.packages[item.location];
+  await fetchSource({ ...item, url: entry.resolved }, item.source);
+}
+const dependencyRecipePath = path.join(
   stage,
-  "sources/python-hashed-requirements.txt",
+  "sources/office-dependency-layout.json",
 );
-writeFileSync(requirementsPath, hashedRequirements);
-const environment = {
-  ...process.env,
-  PATH: `${path.join(stage, "engine/program")}${path.delimiter}${process.env.PATH ?? ""}`,
-  PIP_CACHE_DIR: path.join(cache, "pip-cache"),
-  PYTHONDONTWRITEBYTECODE: "1",
-};
+writeFileSync(
+  dependencyRecipePath,
+  JSON.stringify(dependencyRecipe, null, 2) + "\n",
+);
 await run(
   python,
   [
-    "-m",
-    "pip",
-    "--python",
-    path.join(stage, "python/bin/python.exe"),
-    "install",
-    "--disable-pip-version-check",
-    "--no-deps",
-    "--no-index",
-    "--require-hashes",
-    "--no-compile",
-    "--only-binary=:all:",
-    "--find-links",
-    wheelDirectory,
-    "--target",
-    path.join(stage, "python-packages"),
-    "-r",
-    requirementsPath,
+    "-I",
+    "-S",
+    "-B",
+    "-X",
+    "utf8",
+    path.join(root, "src/app/office_bootstrap/packages.py"),
+    dependencyRecipePath,
+    cache,
+    stage,
+    "--archive-helper",
+    path.join(root, "src/product/control/resources/archive.py"),
   ],
-  "Office locked Python libraries",
-  environment,
-);
-
-const {
-  npm,
-  manifest: authoring,
-  lock: authoringLock,
-} = queryOfficeAuthoring(root);
-const authoringDirectory = path.join(stage, "authoring");
-mkdirSync(authoringDirectory);
-writeFileSync(
-  path.join(authoringDirectory, "package.json"),
-  JSON.stringify(authoring, null, 2) + "\n",
-);
-writeFileSync(
-  path.join(authoringDirectory, "package-lock.json"),
-  JSON.stringify(authoringLock, null, 2) + "\n",
-);
-await run(
-  process.execPath,
-  [
-    npm,
-    "ci",
-    "--ignore-scripts",
-    "--no-audit",
-    "--no-fund",
-    "--prefix",
-    authoringDirectory,
-  ],
-  "Office locked JavaScript libraries",
-  { ...environment, npm_config_cache: path.join(cache, "npm-cache") },
+  "Office pinned offline Python/JavaScript libraries",
 );
 const launcher = path.join(stage, "bin/office.exe");
 await buildOfficeLauncher({ targetId: sources.target, outputPath: launcher });
@@ -349,12 +339,11 @@ writeFileSync(
   JSON.stringify({ schema: 1, signing }, null, 2) + "\n",
 );
 const immutableBefore = componentInventory(stage);
-await run(
-  launcher,
-  ["selftest"],
-  "Office isolated offline self-test",
-  environment,
-);
+await run(launcher, ["selftest"], "Office isolated offline self-test", {
+  ...process.env,
+  PATH: `${path.join(stage, "engine/program")}${path.delimiter}${process.env.PATH ?? ""}`,
+  PYTHONDONTWRITEBYTECODE: "1",
+});
 const immutableAfter = componentInventory(stage);
 if (
   immutableBefore.size !== immutableAfter.size ||

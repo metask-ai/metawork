@@ -114,7 +114,9 @@ export function officeAuthoringLock(root, selected) {
       dependencies: manifest.dependencies,
     },
   };
-  for (const item of selected) {
+  for (const item of [...selected].sort((a, b) =>
+    a.location.localeCompare(b.location, "en"),
+  )) {
     const entry = lock.packages[item.location];
     if (
       !entry ||
@@ -231,4 +233,44 @@ export function officePublicDownloads(root, authoring) {
       "Office public source count exceeds its qualification budget",
     );
   return downloads;
+}
+
+// Generated producer/bootstrap input, never a remote dependency resolver or a
+// second list of package versions. Locations are the root lock's placements.
+export function officeDependencyRecipe(root, authoring) {
+  const { sources, wheels } = officeComponentSources(root);
+  const downloads = officePublicDownloads(root, authoring);
+  return {
+    schema: 1,
+    target: sources.target,
+    archiveHelperSha256: digest(
+      readFileSync(path.join(root, "src/product/control/resources/archive.py")),
+    ),
+    python: wheels.wheels.map((wheel) => ({
+      name: wheel.name,
+      version: wheel.version,
+      source: `wheels/${path.basename(new URL(wheel.url).pathname)}`,
+      algorithm: "sha256",
+      digest: wheel.sha256,
+    })),
+    javascript: downloads
+      .filter((item) => item.name.startsWith("javascript:"))
+      .map((item) => {
+        const location = item.name.slice("javascript:".length);
+        const entry = authoring.lock.packages[location];
+        return {
+          name:
+            entry.name ??
+            location.slice(
+              location.lastIndexOf("node_modules/") + "node_modules/".length,
+            ),
+          version: entry.version,
+          location,
+          source: `npm-archives/${item.digest}.tgz`,
+          algorithm: item.algorithm,
+          digest: item.digest,
+        };
+      }),
+    authoring: { manifest: authoring.manifest, lock: authoring.lock },
+  };
 }

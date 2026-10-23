@@ -14,6 +14,7 @@ import {
   officeComponentSources,
   officeAuthoringLock,
   officePublicDownloads,
+  officeDependencyRecipe,
   queryOfficeAuthoring,
 } from "./office-component-sources.mjs";
 
@@ -149,3 +150,34 @@ test("component sources refuse stale requirements, missing wheels, duplicates an
     );
   }
 });
+
+test(
+  "offline dependency recipe is order-independent and contains only locked relative inputs",
+  { skip: process.platform !== "win32" },
+  () => {
+    const authoring = queryOfficeAuthoring(root);
+    const selected = Object.entries(authoring.lock.packages)
+      .filter(([location]) => location)
+      .map(([location, entry]) => ({ location, version: entry.version }))
+      .reverse();
+    const recipe = officeDependencyRecipe(root, authoring);
+    assert.deepEqual(
+      recipe,
+      officeDependencyRecipe(root, officeAuthoringLock(root, selected)),
+    );
+    assert.equal(
+      recipe.python.length,
+      officeComponentSources(root).wheels.wheels.length,
+    );
+    assert.equal(recipe.javascript.length, selected.length);
+    assert.match(recipe.archiveHelperSha256, /^[a-f0-9]{64}$/u);
+    for (const entry of [...recipe.python, ...recipe.javascript]) {
+      assert.equal(path.isAbsolute(entry.source), false);
+      assert.ok(!entry.source.includes("..") && !entry.source.includes("\\"));
+      assert.match(
+        entry.digest,
+        entry.algorithm === "sha256" ? /^[a-f0-9]{64}$/u : /^[a-f0-9]{128}$/u,
+      );
+    }
+  },
+);
