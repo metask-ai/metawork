@@ -1,9 +1,7 @@
 """Prepare one fixed private Python directory; never repair an existing one."""
 import importlib.metadata
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import time
@@ -50,7 +48,7 @@ if __name__ == "__main__":
         # CLI options fix install effects while pip retains its normal network
         # configuration. Do not print user configuration or credentials.
         subprocess.run([sys.executable, "-I", "-B", "-m", "pip", "--disable-pip-version-check", "install",
-                        "--require-hashes", "--only-binary", ":all:", "--no-compile", "--no-user",
+                        "--require-hashes", "--only-binary", ":all:", "--no-compile", "--no-user", "--no-cache-dir",
                         "--target", str(stage / "packages"), "-r", str(resources / "requirements.txt")], check=True, timeout=600)
         check(stage)
         publish(stage, final)

@@ -40,7 +40,19 @@ async function main() {
   );
   const result = spawnSync(
     process.execPath,
-    [npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+    [
+      npm,
+      "ci",
+      "--prefix",
+      stage,
+      "--global=false",
+      "--cache",
+      path.join(stage, ".npm-cache"),
+      "--omit=dev",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+    ],
     {
       cwd: stage,
       stdio: "inherit",
@@ -51,6 +63,7 @@ async function main() {
   );
   if (result.error || result.status !== 0)
     throw new Error("Private npm preparation failed");
+  fs.rmSync(path.join(stage, ".npm-cache"), { recursive: true, force: true });
   check(stage);
   for (let attempt = 0; ; attempt++) {
     try {
