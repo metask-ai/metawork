@@ -1,16 +1,20 @@
 """Opt-in Windows qualification: real downloads into an isolated test profile."""
 import concurrent.futures
+import atexit
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
-if sys.platform != "win32" or sys.argv[1:] != ["--download"]:
-    raise SystemExit("Usage on Windows: python scripts/check-office-private-environment.py --download")
+if sys.platform != "win32" or sys.argv[1:] not in (["--download"], ["--download", "--network-config-probe"]):
+    raise SystemExit("Usage on Windows: python scripts/check-office-private-environment.py --download [--network-config-probe]")
 scratch = Path(tempfile.mkdtemp(prefix="office-private qualification ", dir=REPO / ".zig-cache"))
 resources = scratch / "resources"
 resources.mkdir()
@@ -18,6 +22,43 @@ subprocess.run(["tar.exe", "-xf", str(REPO / "src/app/office-skills.tar.gz"), "-
 entry = resources / "docx/environment"
 profile = scratch / "profile"
 env = dict(os.environ, LOCALAPPDATA=str(profile), NODE_OPTIONS="", NODE_PATH="")
+network_requests = []
+if "--network-config-probe" in sys.argv:
+    class Mirror(BaseHTTPRequestHandler):
+        def log_message(self, *unused):
+            pass
+
+        def do_GET(self):
+            try:
+                host = "https://pypi.org/" if self.path.startswith("/pypi/") else "https://registry.npmjs.org/"
+                relative = self.path.split("/", 2)[2]
+                with urllib.request.urlopen(host + relative, timeout=60) as upstream:
+                    body = upstream.read()
+                    self.send_response(upstream.status)
+                    self.send_header("Content-Type", upstream.headers.get("Content-Type", "application/octet-stream"))
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                network_requests.append(self.path)
+            except Exception:
+                self.send_error(502, "qualification mirror failed")
+
+    class MirrorServer(ThreadingHTTPServer):
+        # npm opens many parallel downloads; the Windows default backlog of
+        # five refuses bursts even though the fixture is serving correctly.
+        request_queue_size = 128
+
+    server = MirrorServer(("127.0.0.1", 0), Mirror)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    atexit.register(server.server_close)
+    atexit.register(server.shutdown)
+    # Read existing configuration through package-manager mechanisms. CLI must
+    # still fix the destination even when configuration requests global installs.
+    pip_config = scratch / "pip.ini"
+    pip_config.write_text("[global]\nindex-url = http://127.0.0.1:" + str(server.server_port) + "/pypi/simple\ntrusted-host = 127.0.0.1\n", encoding="utf-8")
+    npm_config = scratch / "npmrc"
+    npm_config.write_text("registry=http://127.0.0.1:" + str(server.server_port) + "/npm/\nglobal=true\nprefix=" + str(scratch / "must-not-install") + "\n", encoding="utf-8")
+    env.update(PIP_CONFIG_FILE=str(pip_config), NPM_CONFIG_USERCONFIG=str(npm_config))
 
 
 def command(name, *args, environment=env):
@@ -37,6 +78,11 @@ home = profile / "MetaWork/OfficeDependencies"
 assert len(list(home.glob("node-*"))) == 1
 assert len(list(home.glob("python-*"))) == 1
 assert not list(home.glob(".*.tmp"))
+if "--network-config-probe" in sys.argv:
+    assert any(p.startswith("/pypi/simple/openpyxl/") for p in network_requests), network_requests
+    assert any(p.startswith("/npm/docx/-/") for p in network_requests), network_requests
+    assert any(p.startswith("/npm/pptxgenjs/-/") for p in network_requests), network_requests
+    assert not (scratch / "must-not-install").exists(), "npm configuration escaped the fixed private destination"
 
 
 def inventory():
@@ -75,4 +121,4 @@ for suffix, source in [("docx", "created.docx"), ("pptx", "created.pptx"), ("xls
 assert before == inventory(), "Document processing changed the completed environment"
 print(json.dumps({"scratch": str(scratch), "concurrent_node_publish": True, "offline_reuse": True,
                   "docx_pptx_creation": True, "xlsx_edit": True, "three_format_read": True,
-                  "environment_unchanged": True, "files": len(before)}, ensure_ascii=True))
+                  "environment_unchanged": True, "files": len(before), "network_config_requests": len(network_requests)}, ensure_ascii=True))

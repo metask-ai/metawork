@@ -474,8 +474,6 @@ test("native file drops stay behind the Bridge client boundary", async () => {
         };
       },
       on(name, consume) {
-        if (name === "metawork:document-preview-invalidated")
-          return () => undefined;
         assert.equal(name, "drop:files");
         listener = consume;
         return () => undefined;

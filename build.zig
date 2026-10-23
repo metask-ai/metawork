@@ -53,9 +53,11 @@ pub fn build(b: *std.Build) void {
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
     const bundle = agentcore_bundle.verify(b, root);
+    const office_skill_shell_step = b.step("build-office-skill-shell", "Build canonical Core materialized Office Skill qualification");
     for (bundle.runtime_files) |file| {
         const install = b.addInstallBinFile(.{ .cwd_relative = file }, std.fs.path.basename(file));
         b.getInstallStep().dependOn(&install.step);
+        office_skill_shell_step.dependOn(&install.step);
     }
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
@@ -69,6 +71,15 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    const office_skill_shell = b.addExecutable(.{ .name = "office-skill-shell", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/office_skill_shell.zig"),
+        .target = test_modules.app.resolved_target,
+        .optimize = test_modules.app.optimize,
+        .link_libc = bundle.link_libc,
+    }) });
+    office_skill_shell.root_module.addImport("lifecycle_fixture", lifecycle_fixture);
+    office_skill_shell_step.dependOn(&b.addInstallArtifact(office_skill_shell, .{}).step);
+
     const image_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/generate_image.zig"),
         .target = test_modules.agent.resolved_target,

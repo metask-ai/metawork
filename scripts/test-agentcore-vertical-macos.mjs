@@ -1,5 +1,4 @@
 import { readProbeProductState } from "./probe-product-state.mjs";
-import { localArchiveEnvironment } from "./archive-environment.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createReadStream } from "node:fs";
@@ -135,7 +134,6 @@ const builtinSkillNames =
 const builtinOfficeOnly = process.env.METAWORK_BUILTIN_OFFICE_ONLY === "1";
 if (builtinOfficeOnly) {
   assert.equal(process.platform, "win32");
-  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
 }
 
 const commandTimeoutMs = 20_000;
@@ -416,7 +414,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly) {
+  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -705,9 +703,88 @@ desktopVertical: try {
     );
   }
   if (builtinOfficeOnly) {
+    const verifyNewTask = async (catalog) => {
+      const admission = (await snapshot()).newTaskAdmission;
+      const created = await invokeBridge("metawork.tasks.create", {
+        workspace: { kind: "manual", workspaceId, expectedWorkspaceEpoch },
+        expectedExecutionGeneration: admission.activeGeneration,
+        expectedSelectionRevision: admission.activeSelectionRevision,
+        modelSelection: null,
+        expectedSkillCatalogRevision: catalog.revision,
+        expectedSkillSelectionRevision: catalog.selectionRevision,
+        approvalMode: "full_access",
+      });
+      assert.equal(created.accepted, true);
+      const task = (await snapshot()).tasks.find(
+        (item) => item.id === created.taskId,
+      );
+      for (const name of builtinSkillNames)
+        assert.ok(
+          task.skillCatalog.skills.some((item) => item.invocationName === name),
+        );
+    };
+    await verifyNewTask(catalogSnapshot.catalog);
+    const refresh = await invokeBridge(
+      "metawork.workspaces.refreshSkillCatalog",
+      {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      },
+    );
+    assert.equal(refresh.accepted, true);
+    await readCatalog();
+    await stopApplication("built-in Office cold restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    assert.equal(
+      (
+        await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+          workspaceId,
+          expectedWorkspaceEpoch,
+        })
+      ).accepted,
+      true,
+    );
+    const cold = await readCatalog();
+    for (const name of builtinSkillNames)
+      assert.ok(
+        cold.catalog.skills.some((item) => item.invocationName === name),
+      );
+    await verifyNewTask(cold.catalog);
+    await assert.rejects(
+      readdir(join(platformHome, "MetaWork", "OfficeDependencies")),
+      { code: "ENOENT" },
+    );
+    await stopApplication("built-in Office publication failure fixture");
+    const published = await readdir(join(dataRoot, "builtin-office"));
+    assert.equal(published.length, 1);
+    await writeFile(
+      join(dataRoot, "builtin-office", published[0], "docx", "SKILL.md"),
+      "changed fixture",
+    );
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    assert.equal(
+      (
+        await invokeBridge("metawork.workspaces.refreshSkillCatalog", {
+          workspaceId,
+          expectedWorkspaceEpoch,
+        })
+      ).accepted,
+      true,
+    );
+    const unavailable = await readCatalog();
+    for (const name of builtinSkillNames)
+      assert.ok(
+        !unavailable.catalog.skills.some(
+          (item) => item.invocationName === name,
+        ),
+      );
     await stopApplication("built-in Office catalog verification complete");
     process.stdout.write(
-      "Full built-in Office catalog passed without preparing private environments.\n",
+      "Full Office catalog, explicit refresh, cold restart and nonfatal publication failure passed without preparing private environments.\n",
     );
     break desktopVertical;
   }
