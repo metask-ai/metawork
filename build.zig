@@ -2435,6 +2435,7 @@ fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.B
     store.addImport("office_process", process);
     store.addImport("product_office_component", existingImport(app, "product_office_component"));
     store.addImport("office_component_windows", existingImport(app, "office_component_windows"));
+    b.step("test-office-component-store", "Test Office public installation and atomic component records").dependOn(&b.addRunArtifact(b.addTest(.{ .name = "office-component-store", .root_module = store })).step);
     const python_zip_tests = b.addTest(.{ .name = "office-python-archive", .root_module = b.createModule(.{
         .root_source_file = b.path("src/app/office_python_archive.zig"),
         .target = app.resolved_target,

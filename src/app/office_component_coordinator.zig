@@ -28,6 +28,7 @@ pub const Coordinator = struct {
     environment: *const std.process.Environ.Map,
     input: releases.Parsed,
     input_json: []u8,
+    seed_archive: []u8,
     basic_root: ?[]const u8,
     notify: Notify,
     store: store_impl.Store = undefined,
@@ -41,26 +42,29 @@ pub const Coordinator = struct {
 
     /// Called after Primary authority is acquired. No filesystem or process
     /// effect runs here, nor on a normal management command's admission path.
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, root: []const u8, preview_root: []const u8, environment: *const std.process.Environ.Map, input_json: []const u8, basic_root: ?[]const u8, notify: Notify) !*Coordinator {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, root: []const u8, preview_root: []const u8, environment: *const std.process.Environ.Map, input_json: []const u8, seed_archive: []const u8, basic_root: ?[]const u8, notify: Notify) !*Coordinator {
         if (!std.fs.path.isAbsolute(root) or !std.fs.path.isAbsolute(preview_root)) return error.InvalidComponentRoot;
         if (input_json.len > 16 * 1024) return error.InvalidComponentRelease;
         const owned_input = try allocator.dupe(u8, input_json);
         errdefer allocator.free(owned_input);
         var input = try releases.parse(allocator, owned_input);
         errdefer input.deinit();
+        if (seed_archive.len != (try input.seed()).expected.archive_bytes) return error.InvalidComponentSeed;
+        const owned_seed = try allocator.dupe(u8, seed_archive);
+        errdefer allocator.free(owned_seed);
         const owned_root = try allocator.dupe(u8, root);
         errdefer allocator.free(owned_root);
         const owned_preview_root = try allocator.dupe(u8, preview_root);
         errdefer allocator.free(owned_preview_root);
         const self = try allocator.create(Coordinator);
-        self.* = .{ .allocator = allocator, .io = io, .root = owned_root, .preview_root = owned_preview_root, .environment = environment, .input = input, .input_json = owned_input, .basic_root = basic_root, .notify = notify };
+        self.* = .{ .allocator = allocator, .io = io, .root = owned_root, .preview_root = owned_preview_root, .environment = environment, .input = input, .input_json = owned_input, .seed_archive = owned_seed, .basic_root = basic_root, .notify = notify };
         self.registry = .{ .allocator = allocator, .store = &self.store };
         return self;
     }
 
     pub fn configuration(self: *const Coordinator) !model.Configuration {
         const offered = try self.input.release();
-        return .{ .supported = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64, .available = true, .offered = if (offered) |release| .{ .identity = release.expected.sha256, .download_bytes = release.expected.archive_bytes, .installed_bytes = release.expected.unpacked_bytes } else null };
+        return .{ .supported = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64, .available = true, .offered = if (offered) |release| .{ .identity = release.expected.sha256, .download_bytes = release.download_bytes, .installed_bytes = release.expected.unpacked_bytes } else null };
     }
 
     /// Main-only capture of an already verified current version. IO and
@@ -112,6 +116,7 @@ pub const Coordinator = struct {
             .store = &self.store,
             .opened = self.store_opened,
             .input = &self.input,
+            .seed_archive = self.seed_archive,
             .attempt = product.attempt(id).?,
             .kind = kind,
             .before = before,
@@ -226,6 +231,7 @@ pub const Coordinator = struct {
         self.input.deinit();
         const allocator = self.allocator;
         allocator.free(self.input_json);
+        allocator.free(self.seed_archive);
         allocator.free(self.root);
         allocator.free(self.preview_root);
         allocator.destroy(self);
@@ -242,6 +248,7 @@ const Work = struct {
     store: *store_impl.Store,
     opened: bool,
     input: *const releases.Parsed,
+    seed_archive: []const u8,
     attempt: *ports.OfficeAttempt,
     kind: ports.OfficeKind,
     before: ports.OfficeView,
@@ -316,7 +323,7 @@ const Work = struct {
             return .{ .completion = .{ .current = .{ .identity = record.archive_sha256, .state = .ready }, .health = .ready, .cleanup_pending = retired or receipt.cleanup_pending, .outcome = .succeeded }, .record = record, .source = .verified };
         }
         const release = (try self.input.release()) orelse return error.ComponentNotPublished;
-        const receipt = try self.store.install(release, self.source, self.validation, observer, &self.cancellation);
+        const receipt = try self.store.install(release, self.seed_archive, self.source, self.validation, observer, &self.cancellation);
         return .{ .completion = .{ .current = .{ .identity = receipt.record.archive_sha256, .state = .ready }, .health = .ready, .cleanup_pending = receipt.cleanup_pending, .outcome = .succeeded, .committed = true }, .record = receipt.record, .source = .verified };
     }
 
@@ -472,7 +479,7 @@ const TestEffects = if (builtin.is_test) struct {
     reject: std.atomic.Value(bool) = .init(false),
     downloads: std.atomic.Value(usize) = .init(0),
 
-    fn read(context: ?*anyopaque, _: std.mem.Allocator, io: std.Io, _: store_impl.Release, writer: *std.Io.Writer, cancellation: *const process.Cancellation) !void {
+    fn read(context: ?*anyopaque, _: std.mem.Allocator, io: std.Io, _: store_impl.Source, writer: *std.Io.Writer, cancellation: *const process.Cancellation) !void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         _ = self.downloads.fetchAdd(1, .monotonic);
         self.entered.store(true, .release);
@@ -492,7 +499,8 @@ const TestEffects = if (builtin.is_test) struct {
     fn notify(_: *anyopaque) void {}
 };
 
-const test_input = "{\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"retained\":[],\"release\":{\"url\":\"https://example.invalid/office.tar.gz\",\"archiveSha256\":\"ee27f062faeac5b8cc3a974340fee11b0b40fb65d9c7779df98f3b9c3b4de63a\",\"manifestSha256\":\"601ad3ddad7e6b488b60849c7a8b367316cf569f3061d4b461734289913b115b\",\"archiveBytes\":268,\"unpackedBytes\":186,\"files\":2}}";
+const test_input = @embedFile("office_component_archive_fixtures/install-input.json");
+const test_seed = @embedFile("office_component_archive_fixtures/install-seed.tar.gz");
 
 fn testDrain(coordinator: *Coordinator, product: ports.OfficeManagement) !void {
     const started: std.Io.Timestamp = .now(std.testing.io, .awake);
@@ -515,9 +523,9 @@ test "Office startup and explicit cleanup report retained preview records throug
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{};
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, test_seed, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
-    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
     defer coordinator.shutdown(product.port());
     try std.testing.expect(coordinator.begin(product.port(), .check, product.state.generation).accepted);
@@ -542,9 +550,9 @@ test "Office worker publishes only joined verified receipts after owner-thread s
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{};
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, store_root, root, &environment, test_input, test_seed, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
-    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
     defer coordinator.shutdown(product.port());
     try std.testing.expect(coordinator.begin(product.port(), .check, product.state.generation).accepted);
@@ -602,9 +610,9 @@ test "Office cancellation joins a blocked transfer before clearing its exact sta
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{ .blocked = .init(true) };
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, test_seed, null, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
-    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
     defer coordinator.shutdown(product.port());
     _ = coordinator.begin(product.port(), .check, product.state.generation);
@@ -631,9 +639,9 @@ test "Office update and removal keep catalog-pinned versions until the independe
     var environment: std.process.Environ.Map = .init(std.testing.allocator);
     defer environment.deinit();
     var effects: TestEffects = .{};
-    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+    const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, test_seed, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
     defer coordinator.destroy() catch unreachable;
-    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+    coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
     var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
     defer coordinator.shutdown(product.port());
     _ = coordinator.begin(product.port(), .check, product.state.generation);
@@ -682,9 +690,9 @@ test "cold Office cleanup preserves its intent while a version job is unresolved
     // Keep an old version through update, then simulate process exit without
     // replaying or persisting any of its catalog references.
     {
-        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, test_seed, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
         defer coordinator.destroy() catch unreachable;
-        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
         var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
         defer coordinator.shutdown(product.port());
         _ = coordinator.begin(product.port(), .check, product.state.generation);
@@ -703,9 +711,9 @@ test "cold Office cleanup preserves its intent while a version job is unresolved
     var unresolved = try process.ResourceScope.initVersion(retired.install_id);
     defer unresolved.deinit();
     for ([_]bool{ true, false }) |blocked| {
-        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
+        const coordinator = try Coordinator.create(std.testing.allocator, std.testing.io, root, root, &environment, test_input, test_seed, root, .{ .context = &effects, .notify_fn = TestEffects.notify });
         defer coordinator.destroy() catch unreachable;
-        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate } };
+        coordinator.testing = .{ .source = .{ .context = &effects, .read_fn = TestEffects.read }, .validation = .{ .context = &effects, .available_fn = TestEffects.available, .test_fn = TestEffects.validate, .preparation_fn = store_impl.Fixture.prepare } };
         var product: TestPort = .{ .state = model.State.init(try coordinator.configuration()) };
         defer coordinator.shutdown(product.port());
         _ = coordinator.begin(product.port(), .check, product.state.generation);

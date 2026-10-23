@@ -8,6 +8,7 @@ const Input = struct {
     schema: u32,
     protocolRevision: u32,
     target: []const u8,
+    seed: struct { archiveSha256: []const u8, manifestSha256: []const u8, archiveBytes: u64, unpackedBytes: u64, files: usize },
     retained: []const struct {
         archiveSha256: []const u8,
         manifestSha256: []const u8,
@@ -16,7 +17,7 @@ const Input = struct {
         files: usize,
     },
     release: ?struct {
-        url: []const u8,
+        downloadBytes: u64,
         archiveSha256: []const u8,
         manifestSha256: []const u8,
         archiveBytes: u64,
@@ -36,8 +37,14 @@ pub const Parsed = struct {
     pub fn release(self: *const Parsed) !?contract.Release {
         const value = self.raw.value.release orelse return null;
         const accepted_identity = try decodeIdentity(value, self.raw.value.target);
-        const result: contract.Release = .{ .url = value.url, .expected = accepted_identity.expected, .manifest_sha256 = accepted_identity.manifest_sha256 };
+        const result: contract.Release = .{ .expected = accepted_identity.expected, .manifest_sha256 = accepted_identity.manifest_sha256, .seed = try self.seed(), .download_bytes = value.downloadBytes };
         try result.validate();
+        return result;
+    }
+
+    pub fn seed(self: *const Parsed) !contract.Identity {
+        const result = try decodeIdentity(self.raw.value.seed, self.raw.value.target);
+        if (result.expected.archive_bytes > 1024 * 1024 or result.expected.unpacked_bytes > 8 * 1024 * 1024 or result.expected.files > 512) return error.InvalidComponentRelease;
         return result;
     }
 
@@ -69,8 +76,9 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Parsed {
     if (bytes.len > 16 * 1024) return error.InvalidComponentRelease;
     var result: Parsed = .{ .raw = try std.json.parseFromSlice(Input, allocator, bytes, .{ .max_value_len = 2048, .duplicate_field_behavior = .@"error" }) };
     errdefer result.deinit();
-    if (result.raw.value.schema != 1 or result.raw.value.protocolRevision != 1 or
+    if (result.raw.value.schema != 2 or result.raw.value.protocolRevision != 1 or
         !std.mem.eql(u8, result.raw.value.target, "x86_64-windows-msvc")) return error.InvalidComponentRelease;
+    _ = try result.seed();
     const offered = try result.release();
     if (result.raw.value.retained.len > 8) return error.InvalidComponentRelease;
     for (result.raw.value.retained, 0..) |retained, index| {
@@ -84,43 +92,50 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Parsed {
     return result;
 }
 
-test "unpublished Office release has no implicit or development download fallback" {
-    var parsed = try parse(std.testing.allocator, "{\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"retained\":[],\"release\":null}");
-    defer parsed.deinit();
-    try std.testing.expect(try parsed.release() == null);
-    try std.testing.expectError(error.InvalidComponentRelease, parse(std.testing.allocator, "{\"schema\":1,\"protocolRevision\":2,\"target\":\"x86_64-windows-msvc\",\"retained\":[],\"release\":null}"));
-}
-
-test "Office release accepts only the complete bounded main-pinned identity" {
-    const document = "{\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"retained\":[],\"release\":{\"url\":\"https://downloads.example.invalid/office.tar.gz\",\"archiveSha256\":\"" ++ "1" ** 64 ++ "\",\"manifestSha256\":\"" ++ "2" ** 64 ++ "\",\"archiveBytes\":123,\"unpackedBytes\":456,\"files\":7}}";
+test "Office input pins the seed independently of an offered public installation" {
+    const document = @embedFile("office_component_archive_fixtures/install-input.json");
     var parsed = try parse(std.testing.allocator, document);
     defer parsed.deinit();
-    const release = (try parsed.release()).?;
-    try std.testing.expectEqual(@as(u64, 123), release.expected.archive_bytes);
-    try std.testing.expectEqual(@as(usize, 7), release.expected.files);
-    for ([_][]const u8{ "http://example.invalid/office", "https:///office", "https://user:password@example.invalid/office", "https://example.invalid/office?token=abc", "https://example.invalid/office#fragment" }) |url| {
-        var rejected = release;
-        rejected.url = url;
-        try std.testing.expectError(error.InvalidComponentRelease, rejected.validate());
-    }
-    var rejected = release;
-    rejected.expected.archive_bytes = 801 * 1024 * 1024;
-    try std.testing.expectError(error.InvalidComponentRelease, rejected.validate());
-    rejected = release;
-    rejected.manifest_sha256 = @splat(0);
-    try std.testing.expectError(error.InvalidComponentRelease, rejected.validate());
-    try std.testing.expectError(error.DuplicateField, parse(std.testing.allocator, "{\"schema\":1,\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"retained\":[],\"release\":null}"));
+    const offered = (try parsed.release()).?;
+    try std.testing.expectEqual(@as(u64, 268), offered.download_bytes);
+    try std.testing.expectEqual(@as(u64, 268), offered.expected.archive_bytes);
+    try std.testing.expect(try parsed.accepted(offered.expected.sha256) != null);
+    var invalid = offered;
+    invalid.seed.expected.archive_bytes = 1024 * 1024 + 1;
+    try std.testing.expectError(error.InvalidComponentRelease, invalid.validate());
+    invalid = offered;
+    invalid.download_bytes = 0;
+    try std.testing.expectError(error.InvalidComponentRelease, invalid.validate());
+    try std.testing.expectError(error.MissingField, parse(std.testing.allocator, "{\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"release\":null,\"retained\":[]}"));
 }
 
-test "retained Office identities authorize only exact installed records and never offer an old download" {
-    const retained = "{\"archiveSha256\":\"" ++ "3" ** 64 ++ "\",\"manifestSha256\":\"" ++ "4" ** 64 ++ "\",\"archiveBytes\":100,\"unpackedBytes\":300,\"files\":2}";
-    const prefix = "{\"schema\":1,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"release\":null,\"retained\":[";
-    var parsed = try parse(std.testing.allocator, prefix ++ retained ++ "]}");
+test "an unpublished Office input never offers an implicit download" {
+    const document = "{\"schema\":2,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"seed\":{\"archiveSha256\":\"" ++ "1" ** 64 ++ "\",\"manifestSha256\":\"" ++ "2" ** 64 ++ "\",\"archiveBytes\":123,\"unpackedBytes\":456,\"files\":2},\"release\":null,\"retained\":[]}";
+    var parsed = try parse(std.testing.allocator, document);
     defer parsed.deinit();
     try std.testing.expect(try parsed.release() == null);
-    const accepted = (try parsed.accepted(@splat(0x33))).?;
-    try std.testing.expectEqual(@as([32]u8, @splat(0x44)), accepted.manifest_sha256);
+    try std.testing.expect(try parsed.accepted(@splat(1)) == null);
+}
+
+test "retained identities accept exact current records without offering an old download" {
+    const allocator = std.testing.allocator;
+    var fixture = try parse(allocator, @embedFile("office_component_archive_fixtures/install-input.json"));
+    defer fixture.deinit();
+    const seed_json = try std.json.Stringify.valueAlloc(allocator, fixture.raw.value.seed, .{});
+    defer allocator.free(seed_json);
+    const retained = "{\"archiveSha256\":\"" ++ "3" ** 64 ++ "\",\"manifestSha256\":\"" ++ "4" ** 64 ++ "\",\"archiveBytes\":100,\"unpackedBytes\":300,\"files\":2}";
+    const template = "{{\"schema\":2,\"protocolRevision\":1,\"target\":\"x86_64-windows-msvc\",\"seed\":{s},\"release\":null,\"retained\":[{s}]}}";
+    const document = try std.fmt.allocPrint(allocator, template, .{ seed_json, retained });
+    defer allocator.free(document);
+    var parsed = try parse(allocator, document);
+    defer parsed.deinit();
+    try std.testing.expect(try parsed.release() == null);
+    try std.testing.expectEqual(@as([32]u8, @splat(0x44)), (try parsed.accepted(@splat(0x33))).?.manifest_sha256);
     try std.testing.expect(try parsed.accepted(@splat(0x55)) == null);
-    try std.testing.expectError(error.InvalidComponentRelease, parse(std.testing.allocator, prefix ++ retained ++ "," ++ retained ++ "]}"));
-    try std.testing.expectError(error.UnknownField, parse(std.testing.allocator, prefix ++ "{\"url\":\"https://example.invalid/old\",\"archiveSha256\":\"" ++ "3" ** 64 ++ "\",\"manifestSha256\":\"" ++ "4" ** 64 ++ "\",\"archiveBytes\":100,\"unpackedBytes\":300,\"files\":2}]}"));
+    const duplicate = try std.fmt.allocPrint(allocator, template, .{ seed_json, retained ++ "," ++ retained });
+    defer allocator.free(duplicate);
+    try std.testing.expectError(error.InvalidComponentRelease, parse(allocator, duplicate));
+    const unknown = try std.fmt.allocPrint(allocator, template, .{ seed_json, "{\"url\":\"https://example.invalid/old\"," ++ retained[1..] });
+    defer allocator.free(unknown);
+    try std.testing.expectError(error.UnknownField, parse(allocator, unknown));
 }

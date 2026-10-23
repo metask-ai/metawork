@@ -1,7 +1,14 @@
 {
-  "schema": 1,
+  "schema": 2,
   "protocolRevision": 1,
   "target": "x86_64-windows-msvc",
+  "seed": {
+    "archiveSha256": "33c53f7fa9aeca4ace8e836c059bc603de7af601fbd611c79686a5bdf8879569",
+    "manifestSha256": "85b98ce1291ee9cc3c188d3a3f1ae48b661fec09de268eaab13f3bc0f6ec8cb6",
+    "archiveBytes": 677138,
+    "unpackedBytes": 4163881,
+    "files": 193
+  },
   "release": null,
   "retained": []
 }

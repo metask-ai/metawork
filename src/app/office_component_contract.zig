@@ -18,9 +18,10 @@ pub const Identity = struct {
 };
 
 pub const Release = struct {
-    url: []const u8,
     expected: archive.Expected,
     manifest_sha256: [32]u8,
+    seed: Identity,
+    download_bytes: u64,
 
     pub fn identity(self: Release) Identity {
         return .{ .expected = self.expected, .manifest_sha256 = self.manifest_sha256 };
@@ -28,10 +29,28 @@ pub const Release = struct {
 
     pub fn validate(self: Release) !void {
         try self.identity().validate();
-        const uri = std.Uri.parse(self.url) catch return error.InvalidComponentRelease;
-        if (self.url.len > 2048 or !std.ascii.eqlIgnoreCase(uri.scheme, "https") or uri.host == null or uri.host.?.isEmpty() or
+        try self.seed.validate();
+        if (self.seed.expected.archive_bytes > 1024 * 1024 or self.seed.expected.unpacked_bytes > 8 * 1024 * 1024 or
+            self.seed.expected.files > 512 or self.download_bytes == 0 or self.download_bytes > 800 * 1024 * 1024) return error.InvalidComponentRelease;
+    }
+};
+
+pub const Digest = union(enum) { sha256: [32]u8, sha512: [64]u8 };
+
+pub const Source = struct {
+    url: []const u8,
+    bytes: u64,
+    digest: Digest,
+
+    pub fn validate(self: Source) !void {
+        const uri = std.Uri.parse(self.url) catch return error.InvalidComponentSource;
+        if (self.bytes == 0 or self.bytes > 512 * 1024 * 1024 or self.url.len > 2048 or
+            !std.ascii.eqlIgnoreCase(uri.scheme, "https") or uri.host == null or uri.host.?.isEmpty() or
             uri.user != null or uri.password != null or uri.fragment != null or uri.query != null)
-            return error.InvalidComponentRelease;
-        for (self.url) |character| if (std.ascii.isControl(character)) return error.InvalidComponentRelease;
+            return error.InvalidComponentSource;
+        for (self.url) |character| if (std.ascii.isControl(character) or character == ' ') return error.InvalidComponentSource;
+        switch (self.digest) {
+            inline else => |bytes| if (std.mem.allEqual(u8, &bytes, 0)) return error.InvalidComponentSource,
+        }
     }
 };

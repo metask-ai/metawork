@@ -7,9 +7,13 @@ const archive = @import("office_component_archive.zig");
 const process = @import("office_process");
 const platform = @import("office_component_windows");
 const python_zip = @import("office_python_archive.zig");
+const install_plan = @import("office_install_plan.zig");
 
 pub const Release = @import("office_component_contract.zig").Release;
 pub const Identity = @import("office_component_contract.zig").Identity;
+pub const release_input = @import("office_component_release.zig");
+pub const public_download = @import("office_component_download.zig");
+pub const Source = @import("office_component_contract.zig").Source;
 pub const BootstrapExpected = python_zip.Expected;
 pub const BootstrapSummary = python_zip.Summary;
 
@@ -56,7 +60,7 @@ pub const Observer = struct {
 
 pub const Download = struct {
     context: ?*anyopaque = null,
-    read_fn: *const fn (?*anyopaque, std.mem.Allocator, std.Io, Release, *std.Io.Writer, *const process.Cancellation) anyerror!void,
+    read_fn: *const fn (?*anyopaque, std.mem.Allocator, std.Io, Source, *std.Io.Writer, *const process.Cancellation) anyerror!void,
 };
 
 pub const ValidationResult = enum { ready, rejected, cleanup_incomplete };
@@ -67,6 +71,7 @@ pub const Validation = struct {
     operation_identity: ?[16]u8 = null,
     available_fn: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror!u64 = available,
     test_fn: ?*const fn (?*anyopaque, std.mem.Allocator, std.Io, ValidationStage, Identity, []const u8, []const u8, *const process.Cancellation) ValidationResult = null,
+    preparation_fn: if (builtin.is_test) ?*const fn (std.mem.Allocator, std.Io, std.Io.Dir, Release) anyerror!void else void = if (builtin.is_test) null else {},
 
     fn available(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) !u64 {
         return platform.availableBytes(allocator, path);
@@ -322,15 +327,15 @@ pub const Store = struct {
         }
     }
 
-    pub fn install(self: *Store, release: Release, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation) !Receipt {
+    pub fn install(self: *Store, release: Release, seed_bytes: []const u8, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation) !Receipt {
         try release.validate();
         if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.UnsupportedComponentTarget;
         if (try self.readRecord("pending.json") != null) return error.ComponentRecoveryRequired;
         _ = try self.current(); // corruption cannot be overwritten by installation
         try observer.update(cancellation, .{ .phase = .preparing });
-        const reserve: u64 = 64 * 1024 * 1024;
+        const reserve: u64 = 512 * 1024 * 1024;
         const space = try validation.available_fn(validation.context, self.allocator, self.root);
-        if (space < release.expected.archive_bytes + release.expected.unpacked_bytes + reserve) return error.InsufficientComponentSpace;
+        if (space < 2 * release.download_bytes + release.expected.unpacked_bytes + reserve) return error.InsufficientComponentSpace;
         const record = try self.preparePending(release.expected.sha256);
         const stage_name = std.fmt.bytesToHex(record.install_id, .lower);
         const stage_path = try std.fs.path.join(self.allocator, &.{ self.root, "staging", &stage_name });
@@ -338,7 +343,7 @@ pub const Store = struct {
         var stage_owned = false;
         var published = false;
         var preserve = false;
-        return self.perform(release, source, validation, observer, cancellation, record, &stage_name, stage_path, &stage_owned, &published, &preserve) catch |failure| {
+        return self.perform(release, seed_bytes, source, validation, observer, cancellation, record, &stage_name, stage_path, &stage_owned, &published, &preserve) catch |failure| {
             if (!preserve) {
                 if (stage_owned) try removeDirectory(self.io, self.stages, &stage_name);
                 if (published) {
@@ -426,7 +431,7 @@ pub const Store = struct {
         return record;
     }
 
-    fn perform(self: *Store, release: Release, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, record: Record, stage_name: []const u8, stage_path: []const u8, stage_owned: *bool, published: *bool, preserve: *bool) !Receipt {
+    fn perform(self: *Store, release: Release, seed_bytes: []const u8, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation, record: Record, stage_name: []const u8, stage_path: []const u8, stage_owned: *bool, published: *bool, preserve: *bool) !Receipt {
         var scoped = validation;
         scoped.operation_identity = record.install_id;
         try self.stages.createDir(self.io, stage_name, .default_dir);
@@ -434,32 +439,70 @@ pub const Store = struct {
         const stage = try self.stages.openDir(self.io, stage_name, .{ .follow_symlinks = false });
         var stage_open = true;
         defer if (stage_open) stage.close(self.io);
-        {
-            const file = try stage.createFile(self.io, "archive.tar.gz", .{ .read = true, .exclusive = true });
-            defer file.close(self.io);
-            var sink: DownloadSink = .{ .file = file, .io = self.io, .limit = release.expected.archive_bytes, .observer = observer, .cancellation = cancellation };
-            sink.writer.buffer = &sink.buffer;
-            try observer.update(cancellation, .{ .phase = .downloading, .total = release.expected.archive_bytes });
-            source.read_fn(source.context, self.allocator, self.io, release, &sink.writer, cancellation) catch |failure| return sink.problem orelse failure;
-            sink.writer.flush() catch |failure| return sink.problem orelse failure;
-            if (sink.bytes != release.expected.archive_bytes) return error.ComponentDownloadSize;
-            if (!std.mem.eql(u8, &sink.digest.finalResult(), &release.expected.sha256)) return error.ComponentDownloadDigest;
-            try file.sync(self.io);
-            if (try validation.available_fn(validation.context, self.allocator, self.root) < release.expected.unpacked_bytes + 64 * 1024 * 1024)
-                return error.InsufficientComponentSpace;
-            try observer.update(cancellation, .{ .phase = .unpacking });
-            var state: ContentsObserver = .{ .observer = observer, .cancellation = cancellation, .expected = release.expected.unpacked_bytes };
-            var buffer: [64 * 1024]u8 = undefined;
-            var input = file.reader(self.io, &buffer);
-            const summary = try archive.unpack(self.allocator, self.io, &input.interface, stage, "component", release.expected, .{}, .{ .context = &state, .observe_fn = ContentsObserver.update });
-            if (!std.mem.eql(u8, &summary.manifest_sha256, &release.manifest_sha256)) return error.ComponentManifestIdentity;
-        }
-        try observer.update(cancellation, .{ .phase = .verifying });
-        try stage.createDir(self.io, "scratch", .default_dir);
         const component = try std.fs.path.join(self.allocator, &.{ stage_path, "component" });
         defer self.allocator.free(component);
         const scratch = try std.fs.path.join(self.allocator, &.{ stage_path, "scratch" });
         defer self.allocator.free(scratch);
+        {
+            var seed_input: std.Io.Reader = .fixed(seed_bytes);
+            const seed_summary = try archive.unpack(self.allocator, self.io, &seed_input, stage, "seed", release.seed.expected, .{ .compressed_bytes = 1024 * 1024, .unpacked_bytes = 8 * 1024 * 1024, .member_bytes = 1024 * 1024, .members = 512, .manifest_bytes = 128 * 1024 }, .{ .context = @constCast(cancellation), .observe_fn = seedObservation });
+            if (!std.mem.eql(u8, &seed_summary.manifest_sha256, &release.seed.manifest_sha256)) return error.ComponentManifestIdentity;
+            const seed = try stage.openDir(self.io, "seed", .{ .follow_symlinks = false });
+            defer seed.close(self.io);
+            var plan = try install_plan.read(self.allocator, self.io, seed, release);
+            defer plan.deinit(self.allocator);
+            const downloads = try childDirectory(self.io, stage, "downloads");
+            defer downloads.close(self.io);
+            var completed: u64 = 0;
+            for (plan.entries) |entry| {
+                if (std.fs.path.dirname(entry.path)) |parent| try downloads.createDirPath(self.io, parent);
+                const file = try downloads.createFile(self.io, entry.path, .{ .exclusive = true, .resolve_beneath = true });
+                defer file.close(self.io);
+                var sink: DownloadSink = .{ .file = file, .io = self.io, .limit = entry.source.bytes, .offset = completed, .total = release.download_bytes, .observer = observer, .cancellation = cancellation };
+                sink.writer.buffer = &sink.buffer;
+                try observer.update(cancellation, .{ .phase = .downloading, .bytes = completed, .total = release.download_bytes });
+                source.read_fn(source.context, self.allocator, self.io, entry.source, &sink.writer, cancellation) catch |failure| return sink.problem orelse failure;
+                sink.writer.flush() catch |failure| return sink.problem orelse failure;
+                if (sink.bytes != entry.source.bytes) return error.ComponentDownloadSize;
+                const matches = switch (entry.source.digest) {
+                    .sha256 => |hash| std.mem.eql(u8, &sink.digest.finalResult(), &hash),
+                    .sha512 => |hash| std.mem.eql(u8, &sink.digest512.finalResult(), &hash),
+                };
+                if (!matches) return error.ComponentDownloadDigest;
+                try file.sync(self.io);
+                completed += sink.bytes;
+            }
+            try observer.update(cancellation, .{ .phase = .downloading, .bytes = completed, .total = release.download_bytes });
+            if (try validation.available_fn(validation.context, self.allocator, self.root) < release.expected.unpacked_bytes + release.download_bytes + 512 * 1024 * 1024)
+                return error.InsufficientComponentSpace;
+            try observer.update(cancellation, .{ .phase = .unpacking });
+            try stage.createDir(self.io, "scratch", .default_dir);
+            if (builtin.is_test and validation.preparation_fn != null) {
+                try validation.preparation_fn.?(self.allocator, self.io, stage, release);
+            } else {
+                const bootstrap = plan.entries[plan.bootstrap];
+                var file = try downloads.openFile(self.io, bootstrap.path, .{ .follow_symlinks = false, .resolve_beneath = true });
+                defer file.close(self.io);
+                if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+                var buffer: [64 * 1024]u8 = undefined;
+                var input = file.reader(self.io, &buffer);
+                _ = try prepareBootstrapPython(self.allocator, self.io, &input.interface, stage, stage_path, .{ .sha256 = bootstrap.source.digest.sha256, .bytes = bootstrap.source.bytes }, cancellation);
+                var result = selftestOutput(process.run(self.allocator, self.io, stage_path, .{ .bootstrap = .{ .component_manifest_sha256 = release.manifest_sha256, .seed_manifest_sha256 = release.seed.manifest_sha256 } }, .{ .parent_environment = validation.parent_environment orelse return error.InvalidComponentEnvironment, .scratch_root = scratch, .operation = .{ .create = record.install_id } }, 900_000, cancellation)) catch |failure| {
+                    if (failure == error.ComponentProcessesOutstanding) preserve.* = true;
+                    return failure;
+                };
+                defer result.deinit(self.allocator);
+                if (cancellation.requested.load(.acquire)) return error.Cancelled;
+                if (result.term != .exited or result.term.exited != 0) return error.ComponentAssemblyFailed;
+            }
+        }
+        try observer.update(cancellation, .{ .phase = .verifying });
+        const assembled = try stage.openDir(self.io, "component", .{ .iterate = true, .follow_symlinks = false });
+        {
+            defer assembled.close(self.io);
+            var state: ContentsObserver = .{ .observer = observer, .cancellation = cancellation, .expected = release.expected.unpacked_bytes, .phase = .verifying };
+            _ = try archive.verifyInstalled(self.allocator, self.io, assembled, release.expected, release.manifest_sha256, .{}, .{ .context = &state, .observe_fn = ContentsObserver.update });
+        }
         try observer.update(cancellation, .{ .phase = .testing });
         // Windows can retain a directory after code from it has executed.
         // Authenticate staged bytes first; execute only at the final candidate
@@ -547,6 +590,11 @@ pub const Store = struct {
     }
 };
 
+fn seedObservation(context: ?*anyopaque, _: archive.Progress) bool {
+    const cancellation: *const process.Cancellation = @ptrCast(@alignCast(context.?));
+    return !cancellation.requested.load(.acquire);
+}
+
 const Fault = enum { none, before_current_rename, after_current_rename, before_current_delete, after_current_delete };
 
 fn retiredName(record: Record, buffer: *[45]u8) []const u8 {
@@ -575,11 +623,14 @@ const DownloadSink = struct {
     file: std.Io.File,
     io: std.Io,
     limit: u64,
+    offset: u64,
+    total: u64,
     bytes: u64 = 0,
     observer: Observer,
     cancellation: *const process.Cancellation,
     problem: ?anyerror = null,
     digest: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    digest512: std.crypto.hash.sha2.Sha512 = .init(.{}),
     buffer: [32 * 1024]u8 = undefined,
     writer: std.Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
 
@@ -605,10 +656,11 @@ const DownloadSink = struct {
     }
 
     fn write(self: *DownloadSink, chunk: []const u8) !void {
-        try self.observer.update(self.cancellation, .{ .phase = .downloading, .bytes = self.bytes, .total = self.limit });
+        try self.observer.update(self.cancellation, .{ .phase = .downloading, .bytes = self.offset + self.bytes, .total = self.total });
         if (chunk.len > self.limit -| self.bytes) return error.ComponentDownloadSize;
         try self.file.writeStreamingAll(self.io, chunk);
         self.digest.update(chunk);
+        self.digest512.update(chunk);
         self.bytes += chunk.len;
     }
 };
@@ -671,44 +723,50 @@ fn verifyPe(io: std.Io, path: []const u8) !void {
         std.mem.readInt(u16, pe[4..6], .little) != 0x8664) return error.InvalidComponentPe;
 }
 
-const Fixture = struct {
+pub const Fixture = struct {
     data: []const u8 = @embedFile("office_component_archive_fixtures/valid.tar.gz"),
-    space: u64 = 128 * 1024 * 1024,
+    space: u64 = 1024 * 1024 * 1024,
     validation: ValidationResult = .ready,
     validations: usize = 0,
+    downloads: usize = 0,
+    corrupt_sha512: bool = false,
     reject_on_validation: usize = 0,
     stop_phase: ?Phase = null,
     gate: bool = true,
     cancel_on_gate: ?*process.Cancellation = null,
 
     fn release() !Release {
-        const Metadata = struct { archive_bytes: u64, sha256: []const u8, unpacked_bytes: u64, files: usize, target: []const u8 };
-        const raw = try std.json.parseFromSlice(Metadata, std.testing.allocator, @embedFile("office_component_archive_fixtures/valid.json"), .{});
-        defer raw.deinit();
-        var hash: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&hash, raw.value.sha256);
-        var manifest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(@embedFile("office_component_archive_fixtures/valid.manifest.json"), &manifest, .{});
-        return .{ .url = "https://example.invalid/office.tar.gz", .manifest_sha256 = manifest, .expected = .{
-            .sha256 = hash,
-            .archive_bytes = raw.value.archive_bytes,
-            .unpacked_bytes = raw.value.unpacked_bytes,
-            .files = raw.value.files,
-            .target = "x86_64-windows-msvc",
-        } };
+        var input = try @import("office_component_release.zig").parse(std.testing.allocator, @embedFile("office_component_archive_fixtures/install-input.json"));
+        defer input.deinit();
+        return (try input.release()).?;
+    }
+
+    pub fn prepare(allocator: std.mem.Allocator, io: std.Io, stage: std.Io.Dir, offered: Release) !void {
+        var file = try stage.openFile(io, "downloads/runtime.tar.gz", .{ .follow_symlinks = false, .resolve_beneath = true });
+        defer file.close(io);
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+        var buffer: [4096]u8 = undefined;
+        var input = file.reader(io, &buffer);
+        _ = try archive.unpack(allocator, io, &input.interface, stage, "component", offered.expected, .{}, .{});
     }
 
     fn download(self: *Fixture) Download {
         return .{ .context = self, .read_fn = read };
     }
     fn platformValidation(self: *Fixture) Validation {
-        return .{ .context = self, .available_fn = available, .test_fn = validate };
+        return .{ .context = self, .available_fn = available, .test_fn = validate, .preparation_fn = prepare };
     }
     fn observer(self: *Fixture) Observer {
         return .{ .context = self, .observe_fn = progress, .activate_fn = activate };
     }
-    fn read(context: ?*anyopaque, _: std.mem.Allocator, io: std.Io, _: Release, writer: *std.Io.Writer, _: *const process.Cancellation) !void {
+    fn read(context: ?*anyopaque, _: std.mem.Allocator, io: std.Io, source: Source, writer: *std.Io.Writer, _: *const process.Cancellation) !void {
         const self: *Fixture = @ptrCast(@alignCast(context.?));
+        self.downloads += 1;
+        if (self.corrupt_sha512 and source.digest == .sha512) {
+            try writer.writeAll(self.data[0 .. self.data.len - 1]);
+            try writer.writeByte('!');
+            return;
+        }
         var temporary = std.testing.tmpDir(.{});
         defer temporary.cleanup();
         const file = try temporary.dir.createFile(io, "source", .{ .read = true });
@@ -744,6 +802,60 @@ const Fixture = struct {
     }
 };
 
+test "public install verifies SHA512 sources and reports aggregate progress" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    var input = try release_input.parse(std.testing.allocator, @embedFile("office_component_archive_fixtures/install-sha512-input.json"));
+    defer input.deinit();
+    const release = (try input.release()).?;
+    const cancellation: process.Cancellation = .{};
+    const ProgressProbe = struct {
+        previous: u64 = 0,
+        expected: u64,
+        complete: bool = false,
+        fn observe(context: ?*anyopaque, value: Progress) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (value.phase != .downloading) return true;
+            if (value.total != self.expected or value.bytes < self.previous or value.bytes > value.total) return false;
+            self.previous = value.bytes;
+            self.complete = value.bytes == value.total;
+            return true;
+        }
+    };
+    var progress: ProgressProbe = .{ .expected = release.download_bytes };
+    const receipt = try store.install(release, @embedFile("office_component_archive_fixtures/install-sha512-seed.tar.gz"), fixture.download(), fixture.platformValidation(), .{ .context = &progress, .observe_fn = ProgressProbe.observe }, &cancellation);
+    try std.testing.expectEqual(@as(usize, 2), fixture.downloads);
+    try std.testing.expect(progress.complete);
+    try std.testing.expectEqual(release.download_bytes, progress.previous);
+    fixture.corrupt_sha512 = true;
+    try std.testing.expectError(error.ComponentDownloadDigest, store.install(release, @embedFile("office_component_archive_fixtures/install-sha512-seed.tar.gz"), fixture.download(), fixture.platformValidation(), .{}, &cancellation));
+    try std.testing.expectEqual(@as(usize, 4), fixture.downloads);
+    try std.testing.expect((try store.current()).?.eql(receipt.record));
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+}
+
+test "untrusted installation seed never grants network or execution authority" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    var fixture: Fixture = .{};
+    const cancellation: process.Cancellation = .{};
+    var release = try Fixture.release();
+    release.seed.expected.sha256[0] ^= 1;
+    try std.testing.expectError(error.ComponentDigest, store.install(release, @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), .{}, &cancellation));
+    release = try Fixture.release();
+    release.seed.manifest_sha256[0] ^= 1;
+    try std.testing.expectError(error.ComponentManifestIdentity, store.install(release, @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), .{}, &cancellation));
+    try std.testing.expectEqual(@as(usize, 0), fixture.downloads);
+    try std.testing.expectEqual(@as(usize, 0), fixture.validations);
+    try std.testing.expect(try store.current() == null);
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+}
+
 fn fixtureStore(temporary: *std.testing.TmpDir) !Store {
     const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
@@ -761,7 +873,7 @@ test "Office runtime validation runs at its final candidate path before current 
         runtime_calls: usize = 0,
 
         fn available(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) !u64 {
-            return 128 * 1024 * 1024;
+            return 1024 * 1024 * 1024;
         }
         fn validate(context: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, stage: ValidationStage, identity: Identity, path: []const u8, scratch: []const u8, cancellation: *const process.Cancellation) ValidationResult {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -778,7 +890,7 @@ test "Office runtime validation runs at its final candidate path before current 
     };
     var probe: Probe = .{ .store = &store };
     const cancellation: process.Cancellation = .{};
-    const receipt = try store.install(try Fixture.release(), probe.fixture.download(), .{ .context = &probe, .available_fn = Probe.available, .test_fn = Probe.validate }, .{}, &cancellation);
+    const receipt = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), probe.fixture.download(), .{ .context = &probe, .available_fn = Probe.available, .test_fn = Probe.validate, .preparation_fn = Fixture.prepare }, .{}, &cancellation);
     try std.testing.expectEqual(@as(usize, 1), probe.runtime_calls);
     try std.testing.expectEqual(@as(usize, 2), probe.fixture.validations);
     try std.testing.expect((try store.current()).?.eql(receipt.record));
@@ -791,7 +903,7 @@ test "Office installation commits an independent version and current record only
     defer store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const receipt = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const receipt = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     try std.testing.expect(!receipt.cleanup_pending);
     try std.testing.expectEqual(@as(usize, 2), fixture.validations);
     try std.testing.expect((try store.current()).?.eql(receipt.record));
@@ -829,8 +941,8 @@ test "Office retirement intents survive restart without persisting catalog refer
     defer if (opened) store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const old = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
-    const updated = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const old = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const updated = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     try std.testing.expect(updated.cleanup_pending);
     try std.testing.expectEqual(@as(usize, 1), (try store.retirements()).count);
     try store.versions.createDir(std.testing.io, "unregistered", .default_dir);
@@ -855,7 +967,7 @@ test "Office removal commits a detached current while catalog-held bytes wait fo
     defer store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const installed = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const installed = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     fixture.gate = false;
     try std.testing.expectError(error.Cancelled, store.removeCurrent(installed.record, fixture.observer(), &cancellation));
     try std.testing.expect((try store.current()).?.eql(installed.record));
@@ -883,7 +995,7 @@ test "Office cleanup rejects conflicting intent identities and preserves current
     defer store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const installed = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const installed = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     var conflict = installed.record;
     conflict.archive_sha256[0] ^= 1;
     try store.enqueueRetirement(conflict);
@@ -903,12 +1015,12 @@ test "Office cancel across download unpack validation publication and activation
     const cancellation: process.Cancellation = .{};
     for ([_]Phase{ .preparing, .downloading, .unpacking, .verifying, .testing, .publishing, .finalizing, .activating }) |phase| {
         var fixture: Fixture = .{ .stop_phase = phase };
-        try std.testing.expectError(error.Cancelled, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+        try std.testing.expectError(error.Cancelled, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
         try std.testing.expect(try store.current() == null);
         try std.testing.expect(try store.readRecord("pending.json") == null);
     }
     var fixture: Fixture = .{ .gate = false };
-    try std.testing.expectError(error.Cancelled, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.Cancelled, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expect(try store.current() == null);
 }
 
@@ -919,7 +1031,7 @@ test "Office committed installation wins a later cancel and does not roll back c
     defer store.deinit();
     var cancellation: process.Cancellation = .{};
     var fixture: Fixture = .{ .cancel_on_gate = &cancellation };
-    const receipt = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const receipt = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     try std.testing.expect(cancellation.requested.load(.acquire));
     try std.testing.expect((try store.current()).?.eql(receipt.record));
 }
@@ -932,15 +1044,16 @@ test "Office download and manifest identities fail before execution or activatio
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
     var release = try Fixture.release();
-    release.expected.sha256[0] ^= 1;
-    try std.testing.expectError(error.ComponentDownloadDigest, store.install(release, fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    fixture.data = @embedFile("office_component_archive_fixtures/valid.tar.gz")[0..267] ++ "!";
+    try std.testing.expectError(error.ComponentDownloadDigest, store.install(release, @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    fixture.data = @embedFile("office_component_archive_fixtures/valid.tar.gz");
     release = try Fixture.release();
     release.manifest_sha256[0] ^= 1;
-    try std.testing.expectError(error.ComponentManifestIdentity, store.install(release, fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentManifestIdentity, store.install(release, @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     fixture.data = fixture.data[0 .. fixture.data.len - 1];
-    try std.testing.expectError(error.ComponentDownloadSize, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentDownloadSize, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     fixture.data = @embedFile("office_component_archive_fixtures/valid.tar.gz") ++ "extra";
-    try std.testing.expectError(error.ComponentDownloadSize, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentDownloadSize, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expectEqual(@as(usize, 0), fixture.validations);
     try std.testing.expect(try store.current() == null);
     try std.testing.expect(try store.readRecord("pending.json") == null);
@@ -953,16 +1066,16 @@ test "Office failed update retains old version and current while unknown commit 
     defer store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const old = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const old = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     store.fault = .before_current_rename;
-    try std.testing.expectError(error.ComponentWriteFailed, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentWriteFailed, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expect((try store.current()).?.eql(old.record));
     store.fault = .after_current_rename;
-    try std.testing.expectError(error.ComponentCommitUnknown, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentCommitUnknown, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     const adopted = (try store.current()).?;
     try std.testing.expect(!adopted.eql(old.record));
     try std.testing.expect(try store.readRecord("pending.json") != null);
-    try std.testing.expectError(error.ComponentRecoveryRequired, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentRecoveryRequired, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     store.fault = .none;
     try store.recover();
     try std.testing.expect((try store.current()).?.eql(adopted));
@@ -981,7 +1094,7 @@ test "Office uncertain process cleanup preserves its journal until the caller pr
     defer store.deinit();
     var fixture: Fixture = .{ .validation = .cleanup_incomplete };
     const cancellation: process.Cancellation = .{};
-    try std.testing.expectError(error.ComponentProcessesOutstanding, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentProcessesOutstanding, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expect(try store.readRecord("pending.json") != null);
     try std.testing.expect(try store.current() == null);
     try store.recover();
@@ -1015,18 +1128,18 @@ test "Office space and validation rejection do not adopt resources, and corrupt 
     defer store.deinit();
     const cancellation: process.Cancellation = .{};
     var fixture: Fixture = .{ .space = 1 };
-    try std.testing.expectError(error.InsufficientComponentSpace, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
-    fixture.space = 128 * 1024 * 1024;
+    try std.testing.expectError(error.InsufficientComponentSpace, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    fixture.space = 1024 * 1024 * 1024;
     fixture.validation = .rejected;
-    try std.testing.expectError(error.ComponentValidationFailed, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentValidationFailed, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expect(try store.readRecord("pending.json") == null);
     fixture.validation = .ready;
     fixture.reject_on_validation = fixture.validations + 2;
-    try std.testing.expectError(error.ComponentValidationFailed, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentValidationFailed, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expect(try store.current() == null);
     try std.testing.expect(try store.readRecord("pending.json") == null);
     try store.directory.writeFile(std.testing.io, .{ .sub_path = "current.json", .data = "{broken" });
-    try std.testing.expectError(error.ComponentStoreCorrupt, store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
+    try std.testing.expectError(error.ComponentStoreCorrupt, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
     try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
 }
 
@@ -1047,7 +1160,7 @@ test "component recovery rejects conflicting identities for the same current dir
     defer store.deinit();
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
-    const receipt = try store.install(try Fixture.release(), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const receipt = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     var conflict = receipt.record;
     conflict.archive_sha256[0] ^= 1;
     try store.writeRecord("pending", conflict);
@@ -1067,7 +1180,7 @@ test "current Office validation uses only main identity and journals private sel
     var fixture: Fixture = .{};
     const cancellation: process.Cancellation = .{};
     const release = try Fixture.release();
-    const installed = try store.install(release, fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
+    const installed = try store.install(release, @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
     const checked = try store.verifyCurrent(release.identity(), installed.record, fixture.platformValidation(), fixture.observer(), &cancellation);
     try std.testing.expect(!checked.cleanup_pending);
     try std.testing.expect(checked.record.eql(installed.record));

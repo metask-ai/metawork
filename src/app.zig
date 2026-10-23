@@ -768,6 +768,7 @@ pub fn run(init: std.process.Init) !void {
             paths_state.dataDir(),
             init.environ_map,
             @import("office_release_input").json,
+            @import("office_release_input").seed_archive,
             builtin_skill_root,
             .{ .context = &app.platform, .notify_fn = notifyOfficeComponent },
         );

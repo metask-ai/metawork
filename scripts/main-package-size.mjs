@@ -31,9 +31,9 @@ export function verifyMainPackageSize(targetId, artifactPath) {
 }
 
 export function verifyMainPackageStage(directory) {
-  // Office is an optional download. These interpreters, libraries and Skill
-  // trees must never enter the lightweight application stage, even if their
-  // compressed bytes happen to fit the installer budget.
+  // Heavy Office dependencies remain optional downloads. Expanded Skill trees
+  // are forbidden here; the separately pinned, bounded self-owned seed is
+  // embedded by the build and still counts toward the whole installer budget.
   const forbidden =
     /^(?:node_modules|node(?:\.exe)?|python(?:[0-9.]*|w)?(?:\.exe)?|python[0-9]+\.dll|libpython.*|soffice(?:\.exe|\.bin)?|libreoffice.*|docx|xlsx|pptx)$|\.(?:whl|pyd)$/iu;
   let files = 0;

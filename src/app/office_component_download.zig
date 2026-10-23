@@ -11,7 +11,7 @@ pub fn source() store.Download {
 const Attempt = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    release: store.Release,
+    source: store.Source,
     writer: *std.Io.Writer,
     cancellation: *const process.Cancellation,
     started: std.Io.Timestamp,
@@ -20,7 +20,7 @@ const Attempt = struct {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
         const response = try client.fetch(.{
-            .location = .{ .url = self.release.url },
+            .location = .{ .url = self.source.url },
             .method = .GET,
             .redirect_behavior = .unhandled,
             .response_writer = self.writer,
@@ -39,10 +39,10 @@ const Attempt = struct {
     }
 };
 
-fn read(_: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, release: store.Release, writer: *std.Io.Writer, cancellation: *const process.Cancellation) !void {
-    try release.validate();
+fn read(_: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, source_input: store.Source, writer: *std.Io.Writer, cancellation: *const process.Cancellation) !void {
+    try source_input.validate();
     if (cancellation.requested.load(.acquire)) return error.Cancelled;
-    var attempt: Attempt = .{ .allocator = allocator, .io = io, .release = release, .writer = writer, .cancellation = cancellation, .started = .now(io, .awake) };
+    var attempt: Attempt = .{ .allocator = allocator, .io = io, .source = source_input, .writer = writer, .cancellation = cancellation, .started = .now(io, .awake) };
     const Event = union(enum) { operation: anyerror!void, stopped: anyerror };
     var events: [2]Event = undefined;
     var selection = std.Io.Select(Event).init(io, &events);
@@ -58,14 +58,8 @@ fn read(_: ?*anyopaque, allocator: std.mem.Allocator, io: std.Io, release: store
 
 test "component HTTPS transfer refuses cancellation before opening a network client" {
     const cancellation: process.Cancellation = .{ .requested = .init(true) };
-    const release: store.Release = .{ .url = "https://example.invalid/runtime.tar.gz", .expected = .{
-        .target = "x86_64-windows-msvc",
-        .archive_bytes = 1,
-        .unpacked_bytes = 1,
-        .files = 1,
-        .sha256 = @splat(1),
-    }, .manifest_sha256 = @splat(2) };
+    const input: store.Source = .{ .url = "https://example.invalid/blob", .bytes = 1, .digest = .{ .sha256 = @splat(1) } };
     var bytes: [16]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&bytes);
-    try std.testing.expectError(error.Cancelled, read(null, std.testing.allocator, std.testing.io, release, &writer, &cancellation));
+    try std.testing.expectError(error.Cancelled, read(null, std.testing.allocator, std.testing.io, input, &writer, &cancellation));
 }
