@@ -2621,11 +2621,17 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /system_webview_drag_region|startWindowDrag/,
   );
   const window = read("src/app/window.zig");
-  const resizePath = "src/native_sdk_compat/system_webview_resize.zig";
-  const resizeWindowsPath =
-    "src/native_sdk_compat/system_webview_resize/windows.zig";
-  const startupWindowsPath =
-    "src/native_sdk_compat/system_webview_startup_window/windows.zig";
+  for (const path of [
+    "src/native_sdk_compat/system_webview_resize.zig",
+    "src/native_sdk_compat/system_webview_resize/windows.zig",
+    "src/native_sdk_compat/system_webview_startup_window.zig",
+    "src/native_sdk_compat/system_webview_startup_window/windows.zig",
+  ])
+    assert.ok(!existsSync(new URL(path, root)), `retired window seam: ${path}`);
+  assert.doesNotMatch(
+    compatSource + window + read("src/app/platform.zig"),
+    /system_webview_resize|system_webview_startup_window|SetWindowsHookEx|SetWindowSubclass/,
+  );
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
   const instanceWindowsPath =
     "src/native_sdk_compat/app_single_instance/windows.zig";
@@ -2654,14 +2660,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   ]) {
     assert.match(window, new RegExp(`runtime\\.${method}\\(window_id\\)`));
   }
-  for (const seamPath of [resizePath]) {
-    assert.deepEqual(
-      zigFiles("src/").filter((file) =>
-        read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
-      ),
-      ["src/app/window.zig"],
-    );
-  }
   assert.deepEqual(
     zigFiles("src/").filter((file) =>
       read(file).includes('@import("metawork_app_single_instance_compat")'),
@@ -2689,63 +2687,11 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     [],
   );
 
-  assert.deepEqual(
-    externSymbols(read(resizeWindowsPath), ["user32", "kernel32", "comctl32"]),
-    [
-      "CreateWindowExW",
-      "DefSubclassProc",
-      "DefWindowProcW",
-      "DestroyWindow",
-      "GetClientRect",
-      "GetCurrentThreadId",
-      "GetDpiForWindow",
-      "GetModuleHandleW",
-      "GetSystemMetricsForDpi",
-      "GetWindow",
-      "GetWindowLongPtrW",
-      "GetWindowThreadProcessId",
-      "IsIconic",
-      "IsWindow",
-      "IsWindowEnabled",
-      "IsZoomed",
-      "LoadCursorW",
-      "PostMessageW",
-      "RegisterClassExW",
-      "RegisterWindowMessageW",
-      "ReleaseCapture",
-      "RemoveWindowSubclass",
-      "ScreenToClient",
-      "SetCursor",
-      "SetWindowLongPtrW",
-      "SetWindowPos",
-      "SetWindowSubclass",
-    ].sort(),
-  );
-  assert.doesNotMatch(
-    read(resizeWindowsPath),
-    /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
-  );
   assert.doesNotMatch(
     read("build.zig"),
     /window-chrome-probe|window_chrome_probe/,
   );
   assert.doesNotMatch(read("src/app.zig"), /runWindowChromeProbe/);
-  assert.deepEqual(
-    externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),
-    [
-      "CallNextHookEx",
-      "CreateWindowExW",
-      "DestroyWindow",
-      "GetAncestor",
-      "GetCurrentProcessId",
-      "GetCurrentThreadId",
-      "GetWindow",
-      "GetWindowThreadProcessId",
-      "IsWindow",
-      "SetWindowsHookExW",
-      "UnhookWindowsHookEx",
-    ].sort(),
-  );
   assert.deepEqual(
     externSymbols(read(instanceWindowsPath), [
       "advapi32",

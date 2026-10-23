@@ -641,7 +641,7 @@ if ($Mode -eq 'top-lifecycle') {
         $vertical.Left -ne $rect.Left -or $vertical.Right -ne $rect.Right) {
         throw 'Top-edge double click did not retain native vertical sizing behavior'
     }
-    $inputChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkSystemWebViewTopResize', '')
+    $inputChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'NativeSdkTopResizeStrip', '')
     if ($inputChild -eq [IntPtr]::Zero) { throw 'Input child unavailable' }
     [MetaWorkChromeProbe]::ShowWindow($window, 3) | Out-Null
     Start-Sleep -Milliseconds 200

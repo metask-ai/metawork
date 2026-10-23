@@ -561,7 +561,6 @@ pub fn run(init: std.process.Init) !void {
         .context = &app.platform,
         .notify_fn = app_platform.Adapter.notifyMainLoop,
     });
-    defer app.platform.deinit();
     defer app.automation.deinit();
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
@@ -847,7 +846,6 @@ pub fn run(init: std.process.Init) !void {
     app.dispatcher = &dispatcher;
     const mode = frontend.mode(init.environ_map);
 
-    try app.platform.prepareStartup();
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",

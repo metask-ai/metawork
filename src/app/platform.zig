@@ -34,14 +34,9 @@ pub const Adapter = struct {
         self.trace_product_delivery = enabled;
     }
 
-    pub fn prepareStartup(self: *Adapter) !void {
-        try self.window.prepareStartup();
-    }
-
     pub fn start(self: *Adapter, runtime: *native_sdk.Runtime) !void {
         const services_value = runtime.options.platform.services;
         if (services_value.wake_fn == null) return error.MainLoopWakeUnavailable;
-        try self.window.captureStartupWindow();
         try self.window.bind(services_value);
         self.native_runtime = runtime;
         self.platform_services = services_value;
@@ -49,13 +44,8 @@ pub const Adapter = struct {
 
     pub fn stop(self: *Adapter, runtime: *native_sdk.Runtime) void {
         self.window.removeTray(runtime);
-        self.window.deinit();
         self.platform_services = null;
         if (self.native_runtime == runtime) self.native_runtime = null;
-    }
-
-    pub fn deinit(self: *Adapter) void {
-        self.window.deinit();
     }
 
     pub fn outputFileSave(self: *Adapter) control_ports.OutputFileSave {
@@ -507,7 +497,6 @@ test "main-loop wake startup rejects a missing service before publication" {
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.wake_fn = null;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
     try std.testing.expectError(error.MainLoopWakeUnavailable, adapter.start(&harness.runtime));
     try std.testing.expect(adapter.services() == null);
     try std.testing.expect(adapter.native_runtime == null);
@@ -545,10 +534,6 @@ test "main-loop wake publishes Native startup to the live activation listener" {
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.wake_fn = T.wake;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
-    try adapter.prepareStartup();
-    const startup_window = try app_window.TestSupport.Window.init();
-    defer startup_window.deinit();
     const identity = T.activation.Identity.init("wake-test", "/isolated");
     var queue = T.activation.ActivationQueue.init(std.testing.io, identity);
     var storage: [T.activation.max_frame_bytes]u8 = undefined;
@@ -594,10 +579,6 @@ test "SDK consumption MCP Host handoff preserves deny policy and exact target" {
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.open_external_url_fn = T.open;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
-    try adapter.prepareStartup();
-    const startup_window = try app_window.TestSupport.Window.init();
-    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     try std.testing.expectError(error.NavigationDenied, harness.runtime.openExternalUrl(T.url));
@@ -643,10 +624,6 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     harness.runtime.options.platform.services.start_timer_fn = Spy.start;
     harness.runtime.options.platform.services.cancel_timer_fn = Spy.cancel;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
-    try adapter.prepareStartup();
-    const startup_window = try app_window.TestSupport.Window.init();
-    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     const port = adapter.dispatcherPlatform();
@@ -707,10 +684,6 @@ test "SDK consumption file picker keeps multi-selection cancel and Runtime valid
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.show_open_dialog_fn = Spy.open;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
-    try adapter.prepareStartup();
-    const startup_window = try app_window.TestSupport.Window.init();
-    defer startup_window.deinit();
     try adapter.start(&harness.runtime);
     defer adapter.stop(&harness.runtime);
     const port = adapter.dispatcherPlatform();
@@ -748,7 +721,6 @@ test "Output location uses the SDK Runtime reveal boundary and rejects invalid i
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.reveal_path_fn = Spy.reveal;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
     adapter.native_runtime = &harness.runtime;
     const port = adapter.outputFileReveal();
     const root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace";
@@ -810,7 +782,6 @@ test "Output Save picker uses SDK Runtime and freezes the selected path for work
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.show_save_dialog_fn = Spy.save;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer adapter.deinit();
     adapter.native_runtime = &harness.runtime;
     const port = adapter.outputFileSave();
     var hash: [32]u8 = undefined;

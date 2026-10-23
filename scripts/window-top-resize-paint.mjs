@@ -1,4 +1,4 @@
-// Real desktop paint gate for the input-only HWND. CDP touches only the
+// Real desktop paint gate for the SDK's top resize band. CDP touches only the
 // isolated test WebView; product code and Renderer contracts stay unchanged.
 import { createServer } from "node:net";
 import path from "node:path";

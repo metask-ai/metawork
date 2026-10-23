@@ -50,7 +50,6 @@ test "high-entropy previews reduce pixel count and remain within the encoded inp
     };
     var decoder: Decoder = .{};
     var platform = app_platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
-    defer platform.deinit();
     platform.platform_services = .{ .context = &decoder, .decode_image_fn = Decoder.decode };
     const preview = try prepare(&platform, std.testing.allocator, "original decoder input", product_control.max_attachment_preview_bytes);
     defer std.testing.allocator.free(preview);

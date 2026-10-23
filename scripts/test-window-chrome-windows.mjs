@@ -148,6 +148,7 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
+  await dismissModelSetupIntroduction();
   if (uiSessionOnly) {
     await probeWindowChromeUi({ port: debugPort, runProbe, evidenceDir });
   } else if (controlsSessionOnly || reloadSessionOnly) {
@@ -289,6 +290,45 @@ async function probeControls() {
         maxBuffer: 1024 * 1024,
       }),
   });
+}
+
+async function dismissModelSetupIntroduction() {
+  const webview = await connectTestWebView(debugPort);
+  try {
+    const point = await webview.evaluate(`(async () => {
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      const button = document.querySelector('.model-setup-close');
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      const x = Math.round(rect.x + rect.width / 2), y = Math.round(rect.y + rect.height / 2);
+      if (!rect.width || !rect.height || !button.contains(document.elementFromPoint(x, y)))
+        throw new Error('Model setup close button is not hit-testable');
+      return {x, y};
+    })()`);
+    if (!point) return;
+    // Dismiss the first-launch modal through real input before testing its
+    // background titlebar. Do not override the product's inert/drag policy.
+    await runProbe("control-click", [
+      "-PointX",
+      String(point.x),
+      "-PointY",
+      String(point.y),
+    ]);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (
+        await webview.evaluate(
+          `!document.querySelector('.model-setup-dialog') && !document.querySelector('header[data-native-window-drag]')?.closest('[inert]')`,
+        )
+      )
+        return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("Model setup introduction did not close after real input");
+  } finally {
+    webview.close();
+  }
 }
 
 async function waitForRendererChromeReady() {

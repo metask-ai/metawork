@@ -3,14 +3,11 @@ const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
-const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
-const resize = @import("../native_sdk_compat/system_webview_resize.zig");
 
 pub const main_window_id: native_sdk.platform.WindowId = 1;
 
 pub const tray_open_id: native_sdk.platform.TrayItemId = 1;
 pub const tray_quit_id: native_sdk.platform.TrayItemId = 2;
-pub const TestSupport = if (builtin.is_test) startup_window.TestSupport else struct {};
 
 const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_open_id, .label = "Open MetaWork", .command = "metawork.tray.open" },
@@ -24,26 +21,10 @@ const tray_icon_path = switch (builtin.os.tag) {
 };
 
 pub const State = struct {
-    startup_window_capture: startup_window.Capture = .{},
-    resize_capability: resize.Capability = .{},
     tray_installed: bool = false,
-
-    pub fn prepareStartup(self: *State) !void {
-        try self.startup_window_capture.prepare();
-    }
-
-    pub fn captureStartupWindow(self: *State) !void {
-        const startup_binding = try self.startup_window_capture.take(main_window_id);
-        try self.resize_capability.attach(startup_binding);
-    }
 
     pub fn bind(_: *State, services: native_sdk.platform.PlatformServices) !void {
         if (services.window_chrome_fn == null) return error.SystemWebViewChromeUnavailable;
-    }
-
-    pub fn deinit(self: *State) void {
-        self.resize_capability.deinit();
-        self.startup_window_capture.deinit();
     }
 
     pub fn installTray(
@@ -230,11 +211,6 @@ fn environment(
     };
 }
 
-test {
-    _ = startup_window;
-    _ = resize;
-}
-
 test "Windows packaged tray icon resolves from the executable's package root" {
     var buffer: [256]u8 = undefined;
     const resolved = windowsPackagedTrayIconPath(
@@ -298,7 +274,6 @@ test "Windows window actions reject missing closed and hidden SDK windows before
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     var window: State = .{};
-    defer window.deinit();
     const actions = [_]bridge_api.WindowChromeControlAction{ .minimize, .toggle_maximize, .close };
     for (actions) |action|
         try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, action));
@@ -328,7 +303,6 @@ test "Windows window controls follow SDK frame state without a native controls b
     defer harness.destroy(std.testing.allocator);
     _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
     var window: State = .{};
-    defer window.deinit();
     const initial = try window.connectWindows(&harness.runtime, 1);
     try std.testing.expect(initial.renderer_controls);
     try std.testing.expect(!initial.maximized);
@@ -365,7 +339,6 @@ test "Windows user close preserves SDK hide policy while explicit quit closes" {
     var context: u8 = 0;
     const app: native_sdk.App = .{ .context = &context, .name = "window-controls-test" };
     var window: State = .{};
-    defer window.deinit();
 
     try std.testing.expectError(error.WindowIdentityMismatch, window.control(&harness.runtime, 2, .close));
     try std.testing.expect(harness.null_platform.takeQueuedCloseRequest() == null);
@@ -403,7 +376,6 @@ test "SDK consumption notification bounds presentation without changing Product 
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.show_notification_fn = Spy.notify;
     var window: State = .{};
-    defer window.deinit();
     const long = "a" ** 127 ++ "界" ++ "b" ** 50;
     const notification: control_ports.ScheduleNotification = .{ .scheduled_task_id = 1, .title = long, .kind = .completed };
     // Runtime validation would reject the original, unbounded subtitle.
@@ -435,7 +407,6 @@ test "SDK consumption chrome queries enter Runtime recording and replay divergen
     harness.runtime.options.platform.services.window_chrome_fn = Spy.chrome;
     _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
     var window: State = .{};
-    defer window.deinit();
     const recorder = try std.testing.allocator.create(native_sdk.runtime.SessionRecorder);
     defer std.testing.allocator.destroy(recorder);
     var context: u8 = 0;
