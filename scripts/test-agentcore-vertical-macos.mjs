@@ -1,6 +1,5 @@
 import { readProbeProductState } from "./probe-product-state.mjs";
 import { localArchiveEnvironment } from "./archive-environment.mjs";
-import { runOfficeSkillVertical } from "./office-skill-vertical.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createReadStream } from "node:fs";
@@ -37,7 +36,6 @@ import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runOutputDeliveryVertical } from "./output-delivery-vertical.mjs";
-import { runOfficeInstallVertical } from "./office-install-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -115,14 +113,6 @@ const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
 await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
 // Exercise the shipped rg beside the Host, not an ambient development install.
 const appEnvironment = { ...process.env };
-if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1") {
-  Object.assign(appEnvironment, localArchiveEnvironment(root, appEnvironment));
-  // Exercise Application -> Product with helper-only configuration. The
-  // scripted provider selects a fixture interpreter, just as Agent would
-  // select an available interpreter through Bash; archive:setup is optional.
-  delete appEnvironment.METAWORK_LOCAL_ARCHIVE_PYTHON;
-  assert.ok(appEnvironment.METAWORK_LOCAL_ARCHIVE_HELPER);
-}
 for (const key of Object.keys(appEnvironment)) {
   if (key.toUpperCase() === "PATH" || key.toUpperCase() === "RG_BIN")
     delete appEnvironment[key];
@@ -141,15 +131,13 @@ appEnvironment.PATH =
     : "/usr/bin:/bin";
 
 const builtinSkillNames =
-  process.platform === "win32" || process.env.METAWORK_LOCAL_SKILL_ROOT
-    ? ["docx", "pptx", "xlsx"]
-    : [];
-const basicOfficeOnly = process.env.METAWORK_BASIC_OFFICE_ONLY === "1";
-if (basicOfficeOnly) {
+  process.platform === "win32" ? ["docx", "pptx", "xlsx"] : [];
+const builtinOfficeOnly = process.env.METAWORK_BUILTIN_OFFICE_ONLY === "1";
+if (builtinOfficeOnly) {
   assert.equal(process.platform, "win32");
   assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
 }
-const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
+
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -291,7 +279,7 @@ const responses = [
       { file_path: fixturePath },
       "I’m checking the workspace before making changes.",
     ),
-    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 350,
+    350,
   ),
   streamedSse(
     toolSse(
@@ -302,14 +290,12 @@ const responses = [
         command:
           process.platform === "win32"
             ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-            : officeModelToolProbe
-              ? "sleep 2; echo agentcore-vertical-bash-ok"
-              : "sleep 0.4; echo agentcore-vertical-bash-ok",
+            : "sleep 0.4; echo agentcore-vertical-bash-ok",
         description: "Check the command output",
       },
       "I’ve checked the input; now I’m running a focused verification.",
     ),
-    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
+    80,
   ),
   streamedSse(
     toolSse(
@@ -323,7 +309,7 @@ const responses = [
       },
       "The verification passed; now I’m applying the change.",
     ),
-    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
+    80,
   ),
   ...(process.platform === "win32"
     ? [
@@ -404,8 +390,8 @@ const responses = [
 ];
 const provider = createProvider(responses, {
   // CLI snapshot polling needs an observation window during this larger probe.
-  initialDelayMs: visualCaptureDir || officeModelToolProbe ? 1_500 : 120,
-  frameDelayMs: process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 300 : 80,
+  initialDelayMs: visualCaptureDir ? 1_500 : 120,
+  frameDelayMs: 80,
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
@@ -421,11 +407,6 @@ let app;
 let exited;
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
-const officeInstallOnly = process.env.METAWORK_OFFICE_INSTALL_ONLY === "1";
-if (officeInstallOnly) {
-  assert.equal(process.platform, "win32");
-  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
-}
 startApplication();
 
 desktopVertical: try {
@@ -435,7 +416,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly && !officeInstallOnly) {
+  if (!activeInputOnly && !outputOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -480,37 +461,6 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
-  if (officeInstallOnly) {
-    await runOfficeInstallVertical({
-      root,
-      dataRoot,
-      workspaceId,
-      workspaceEpoch: expectedWorkspaceEpoch,
-      invoke: invokeBridge,
-      snapshot,
-      poll,
-      provider,
-      toolSse,
-      textSse,
-      connectWebView: () =>
-        connectTestWebView(chromeProbePort, {
-          requestTimeoutMs: commandTimeoutMs,
-        }),
-      restart: async () => {
-        await stopApplication("Office install cold restart");
-        await rm(automationDir, { recursive: true, force: true });
-        startApplication();
-        await waitForBridge();
-      },
-      hostPid: () => app.pid,
-      evidenceDirectory: join(root, ".zig-cache/office-app-install"),
-    });
-    await stopApplication("Office install desktop verification complete");
-    process.stdout.write(
-      "Office Windows App installation passed: real public signed install, basic/full catalog binding, explicit refresh, ordinary Task during installation and cold startup.\n",
-    );
-    break desktopVertical;
-  }
   if (outputOnly) {
     assert.equal(process.platform, "win32");
     const catalog = await poll(
@@ -754,10 +704,10 @@ desktopVertical: try {
       "Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
     );
   }
-  if (basicOfficeOnly) {
-    await stopApplication("basic Office catalog verification complete");
+  if (builtinOfficeOnly) {
+    await stopApplication("built-in Office catalog verification complete");
     process.stdout.write(
-      "Basic Office desktop catalog passed without a selected Office environment.\n",
+      "Full built-in Office catalog passed without preparing private environments.\n",
     );
     break desktopVertical;
   }
@@ -1825,48 +1775,6 @@ desktopVertical: try {
   for (const originalPath of retainedAttachmentPaths)
     await expectMissing(originalPath);
   await expectMissing(compactCheckpoint.blobPath);
-  if (process.env.METAWORK_OFFICE_VERTICAL === "1") {
-    assert.equal(process.platform, "darwin");
-    assert.ok(process.env.METAWORK_LOCAL_SKILL_ROOT);
-    const cases =
-      process.env.METAWORK_OFFICE_ATTACHMENTS === "1"
-        ? [
-            { automaticOverride: true, approvalMode: "full_access" },
-            { automaticOverride: false, approvalMode: "full_access" },
-            {
-              automaticOverride: true,
-              approvalMode: "manual",
-              selectedFormats: ["docx"],
-            },
-            {
-              automaticOverride: true,
-              approvalMode: "auto_review",
-              selectedFormats: ["zip"],
-            },
-          ]
-        : [{}];
-    for (const [caseId, options] of cases.entries())
-      await runOfficeSkillVertical({
-        root,
-        workspace: canonicalWorkspace,
-        workspaceId,
-        invoke: invokeBridge,
-        snapshot,
-        poll,
-        provider,
-        toolSse,
-        textSse,
-        imagePath: attachmentPngPath,
-        restart: async () => {
-          await stopApplication("Office attachment restart");
-          await rm(automationDir, { recursive: true, force: true });
-          startApplication();
-          await waitForBridge();
-        },
-        caseId,
-        ...options,
-      });
-  }
   if (process.platform === "win32") await verifyModelSwitch();
   await stopApplication("app stop");
 
@@ -3588,7 +3496,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let nextTitleGate = null;
   let reviewRequests = 0;
   let inputReviewRequests = 0;
-  let officeReviewRequests = 0;
+
   let releaseReview = null;
   let providerError = null;
   const requests = [];
@@ -3621,49 +3529,6 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           assert.equal(payload.stream, undefined);
           assert.equal(payload.tools, undefined);
           const review = JSON.parse(payload.messages[0].content);
-          let officeIntent = null;
-          try {
-            const candidate = JSON.parse(review.evidence.user_intent);
-            if (
-              candidate.kind === "explicit_multimodal_input" &&
-              candidate.text.startsWith("Read the supplied")
-            )
-              officeIntent = candidate;
-          } catch {}
-          if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1" && officeIntent) {
-            assert.equal(officeIntent.attachments[0].kind, "file");
-            assert.equal(
-              officeIntent.attachments[0].display_name,
-              "sample.zip",
-            );
-            assert.ok(!review.evidence.user_intent.includes("file_path="));
-            assert.equal(review.host.delegation, "current_request_only");
-            assert.ok(
-              ["Bash", "Skill"].includes(review.evidence.request.tool_name),
-            );
-            officeReviewRequests++;
-            response.writeHead(200, {
-              "content-type": "application/json",
-              connection: "close",
-            });
-            response.end(
-              JSON.stringify({
-                type: "message",
-                content: [
-                  {
-                    type: "text",
-                    text: JSON.stringify({
-                      decision: "allow_once",
-                      reason: "bounded Office fixture operation",
-                    }),
-                  },
-                ],
-                stop_reason: "end_turn",
-                usage: { input_tokens: 1, output_tokens: 1 },
-              }),
-            );
-            return;
-          }
           assert.equal(review.host.delegation, "current_request_only");
           assert.equal(review.evidence.request.tool_name, "Bash");
           if (review.evidence.user_intent === "input-review-constraint") {
@@ -3819,9 +3684,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     get reviewRequests() {
       return reviewRequests;
     },
-    get officeReviewRequests() {
-      return officeReviewRequests;
-    },
+
     releaseReview() {
       assert.ok(releaseReview, "review fixture was not admitted");
       releaseReview();

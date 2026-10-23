@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-
 import type {
   AccountView,
   BuiltinProviderId,
@@ -22,12 +21,6 @@ import {
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 import { supportsCustomProviders } from "../../workbench/model-setup.ts";
-import { OfficeSettings, type OfficeAction } from "./OfficeSettings.tsx";
-import type {
-  OfficeComponentView,
-  OfficeComponentResult,
-} from "../../bridge/contracts.ts";
-
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
 type ProvidersPage = "list" | "builtin" | "custom";
@@ -74,25 +67,21 @@ type CustomProviderCredentialEdit = CustomProviderRemoval & {
 };
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
-
 const customProviderBaseUrlExamples: Record<Protocol, string> = {
   openai_responses: "https://api.openai.com/v1",
   anthropic_messages: "https://api.anthropic.com",
   openai_chat_completions: "https://api.openai.com/v1",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
-
 const customProviderRequestPaths: Record<Protocol, string> = {
   openai_responses: "/responses",
   openai_chat_completions: "/chat/completions",
   anthropic_messages: "/v1/messages",
   gemini_native: "",
 };
-
 function trimTrailingSlashes(value: string) {
   return value.replace(/\/+$/u, "");
 }
-
 export function customProviderEndpointFromBaseUrl(
   protocol: Protocol,
   baseUrl: string,
@@ -104,7 +93,6 @@ export function customProviderEndpointFromBaseUrl(
   }
   return `${normalizedBase}${requestPath}`;
 }
-
 function customProviderBaseUrlFromEndpoint(
   protocol: Protocol,
   endpoint: string,
@@ -115,7 +103,6 @@ function customProviderBaseUrlFromEndpoint(
     ? normalizedEndpoint.slice(0, -requestPath.length)
     : normalizedEndpoint;
 }
-
 function newCustomProviderDraft(): CustomProviderDraft {
   return {
     displayName: "",
@@ -124,7 +111,6 @@ function newCustomProviderDraft(): CustomProviderDraft {
     apiKey: "",
   };
 }
-
 function newBuiltinProviderDraft(): BuiltinProviderDraft {
   return {
     providerId: "",
@@ -133,7 +119,6 @@ function newBuiltinProviderDraft(): BuiltinProviderDraft {
     editingBaseUrl: false,
   };
 }
-
 function providerAddressHost(value: string) {
   try {
     return new URL(value).host;
@@ -141,49 +126,40 @@ function providerAddressHost(value: string) {
     return value.trim();
   }
 }
-
 function modelLabel(
   model: ModelsView["providers"][number]["models"][number],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return model.displayName.trim() || model.id;
 }
-
 function customProviderProtocolLabel(
   protocol: Protocol,
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.custom_provider_protocol.${protocol}`);
 }
-
 function customProviderCredentialLabel(
   status: ModelsView["customProviders"][number]["credentialStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.custom_provider_credential.${status}`);
 }
-
 function customProviderStateLabel(
   state: ModelsView["customProviders"][number]["state"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.custom_provider_state.${state}`);
 }
-
 function customModelTestStatusLabel(
   status: ModelsView["customProviders"][number]["models"][number]["testStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.custom_model_test_status.${status}`);
 }
-
 export function SettingsPage({
   account,
   models,
   automaticWorkspaceRoot,
-  office,
-  onOfficeAction,
-  onOfficeCancel,
   customProviderCapabilities,
   focusTarget,
   initialSection = "general",
@@ -218,12 +194,6 @@ export function SettingsPage({
   account: AccountView;
   models: ModelsView;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
-  office: OfficeComponentView;
-  onOfficeAction: (
-    action: OfficeAction,
-    generation: string,
-  ) => Promise<OfficeComponentResult | null>;
-  onOfficeCancel: (id: string) => Promise<OfficeComponentResult | null>;
   customProviderCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -392,9 +362,7 @@ export function SettingsPage({
         committedProviderId === "metask"
           ? "Metask"
           : (committedCustomProvider?.displayName ?? committedProviderId)
-      } · ${
-        committedDefaultModel?.displayName || models.defaultSelection.modelId
-      }`
+      } · ${committedDefaultModel?.displayName || models.defaultSelection.modelId}`
     : t("settings.default_selection_missing");
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
@@ -572,7 +540,6 @@ export function SettingsPage({
         return null;
     }
   })();
-
   useEffect(() => {
     if (focusTarget === "providers" && customProviderSettingsAvailable) {
       setActiveSection("providers");
@@ -582,7 +549,6 @@ export function SettingsPage({
       setActiveSection("account");
     }
   }, [focusTarget, customProviderSettingsAvailable]);
-
   useEffect(() => {
     if (activeSection === "providers" && !customProviderSettingsAvailable) {
       setActiveSection("general");
@@ -606,11 +572,9 @@ export function SettingsPage({
     customProviderSettingsAvailable,
     providersPage,
   ]);
-
   useEffect(() => {
     content.current?.scrollTo?.({ top: 0, behavior: "auto" });
   }, [activeSection, providersPage]);
-
   useEffect(() => {
     if (activeSection === "providers") return;
     setProvidersPage("list");
@@ -618,7 +582,6 @@ export function SettingsPage({
     setBuiltinProviderDraft(newBuiltinProviderDraft());
     setCustomProviderCredentialEdit(null);
   }, [activeSection]);
-
   useEffect(() => {
     if (!confirmSignOut) return;
     const frame = window.requestAnimationFrame(() =>
@@ -626,7 +589,6 @@ export function SettingsPage({
     );
     return () => window.cancelAnimationFrame(frame);
   }, [confirmSignOut]);
-
   useEffect(() => {
     if (
       !automaticRootPending ||
@@ -638,7 +600,6 @@ export function SettingsPage({
     setAutomaticRootMutationFailed(false);
     restoreAutomaticRootFocus(action);
   }, [automaticWorkspaceRoot.generation, automaticRootPending]);
-
   function restoreAutomaticRootFocus(action: AutomaticWorkspaceRootAction) {
     const origin =
       action === "choose"
@@ -655,7 +616,6 @@ export function SettingsPage({
       )?.focus(),
     );
   }
-
   async function mutateAutomaticWorkspaceRoot(
     action: AutomaticWorkspaceRootAction,
   ) {
@@ -684,7 +644,6 @@ export function SettingsPage({
     setAutomaticRootMutationFailed(outcome === false);
     restoreAutomaticRootFocus(action);
   }
-
   const automaticRootDisplay =
     automaticWorkspaceRoot.canonicalRoot ??
     t("settings.automatic_workspace.location_unavailable");
@@ -694,7 +653,6 @@ export function SettingsPage({
     automaticWorkspaceRoot.canonicalRoot === null
       ? "settings.automatic_workspace.health.write_failed_no_active"
       : `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`;
-
   useEffect(() => {
     if (customProviderCapabilities.secretCapture) return;
     setCustomProviderDraft(null);
@@ -702,7 +660,6 @@ export function SettingsPage({
     setCustomProviderCredentialEdit(null);
     setCreatingCustomProvider(false);
   }, [customProviderCapabilities.secretCapture]);
-
   useEffect(() => {
     setCustomProviderEdit((current) => {
       if (!current) return null;
@@ -732,7 +689,6 @@ export function SettingsPage({
         : null;
     });
   }, [models.customProviders]);
-
   useEffect(() => {
     if (
       models.errorCode !== "none" ||
@@ -748,7 +704,6 @@ export function SettingsPage({
     account.state,
     disabled,
   ]);
-
   useEffect(() => {
     if (
       requestedProviderId !== null &&
@@ -757,12 +712,10 @@ export function SettingsPage({
       setRequestedProviderId(null);
     }
   }, [committedProviderId, requestedProviderId]);
-
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
-
   async function submitCustomProvider() {
     if (!customProviderDraft || creatingCustomProvider) return;
     const baseUrl = customProviderDraft.baseUrl.trim();
@@ -788,7 +741,6 @@ export function SettingsPage({
       setCreatingCustomProvider(false);
     }
   }
-
   async function submitBuiltinProvider() {
     if (
       creatingCustomProvider ||
@@ -815,7 +767,6 @@ export function SettingsPage({
       setCreatingCustomProvider(false);
     }
   }
-
   function openBuiltinProvider(providerId: BuiltinProviderId) {
     const preset = models.builtinProviderPresets.find(
       (candidate) => candidate.id === providerId,
@@ -841,7 +792,6 @@ export function SettingsPage({
     });
     setProvidersPage("builtin");
   }
-
   async function updateBuiltinProviderBaseUrl() {
     if (
       !selectedBuiltinProvider ||
@@ -865,7 +815,6 @@ export function SettingsPage({
       setMutatingCustomProvider(false);
     }
   }
-
   async function replaceCustomProviderCredential() {
     if (!customProviderCredentialEdit || mutatingCustomProvider) return;
     if (!customProviderCredentialEdit.apiKey) return;
@@ -884,7 +833,6 @@ export function SettingsPage({
       setMutatingCustomProvider(false);
     }
   }
-
   async function addCustomModel() {
     const modelId = customModelId.trim();
     if (!selectedCustomProvider || !modelId || addingCustomModel) return;
@@ -904,7 +852,6 @@ export function SettingsPage({
       setAddingCustomModel(false);
     }
   }
-
   async function removeCustomModel() {
     if (!customModelRemoval || mutatingCustomProvider) return;
     setMutatingCustomProvider(true);
@@ -923,7 +870,6 @@ export function SettingsPage({
       setMutatingCustomProvider(false);
     }
   }
-
   async function submitCustomProviderEdit() {
     if (!customProviderEdit || mutatingCustomProvider) return;
     const baseUrl = customProviderEdit.baseUrl.trim();
@@ -949,7 +895,6 @@ export function SettingsPage({
       setMutatingCustomProvider(false);
     }
   }
-
   async function removeCustomProvider() {
     if (!customProviderRemoval || mutatingCustomProvider) return;
     setMutatingCustomProvider(true);
@@ -971,7 +916,6 @@ export function SettingsPage({
       setMutatingCustomProvider(false);
     }
   }
-
   return (
     <div
       className="settings-page"
@@ -1200,12 +1144,6 @@ export function SettingsPage({
                   </div>
                 </div>
               </div>
-              <OfficeSettings
-                view={office}
-                disabled={disabled}
-                onAction={onOfficeAction}
-                onCancel={onOfficeCancel}
-              />
             </section>
           )}
 

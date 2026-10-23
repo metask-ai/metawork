@@ -1,17 +1,10 @@
 import {
   approvalFailureReasons,
   type TaskApprovalResultWire,
-  type OfficeComponentView,
 } from "./generated-wire.ts";
 export { approvalFailureReasons };
-export type {
-  OfficeComponentView,
-  OfficeComponentResult,
-} from "./generated-wire.ts";
-
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
-
 export type ModelsCatalogState =
   | "needs_authentication"
   | "loading"
@@ -19,9 +12,7 @@ export type ModelsCatalogState =
   | "ready"
   | "failed"
   | "unavailable";
-
 export type NewTaskAdmissionState = "unavailable" | "ready" | "replacing";
-
 export type NewTaskAdmissionReason =
   | "none"
   | "custom_provider_persistence_unavailable"
@@ -31,7 +22,6 @@ export type NewTaskAdmissionReason =
   | "schedule_persistence_unavailable"
   | "schedule_persistence_failed"
   | "schedule_persistence_outcome_unknown";
-
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -58,7 +48,6 @@ export type AccountErrorCode =
   | "refresh_schedule_failed"
   | "local_resource_exhausted"
   | "account_operation_failed";
-
 export type ExecutionCommandErrorCode =
   | "none"
   | "operation_in_progress"
@@ -72,13 +61,11 @@ export type ExecutionCommandErrorCode =
   | "custom_provider_capture_unavailable"
   | "custom_provider_persistence_unavailable"
   | "custom_model_test_unavailable";
-
 export type Protocol =
   | "openai_responses"
   | "anthropic_messages"
   | "openai_chat_completions"
   | "gemini_native";
-
 export const builtinProviderIds = [
   "deepseek",
   "kimi",
@@ -86,7 +73,6 @@ export const builtinProviderIds = [
   "glm",
 ] as const;
 export type BuiltinProviderId = (typeof builtinProviderIds)[number];
-
 export type BuiltinProviderPresetView = {
   id: BuiltinProviderId;
   displayName: string;
@@ -95,24 +81,18 @@ export type BuiltinProviderPresetView = {
   apiKeyUrl: string;
   documentationUrl: string;
 };
-
 export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];
 export const approvalModes = ["manual", "auto_review", "full_access"] as const;
 export type ApprovalMode = (typeof approvalModes)[number];
 export type PermissionInteraction = "interactive" | "noninteractive";
-
 export type CustomProviderState = "configuring" | "ready" | "disabled";
-
 export type CustomModelTestStatus =
   "untested" | "testing" | "connected" | "failed";
-
 export type CustomProviderCredentialStatus =
   "missing" | "ready" | "invalid" | "capture_unavailable";
-
 export type ModelMetadataProvenance =
   "unknown" | "user_declared" | "provider_declared" | "runtime_verified";
-
 export type CustomProviderView = {
   id: string;
   builtinProviderId: BuiltinProviderId | null;
@@ -134,12 +114,10 @@ export type CustomProviderView = {
   sourceGeneration: string;
   catalogGeneration: string;
 };
-
 export type ModelRef = {
   sourceId: string;
   modelId: string;
 };
-
 /** Server declarations only; null means unknown, not unsupported. */
 export type ModelMetadata = {
   maxInputTokens: string | null;
@@ -181,7 +159,6 @@ export type ModelMetadata = {
     };
   };
 };
-
 export type AccountView = {
   state: AccountState;
   canCancel: boolean;
@@ -239,7 +216,6 @@ export type AccountView = {
     };
   };
 };
-
 export type ModelsErrorCode =
   | "none"
   | "authorization_unavailable"
@@ -250,14 +226,12 @@ export type ModelsErrorCode =
   | "no_models"
   | "operation_in_progress"
   | "local_resource_exhausted";
-
 export type CatalogModelView = {
   id: string;
   displayName: string;
   metadata: ModelMetadata;
   metadataProvenance: ModelMetadataProvenance;
 };
-
 export type ModelsView = {
   availability: ModelsCatalogState;
   persistenceHealth: "ready" | "recovery_required" | "unavailable";
@@ -282,7 +256,6 @@ export type ModelsView = {
   builtinProviderPresets: BuiltinProviderPresetView[];
   customProviders: CustomProviderView[];
 };
-
 export type NewTaskAdmissionView = {
   available: boolean;
   reason: NewTaskAdmissionReason;
@@ -291,26 +264,22 @@ export type NewTaskAdmissionView = {
   activeSelectionRevision: string;
   state: NewTaskAdmissionState;
 };
-
 export type AccountCommandResult = {
   accepted: boolean;
   errorCode: AccountErrorCode;
   attemptId: string | null;
 };
-
 export type ExecutionCommandResult = {
   accepted: boolean;
   errorCode: ExecutionCommandErrorCode;
   attemptId: null;
 };
-
 export type FileReferenceView = {
   generatedImage?: true;
   id: string;
   title: string;
   displayPath: string;
 };
-
 export type PreviewMediaType = "image/png" | "image/jpeg" | "image/webp";
 export type FilePreviewImage = {
   readonly id: string;
@@ -353,7 +322,6 @@ export type FilePreviewLoadOptions = {
   signal?: AbortSignal;
   priority?: "interactive" | "prefetch";
 };
-
 export type FileChangeView = {
   id: string;
   order: string;
@@ -367,12 +335,10 @@ export type FileChangeView = {
   diffComplete: boolean;
   redacted: boolean;
 };
-
 export type RunFileChanges = {
   observation: "collecting" | "complete" | "incomplete";
   changes: FileChangeView[];
 };
-
 export type FileChangeDiffResult =
   | {
       status: "ready";
@@ -385,7 +351,6 @@ export type FileChangeDiffResult =
       reason: "not_recorded" | "capacity" | "missing" | "corrupt";
       content: "";
     };
-
 export type ToolPresentation =
   | {
       kind: "read";
@@ -393,8 +358,15 @@ export type ToolPresentation =
       offset: string | null;
       limit: string | null;
     }
-  | { kind: "write" | "edit"; target: string }
-  | { kind: "glob"; pattern: string; scope: string | null }
+  | {
+      kind: "write" | "edit";
+      target: string;
+    }
+  | {
+      kind: "glob";
+      pattern: string;
+      scope: string | null;
+    }
   | {
       kind: "grep";
       pattern: string;
@@ -412,8 +384,14 @@ export type ToolPresentation =
         stderrIncomplete: boolean;
       } | null;
     }
-  | { kind: "kill_shell"; jobId: string }
-  | { kind: "web_search"; query: string }
+  | {
+      kind: "kill_shell";
+      jobId: string;
+    }
+  | {
+      kind: "web_search";
+      query: string;
+    }
   | {
       kind: "web_fetch";
       url: string;
@@ -424,7 +402,6 @@ export type ToolPresentation =
         content: string;
       } | null;
     };
-
 export type ToolView = {
   bash: {
     command: string | null;
@@ -454,7 +431,6 @@ export type ToolView = {
   redacted: boolean;
   fileRefs: FileReferenceView[];
 };
-
 export type RunPhase =
   | "queued"
   | "running"
@@ -465,12 +441,10 @@ export type RunPhase =
   | "cancelled"
   | "interrupted"
   | "failed";
-
 export type NonTerminalRunPhase = Extract<
   RunPhase,
   "queued" | "running" | "waiting_ui" | "stopping"
 >;
-
 export type TaskRunInput =
   | {
       kind: "text";
@@ -488,7 +462,6 @@ export type TaskRunInput =
       text: string;
       attachmentTokens: string[];
     };
-
 export type AttachmentDescriptor =
   | {
       token: string;
@@ -503,10 +476,14 @@ export type AttachmentDescriptor =
       displayName: string;
       sizeBytes: string;
     };
-
 export type AttachmentChooseResult =
-  | { status: "cancelled" }
-  | { status: "ready"; attachments: AttachmentDescriptor[] }
+  | {
+      status: "cancelled";
+    }
+  | {
+      status: "ready";
+      attachments: AttachmentDescriptor[];
+    }
   | {
       status: "rejected";
       reason:
@@ -519,7 +496,6 @@ export type AttachmentChooseResult =
         | "file_changed"
         | "shutting_down";
     };
-
 export type AttachmentAddResult =
   | AttachmentChooseResult
   | {
@@ -528,35 +504,53 @@ export type AttachmentAddResult =
         "invalid_transfer" | "stale_transfer" | "input_busy" | "cleanup_failed";
     };
 export type AttachmentAddAcceptance =
-  { status: "accepted" } | Exclude<AttachmentAddResult, { status: "ready" }>;
+  | {
+      status: "accepted";
+    }
+  | Exclude<
+      AttachmentAddResult,
+      {
+        status: "ready";
+      }
+    >;
 export type AttachmentAddBeginResult =
-  AttachmentAddResult | { status: "accepted" };
+  | AttachmentAddResult
+  | {
+      status: "accepted";
+    };
 export type AttachmentCancelResult =
-  { status: "cleaned"; released: boolean } | { status: "cleanup_failed" };
-
+  | {
+      status: "cleaned";
+      released: boolean;
+    }
+  | {
+      status: "cleanup_failed";
+    };
 export type AttachmentReceiveResult =
   | AttachmentChooseResult
-  | { status: "rejected"; reason: "invalid_transfer" | "stale_transfer" };
-
+  | {
+      status: "rejected";
+      reason: "invalid_transfer" | "stale_transfer";
+    };
 export type ScheduledTaskRecurrence =
-  | { kind: "once"; atUnixSeconds: string }
+  | {
+      kind: "once";
+      atUnixSeconds: string;
+    }
   | {
       kind: "interval";
       startAtUnixSeconds: string;
       everySeconds: string;
     };
-
 export type ScheduledTaskBinding = {
   modelRef: ModelRef;
   sourceGeneration: string;
   selectionRevision: string;
   protocol: Protocol;
 };
-
 export type ScheduledTaskStoredBinding = {
   status: "bound";
 } & ScheduledTaskBinding;
-
 export type ScheduledTaskView = {
   id: string;
   epoch: string;
@@ -578,7 +572,11 @@ export type ScheduledTaskView = {
     | "permission_required"
     | null;
   binding: ScheduledTaskStoredBinding;
-  input: { kind: "text"; text: string; redacted: boolean };
+  input: {
+    kind: "text";
+    text: string;
+    redacted: boolean;
+  };
   recurrence: ScheduledTaskRecurrence;
   nextRunAtUnixSeconds: string | null;
   occurrences: Array<{
@@ -599,15 +597,18 @@ export type ScheduledTaskView = {
       | null;
   }>;
 };
-
 export type ScheduledTaskMutation = {
   title: string;
   binding: ScheduledTaskBinding;
   permissionProfile: PermissionProfile;
-  input: Extract<TaskRunInput, { kind: "text" }>;
+  input: Extract<
+    TaskRunInput,
+    {
+      kind: "text";
+    }
+  >;
   recurrence: ScheduledTaskRecurrence;
 };
-
 export type RunInputView =
   | {
       kind: "text";
@@ -643,7 +644,6 @@ export type RunInputView =
       >;
       redacted: boolean;
     };
-
 export const runCauses = [
   "user_cancel",
   "timeout",
@@ -666,9 +666,7 @@ export const runCauses = [
   "skill_unavailable",
   "resource_limit",
 ] as const;
-
 export type RunCause = (typeof runCauses)[number];
-
 export type RunOutcome =
   | "completed"
   | "stopped"
@@ -676,13 +674,11 @@ export type RunOutcome =
   | "interrupted"
   | "failed"
   | "dependency_contract_failure";
-
 export type RunTerminal = {
   outcome: RunOutcome;
   cause: RunCause | null;
   diagnosticDisposition: "absent" | "withheld";
 };
-
 export type RunOutput = {
   commentary: string[];
   response: string;
@@ -691,27 +687,45 @@ export type RunOutput = {
   redacted: boolean;
   provisionalRedacted: boolean;
 };
-
 export type RunActivity =
-  | { kind: "queued" }
-  | { kind: "starting" }
-  | { kind: "waiting_model" }
-  | { kind: "thinking" }
-  | { kind: "writing_response" }
-  | { kind: "executing_tools"; inFlight: string | null }
+  | {
+      kind: "queued";
+    }
+  | {
+      kind: "starting";
+    }
+  | {
+      kind: "waiting_model";
+    }
+  | {
+      kind: "thinking";
+    }
+  | {
+      kind: "writing_response";
+    }
+  | {
+      kind: "executing_tools";
+      inFlight: string | null;
+    }
   | {
       kind: "retrying_provider";
       attempt: string | null;
       max: string | null;
       delayMs: string | null;
     }
-  | { kind: "waiting_user" }
-  | { kind: "compacting_context" }
-  | { kind: "finalizing" }
-  | { kind: "stopping" };
-
+  | {
+      kind: "waiting_user";
+    }
+  | {
+      kind: "compacting_context";
+    }
+  | {
+      kind: "finalizing";
+    }
+  | {
+      kind: "stopping";
+    };
 export type ConversationCoverage = "included" | "excluded";
-
 export const outputActionStates = [
   "ready",
   "revealed",
@@ -739,14 +753,12 @@ export type OutputActionHandler = (
   action: OutputAction,
   signal: AbortSignal,
 ) => Promise<OutputActionState>;
-
 export type DeliveredOutputView = {
   id: string;
   displayPath: string;
   sizeBytes: string;
   redacted: boolean;
 };
-
 export type RunView = {
   submission: InputSubmission | null;
   elapsedMs: string | null;
@@ -777,7 +789,6 @@ export type RunView = {
   fileChanges: RunFileChanges | null;
   outputs: DeliveredOutputView[];
 };
-
 export type ConversationContext = {
   pressure: {
     sourceRunId: string;
@@ -795,7 +806,6 @@ export type ConversationContext = {
     afterTokens: string;
   } | null;
 };
-
 export const compactPhases = [
   "queued",
   "compacting",
@@ -808,7 +818,6 @@ export const compactPhases = [
   "failed",
 ] as const;
 export type CompactPhase = (typeof compactPhases)[number];
-
 export const compactCauses = [
   "user_cancel",
   "session_close",
@@ -817,9 +826,7 @@ export const compactCauses = [
   "agent_failure",
   "dependency_contract_failure",
 ] as const;
-
 export type CompactCause = (typeof compactCauses)[number];
-
 export type CompactView = {
   operationId: string;
   afterRunId: string;
@@ -835,12 +842,19 @@ export type CompactView = {
     cacheCreation: string;
   };
 };
-
 export type ActiveOperation =
-  | { kind: "run"; id: string }
-  | { kind: "compact"; id: string }
-  | { kind: "restore"; id: string };
-
+  | {
+      kind: "run";
+      id: string;
+    }
+  | {
+      kind: "compact";
+      id: string;
+    }
+  | {
+      kind: "restore";
+      id: string;
+    };
 export type PendingUi = {
   requestId: string;
   runId: string;
@@ -855,14 +869,19 @@ export type PendingUi = {
   policyGeneration: string;
   canonicalArgumentsDigest: string;
   candidate:
-    | { ruleId: string; scope: "exact_arguments" }
-    | { ruleId: string; scope: "file_target"; target: string }
+    | {
+        ruleId: string;
+        scope: "exact_arguments";
+      }
+    | {
+        ruleId: string;
+        scope: "file_target";
+        target: string;
+      }
     | null;
 };
-
 export type PermissionChoice =
   "deny_once" | "deny_session" | "allow_once" | "allow_session";
-
 export type UiRecord = {
   answeredBy: "user" | "reviewer" | null;
   reviewReason: string | null;
@@ -883,7 +902,6 @@ export type UiRecord = {
   detailTruncated: boolean;
   redacted: boolean;
 };
-
 export type PermissionHistory = {
   requestId: string;
   matchedRuleId: string;
@@ -908,14 +926,17 @@ export type PermissionHistory = {
   callbackOutcome:
     "answered" | "user_cancelled" | "unavailable" | "contract_failure" | null;
 };
-
 export type TaskMcpAuthority =
-  | { kind: "ready"; selection: "selected" | "none" }
-  | { kind: "unavailable"; selection: null };
-
+  | {
+      kind: "ready";
+      selection: "selected" | "none";
+    }
+  | {
+      kind: "unavailable";
+      selection: null;
+    };
 export type TaskModelSelectionAvailability =
   "available" | "catalog_loading" | "catalog_unavailable" | "task_unavailable";
-
 export type ApprovalFailureReason = (typeof approvalFailureReasons)[number];
 export type TaskApprovalChange = {
   revision: string;
@@ -924,10 +945,15 @@ export type TaskApprovalChange = {
 };
 export type TaskApprovalResult = TaskApprovalResultWire &
   (
-    | { outcome: "completed"; reason: null }
-    | { outcome: "failed"; reason: ApprovalFailureReason }
+    | {
+        outcome: "completed";
+        reason: null;
+      }
+    | {
+        outcome: "failed";
+        reason: ApprovalFailureReason;
+      }
   );
-
 export const sendInputReasons = [
   "binding_changed",
   "binding_unavailable",
@@ -965,10 +991,15 @@ export type SendInputResult = {
   operationId: string;
   taskId: string;
 } & (
-  | { outcome: "accepted"; reason: null }
-  | { outcome: "rejected"; reason: SendInputReason }
+  | {
+      outcome: "accepted";
+      reason: null;
+    }
+  | {
+      outcome: "rejected";
+      reason: SendInputReason;
+    }
 );
-
 export type InputSubmission = {
   operationId: string;
   receivedAtUnixMs: string | null;
@@ -981,7 +1012,6 @@ export type WaitingInputView = {
   state: "waiting" | "failed" | "cancelled" | "interrupted";
   reason: SendInputReason | null;
 };
-
 export type AdditionalInputView = {
   submission: InputSubmission | null;
   id: string;
@@ -1002,10 +1032,12 @@ export type AdditionalInputView = {
   transferredToRunId: string | null;
   continuationReason: SendInputReason | null;
 };
-
 export type TaskView = {
   inputReady: boolean;
-  inputAcceptance: { available: boolean; reason: SendInputReason | null };
+  inputAcceptance: {
+    available: boolean;
+    reason: SendInputReason | null;
+  };
   inputSubmissions: WaitingInputView[];
   approvalMode: ApprovalMode;
   approvalRevision: string;
@@ -1068,16 +1100,17 @@ export type TaskView = {
   pendingUi: PendingUi | null;
   uiHistory: UiRecord[];
 };
-
 export type ViewScope = {
   taskId: string | null;
   beforeRunId: string | null;
   runLimit: number;
   management: "none" | "skills" | "mcp" | "schedules";
   search: boolean;
-  receipts: { taskId: string; operationId: string }[];
+  receipts: {
+    taskId: string;
+    operationId: string;
+  }[];
 };
-
 export const initialViewScope: ViewScope = {
   taskId: null,
   beforeRunId: null,
@@ -1086,7 +1119,6 @@ export const initialViewScope: ViewScope = {
   search: false,
   receipts: [],
 };
-
 export function sameViewPageScope(a: ViewScope, b: ViewScope): boolean {
   return (
     a.taskId === b.taskId &&
@@ -1110,12 +1142,12 @@ export function sameViewScope(a: ViewScope, b: ViewScope): boolean {
 export function cloneViewScope(scope: ViewScope): ViewScope {
   return { ...scope, receipts: scope.receipts.map((query) => ({ ...query })) };
 }
-
 export type RunManifest = Pick<
   RunView,
   "id" | "phase" | "permissionProfile" | "permissionInteraction" | "terminal"
-> & { contentVersion: string };
-
+> & {
+  contentVersion: string;
+};
 export type TaskSummary = Pick<
   TaskView,
   | "id"
@@ -1138,7 +1170,6 @@ export type TaskSummary = Pick<
     "outcome" | "cause"
   > | null;
 };
-
 export const viewBlockNames = [
   "context",
   "workspaces",
@@ -1159,16 +1190,18 @@ export const emptyViewVersions: ViewVersions = {
   management: "0",
   searchIndex: "0",
 };
-
 export type WorkbenchSnapshot = {
-  office: OfficeComponentView;
   revision: string;
   blockVersions: ViewVersions;
   securityEpoch: string;
   historyEpoch: string;
   scope: ViewScope;
   taskIndex: TaskSummary[];
-  receipts: { taskId: string; operationId: string; observed: boolean }[];
+  receipts: {
+    taskId: string;
+    operationId: string;
+    observed: boolean;
+  }[];
   searchIndex:
     | {
         taskId: string;
@@ -1277,11 +1310,9 @@ export type WorkbenchSnapshot = {
   scheduledTasks: ScheduledTaskView[] | null;
   tasks: TaskView[];
 };
-
 export type AutomaticWorkspaceRootMutationResult = {
   outcome: "applied" | "cancelled";
 };
-
 export type PersistenceRecoveryOutcome =
   | "recovered"
   | "stale_revision"
@@ -1290,7 +1321,6 @@ export type PersistenceRecoveryOutcome =
   | "failed"
   | "outcome_unknown"
   | "shutting_down";
-
 export type WorkspaceView = {
   id: string;
   epoch: string;
@@ -1309,10 +1339,8 @@ export type WorkspaceView = {
     failedOrInterrupted: number;
   };
 };
-
 export type SkillCatalogAvailability =
   "uninitialized" | "loading" | "ready" | "degraded" | "unavailable";
-
 export type SkillCatalogView = {
   availability: SkillCatalogAvailability;
   redacted: boolean;
@@ -1336,10 +1364,8 @@ export type SkillCatalogView = {
     invocationName: string | null;
   }[];
 };
-
 export const skillSourceBrands = ["claude", "codex"] as const;
 export type SkillSourceBrand = (typeof skillSourceBrands)[number];
-
 export const skillSourceIds = [
   "compat.claude.user",
   "compat.claude.workspace",
@@ -1401,14 +1427,25 @@ export type SkillSourceSettings = {
     enabled: boolean | null;
     canSetEnabled: boolean;
   }[];
-  recovery: { canReread: boolean; canReset: boolean; token: string | null };
+  recovery: {
+    canReread: boolean;
+    canReset: boolean;
+    token: string | null;
+  };
 };
 export type SkillSourceSettingsReason =
   (typeof skillSourceSettingsReasons)[number];
 export type SkillSourceSettingsResult =
-  | { applied: true; revision: string; reason: null }
-  | { applied: false; revision: null; reason: SkillSourceSettingsReason };
-
+  | {
+      applied: true;
+      revision: string;
+      reason: null;
+    }
+  | {
+      applied: false;
+      revision: null;
+      reason: SkillSourceSettingsReason;
+    };
 export type SkillManagementView = {
   availability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
   enablementAvailability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
@@ -1422,9 +1459,18 @@ export type SkillManagementView = {
       scope: (typeof skillOriginScopes)[number];
     } | null;
     scope:
-      | { kind: "personal"; workspaceId: null }
-      | { kind: "project"; workspaceId: string }
-      | { kind: "external"; workspaceId: null };
+      | {
+          kind: "personal";
+          workspaceId: null;
+        }
+      | {
+          kind: "project";
+          workspaceId: string;
+        }
+      | {
+          kind: "external";
+          workspaceId: null;
+        };
     managementState:
       | "ready"
       | "pending_verification"
@@ -1448,7 +1494,6 @@ export type SkillManagementView = {
     issueCodes: SkillCatalogView["issues"][number]["code"][];
   }[];
 };
-
 export const mcpAvailabilities = ["unavailable", "ready", "degraded"] as const;
 export const mcpManagementHealthValues = [
   "unavailable",
@@ -1500,11 +1545,14 @@ export const mcpAuthorizationPhaseValues = [
   "refreshing",
   "cancelling",
 ] as const;
-
 export type McpSecretSlot =
-  | { kind: "stdio_environment" | "http_header"; name: string }
-  | { kind: "oauth_client_secret" };
-
+  | {
+      kind: "stdio_environment" | "http_header";
+      name: string;
+    }
+  | {
+      kind: "oauth_client_secret";
+    };
 export type McpStdioConnectionInput = {
   displayName: string;
   negotiation: "automatic" | "modern_only" | "compat_only";
@@ -1514,7 +1562,6 @@ export type McpStdioConnectionInput = {
   cwd: string | null;
   environmentNames: string[];
 };
-
 export type McpHttpConnectionInput = {
   displayName: string;
   negotiation: "automatic" | "modern_only" | "compat_only";
@@ -1524,7 +1571,9 @@ export type McpHttpConnectionInput = {
   headerNames: string[];
   registration:
     | null
-    | { kind: "automatic" }
+    | {
+        kind: "automatic";
+      }
     | {
         kind: "pre_registered";
         clientId: string;
@@ -1532,14 +1581,15 @@ export type McpHttpConnectionInput = {
           "none" | "client_secret_basic" | "client_secret_post";
       };
 };
-
 export type McpManagementView = {
   availability: (typeof mcpAvailabilities)[number];
   managementHealth: (typeof mcpManagementHealthValues)[number];
   operation: "idle" | "saving" | "refreshing";
   configurationApply: (typeof mcpConfigurationApplyValues)[number];
   authorizationOperation:
-    | { kind: "idle" }
+    | {
+        kind: "idle";
+      }
     | {
         kind: (typeof mcpAuthorizationPhaseValues)[number];
         serverId: string;
@@ -1563,12 +1613,18 @@ export type McpManagementView = {
           command: string;
           arguments: string[];
           cwd: string | null;
-          environment: { name: string; status: "missing" | "set" }[];
+          environment: {
+            name: string;
+            status: "missing" | "set";
+          }[];
         }
       | {
           kind: "streamable_http";
           endpoint: string;
-          headers: { name: string; status: "missing" | "set" }[];
+          headers: {
+            name: string;
+            status: "missing" | "set";
+          }[];
           registrationKind: "none" | "automatic" | "pre_registered";
           clientId: string | null;
           tokenEndpointAuthMethod:
@@ -1594,7 +1650,6 @@ export type McpManagementView = {
     }[];
   }[];
 };
-
 export type McpMutationResult = {
   outcome:
     | "unchanged"
@@ -1608,7 +1663,6 @@ export type McpMutationResult = {
     | "capability_unavailable";
   desiredGeneration: string | null;
 };
-
 export type McpAuthorizationResult = {
   outcome:
     | "started"
@@ -1618,7 +1672,6 @@ export type McpAuthorizationResult = {
     | "capability_unavailable";
   operationId: string | null;
 };
-
 export type McpAuthorizationCancelResult = {
   outcome:
     | "cancelled"
@@ -1628,15 +1681,12 @@ export type McpAuthorizationCancelResult = {
     | "indeterminate"
     | "capability_unavailable";
 };
-
 export type McpRefreshResult = {
   outcome: "started" | "busy" | "unavailable" | "shutting_down" | "rejected";
 };
-
 export type McpConfigurationApplyResult = {
   outcome: "started" | "busy" | "unavailable" | "rejected";
 };
-
 export type McpConnectionTestResult = {
   outcome:
     | "started"
@@ -1646,7 +1696,6 @@ export type McpConnectionTestResult = {
     | "rejected"
     | "unavailable";
 };
-
 export type TaskCreateReason =
   | "execution_changed"
   | "execution_unavailable"
@@ -1659,7 +1708,6 @@ export type TaskCreateReason =
   | "stale_catalog"
   | "capacity_reached"
   | "shutting_down";
-
 export type TaskCreateResult =
   | {
       accepted: true;
@@ -1675,21 +1723,20 @@ export type TaskCreateResult =
       mcpAuthority: null;
       reason: TaskCreateReason;
     };
-
 export type TaskWorkspaceIntent =
-  | { kind: "automatic" }
+  | {
+      kind: "automatic";
+    }
   | {
       kind: "manual";
       workspaceId: string;
       expectedWorkspaceEpoch: string;
     };
-
 export type NewTaskModelSelectionIntent = {
   targetModelRef: ModelRef;
   expectedSourceGeneration: string;
   expectedCatalogGeneration: string;
 };
-
 export type TaskRunReason =
   | "binding_changed"
   | "binding_unavailable"
@@ -1708,7 +1755,6 @@ export type TaskRunReason =
   | "unsupported_attachment"
   | "capacity_reached"
   | "shutting_down";
-
 export type TaskRunResult =
   | {
       accepted: true;
@@ -1722,13 +1768,11 @@ export type TaskRunResult =
       runId: null;
       reason: TaskRunReason;
     };
-
 export type TaskCompletionSeenResult = {
   taskId: string;
   runId: string;
   marked: boolean;
 };
-
 export const taskApprovalModeReasons = [
   "task_not_found",
   "stale_binding",
@@ -1743,14 +1787,18 @@ export const taskApprovalModeReasons = [
 ] as const;
 export type TaskApprovalModeReason = (typeof taskApprovalModeReasons)[number];
 export type TaskApprovalModeResult =
-  | { accepted: true; taskId: string; approvalRevision: string; reason: null }
+  | {
+      accepted: true;
+      taskId: string;
+      approvalRevision: string;
+      reason: null;
+    }
   | {
       accepted: false;
       taskId: string;
       approvalRevision: null;
       reason: TaskApprovalModeReason;
     };
-
 export type TaskModelSelectionReason =
   | "persistence_unavailable"
   | "persistence_failed"
@@ -1761,7 +1809,6 @@ export type TaskModelSelectionReason =
   | "task_busy"
   | "shutting_down"
   | "capacity_reached";
-
 export type TaskModelSelectionResult =
   | {
       accepted: true;
@@ -1775,7 +1822,6 @@ export type TaskModelSelectionResult =
       selectionRevision: null;
       reason: TaskModelSelectionReason;
     };
-
 export type TaskCompactReason =
   | "binding_changed"
   | "binding_unavailable"
@@ -1784,7 +1830,6 @@ export type TaskCompactReason =
   | "no_history"
   | "capacity_reached"
   | "shutting_down";
-
 export type TaskCompactResult =
   | {
       accepted: true;
@@ -1798,14 +1843,12 @@ export type TaskCompactResult =
       operationId: null;
       reason: TaskCompactReason;
     };
-
 export type TaskRestoreReason =
   | "binding_changed"
   | "task_unavailable"
   | "recovery_unavailable"
   | "capacity_reached"
   | "shutting_down";
-
 export type TaskRestoreResult =
   | {
       accepted: true;
@@ -1819,7 +1862,6 @@ export type TaskRestoreResult =
       attemptId: null;
       reason: TaskRestoreReason;
     };
-
 export type CatalogRefreshReason =
   | "workspace_changed"
   | "binding_changed"
@@ -1831,26 +1873,29 @@ export type CatalogRefreshReason =
   | "catalog_unavailable"
   | "capacity_reached"
   | "shutting_down";
-
 export type CatalogRefreshResult<Identity extends "workspaceId" | "taskId"> = {
   accepted: boolean;
   reason: CatalogRefreshReason | null;
 } & Record<Identity, string>;
-
 export type SkillCatalogRefreshResult = {
   accepted: boolean;
   reason: CatalogRefreshReason | null;
 };
-
 export type HostSignal = {
   sequence: number;
 };
-
 export type WorkspaceChoice =
-  { selected: false } | { selected: true; workspaceId: string };
-
+  | {
+      selected: false;
+    }
+  | {
+      selected: true;
+      workspaceId: string;
+    };
 export type SkillImportPreview =
-  | { selected: false }
+  | {
+      selected: false;
+    }
   | {
       selected: true;
       previewId: string;
@@ -1861,7 +1906,6 @@ export type SkillImportPreview =
       fileCount: number;
       totalBytes: number;
     };
-
 export type SkillMutationReason =
   | "invalid_scope"
   | "invalid_preview"
@@ -1876,7 +1920,6 @@ export type SkillMutationReason =
   | "capacity_reached"
   | "shutting_down"
   | "local_storage_failed";
-
 export type SkillMutationResult =
   | {
       accepted: true;
@@ -1890,19 +1933,28 @@ export type SkillMutationResult =
       verificationPending: false;
       reason: SkillMutationReason;
     };
-
 export type SkillEnablementResult =
-  | { applied: true; selectionRevision: string; reason: null }
+  | {
+      applied: true;
+      selectionRevision: string;
+      reason: null;
+    }
   | {
       applied: false;
       selectionRevision: null;
       reason: SkillMutationReason;
     };
-
 export type SkillExportResult =
-  | { exported: true; fileName: string; reason: null }
-  | { exported: false; fileName: null; reason: string };
-
+  | {
+      exported: true;
+      fileName: string;
+      reason: null;
+    }
+  | {
+      exported: false;
+      fileName: null;
+      reason: string;
+    };
 export type SkillDetailResult =
   | {
       available: true;
@@ -1918,7 +1970,6 @@ export type SkillDetailResult =
       totalBytes: 0;
       reason: string;
     };
-
 export type UiResponsePayload = {
   kind: "permission";
   permission: PermissionChoice;

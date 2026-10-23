@@ -12,7 +12,6 @@ import {
 } from "./package-metadata.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { localArchiveEnvironment } from "./archive-environment.mjs";
-import { localOfficeEnvironment } from "./office-environment.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -51,10 +50,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.capture ? "pipe" : "inherit",
     env: {
-      ...localArchiveEnvironment(
-        repositoryRoot,
-        localOfficeEnvironment(repositoryRoot),
-      ),
+      ...localArchiveEnvironment(repositoryRoot, process.env),
     },
   });
   if (result.error) throw result.error;
@@ -351,10 +347,7 @@ export function signWithStableRequirement(targetPath, identity, options = {}) {
 }
 
 export function developmentEnvironment(root, inherited = process.env) {
-  const environment = localArchiveEnvironment(
-    root,
-    localOfficeEnvironment(root, inherited),
-  );
+  const environment = localArchiveEnvironment(root, inherited);
   delete environment.NATIVE_SDK_FRONTEND_URL;
   delete environment.NATIVE_SDK_HMR;
   delete environment.NATIVE_SDK_MODE;

@@ -2,7 +2,6 @@
 const std = @import("std");
 const snapshot = @import("snapshot_contract");
 const task_view = @import("task_view_contract");
-const office_view = @import("office_view_contract");
 pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
@@ -15,8 +14,6 @@ pub fn main(init: std.process.Init) !void {
     try emit(snapshot.SnapshotPreparing, "SnapshotPreparing", writer);
     try emit(snapshot.SnapshotDescriptor, "SnapshotDescriptor", writer);
     try emit(task_view.ApprovalResult, "TaskApprovalResultWire", writer);
-    try emit(office_view.View, "OfficeComponentView", writer);
-    try emit(office_view.Result, "OfficeComponentResult", writer);
     try writer.flush();
 }
 

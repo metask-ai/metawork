@@ -32,7 +32,7 @@ export function verifyMainPackageSize(targetId, artifactPath) {
 
 export function verifyMainPackageStage(directory) {
   // Heavy Office dependencies remain optional downloads. Expanded Skill trees
-  // are forbidden here; the separately pinned, bounded self-owned seed is
+  // are forbidden here; the bounded compressed built-in resource archive is
   // embedded by the build and still counts toward the whole installer budget.
   const forbidden =
     /^(?:node_modules|node(?:\.exe)?|python(?:[0-9.]*|w)?(?:\.exe)?|python[0-9]+\.dll|libpython.*|soffice(?:\.exe|\.bin)?|libreoffice.*|docx|xlsx|pptx)$|\.(?:whl|pyd)$/iu;

@@ -1,14 +1,10 @@
-import { isDocumentPreviewFile } from "../../bridge/document-format.ts";
-import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { useEffect, useRef, useState } from "react";
-
 import type {
   FilePreview,
   FileReferenceView,
   FilePreviewLoadOptions,
 } from "../../bridge/contracts.ts";
 import { createTaskPanelPreviewTab } from "./task-panel-state.ts";
-
 type FilePreviewIdentity = {
   tabId: string;
   taskId: string;
@@ -16,30 +12,28 @@ type FilePreviewIdentity = {
   reference: FileReferenceView;
   requestGeneration: number;
 };
-
 export type FilePreviewTabState =
-  | (FilePreviewIdentity & { kind: "document"; document: DocumentPreview })
-  | (FilePreviewIdentity & { kind: "loading" })
-  | (FilePreviewIdentity & { kind: "ready"; preview: FilePreview })
-  | (FilePreviewIdentity & { kind: "failed"; preview: FilePreview });
-
+  | (FilePreviewIdentity & {
+      kind: "loading";
+    })
+  | (FilePreviewIdentity & {
+      kind: "ready";
+      preview: FilePreview;
+    })
+  | (FilePreviewIdentity & {
+      kind: "failed";
+      preview: FilePreview;
+    });
 type FilePreviewLoader = (
   taskId: string,
   runId: string,
   referenceId: string,
   options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
-
 export function useFilePreviewTabs(
   activeTaskId: string | null,
   validTabIds: ReadonlySet<string>,
   load: FilePreviewLoader,
-  loadDocument?: (
-    taskId: string,
-    runId: string,
-    referenceId: string,
-    signal: AbortSignal,
-  ) => DocumentPreview,
 ) {
   const [resources, setResourceState] = useState<
     Record<string, FilePreviewTabState>
@@ -49,7 +43,6 @@ export function useFilePreviewTabs(
   const controllers = useRef(new Map<string, AbortController>());
   const activeTaskIdRef = useRef(activeTaskId);
   activeTaskIdRef.current = activeTaskId;
-
   function setResources(
     update: (
       current: Record<string, FilePreviewTabState>,
@@ -59,16 +52,13 @@ export function useFilePreviewTabs(
     resourcesRef.current = next;
     setResourceState(next);
   }
-
   function invalidate(tabId: string) {
     controllers.current.get(tabId)?.abort();
     controllers.current.delete(tabId);
     const resource = resourcesRef.current[tabId];
     if (resource && "preview" in resource) resource.preview.release?.();
-    if (resource?.kind === "document") void resource.document.close();
     generations.current.set(tabId, (generations.current.get(tabId) ?? 0) + 1);
   }
-
   function request(
     taskId: string,
     runId: string,
@@ -87,19 +77,6 @@ export function useFilePreviewTabs(
       reference,
       requestGeneration,
     };
-    if (loadDocument && isDocumentPreviewFile(reference.displayPath)) {
-      const document = loadDocument(
-        taskId,
-        runId,
-        reference.id,
-        controller.signal,
-      );
-      setResources((current) => ({
-        ...current,
-        [tab.tabId]: { ...identity, kind: "document", document },
-      }));
-      return;
-    }
     setResources((current) => ({
       ...current,
       [tab.tabId]: { kind: "loading", ...identity },
@@ -165,7 +142,6 @@ export function useFilePreviewTabs(
         });
       });
   }
-
   function open(taskId: string, runId: string, reference: FileReferenceView) {
     const tab = createTaskPanelPreviewTab(taskId, runId, reference);
     const current = resourcesRef.current[tab.tabId];
@@ -182,7 +158,6 @@ export function useFilePreviewTabs(
     }
     request(taskId, runId, reference);
   }
-
   function close(tabId: string) {
     invalidate(tabId);
     setResources((current) => {
@@ -192,7 +167,6 @@ export function useFilePreviewTabs(
       return next;
     });
   }
-
   function clear() {
     for (const controller of controllers.current.values()) controller.abort();
     controllers.current.clear();
@@ -201,7 +175,6 @@ export function useFilePreviewTabs(
       Object.keys(current).length === 0 ? current : {},
     );
   }
-
   useEffect(() => {
     clear();
     return () => {
@@ -209,15 +182,12 @@ export function useFilePreviewTabs(
       controllers.current.clear();
       for (const resource of Object.values(resourcesRef.current)) {
         if ("preview" in resource) resource.preview.release?.();
-        if (resource.kind === "document") void resource.document.close();
       }
     };
   }, [activeTaskId]);
-
   useEffect(() => {
     for (const tabId of Object.keys(resourcesRef.current))
       if (!validTabIds.has(tabId)) close(tabId);
   }, [validTabIds]);
-
   return { resources, open, refresh: request, close, clear };
 }
