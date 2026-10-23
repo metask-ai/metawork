@@ -113,6 +113,10 @@ Application 只有持有本地数据目录 Primary authority 且组件操作已�
 
 先检查目标 PE machine，校验 MetaWork 入口及所带 Python、Node、引擎入口的 Authenticode，再将已认证字节移入独立最终候选目录。候选目录尚不可发布为 catalog 或当前可用版本，仅本次安装事务可启动受控自检。Windows 在执行资源后可能暂时无法移动其目录，因此完整运行自检只在最终候选位置执行。最终位置必须重新检查 PE 与签名，再通过 Application Office Job 完成自检，成功后才能原子替换当前记录。失败保留旧当前版本；不得把未签名开发 witness 接到正式客户端。受控调用仅继承固定 OS 环境，以事务 scratch 为工作和临时目录，不继承 Task 或 Provider credential。
 
+引擎私有配置目录由组件原生入口单独拥有，不能随文档、安装阶段或预览 scratch 的任意深度增长。入口在启动解释器前，通过 Windows LocalAppData Known Folder 固定选择 `MetaWork/OfficeProfiles/<随机身份>`，覆盖其子进程专用的 `METAWORK_OFFICE_PROFILE`；不使用继承的 TMP/APPDATA 决定该配置根，不在失败后切换目录。配置路径必须满足固定长度预算，否则明确失败。文档输入、产物和其他临时文件仍遵循原 scratch 的 owner。该目录不承载用户 Office 配置、组件版本引用或 Task/Session 数据。
+
+每次调用持有独立的非继承 `Local\MetaWork.Office.Profile.<身份>` kill-on-close Job；它嵌套于已有 Host 或版本执行范围，不取代外层取消及强杀责任。目录的恢复记录为同级 `<身份>.scope`，精确 40 字节：ASCII `MWOFP001` 后接目录身份的 32 个小写十六进制 ASCII 字符。入口先取得独占 Job，写入并 sync 同级 `<身份>.next` 后原子发布记录，最后创建目录和启动子进程；`.next` 仅为未发布的机械临时文件，不授予目录清理身份。正常结束只有在子树静止后才能删除目录及记录；强杀留下的记录由下一次调用有界恢复。恢复只处理此命名空间内格式正确的记录，无法独占相应 Job 时保留；未登记目录不收养。删除不跟随 reparse point，父目录持有防替换 handle，未知记录、超限、清理或静止验证失败均明确失败并保留未完成工作。该格式只属于组件临时资源恢复，不改变组件 store、Task 或 Session 的持久格式。
+
 
 组件 store 的持久记录仅描述组件自身，不写入 Task 或 Session。`current.json` 与 `pending.json` 使用 schema 1、`installId`（32 位小写十六进制随机身份）及 `archiveSha256`（64 位小写十六进制）；固定 `.next` 文件是机械临时文件，不授予身份。阶段目录为 `staging/<installId>`，最终版本目录为 `versions/<installId>`，不得覆盖既有目录。新安装与修复都使用独立身份，不原地替换仍被引用的资源。`archiveSha256` 继续表示合格 producer 归档的真实身份，不改写为 recipe 或客户端组装摘要；完整组件清单 pin 另行验证。因此不迁移既有 current/pending 格式，也不重新解释旧记录。归档摘要不重复拼进长运行时路径，以避免供应商 Windows loader 的路径限制。
 

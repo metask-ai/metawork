@@ -130,10 +130,13 @@ class Engine:
         self.process = None
 
     def __enter__(self):
-        # LibreOffice's registry paths append long fixed suffixes. Keep our
-        # private names short so scoped installation scratch remains usable.
-        profile = (self.directory / "p").as_uri()
-        shared_cache = self.directory / "sc"
+        # The native entry selects and owns one short profile scope before
+        # any child starts. Document and publication paths remain in scratch.
+        # Never retry an engine failure in a different temporary namespace.
+        scope = Path(os.environ["METAWORK_OFFICE_PROFILE"])
+        private = Path(tempfile.mkdtemp(prefix="e-", dir=scope))
+        profile = (private / "p").as_uri()
+        shared_cache = private / "sc"
         shared_cache.mkdir()
         pipe = "metawork-office-" + uuid.uuid4().hex
         os.environ["URE_BOOTSTRAP"] = (PROGRAM / "fundamental.ini").as_uri()

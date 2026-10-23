@@ -29,6 +29,8 @@ export async function buildOfficeLauncher({ targetId, outputPath, signal }) {
       "-Wextra",
       "-Werror",
       path.join(root, "src/product/skill/office_runtime/launcher_windows.c"),
+      "-lshell32",
+      "-lole32",
       "-o",
       outputPath,
     ],

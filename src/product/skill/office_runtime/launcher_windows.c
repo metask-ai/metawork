@@ -8,15 +8,17 @@
 #include <stdio.h>
 #include <wchar.h>
 
-/* Standalone Office calls own this non-inheritable job handle. Keeping it
- * armed until process teardown also covers TerminateProcess on this entrypoint.
- * This is an Office component executable, not a Host process service. */
+/* Every Office entry owns its invocation/profile Job. Hosted calls additionally
+ * join the independent outer Host Job. Keeping this non-inheritable handle
+ * armed until teardown covers TerminateProcess on the entrypoint as well. */
 static HANDLE office_job;
 static wchar_t command[32768];
 static size_t used;
 static HANDLE scope[32];
 static DWORD scope_count;
 static wchar_t version_job_name[64];
+
+#include "profile_windows.h"
 
 /* Installed resources bind to the Primary Host that published their Skill
  * source. This is process identity, never a Task/Session/version reference.
@@ -138,8 +140,11 @@ static int argument(const wchar_t *value) {
 }
 
 static int fail(const char *reason) {
+    DWORD error = GetLastError();
+    /* On an unsettled tree leave the durable profile record for recovery. */
+    profile_finish();
     /* No document content, arguments or inherited environment in diagnostics. */
-    fprintf(stderr, "Office launcher: %s (Windows error %lu)\n", reason, GetLastError());
+    fprintf(stderr, "Office launcher: %s (Windows error %lu)\n", reason, error);
     return 1;
 }
 
@@ -215,17 +220,10 @@ int wmain(int argc, wchar_t **argv) {
             CloseHandle(version_job);
             if (!joined) return fail("Office version is closing");
         }
-        office_job = CreateJobObjectW(NULL, NULL);
-        if (!office_job) return fail("cannot create Office job");
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-        if (!SetInformationJobObject(office_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
-            !AssignProcessToJobObject(office_job, GetCurrentProcess())) {
-            CloseHandle(office_job);
-            return fail("cannot own Office process tree");
-        }
     }
+    /* This nested job owns only this invocation and its private profile.
+     * Host/version jobs retain their independent outer lifetime authority. */
+    if (!profile_begin()) return fail("cannot prepare private Office profile");
 
     if (!argument(python) || !argument(L"-I") || !argument(L"-S") || !argument(L"-B") ||
         !argument(L"-X") || !argument(L"utf8") || !argument(script))
@@ -260,9 +258,6 @@ int wmain(int argc, wchar_t **argv) {
     BOOL exited = GetExitCodeProcess(child.hProcess, &exit_code);
     CloseHandle(child.hProcess);
     if (!exited) return fail("cannot observe component Python exit");
-    /* Hosted calls are joined and checked by Application, which owns the only
-     * long-lived job handle. The standalone Shell path checks its own job. */
-    if (hosted) return (int)exit_code;
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
     ULONGLONG deadline = GetTickCount64() + 2000;
     for (;;) {
@@ -274,6 +269,7 @@ int wmain(int argc, wchar_t **argv) {
         /* Process handles can signal just before job accounting is updated. */
         Sleep(1);
     }
+    if (!profile_finish()) return fail("private Office profile cleanup is incomplete");
     /* The OS closes office_job at exit. It is never inherited by children. */
     return (int)exit_code;
 }

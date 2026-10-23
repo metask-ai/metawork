@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+import _winapi
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -190,7 +191,9 @@ class OfficeEngine(unittest.TestCase):
         return process
 
     def test_selftest_uses_a_deep_owned_installation_temporary_directory(self):
-        directory = self.root / ("installation-scratch-" + "a" * 24)
+        # The actual App installer reached this depth before final activation.
+        # A short checkout-relative fixture missed the engine startup failure.
+        directory = self.root / ("s" * max(1, 176 - len(str(self.root)) - 1))
         directory.mkdir()
         environment = {**os.environ, "TMP": str(directory), "TEMP": str(directory), "TMPDIR": str(directory)}
         result = subprocess.run([str(self.exe), "selftest"], cwd=directory, env=environment,
@@ -359,6 +362,46 @@ class OfficeEngine(unittest.TestCase):
 
     def test_real_engine_tree_exits_when_controller_is_killed(self):
         self.tree_failure("controller-killed", "python")
+
+    def test_profile_recovery_excludes_live_calls_and_reaps_a_killed_call(self):
+        witness = self.root / "profile-scope.json"
+        code = ("import office,os,json,time; from pathlib import Path; "
+                f"Path({str(witness)!r}).write_text(json.dumps(os.environ['METAWORK_OFFICE_PROFILE'])); "
+                "scratch=office.tempfile.TemporaryDirectory(); "
+                "engine=office.Engine(Path(scratch.name)); engine.__enter__(); time.sleep(60)")
+        process = subprocess.Popen([str(self.exe), "python", "-c", code],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(self.stop_process, process)
+        handles = self.hold_real_tree(process)
+        directory = Path(json.loads(witness.read_text()))
+        record = directory.with_suffix(".scope")
+        self.assertTrue(directory.is_dir())
+        self.assertTrue(record.is_file())
+        sibling = subprocess.run([str(self.exe), "python", "-c", "print('sibling')"],
+                                 capture_output=True, timeout=20)
+        self.assertEqual(sibling.returncode, 0, sibling.stderr)
+        self.assertTrue(directory.is_dir(), "Another invocation deleted a live profile")
+        self.assertTrue(record.is_file())
+        process.kill()
+        process.communicate(timeout=15)
+        for handle in handles.values():
+            self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0)
+        self.assertTrue(record.exists(), "Hard kill lost durable cleanup identity")
+        # Recovery must also discard an interrupted, unpublished record and
+        # unlink a reparse leaf without traversing into unrelated files.
+        temporary_record = directory.with_suffix(".next")
+        temporary_record.write_bytes(b"partial")
+        canary = self.root / "profile-cleanup-canary"
+        canary.mkdir()
+        (canary / "keep.txt").write_bytes(b"outside profile")
+        _winapi.CreateJunction(str(canary), str(directory / "outside-link"))
+        recovery = subprocess.run([str(self.exe), "python", "-c", "print('recovered')"],
+                                  capture_output=True, timeout=20)
+        self.assertEqual(recovery.returncode, 0, recovery.stderr)
+        self.assertFalse(record.exists())
+        self.assertFalse(directory.exists())
+        self.assertFalse(temporary_record.exists())
+        self.assertEqual((canary / "keep.txt").read_bytes(), b"outside profile")
 
     def test_real_engine_deadline_is_failure_and_leaves_no_published_pages(self):
         self.tree_failure("deadline", "timeout")
