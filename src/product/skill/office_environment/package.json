@@ -1,0 +1,8 @@
+{
+  "name": "metawork-office-authoring",
+  "private": true,
+  "dependencies": {
+    "docx": "9.6.1",
+    "pptxgenjs": "4.0.1"
+  }
+}

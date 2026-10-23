@@ -7,72 +7,25 @@ description: Create, read, edit, revise, and manage comments in Word documents. 
 
 ## Execution environment
 
-Skill resource directory: `${CLAUDE_SKILL_DIR}`
+This is a complete built-in Skill. Its private environment may not be prepared yet. Only Windows x64 automatic preparation is supported.
 
-This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
+Use the absolute resource entries `${CLAUDE_SKILL_DIR}/environment/prepare.cmd` and `${CLAUDE_SKILL_DIR}/environment/run.cmd` through the existing Shell, preserving Windows argument quoting. Never infer an executable from the parent of this resource directory.
 
-Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
+First use `prepare.cmd python` or `prepare.cmd node` only to reuse an existing environment **after consent has already been obtained**, or use `run.cmd python ...` / `run.cmd node ...` to execute: run never downloads and reports a missing environment. Before first preparation, tell the user its purpose and the fixed download sizes in [environment inputs](environment/environment.json), plus the required library download, and ask for agreement. Then call the fixed prepare entry for the needed language. No arbitrary URL, package list or version arguments are supported. DOCX/PPTX creation and Python validation may need both environments. If preparation fails or is refused, explain the limitation and continue what is possible. Do not install globally or change user configuration. Consent is a conversation instruction; full_access has no additional product installation gate.
 
-The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
+The prepared directories are shared under the user's LocalAppData/MetaWork/OfficeDependencies. Do not update, rename or delete completed environments or ask the user to delete them. Private dependencies are not an execution sandbox. Write task scripts, working copies and outputs in the Task workspace. Use `from office_archive import checked_copy` and load only the private checked path inside its context when passing an existing Office file to a library. Never overwrite the attachment original.
 
-Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
+This edition cannot render documents, export PDF, accept revisions or recalculate formulas. Do not invent visual QA or calculation results. XLSX may request recalculation on open, but this does not calculate or populate caches now.
 
-Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
+## Read, check and deliver
 
-## Explicit file delivery
+For bounded structured text: `run.cmd python "${CLAUDE_SKILL_DIR}/environment/read.py" input.docx new-content.json` (also XLSX/PPTX). For XML work, run the scripts under `scripts/office/` with `run.cmd python`, using new output directories. Reopen and inspect changed content and validate supported structures before delivery. Report unsupported features and checks not performed.
 
-Validate and reopen the DOCX, verify the requested content and revision state, and inspect the affected pages when layout matters. State any checks you could not perform. Host file verification does not establish document quality.
-
-After checking the final file, call the Host tool `DeliverFile` with arguments `{"path":"results/report.docx"}`, using the actual Task Workspace-relative path with forward slashes. This is a tool call, not a Shell command or text to print. Submit only the finished files requested by the user; keep unpacked XML, scripts, temporary files and preview images as working material unless explicitly requested.
-
-Observe the actual tool result. `verified_for_delivery` confirms the Host checked the bytes and issued a receipt; the Task Outputs record determines registration. If the tool is unavailable or fails, report that delivery was not confirmed. A Markdown path or Shell output cannot register an Output. Describe the changes and any remaining limitations after the real result.
-
-Do not change a file after submitting it; finish further edits and checks before submitting the new result. A read-only analysis can end with a conversational answer and does not require a new file.
-
-## Overview
-
-A .docx file is a ZIP archive containing XML files.
-
-## Quick Reference
-
-| Task | Approach |
-|------|----------|
-| Read/analyze content | Component `text` command, or bounded unpack for raw XML |
-| Create new document | Use `docx-js` - see Creating New Documents below |
-| Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
-
-Legacy `.doc` files, encrypted documents and user document macros are outside this Skill's supported workflow. Explain the limitation rather than presenting an unverified conversion as supported.
-
-### Reading Content
-
-```bash
-# Text extraction with tracked changes
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text document.docx content.json
-
-# Raw XML access
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" document.docx unpacked/
-```
-
-### Converting to Images
-
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render document.docx preview-pages/
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" pdf document.docx exported.pdf
-```
-
-### Accepting Tracked Changes
-
-To produce a checked clean working copy with all tracked changes accepted:
-
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" accept input.docx output.docx
-```
-
----
+Call the Host tool `DeliverFile` with the actual Task Workspace-relative output path, e.g. `{"path":"results/report.docx"}`. This is a tool call, not a Shell command or text to print. Deliver only finished files requested by the user, not temporary XML, scripts or check output.
 
 ## Creating New Documents
 
-Generate .docx files with JavaScript using the `docx` package, then validate. Run the saved script with `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`; do not run a system Node or install a package.
+Generate .docx files with JavaScript using the `docx` package, then validate. Run the saved script with `"${CLAUDE_SKILL_DIR}/environment/run.cmd" node create.cjs`; do not run a system Node or install a package.
 
 ### Setup
 ```javascript
@@ -92,7 +45,7 @@ Packer.toBuffer(doc).then(buffer => fs.writeFileSync("doc.docx", buffer));
 ### Validation
 After creating the file, validate it. If validation fails, unpack, fix the XML, and repack.
 ```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/validate.py" doc.docx
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/office/validate.py" doc.docx
 ```
 
 ### Page Size
@@ -419,7 +372,7 @@ sections: [{
 
 ### Step 1: Unpack
 ```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" document.docx unpacked/
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" document.docx unpacked/
 ```
 Extracts XML, pretty-prints, merges adjacent runs, and converts smart quotes to XML entities (`&#x201C;` etc.) so they survive editing. Use `--merge-runs false` to skip run merging.
 
@@ -445,15 +398,15 @@ Edit files in `unpacked/word/`. See XML Reference below for patterns.
 
 **Adding comments:** Use `comment.py` to handle boilerplate across multiple XML files (text must be pre-escaped XML):
 ```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Comment text with &amp; and &#x2019;"
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Text" --author "Custom Author"  # custom author name
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Comment text with &amp; and &#x2019;"
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/comment.py" unpacked/ 0 "Text" --author "Custom Author"  # custom author name
 ```
 Then add markers to document.xml (see Comments in XML Reference).
 
 ### Step 3: Pack
 ```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/pack.py" unpacked/ output.docx --original document.docx
+"${CLAUDE_SKILL_DIR}/environment/run.cmd" python "${CLAUDE_SKILL_DIR}/scripts/office/pack.py" unpacked/ output.docx --original document.docx
 ```
 Validates with auto-repair, condenses XML, and creates DOCX. Use `--validate false` to skip.
 
@@ -600,6 +553,3 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 
 ---
 
-## Runtime
-
-The Office component supplies its sole conversion engine, Python with defusedxml/lxml, and Node with docx. Use the component entry shown above for creation, XML helpers, acceptance, export and page images. No separate system tool installation is part of this workflow.
