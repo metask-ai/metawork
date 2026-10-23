@@ -110,6 +110,22 @@ pub const ModelsManagement = struct {
     }
 };
 
+/// Main-thread, secret-free proof supplied by the Application Account owner.
+/// A scope survives token refresh and ends on login replacement or credential loss.
+pub const MetaskAuthorization = struct {
+    generation: u64,
+    scope: u64,
+};
+
+pub const MetaskAuthorizationCheck = struct {
+    context: *anyopaque,
+    current_fn: *const fn (*anyopaque) ?MetaskAuthorization,
+
+    pub fn current(self: MetaskAuthorizationCheck) ?MetaskAuthorization {
+        return self.current_fn(self.context);
+    }
+};
+
 /// Main-thread admission call only. The returned owned value contains no
 /// mutable aggregate pointer; only the scoped effect owner is retained.
 pub const ImageRunPreparation = struct {

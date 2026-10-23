@@ -475,6 +475,8 @@ pub const RecoveryStartInput = struct {
     workspace_kind: recovery_job.WorkspaceKind,
     execution: models_contract.ConfigInput,
     source_generation: u64 = 0,
+    metask_authorization_scope: u64 = 0,
+    continuation_source_id: ?u64 = null,
     agent_runtime: *agent.Runtime,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
@@ -525,6 +527,7 @@ pub const DeletionSync = struct {
 };
 
 pub const CreateCandidate = struct {
+    metask_authorization_scope: u64 = 0,
     execution_generation: u64,
     execution_protocol: task_state.Protocol,
     execution_model: []u8,
@@ -554,6 +557,7 @@ pub const CreateTaskInput = struct {
     model: []const u8,
     model_ref: ?models_contract.ModelRef = null,
     source_generation: u64 = 0,
+    metask_authorization_scope: u64 = 0,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -1674,6 +1678,7 @@ pub const Runtime = struct {
         input.pinned_catalog.* = null;
         var candidate = CreateCandidate{
             .execution_generation = input.execution.execution_generation,
+            .metask_authorization_scope = input.metask_authorization_scope,
             .execution_protocol = input.protocol,
             .execution_model = execution_model,
             .model_intent = model_intent,
@@ -1759,6 +1764,7 @@ pub const Runtime = struct {
                 .ui_history = ui_history,
             },
             .runtime = .{
+                .metask_authorization_scope = owned.metask_authorization_scope,
                 .mcp_authority_at_creation = owned.mcp_authority,
                 .attachment = .{ .attached = .{
                     .binding = owned.binding.take(),
@@ -2215,10 +2221,10 @@ pub const Runtime = struct {
         return merged;
     }
 
-    pub fn prepareInputContinuation(self: *Runtime, task_id: u64, max_bytes: usize) union(enum) {
+    pub fn inspectInputContinuation(self: *Runtime, task_id: u64) union(enum) {
         wait,
         ended,
-        ready: struct { source_id: u64, binding_epoch: u64, text: []u8 },
+        ready: struct { source_id: u64, binding_epoch: u64 },
     } {
         const task = self.find(task_id) orelse return .wait;
         const source = self.inputContinuation(task_id) orelse return .wait;
@@ -2235,6 +2241,21 @@ pub const Runtime = struct {
             _ = self.cancelInputContinuation(task_id, source.id, .binding_changed);
             return .ended;
         }
+        return .{ .ready = .{ .source_id = source.id, .binding_epoch = source.input_continuation_binding_epoch } };
+    }
+
+    pub fn prepareInputContinuation(self: *Runtime, task_id: u64, max_bytes: usize) union(enum) {
+        wait,
+        ended,
+        ready: struct { source_id: u64, binding_epoch: u64, text: []u8 },
+    } {
+        const ready = switch (self.inspectInputContinuation(task_id)) {
+            .wait => return .wait,
+            .ended => return .ended,
+            .ready => |value| value,
+        };
+        const task = self.find(task_id).?;
+        const source = task_state.findRun(task.durable.runs, ready.source_id).?;
         source.noteProjectionChange();
         source.input_continuation_pending = false;
         source.input_continuation_attempted = true;
@@ -4669,7 +4690,11 @@ pub const Runtime = struct {
         input: RecoveryStartInput,
     ) RecoveryStartError!u64 {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (self.inputContinuation(task_id) != null) return error.RestoreBusy;
+        if (self.inputContinuation(task_id)) |source| {
+            if (input.continuation_source_id != source.id or input.rebind == null or
+                source.input_continuation_attempted or source.input_continuation_cancelled or
+                !source.event_stream_finalized) return error.RestoreBusy;
+        } else if (input.continuation_source_id != null) return error.RecoveryUnavailable;
         if (input.expected_binding_epoch == 0 or
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
@@ -4782,6 +4807,8 @@ pub const Runtime = struct {
                 .permission_interaction = permission.interaction,
             },
         };
+        job.continuation_source_id = input.continuation_source_id;
+        job.metask_authorization_scope = input.metask_authorization_scope;
         job.credential = job.attempt.execution.secret;
         restore_lease_owned = false;
         job_initialized = true;
@@ -5296,11 +5323,30 @@ pub const Runtime = struct {
                 task.runtime.restore_catalog = null;
             }
         }
+        const continuation = job.continuation_source_id;
+        const original_epoch = job.attempt.binding_epoch;
+        const continued = job.rebind != null and job.rebind.?.phase == .restoring_target and
+            task.runtime.executionConst() != null and
+            task.runtime.executionConst().?.execution_generation == job.attempt.target_execution_generation;
         task.runtime.restore_job = null;
         task.runtime.active_operation = .none;
         if (!job.deinit()) {
             self.recovery_poisoned = true;
             task.runtime.last_restore_failure = .candidate_cleanup_failed;
+        }
+        if (continuation) |source_id| {
+            const source = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
+            if (!source.input_continuation_pending) return;
+            if (!continued or task.runtime.last_restore_failure != null) {
+                _ = self.cancelInputContinuation(task.durable.id, source_id, .admission_failed);
+            } else if (source.input_continuation_binding_epoch != original_epoch) {
+                _ = self.cancelInputContinuation(task.durable.id, source_id, .binding_changed);
+            } else {
+                // Only the successful, explicitly owned transaction can move
+                // this pending batch to the new binding. It has not been sent.
+                source.input_continuation_binding_epoch = task.durable.binding_epoch;
+                source.noteProjectionChange();
+            }
         }
     }
 
@@ -5674,6 +5720,7 @@ pub const Runtime = struct {
                     record.deinit(self.allocator);
                 }
                 if (install_candidate) {
+                    task.runtime.metask_authorization_scope = if (job.rebind != null and job.rebind.?.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = if (candidate.report) |report| .{
                         .restored_rules = report.restored_permission_rules,
@@ -7441,7 +7488,7 @@ fn applyModelIntent(
     if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
     const intent = task.durable.model_intent orelse return;
     const installed = task.runtime.execution().?;
-    if (installed.model_intent_revision == intent.revision) return;
+    if (installed.model_intent_revision == intent.revision and effects.model_target == null) return;
     const target = effects.model_target orelse return error.ExecutionUnavailable;
     if (!std.mem.eql(u8, intent.model_id, target.target.model)) return error.ExecutionGenerationMismatch;
     if (!installed.matchesSource(target))

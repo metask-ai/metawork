@@ -6872,6 +6872,15 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
         .{ .text = "finish before cancel arrives" },
     );
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    // Terminal publication precedes automatic-title completion and lease release.
+    // Observe quiescence before attributing any revision change to cancellation.
+    const task = workbench.task_runtime.find(task_id).?;
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (!task.runtime.worker_leases.hasLive() and
+            task.durable.runs[0].?.automatic_title.state.load(.acquire) == .settled) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());

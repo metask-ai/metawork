@@ -229,6 +229,7 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,

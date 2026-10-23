@@ -294,6 +294,12 @@ pub const Runtime = struct {
         );
     }
 
+    /// Tests the accepted catalog against an Application-supplied authorization.
+    pub fn acceptsMetaskAuthorization(self: *Runtime, generation: u64) bool {
+        self.assertMainThread();
+        return generation != 0 and generation == self.metask_catalog_authorization_generation and self.metask_catalog_state == .ready;
+    }
+
     /// Resolve the preferred model or the first eligible catalog entry using
     /// the current authorization lease. No user selection is persisted.
     pub fn prepareImageCandidate(self: *Runtime, input: contract.ImagePreparationInput) contract.ImagePreparation {

@@ -1269,6 +1269,7 @@ pub const Runtime = struct {
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
+    metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -4044,6 +4045,7 @@ pub const Runtime = struct {
         var task_input: task_runtime.CreateTaskInput = .{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
+            .metask_authorization_scope = try self.metaskAuthorizationScope(execution_input.target.provider_id),
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
             .model_ref = if (model_selection) |selection| selection.target else self.execution_state.activeModelRef(),
@@ -4246,6 +4248,10 @@ pub const Runtime = struct {
         const job = task.runtime.restore_job orelse return false;
         const rebind = if (job.rebind) |*value| value else return false;
         if (task.durable.approval_revision != rebind.approval_revision) return false;
+        const execution = if (job.outcome == .candidate) &job.outcome.candidate.execution else &job.attempt.execution;
+        const scope = self.metaskAuthorizationScope(execution.provider_id) catch return false;
+        const expected_scope = if (rebind.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+        if (scope != expected_scope) return false;
         const capabilities = if (rebind.capabilities) |*value| value else return true;
         const current = self.prepareTaskRestoreFilters(task_id, &capabilities.original) catch return false;
         defer if (current.skill) |value| value.deinit() catch {};
@@ -4273,7 +4279,7 @@ pub const Runtime = struct {
         return true;
     }
 
-    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate) Error!u64 {
+    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate, continuation_source_id: ?u64) Error!u64 {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
         const attached = task.runtime.hasAttachedSession();
@@ -4286,6 +4292,7 @@ pub const Runtime = struct {
         const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
         const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+        try self.validateTaskMetaskAuthorization(task_id);
         self.learnProjectionCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
@@ -4326,6 +4333,8 @@ pub const Runtime = struct {
             },
             .execution = config,
             .source_generation = execution.source_generation,
+            .continuation_source_id = continuation_source_id,
+            .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
             .checkpoint_store_health = &self.checkpoint_store_health,
@@ -4355,7 +4364,7 @@ pub const Runtime = struct {
             defer if (target) |*value| value.deinit();
             if (target) |*value| if (task.runtime.attachment == .detached or
                 (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
-                return self.beginTaskModelRebind(task_id, expected_binding_epoch, value);
+                return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
         }
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
@@ -4383,6 +4392,7 @@ pub const Runtime = struct {
             },
             .execution = execution,
             .source_generation = self.execution_state.activeSourceGeneration(),
+            .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
             .checkpoint_limits = checkpoint_export_limits,
@@ -5063,7 +5073,7 @@ pub const Runtime = struct {
             if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
                 if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
                     return error.ExecutionUnavailable;
-                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target);
+                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null);
                 return error.RestoreBusy;
             };
         }
@@ -5899,6 +5909,33 @@ pub const Runtime = struct {
     }
 
     fn advanceInputContinuation(self: *Runtime, task_id: u64) bool {
+        const readiness = self.task_runtime.inspectInputContinuation(task_id);
+        switch (readiness) {
+            .wait => return false,
+            .ended => {
+                self.bumpRevision();
+                return true;
+            },
+            .ready => |batch| {
+                // Resolve before consuming the batch. A replacement is one
+                // bounded preparation, not a failed Run admission or replay.
+                var target = self.resolveTaskRunModel(task_id) catch |err| {
+                    _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
+                    self.bumpRevision();
+                    return true;
+                };
+                defer if (target) |*value| value.deinit();
+                const task = self.task_runtime.findConst(task_id).?;
+                if (target) |*value| if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(value.input())) {
+                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id) catch |err| {
+                        _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
+                        self.bumpRevision();
+                        return true;
+                    };
+                    return false;
+                };
+            },
+        }
         switch (self.task_runtime.prepareInputContinuation(task_id, self.limits.max_user_message_bytes)) {
             .wait => return false,
             .ended => {
@@ -7759,7 +7796,7 @@ pub const Runtime = struct {
         const task = self.task_runtime.findConst(task_id) orelse return false;
         const intent = task.durable.model_intent orelse return false;
         const installed = task.runtime.executionConst() orelse return false;
-        if (installed.model_intent_revision == intent.revision) return false;
+        if (installed.model_intent_revision == intent.revision and task.runtime.metask_authorization_scope == 0) return false;
         const authority = self.taskModelIntentAuthority(task_id) orelse return false;
         const protocol = self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) orelse return false;
         const provider_matches = if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id))
@@ -7774,7 +7811,10 @@ pub const Runtime = struct {
         const intent = task.durable.model_intent orelse return null;
         // Account identity replacement revokes new Metask credential use.
         // Independent Custom Providers do not inherit that Account gate.
-        if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id) and self.execution_state.identityReplacementPending()) return null;
+        if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id)) {
+            if (self.execution_state.identityReplacementPending()) return null;
+            self.validateTaskMetaskAuthorization(task_id) catch return null;
+        }
         const models = self.modelsView();
         for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
             return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
@@ -7786,14 +7826,26 @@ pub const Runtime = struct {
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
         const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
         if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        try self.validateTaskMetaskAuthorization(task_id);
         const intent = task.durable.model_intent orelse return null;
         if (task.runtime.executionConst()) |installed|
-            if (installed.model_intent_revision == intent.revision) return null;
+            if (installed.model_intent_revision == intent.revision) {
+                if (task.runtime.metask_authorization_scope == 0) return null;
+                const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+                if (installed.source_generation == current.source_generation) return null;
+            };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        return (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
+        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
+        errdefer candidate.deinit();
+        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.model_intent_revision == intent.revision) {
+            const input = candidate.input();
+            if (installed.protocol != input.target.protocol or !std.mem.eql(u8, installed.base_url, input.target.base_url))
+                return error.ExecutionUnavailable;
+        };
+        return candidate;
     }
 
     fn writeTaskCatalogProjection(
@@ -9882,6 +9934,34 @@ pub const Runtime = struct {
             .context = self,
             .commit_fn = controlCommitAccountChange,
         };
+    }
+
+    pub fn setMetaskAuthorizationCheck(self: *Runtime, check: control_ports.MetaskAuthorizationCheck) void {
+        self.metask_authorization_check = check;
+    }
+
+    fn metaskAuthorizationScope(self: *Runtime, provider_id: []const u8) Error!u64 {
+        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return 0;
+        if (self.shutting_down) return error.ExecutionUnavailable;
+        const check = self.metask_authorization_check orelse {
+            // Isolated Product tests have no Account composition. Desktop
+            // admission must fail closed if its required capability is absent.
+            if (builtin.is_test) return 0;
+            return error.ExecutionUnavailable;
+        };
+        const current = check.current() orelse return error.ExecutionUnavailable;
+        if (current.scope == 0 or current.generation == 0 or
+            !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return error.ExecutionUnavailable;
+        return current.scope;
+    }
+
+    fn validateTaskMetaskAuthorization(self: *Runtime, task_id: u64) Error!void {
+        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
+        const provider_id = if (task.durable.model_intent) |intent| intent.source_id else if (task.runtime.executionConst()) |execution| execution.provider_id else return;
+        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
+        const scope = try self.metaskAuthorizationScope(provider_id);
+        if (task.runtime.metask_authorization_scope != 0 and task.runtime.metask_authorization_scope != scope)
+            return error.ExecutionUnavailable;
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {

@@ -1,0 +1,614 @@
+//! Real Account/Models/Product lifecycle with a synthetic Core ABI.
+//! Expired-token rejection is injected; this does not claim live Metask evidence.
+const fixture = @import("lifecycle_fixture");
+const std = fixture.std;
+const account = fixture.account;
+const control_api = fixture.product_control;
+const coordinator_api = fixture.models_coordinator;
+const models = fixture.models_contract;
+const fake_core = &fixture.fake_core;
+
+const access_a = "synthetic-lifecycle-access-a";
+const access_b = "synthetic-lifecycle-access-b";
+const model_id = "glm-5.3-flash";
+
+const Network = struct {
+    expected_access: []const u8 = access_a,
+    catalog_calls: std.atomic.Value(usize) = .init(0),
+    refresh_calls: std.atomic.Value(usize) = .init(0),
+    fail_catalog: bool = false,
+    login_principal: []const u8 = "credential-lifecycle",
+    catalog_drift: bool = false,
+    rotate_token: bool = true,
+
+    fn wake(_: *anyopaque) void {}
+
+    fn refresh(context: *anyopaque, request: account.TransportRequest, buffer: []u8) account.TransportError!account.TransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (request.kind == .userinfo) {
+            const body = std.fmt.bufPrint(buffer, "{{\"sub\":\"{s}\",\"name\":\"Synthetic user\",\"client_id\":\"metawork\",\"authorization_id\":\"synthetic-authorization\"}}", .{self.login_principal}) catch return error.ResponseTooLarge;
+            return .{ .status = 200, .body = body };
+        }
+        if (request.kind != .refresh_token and request.kind != .exchange_code) return error.ProtocolFailed;
+        if (request.kind == .refresh_token) _ = self.refresh_calls.fetchAdd(1, .monotonic);
+        const body = std.fmt.bufPrint(buffer, "{{\"access_token\":\"{s}\",\"refresh_token\":\"synthetic-lifecycle-refresh-b\",\"token_type\":\"Bearer\",\"expires_in\":3600}}", .{if (self.rotate_token) access_b else access_a}) catch return error.ResponseTooLarge;
+        return .{ .status = 200, .body = body };
+    }
+
+    fn catalog(context: *anyopaque, request: fixture.metask_transport.Request, buffer: []u8) fixture.metask_transport.TransportError!fixture.metask_transport.Response {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (request.kind != .models or !std.mem.eql(u8, request.bearer orelse "", self.expected_access)) return error.ProtocolFailed;
+        _ = self.catalog_calls.fetchAdd(1, .monotonic);
+        if (self.fail_catalog) return .{ .status = 503, .body = "unavailable" };
+        const body = if (self.catalog_drift and std.mem.eql(u8, self.expected_access, access_a)) "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"catalog-default-model\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}},{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}" else "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}";
+        @memcpy(buffer[0..body.len], body);
+        return .{ .status = 200, .body = buffer[0..body.len] };
+    }
+
+    // No Custom Provider is created; any credential-vault access is a bug in
+    // this Metask-only composition. Account has its own in-memory platform.
+    fn generate(_: *anyopaque, _: *[fixture.models_ports.credential_slot_bytes]u8) anyerror!void {
+        return error.UnexpectedVaultAccess;
+    }
+    fn store(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {
+        return error.UnexpectedVaultAccess;
+    }
+    fn get(_: *anyopaque, _: []const u8, _: []u8) anyerror!?[]const u8 {
+        return error.UnexpectedVaultAccess;
+    }
+    fn delete(_: *anyopaque, _: []const u8) anyerror!void {
+        return error.UnexpectedVaultAccess;
+    }
+};
+
+fn drainCatalog(coordinator: *coordinator_api.Coordinator) !void {
+    for (0..5000) |_| {
+        coordinator.drain();
+        if (coordinator.catalog_job == null) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.CatalogDidNotSettle;
+}
+
+fn createTask(control: *control_api.Runtime, workspace: u64) !u64 {
+    return createTaskWithMode(control, workspace, .manual);
+}
+
+fn createTaskWithMode(control: *control_api.Runtime, workspace: u64, mode: control_api.ApprovalMode) !u64 {
+    const view = control.modelsView();
+    const provider = view.providers[0];
+    const admission = control.newTaskAdmissionView();
+    return control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), admission.active_generation, admission.active_selection_revision, .{
+        .target = .{ .source_id = models.metask_source_id, .model_id = model_id },
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }, null, null, .{ .interactive = mode });
+}
+
+fn runCalls() usize {
+    fake_core.lock();
+    defer fake_core.unlock();
+    return fake_core.run_calls;
+}
+
+fn runAndExpect(control: *control_api.Runtime, task_id: u64, operation: []const u8, expected: fixture.product_task.RunOutcome) !void {
+    const task = control.task_runtime.find(task_id).?;
+    const previous_calls = runCalls();
+    const accepted = try control.sendInput(operation, task_id, .{ .text = "Reply with a short text; do not call tools." });
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (runCalls() > previous_calls and task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
+    try std.testing.expectEqual(previous_calls + 1, runCalls());
+    const run = fixture.product_task.testing.policy_module.latestTerminalRun(task.durable.runs).?;
+    const terminal = fixture.product_task.testing.state_module.productTerminalFacts(run).?;
+    try std.testing.expectEqual(expected, terminal.outcome);
+    if (expected == .failed) {
+        try std.testing.expectEqual(.provider_failure, terminal.cause.?);
+        try std.testing.expectEqual(.absent, terminal.diagnostic_disposition);
+        try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
+    }
+    for (run.tools) |tool| try std.testing.expect(tool == null);
+}
+
+test "Metask token rotation renews an idle old Task without changing its model intent" {
+    try characterizeCredentialExpiry(.rotation);
+}
+
+test "Metask hard expiry blocks an old Task before Core without a notification" {
+    try characterizeCredentialExpiry(.expiry);
+}
+
+test "Metask explicit relogin cannot renew an old Task even for the same principal" {
+    try characterizeCredentialExpiry(.relogin);
+}
+
+test "Metask account replacement cannot lend its credential to an old Task" {
+    try characterizeCredentialExpiry(.account_switch);
+}
+
+test "Metask catalog refresh failure never falls back to an old credential" {
+    try characterizeCredentialExpiry(.catalog_failure);
+}
+
+test "Metask renewal restore failure keeps the input failed and does not replay a Run" {
+    try characterizeCredentialExpiry(.restore_failure);
+}
+
+test "Metask authorization replacement during renewal rejects the restored candidate" {
+    try characterizeCredentialExpiry(.stale_restore);
+}
+
+test "Metask queued input renews only after an active Run quiesces" {
+    try characterizeCredentialExpiry(.queued_rotation);
+}
+
+test "Metask renewed main Agent and automatic reviewer use the same new credential" {
+    try characterizeCredentialExpiry(.reviewer);
+}
+
+test "Metask logout blocks old Tasks before and after login" {
+    try characterizeCredentialExpiry(.logout);
+}
+
+test "Metask detached Task retains its authorization scope across login replacement" {
+    try characterizeCredentialExpiry(.detached);
+}
+
+test "Metask token rotation renews another model after provider intent leaves the catalog" {
+    try characterizeCredentialExpiry(.catalog_drift);
+}
+
+test "Metask unadopted additional input survives credential renewal exactly once" {
+    try characterizeCredentialExpiry(.continuation_rotation);
+}
+
+test "Metask continuation with unchanged credential does not recreate the Session" {
+    try characterizeCredentialExpiry(.continuation_unchanged);
+}
+
+test "Metask continuation renewal failure is final without discarding a successful source Run" {
+    try characterizeCredentialExpiry(.continuation_restore_failure);
+}
+
+test "Metask stopping a continuation during renewal never resubmits it" {
+    try characterizeCredentialExpiry(.continuation_cancelled);
+}
+
+test "Metask relogin during continuation renewal rejects its pending input" {
+    try characterizeCredentialExpiry(.continuation_stale_auth);
+}
+
+test "Metask hard expiry during continuation renewal prevents the next Run" {
+    try characterizeCredentialExpiry(.continuation_expired);
+}
+
+const Scenario = enum { rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, restore_failure, stale_restore, queued_rotation, continuation_rotation, continuation_unchanged, continuation_restore_failure, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+
+fn characterizeCredentialExpiry(scenario: Scenario) !void {
+    const rotate = scenario != .expiry;
+    const continuation = switch (scenario) {
+        .continuation_rotation, .continuation_unchanged, .continuation_restore_failure, .continuation_cancelled, .continuation_stale_auth, .continuation_expired => true,
+        else => false,
+    };
+    const continuation_failure = continuation and scenario != .continuation_rotation and scenario != .continuation_unchanged;
+    const renewed_token = if (scenario == .continuation_unchanged) access_a else access_b;
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const runtime = try fixture.createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        fixture.shutdownTestComposition(runtime) catch unreachable;
+        fixture.deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try fixture.product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    var history = try fixture.product_task.history.FileStore.init(std.testing.io, home);
+    defer history.deinit();
+    var review = ReviewProbe{};
+    var configuration = fixture.productControlConfiguration();
+    if (scenario == .reviewer) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
+    configuration.task_persistence = History.capability(&history);
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    configuration.directories.canonical_user_home = home;
+    var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
+    defer control.deinit();
+    defer fake_core.releaseControlledRestore();
+    defer fake_core.releaseControlled();
+
+    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .rotate_token = scenario != .continuation_unchanged };
+    var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
+    var platform: account.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account.TestSupport.attachPlatform(&account_runtime, &platform);
+    defer {
+        account.TestSupport.detachPlatform(&account_runtime);
+        account_runtime.deinit();
+    }
+    var authenticated = try account.TestSupport.prepareAuthenticated(&account_runtime, "credential-lifecycle", "Synthetic user", access_a, "synthetic-lifecycle-refresh-a", 200);
+    defer authenticated.deinit();
+    account_runtime.commit(&authenticated);
+    control.commitAccountFactNoFail(account_runtime.preparedFact(&authenticated));
+    control.finishAccountCommitNoFail();
+    var coordinator = coordinator_api.Coordinator.init(&account_runtime, .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &network, .notify_fn = Network.wake });
+    coordinator.start(home, .{ .context = &network, .generate_slot_fn = Network.generate, .store_fn = Network.store, .get_fn = Network.get, .delete_fn = Network.delete });
+    defer coordinator.shutdown();
+    // Product may consult the admission port while settling recovery at shutdown.
+    defer {
+        fake_core.releaseControlledRestore();
+        fake_core.releaseControlled();
+        control.shutdownExecutor();
+    }
+    control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
+    coordinator.authorizationChanged();
+    try drainCatalog(&coordinator);
+    try std.testing.expectEqual(@as(usize, 1), network.catalog_calls.load(.acquire));
+    try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
+
+    const workspace = try control.openWorkspace(.{ .workspace_root = home, .trust = .explicitly_trusted });
+    const old_id = try createTaskWithMode(&control, workspace, if (scenario == .reviewer) .auto_review else .manual);
+    const old = control.task_runtime.find(old_id).?;
+    const old_epoch = old.durable.binding_epoch;
+    const old_source = old.runtime.executionConst().?.source_generation;
+    const old_revision = old.durable.model_intent.?.revision;
+    try runAndExpect(&control, old_id, "before-expiry", .completed);
+    try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+    try std.testing.expectEqualDeep(fixture.credentialDigest(access_a), fake_core.sessions[0].credential_digest);
+
+    const old_generation = old.durable.execution_generation;
+    const old_scope = old.runtime.metask_authorization_scope;
+    try std.testing.expect(old_scope != 0);
+    try std.testing.expect(old.durable.checkpoint != null);
+    fake_core.setRestoredLogicalId(old.durable.checkpoint.?.session.logical_session_id);
+    fake_core.setRestoreHistory(1, 0);
+    fake_core.setRestoredModel(model_id);
+    const default_revision = control.modelsView().selection_revision;
+    if (scenario == .detached) {
+        try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
+        for (0..5000) |_| {
+            control.syncLifecycle();
+            if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.DetachDidNotSettle;
+        try std.testing.expectEqual(old_scope, old.runtime.metask_authorization_scope);
+        try relogin(&account_runtime);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        try expectBlocked(&control, old_id, "detached-after-login");
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        return;
+    }
+    if (scenario == .logout) {
+        var signed_out = account.TestSupport.prepareLoggedOutAfterExternalCommit(&account_runtime);
+        defer signed_out.deinit();
+        account_runtime.commit(&signed_out);
+        try expectBlocked(&control, old_id, "logged-out-without-notification");
+        coordinator.authorizationChanged();
+        try relogin(&account_runtime);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        try expectBlocked(&control, old_id, "logged-in-again");
+        return;
+    }
+    if (scenario == .relogin or scenario == .account_switch) {
+        network.login_principal = if (scenario == .relogin) "credential-lifecycle" else "different-principal";
+        try relogin(&account_runtime);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        try std.testing.expect(old_scope != account_runtime.authorizationState().?.scope);
+        try expectBlocked(&control, old_id, "replaced-authorization");
+        try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+        const new_id = try createTask(&control, workspace);
+        try runAndExpect(&control, new_id, "new-authorization", .completed);
+        return;
+    }
+    if (scenario == .queued_rotation or continuation) {
+        fake_core.input_enabled = continuation;
+        fake_core.setCheckpointGeneration(2);
+        fake_core.setSessionPlan(.controlled);
+        const accepted = try control.sendInput("in-flight", old_id, .{ .text = "Finish the existing Run." });
+        try std.testing.expectEqual(.accepted, accepted.outcome);
+        for (0..5000) |_| {
+            if (runCalls() == 2) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.RunDidNotStart;
+        fake_core.setRestoreHistory(2, 0);
+    }
+    defer fake_core.releaseControlled();
+    if (rotate) {
+        platform.now_unix_seconds = 150;
+        var refresh = switch (account_runtime.prepareTokenRefresh()) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        try std.testing.expect(account_runtime.admitEffect(&refresh));
+        account_runtime.commit(&refresh);
+        try std.testing.expect(account_runtime.dispatchCommitted(&refresh) == null);
+        account.TestSupport.joinNetwork(&account_runtime);
+        var rotated = switch (account_runtime.prepareNextCompletion().?) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer rotated.deinit();
+        account_runtime.commit(&rotated);
+        control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
+        control.finishAccountCommitNoFail();
+        try std.testing.expectEqual(old_scope, account_runtime.authorizationState().?.scope);
+        network.expected_access = renewed_token;
+        network.fail_catalog = scenario == .catalog_failure;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        if (scenario == .catalog_failure) {
+            try expectBlocked(&control, old_id, "catalog-failed");
+            try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+            return;
+        }
+        try std.testing.expectEqual(@as(usize, 1), network.refresh_calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 2), network.catalog_calls.load(.acquire));
+        try std.testing.expectEqual(scenario != .continuation_unchanged, old_source != control.modelsView().providers[0].source_generation);
+        try std.testing.expectEqual(default_revision, control.modelsView().selection_revision);
+        if (scenario == .catalog_drift) {
+            try std.testing.expectEqualStrings("catalog-default-model", control.modelsView().metask_selection.?.model_id);
+            try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);
+        }
+        if (scenario == .restore_failure or scenario == .stale_restore) {
+            if (scenario == .restore_failure) fake_core.forceNextCheckpointRestoreStatus(fixture.wire.STATUS_CHECKPOINT_CORRUPT) else fake_core.armControlledRestoreAfterCreate();
+            const accepted = try control.sendInput("renewal-failure", old_id, .{ .text = "This must execute at most once." });
+            try std.testing.expectEqual(.accepted, accepted.outcome);
+            if (scenario == .stale_restore) {
+                for (0..5000) |_| {
+                    control.syncLifecycle();
+                    fake_core.lock();
+                    const entered = fake_core.restore_entered;
+                    fake_core.unlock();
+                    if (entered) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.RestoreDidNotStart;
+                try relogin(&account_runtime);
+                fake_core.releaseControlledRestore();
+            }
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                if (old.runtime.restore_job == null and !old.runtime.worker_leases.hasLive() and old.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.RestoreDidNotSettle;
+            control.syncLifecycle();
+            try std.testing.expectEqual(.failed, old.input_submissions.items[old.input_submissions.items.len - 1].state);
+            try std.testing.expectEqual(@as(usize, 1), runCalls());
+            return;
+        }
+        if (scenario == .queued_rotation or continuation) {
+            const queued = try control.sendInput("queued-after-rotation", old_id, .{ .text = "Start the next Run with the renewed token." });
+            try std.testing.expectEqual(.accepted, queued.outcome);
+            try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+            try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            if (continuation) {
+                for (0..1000) |_| {
+                    control.syncLifecycle();
+                    if (old.durable.runs[1].?.additional_inputs[0] != null) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.AdditionalInputNotSubmitted;
+            }
+            if (continuation_failure) {
+                if (scenario == .continuation_restore_failure) fake_core.forceNextCheckpointRestoreStatus(fixture.wire.STATUS_CHECKPOINT_CORRUPT) else fake_core.armControlledRestoreAfterCreate();
+            }
+            fake_core.releaseControlled();
+            if (continuation_failure) {
+                if (scenario != .continuation_restore_failure) {
+                    for (0..5000) |_| {
+                        try control.drainAgentEvents();
+                        control.syncLifecycle();
+                        fake_core.lock();
+                        const entered = fake_core.restore_entered;
+                        fake_core.unlock();
+                        if (entered) break;
+                        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                    } else return error.RestoreDidNotStart;
+                    if (scenario == .continuation_cancelled) try control.stopTask(old_id);
+                    if (scenario == .continuation_stale_auth) try relogin(&account_runtime);
+                    if (scenario == .continuation_expired) platform.now_unix_seconds = 4000;
+                    fake_core.releaseControlledRestore();
+                }
+                for (0..5000) |_| {
+                    try control.drainAgentEvents();
+                    control.syncLifecycle();
+                    if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive() and old.runtime.close_thread == null) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.RestoreDidNotSettle;
+                const source = old.durable.runs[1].?;
+                try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(&source).?.outcome);
+                try std.testing.expect(source.input_continuation_failure != null);
+                try std.testing.expect(!source.input_continuation_pending);
+                try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+                try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+                try std.testing.expectEqual(@as(usize, 0), control.task_runtime.pending_input_bytes);
+                for (0..10) |_| control.syncLifecycle();
+                try std.testing.expectEqual(@as(usize, 2), runCalls());
+                return;
+            }
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                if (runCalls() == 3 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.QueuedRunDidNotSettle;
+            try std.testing.expectEqualStrings(renewed_token, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(@as(usize, if (scenario == .continuation_unchanged) 1 else 2), fake_core.session_created);
+            if (continuation) {
+                const source = old.durable.runs[1].?;
+                const additional = source.additional_inputs[0].?;
+                try std.testing.expectEqual(.transferred, additional.state);
+                try std.testing.expectEqual(old.durable.runs[2].?.id, additional.transferred_to_run_id.?);
+                try std.testing.expect(additional.raw_text == null);
+                try std.testing.expect(source.input_continuation_failure == null);
+                try std.testing.expectEqual(@as(usize, 0), control.task_runtime.pending_input_bytes);
+                for (0..5) |_| control.syncLifecycle();
+                try std.testing.expectEqual(@as(usize, 3), runCalls());
+            }
+            return;
+        }
+        try runAndExpect(&control, old_id, "rotated-before-old-expiry", .completed);
+        if (scenario == .reviewer) {
+            fake_core.setSessionPlan(.ui_wait);
+            const accepted = try control.sendInput("review-new-authority", old_id, .{ .text = "Ask permission for this operation." });
+            try std.testing.expectEqual(.accepted, accepted.outcome);
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                if (old.permissionReviewPhase() == .needs_user) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ReviewDidNotSettle;
+            try std.testing.expectEqual(@as(usize, 1), review.calls.load(.acquire));
+            try std.testing.expect(review.credential_matched.load(.acquire));
+            try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[1].credential_digest);
+            // Reviewer HTTP failure does not fail the main Run or approve the tool.
+            try std.testing.expectEqual(.run, std.meta.activeTag(old.runtime.active_operation));
+            try control.respondUi(old_id, old.runtime.active_run_id, old.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+            fake_core.releaseControlled();
+            for (0..5000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.RunDidNotSettle;
+            const run = fixture.product_task.testing.policy_module.latestTerminalRun(old.durable.runs).?;
+            try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(run).?.outcome);
+            return;
+        }
+    }
+
+    platform.now_unix_seconds = 201;
+    var lease = try account_runtime.authorizationLease();
+    defer if (lease) |*value| value.deinit();
+    if (rotate) {
+        try std.testing.expectEqualStrings(access_b, lease.?.access_token);
+    } else {
+        try std.testing.expect(lease == null);
+        // The Account clock alone must block admission, before any Models notification.
+        try expectBlocked(&control, old_id, "expired-no-notification");
+        coordinator.authorizationChanged();
+        try std.testing.expectEqual(.needs_authentication, control.modelsView().providers[0].catalog_state);
+        try std.testing.expectEqual(@as(usize, 1), network.catalog_calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), network.refresh_calls.load(.acquire));
+        try std.testing.expectError(error.ModelSelectionChanged, createTask(&control, workspace));
+    }
+    // A is now rejected by the synthetic provider. Renewal must have replaced
+    // the old Core Session before another Run can use it.
+    fake_core.lock();
+    fake_core.rejected_credential_digest = fixture.credentialDigest(access_a);
+    fake_core.unlock();
+    if (rotate) {
+        try runAndExpect(&control, old_id, "expired-old-first", .completed);
+        try runAndExpect(&control, old_id, "expired-old-repeat", .completed);
+        try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+        try std.testing.expect(old_epoch != old.durable.binding_epoch);
+        try std.testing.expect(old_generation != old.durable.execution_generation);
+        try std.testing.expectEqual(old_scope, old.runtime.metask_authorization_scope);
+        try std.testing.expectEqual(@as(usize, 2), fake_core.session_created);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
+        const new_id = try createTask(&control, workspace);
+        try runAndExpect(&control, new_id, "fresh-task-control", .completed);
+        const new = control.task_runtime.find(new_id).?;
+        try std.testing.expectEqualStrings(access_b, new.runtime.executionConst().?.secret);
+        try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[2].credential_digest);
+        try std.testing.expectEqualStrings(old.durable.execution_model, new.durable.execution_model);
+        try std.testing.expectEqual(old.durable.execution_protocol, new.durable.execution_protocol);
+    } else {
+        try expectBlocked(&control, old_id, "expired-old-first");
+        try expectBlocked(&control, old_id, "expired-old-repeat");
+        try std.testing.expectEqual(old_epoch, old.durable.binding_epoch);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        try std.testing.expectEqual(@as(usize, 0), fake_core.session_destroyed);
+    }
+    try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);
+    var snapshot: [512 * 1024]u8 = undefined;
+    const json = try control.writeAggregateFixture(&snapshot);
+    for ([_][]const u8{ access_a, access_b, "synthetic-lifecycle-refresh-a", "synthetic-lifecycle-refresh-b" }) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, json, secret) == null);
+}
+
+const History = struct {
+    fn commit(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
+        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
+        return .committed;
+    }
+    fn confirmed(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
+        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        return store.commitConfirmed(std.testing.allocator, bytes);
+    }
+    fn resolve(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
+        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        return store.resolveCommit(std.testing.allocator, bytes);
+    }
+    fn capability(store: *fixture.product_task.history.FileStore) fixture.product_task.history.Capability {
+        return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
+    }
+};
+
+fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const u8) !void {
+    const before = runCalls();
+    const result = try control.sendInput(operation, task_id, .{ .text = "No tools; this must not reach the provider." });
+    try std.testing.expectEqual(.accepted, result.outcome);
+    control.syncLifecycle();
+    const task = control.task_runtime.find(task_id).?;
+    const record = task.input_submissions.items[task.input_submissions.items.len - 1];
+    try std.testing.expectEqual(.failed, record.state);
+    try std.testing.expectEqual(before, runCalls());
+    try std.testing.expectEqual(.none, task.runtime.active_operation);
+}
+
+fn relogin(runtime: *account.Runtime) !void {
+    _ = account.TestSupport.commitBeginLoginWithoutDispatch(runtime);
+    var input = try account.TestSupport.exchangeInput(std.testing.allocator, "synthetic-authorization-code");
+    defer input.deinit();
+    var exchange = account.TestSupport.prepareLoginExchange(runtime, &input);
+    defer exchange.deinit();
+    try std.testing.expect(runtime.admitEffect(&exchange));
+    runtime.commit(&exchange);
+    try std.testing.expect(runtime.dispatchCommitted(&exchange) == null);
+    // Token exchange, durable rotation, then Userinfo identity confirmation.
+    for (0..2) |_| {
+        account.TestSupport.joinNetwork(runtime);
+        var prepared = switch (runtime.prepareNextCompletion().?) {
+            .prepared => |value| value,
+            else => return error.LoginDidNotComplete,
+        };
+        defer prepared.deinit();
+        try std.testing.expect(runtime.admitEffect(&prepared));
+        runtime.commit(&prepared);
+        try std.testing.expect(runtime.dispatchCommitted(&prepared) == null);
+    }
+    try std.testing.expectEqual(.authenticated, runtime.view().state);
+}
+
+const ReviewProbe = struct {
+    calls: std.atomic.Value(usize) = .init(0),
+    credential_matched: std.atomic.Value(bool) = .init(false),
+
+    fn create(context: ?*anyopaque, allocator: std.mem.Allocator, binding: fixture.lifecycle.ModelBinding) anyerror!*fixture.lifecycle.Completion {
+        return fixture.lifecycle.Completion.init(allocator, .{ .context = context, .perform_fn = perform }, binding);
+    }
+    fn perform(context: ?*anyopaque, request: fixture.lifecycle.CompletionHttpRequest, _: *const fixture.lifecycle.CompletionCancellation, _: []u8) fixture.lifecycle.CompletionTransportError!fixture.lifecycle.CompletionTransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (std.mem.indexOf(u8, request.body, "allow_once") != null) {
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
+                self.credential_matched.store(std.mem.eql(u8, header.value, access_b), .release);
+            };
+        }
+        return .{ .status = 400, .body = "synthetic reviewer rejection" };
+    }
+};
