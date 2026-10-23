@@ -98,7 +98,7 @@ OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Appl
 
 精确 module imports 由 `build.zig` 强制，本文不复制内部 leaf graph。跨 owner import 必须符合上述方向，并只消费发布者显式暴露且由 build graph 具名注入的 root、contract、port 或窄 leaf；具名 leaf 不因此取得新的 owner 身份。
 
-`product_office_component` 是 Product Control 内唯一可选 Office 组件的纯合同与状态 module，不形成新的顶层 owner。Runtime 拥有状态，scoped port 只发布类型和回调；Application worker 仅借用稳定 Attempt，机械进度消费同一 Phase 合同，不持有 Product Runtime。组件行为和事务边界见 [Product 架构](product-architecture.md#可选-office-组件)。
+`product_office_component` 是 Product Control 内唯一可选 Office 组件的纯合同与状态 module，不形成新的顶层 owner。Runtime 拥有状态，scoped port 只发布类型和回调；Application worker 仅借用稳定 Attempt，机械进度消费同一 Phase 合同，不持有 Product Runtime。组件行为和事务边界见 [Product 架构](product-architecture.md#内置-office-skill)。
 
 文档预览的 typed material 与 owned effect 是 Product Control 发布的窄合同 leaf；Application 实现物理资源 effect，Product Control 调度只消费该合同，不反向导入 Application。调度与内容授权职责见 [Product 架构](product-architecture.md#3-并发与生命周期)，它不形成新的 owner 或 Renderer 协议。
 

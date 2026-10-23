@@ -157,7 +157,7 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 `external_link_handoff` 只允许三种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
 
-`office_component_validation` 只由 Application 安装事务消费，不访问 SDK 私有 context，也不向 Product、Bridge 或 Renderer 暴露系统 handle。磁盘检查使用调用方可用字节；签名检查在阶段目录和最终版本目录均执行，禁止弹出 UI、联网补取证书或将失败降级为成功。精确下载来源、摘要与接受格式由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 定义。
+`office_component_validation` 只由 Application 安装事务消费，不访问 SDK 私有 context，也不向 Product、Bridge 或 Renderer 暴露系统 handle。磁盘检查使用调用方可用字节；签名检查在阶段目录和最终版本目录均执行，禁止弹出 UI、联网补取证书或将失败降级为成功。精确下载来源、摘要与接受格式由 [Windows 分发](windows-distribution.md#office-skill-与私有依赖) 定义。
 
 `office_process_tree` 只补当前 SDK 未公开的 Windows Office Job、自身进程身份与 Office 捕获管道只读观测能力。Application 相应资源 owner 保留唯一长期 Job handle，组件入口只临时打开、验证 kill-on-close 且禁止 breakaway 的 Job、加入自身并在创建 Python 前关闭临时 handle。Host 硬杀由 OS 关闭最后引用并终止整树；显式失败、取消与超时则先由唯一标准库 child owner kill/wait 根进程，再终止 Job 并观测 active process 数归零，最后 join 有界 stdout/stderr reader。不能先等待仍被子进程占用的管道再请求终止。清理无法证实时必须返回失败，调用方不得发布结果或删除仍可能使用的组件和预览资源。该 seam 不维护窗口或 Native Runtime 状态，不修改 SDK 源码，也不成为通用进程服务。
 
