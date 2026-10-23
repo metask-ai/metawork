@@ -3,17 +3,17 @@
   "protocolRevision": 1,
   "target": "x86_64-windows-msvc",
   "seed": {
-    "archiveSha256": "d4989771176be077eee61ed89c3d16ec8d31a0b98c4edf6117e36ec9987be322",
-    "manifestSha256": "b1e2bf5aaed22d6f84614eda971dbe86e56d65bca7dc34b221c2ed7b39a41b99",
-    "archiveBytes": 687696,
-    "unpackedBytes": 4179784,
+    "archiveSha256": "bf613c092aa4ab67cc92beb64a960f0b1273c909325828fb8e4499fb8312a6a1",
+    "manifestSha256": "649d76f4e91f214d67a2536399831efa8366d03f0b68699f565f24281fa1532c",
+    "archiveBytes": 687957,
+    "unpackedBytes": 4181016,
     "files": 193
   },
   "release": {
-    "archiveSha256": "3075463626733ed083fbb295e4b199519f2f22eff8393e3201c867b45920886a",
-    "manifestSha256": "a4d263bbddc0fe6b5cf49c3329291c37fa8ea94ed716a5e1db262014108713ab",
-    "archiveBytes": 627592466,
-    "unpackedBytes": 1915230480,
+    "archiveSha256": "07286965019602e6f6cc90ec95fefdffa443d6d12da97ce7022696b69f93cbcf",
+    "manifestSha256": "daa211e2a3e60e091d5c8536e7760b9018bb8796726c488c0dedea9a5aebe113",
+    "archiveBytes": 627592698,
+    "unpackedBytes": 1915231676,
     "files": 25969,
     "downloadBytes": 479939197
   },

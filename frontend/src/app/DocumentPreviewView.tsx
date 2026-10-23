@@ -1,15 +1,15 @@
 import { useEffect, useId, useState, useSyncExternalStore } from "react";
-import type { DocumentPreview } from "../../bridge/document-preview.ts";
+import type { DocumentPreview } from "../bridge/document-preview.ts";
 import type {
   DocumentCell,
   DocumentFailure,
   DocumentLayout,
   DocumentOpen,
   DocumentRegion,
-} from "../../bridge/document-contract.ts";
-import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { Button } from "../../components/ui/button.tsx";
-import { useI18n } from "../../i18n/context.ts";
+} from "../bridge/document-contract.ts";
+import { PreviewImageView } from "../components/PreviewImageView.tsx";
+import { Button } from "../components/ui/button.tsx";
+import { useI18n } from "../i18n/context.ts";
 
 export function columnName(index: number) {
   let value = "";

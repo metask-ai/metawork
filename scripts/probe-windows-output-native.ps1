@@ -109,6 +109,7 @@ if (-not [string]::Equals($process.Path, $expected, [StringComparison]::OrdinalI
 }
 $rootPath = (Resolve-Path -LiteralPath $WorkspaceRoot).ProviderPath.TrimEnd('\')
 $source = (Resolve-Path -LiteralPath $SourcePath).ProviderPath
+$sourceDirectory = [IO.Path]::GetDirectoryName($source)
 if (-not $source.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Source must be inside the private test Workspace'
 }
@@ -186,7 +187,7 @@ try {
             Assert-Target
             foreach ($window in $shell.Windows()) {
                 try { $folder = $window.Document.Folder.Self.Path } catch { continue }
-                if (-not [string]::Equals($folder, $rootPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                if (-not [string]::Equals($folder, $sourceDirectory, [StringComparison]::OrdinalIgnoreCase)) { continue }
                 $selected = $window.Document.SelectedItems()
                 if ($selected.Count -ne 1 -or -not [string]::Equals(
                     $selected.Item(0).Path, $source, [StringComparison]::OrdinalIgnoreCase)) { continue }

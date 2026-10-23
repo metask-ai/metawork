@@ -58,7 +58,7 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { DocumentPreviewView } = await vite.ssrLoadModule(
-  "/src/features/task-panel/DocumentPreviewView.tsx",
+  "/src/app/DocumentPreviewView.tsx",
 );
 const { RunOutputs } = await vite.ssrLoadModule(
   "/src/features/tasks/RunOutputs.tsx",
@@ -396,6 +396,8 @@ test("Outputs opens the exact delivered identity and closes preview before retur
       taskId: "3",
       runId: "7",
       onAction: async () => "ready",
+      renderPreview: (preview, title, onRefresh) =>
+        element(DocumentPreviewView, { preview, title, onRefresh }),
       onPreview: (...args) => {
         calls.push(args);
         return preview;

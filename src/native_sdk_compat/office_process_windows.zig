@@ -41,8 +41,22 @@ extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn WaitForSingleObject(HANDLE, u32) callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
+extern "kernel32" fn PeekNamedPipe(HANDLE, ?*anyopaque, u32, ?*u32, ?*u32, ?*u32) callconv(.winapi) BOOL;
 extern "kernel32" fn GetProcessTimes(HANDLE, *FileTime, *FileTime, *FileTime, *FileTime) callconv(.winapi) BOOL;
 const FileTime = extern struct { low: u32 = 0, high: u32 = 0 };
+
+/// Only the Office owner's pipe read endpoint. Never block on a writer which
+/// an unrelated concurrent process may have inherited from std.process.spawn.
+pub fn pipeAvailable(handle: std.Io.File.Handle) !?usize {
+    var count: u32 = 0;
+    if (PeekNamedPipe(handle, null, 0, null, &count, null) == 0) {
+        return switch (GetLastError()) {
+            109, 233 => null,
+            else => error.OfficePipeObservationFailed,
+        };
+    }
+    return count;
+}
 
 /// Only this Host's process identity. It conveys no process-control authority.
 pub fn hostScope() ![24]u8 {

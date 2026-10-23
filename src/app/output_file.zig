@@ -4,6 +4,23 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub fn absolutePath(allocator: std.mem.Allocator, root: []const u8, relative: []const u8) ![]u8 {
+    if (!std.fs.path.isAbsolute(root)) return error.InvalidWorkspaceRoot;
+    try validatePath(relative);
+    const path = try std.fs.path.join(allocator, &.{ root, relative });
+    if (builtin.os.tag == .windows) for (path) |*byte| {
+        if (byte.* == '/') byte.* = '\\';
+    };
+    return path;
+}
+
+test "Windows reveal path normalizes nested Workspace separators" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const path = try absolutePath(std.testing.allocator, "C:\\Workspace", "results/中文/report.docx");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("C:\\Workspace\\results\\中文\\report.docx", path);
+}
+
 pub const max_file_bytes = 256 * 1024 * 1024;
 pub const max_path_bytes = 512;
 pub const Inspection = struct { size_bytes: u64, sha256: [32]u8 };

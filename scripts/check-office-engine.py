@@ -263,6 +263,46 @@ class OfficeEngine(unittest.TestCase):
         self.assertEqual(summary["status"], "errors_found")
         self.assertEqual(summary["total_errors"], 1)
         self.assertIn("#DIV/0!", summary["error_summary"])
+        self.assertFalse((self.root / "error-result.xlsx").exists())
+
+    def test_formula_normalization_is_accepted_and_stale_cache_is_replaced(self):
+        source = self.root / "stale.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet["A1"], sheet["B1"] = 15, 7
+        for cell, formula in [("C1", "=sum(A1:B1)"), ("D1", "=IF(FALSE,1,2)"),
+                              ("E1", "=A1*0.10"), ("F1", "=1E3+A1")]:
+            sheet[cell] = formula
+        workbook.calculation.calcMode = "manual"
+        workbook.save(source)
+        workbook.close()
+        with zipfile.ZipFile(source) as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        xml = ET.fromstring(parts["xl/worksheets/sheet1.xml"])
+        for cell in xml.iter(ns + "c"):
+            if cell.get("r") == "C1":
+                cell.find(ns + "v").text = "12"
+        parts["xl/worksheets/sheet1.xml"] = ET.tostring(xml)
+        with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in parts.items():
+                archive.writestr(name, data)
+        before = load_workbook(source, data_only=True)
+        try:
+            self.assertEqual(before.active["C1"].value, 12)
+        finally:
+            before.close()
+        self.invoke("recalc", "stale.xlsx", "updated.xlsx")
+        values = load_workbook(self.root / "updated.xlsx", data_only=True)
+        formulas = load_workbook(self.root / "updated.xlsx", data_only=False)
+        try:
+            self.assertEqual([values.active[cell].value for cell in ["C1", "D1", "E1", "F1"]],
+                             [22, 2, 1.5, 1015])
+            self.assertTrue(all(formulas.active[cell].data_type == "f"
+                                for cell in ["C1", "D1", "E1", "F1"]))
+        finally:
+            values.close()
+            formulas.close()
 
     def test_word_pptx_and_pdf_have_distinct_complete_pages(self):
         self.invoke("render", "original.docx", "word-pages")

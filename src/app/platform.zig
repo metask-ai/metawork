@@ -105,8 +105,7 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
         if (!std.fs.path.isAbsolute(root)) return error.InvalidPath;
-        try @import("app_output_file").validatePath(relative);
-        const path = try std.fs.path.join(std.heap.c_allocator, &.{ root, relative });
+        const path = try @import("app_output_file").absolutePath(std.heap.c_allocator, root, relative);
         defer std.heap.c_allocator.free(path);
         try (self.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
     }

@@ -2907,6 +2907,7 @@ test("Office Windows Job seam has one Application consumer and exact OS symbols"
       "GetCurrentProcessId",
       "GetLastError",
       "GetProcessTimes",
+      "PeekNamedPipe",
       "QueryInformationJobObject",
       "SetInformationJobObject",
       "TerminateJobObject",

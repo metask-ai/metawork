@@ -201,10 +201,7 @@ pub const Store = struct {
             entries += 1;
             if (entries > 1024) return error.ComponentStoreCorrupt;
             if (!std.mem.startsWith(u8, entry.name, "retired-")) continue;
-            if (entry.kind != .file or entry.name.len != 45 or !std.mem.endsWith(u8, entry.name, ".json")) return error.ComponentStoreCorrupt;
-            const record = try self.readRecord(entry.name) orelse return error.ComponentStoreCorrupt;
-            var name: [45]u8 = undefined;
-            if (!std.mem.eql(u8, entry.name, retiredName(record, &name))) return error.ComponentStoreCorrupt;
+            const record = try self.readRetirement(entry.name);
             if (result.count == result.records.len) return error.ComponentRetirementLimit;
             result.records[result.count] = record;
             result.count += 1;
@@ -299,16 +296,35 @@ pub const Store = struct {
     /// Explicit recovery after startup/worker quiescence only. It never retries
     /// download, execution or activation. Canonical readback decides ownership.
     pub fn recover(self: *Store) !void {
-        const committed = try self.current();
+        const committed = try self.recoverRecord("current.json");
+        // Isolate only corrupt metadata. Neither its bytes nor directory names
+        // can authorize guessing a current version or deleting unknown files.
+        var iterator = self.directory.iterate();
+        var count: usize = 0;
+        while (try iterator.next(self.io)) |entry| {
+            count += 1;
+            if (count > 1024) return error.ComponentStoreCorrupt;
+            if (!std.mem.startsWith(u8, entry.name, "retired-")) continue;
+            const retired = self.readRetirement(entry.name) catch |failure| {
+                if (failure != error.ComponentStoreCorrupt) return failure;
+                try self.quarantineRecord(entry.name);
+                continue;
+            };
+            if (committed) |active| if (active.sameDirectory(retired) and !active.eql(retired))
+                try self.quarantineRecord(entry.name);
+        }
         // Enqueue's fixed temporary record never authorizes deletion. The
         // current pointer cannot change until its named intent was published.
         try self.deleteKnownFile("retired.next");
         try self.deleteKnownFile("retired.json");
-        if (try self.readRecord("pending.json")) |pending| {
+        if (try self.recoverRecord("pending.json")) |pending| {
+            if (committed) |value| if (value.sameDirectory(pending) and !value.eql(pending)) {
+                try self.quarantineRecord("pending.json");
+                return;
+            };
             const cancellation: process.Cancellation = .{};
             var reservation = try process.ResourceScope.reserveOperationDeletion(self.io, pending.install_id, &cancellation);
             defer reservation.deinit();
-            if (committed) |value| if (value.sameDirectory(pending) and !value.eql(pending)) return error.ComponentStoreCorrupt;
             const adopted = if (committed) |value| value.eql(pending) else false;
             if (!adopted) {
                 var name: [32]u8 = undefined;
@@ -325,6 +341,34 @@ pub const Store = struct {
             try self.deleteKnownFile("pending.next");
             try self.deleteKnownFile("current.next");
         }
+    }
+
+    fn readRetirement(self: *Store, path: []const u8) !Record {
+        if (path.len != 45 or !std.mem.endsWith(u8, path, ".json")) return error.ComponentStoreCorrupt;
+        const record = try self.readRecord(path) orelse return error.ComponentStoreCorrupt;
+        var name: [45]u8 = undefined;
+        if (!std.mem.eql(u8, path, retiredName(record, &name))) return error.ComponentStoreCorrupt;
+        return record;
+    }
+
+    fn quarantineRecord(self: *Store, path: []const u8) !void {
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(self.io, &random);
+        const kind = if (std.mem.eql(u8, path, "current.json")) "current" else if (std.mem.eql(u8, path, "pending.json")) "pending" else "retired";
+        var buffer: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "quarantined-{s}-{s}.json", .{ kind, std.fmt.bytesToHex(random, .lower) });
+        const isolated = try childDirectory(self.io, self.directory, "quarantine");
+        defer isolated.close(self.io);
+        try self.directory.renamePreserve(path, isolated, name, self.io);
+        std.log.warn("Office {s} record isolated; unrecorded component directories retained", .{kind});
+    }
+
+    fn recoverRecord(self: *Store, path: []const u8) !?Record {
+        return self.readRecord(path) catch |failure| {
+            if (failure != error.ComponentStoreCorrupt) return failure;
+            try self.quarantineRecord(path);
+            return null;
+        };
     }
 
     pub fn install(self: *Store, release: Release, seed_bytes: []const u8, source: Download, validation: Validation, observer: Observer, cancellation: *const process.Cancellation) !Receipt {
@@ -541,7 +585,7 @@ pub const Store = struct {
     fn readRecord(self: *Store, path: []const u8) !?Record {
         var file = self.directory.openFile(self.io, path, .{ .follow_symlinks = false, .resolve_beneath = true }) catch |failure| {
             if (failure == error.FileNotFound) return null;
-            return error.ComponentStoreCorrupt;
+            return failure;
         };
         defer file.close(self.io);
         const status = try file.stat(self.io);
@@ -549,11 +593,14 @@ pub const Store = struct {
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
         var buffer: [1024]u8 = undefined;
         const bytes = buffer[0..@intCast(status.size)];
-        if (try file.readPositionalAll(self.io, bytes, 0) != bytes.len) return error.ComponentStoreCorrupt;
+        if (try file.readPositionalAll(self.io, bytes, 0) != bytes.len) return error.ComponentRecordChanged;
         const after = try file.stat(self.io);
-        if (after.size != status.size or after.mtime.nanoseconds != status.mtime.nanoseconds) return error.ComponentStoreCorrupt;
+        if (after.size != status.size or after.mtime.nanoseconds != status.mtime.nanoseconds) return error.ComponentRecordChanged;
         const Raw = struct { schema: u32, installId: []const u8, archiveSha256: []const u8 };
-        const parsed = std.json.parseFromSlice(Raw, self.allocator, bytes, .{ .max_value_len = 128, .duplicate_field_behavior = .@"error" }) catch return error.ComponentStoreCorrupt;
+        const parsed = std.json.parseFromSlice(Raw, self.allocator, bytes, .{ .max_value_len = 128, .duplicate_field_behavior = .@"error" }) catch |failure| switch (failure) {
+            error.OutOfMemory => return failure,
+            else => return error.ComponentStoreCorrupt,
+        };
         defer parsed.deinit();
         if (parsed.value.schema != 1 or parsed.value.installId.len != 32 or parsed.value.archiveSha256.len != 64) return error.ComponentStoreCorrupt;
         for ([_][]const u8{ parsed.value.installId, parsed.value.archiveSha256 }) |hex| {
@@ -1121,7 +1168,70 @@ test "Office recovery preserves pending bytes while an operation job still has a
     try std.testing.expectError(error.FileNotFound, store.stages.statFile(std.testing.io, &stage_name, .{}));
 }
 
-test "Office space and validation rejection do not adopt resources, and corrupt records freeze mutation" {
+test "Office recovery preserves valid current on open failure, short read, change and allocation failure" {
+    const Probe = struct {
+        const Mode = enum { open_failure, read_failure, short_read, changed };
+        threadlocal var mode: Mode = .open_failure;
+        threadlocal var stats: usize = 0;
+
+        fn open(userdata: ?*anyopaque, directory: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            if (mode == .open_failure and std.mem.eql(u8, path, "current.json")) return error.AccessDenied;
+            return std.testing.io.vtable.dirOpenFile(userdata, directory, path, options);
+        }
+
+        fn read(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            if (mode == .read_failure) return error.InputOutput;
+            if (mode == .short_read) return 0;
+            return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+        }
+
+        fn stat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+            var value = try std.testing.io.vtable.fileStat(userdata, file);
+            stats += 1;
+            if (mode == .changed and stats == 2) value.mtime.nanoseconds += 1;
+            return value;
+        }
+    };
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var store = try fixtureStore(&temporary);
+    defer store.deinit();
+    const record: Record = .{ .install_id = @splat(7), .archive_sha256 = @splat(8) };
+    try store.writeRecord("current", record);
+    var name: [32]u8 = undefined;
+    try store.versions.createDir(std.testing.io, record.versionName(&name), .default_dir);
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirOpenFile = Probe.open;
+    vtable.fileReadPositional = Probe.read;
+    vtable.fileStat = Probe.stat;
+    for ([_]Probe.Mode{ .open_failure, .read_failure, .short_read, .changed }) |mode| {
+        Probe.mode = mode;
+        Probe.stats = 0;
+        {
+            store.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+            defer store.io = std.testing.io;
+            const expected = switch (mode) {
+                .open_failure => error.AccessDenied,
+                .read_failure => error.InputOutput,
+                .short_read, .changed => error.ComponentRecordChanged,
+            };
+            try std.testing.expectError(expected, store.recover());
+        }
+        try std.testing.expect((try store.current()).?.eql(record));
+        try std.testing.expectError(error.FileNotFound, store.directory.statFile(std.testing.io, "quarantine", .{}));
+        _ = try store.versions.statFile(std.testing.io, &name, .{});
+    }
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        store.allocator = failing.allocator();
+        defer store.allocator = std.testing.allocator;
+        try std.testing.expectError(error.OutOfMemory, store.recover());
+    }
+    try std.testing.expect((try store.current()).?.eql(record));
+    try std.testing.expectError(error.FileNotFound, store.directory.statFile(std.testing.io, "quarantine", .{}));
+}
+
+test "Office rejection does not adopt resources and corrupt current recovers without adoption" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var store = try fixtureStore(&temporary);
@@ -1140,20 +1250,28 @@ test "Office space and validation rejection do not adopt resources, and corrupt 
     try std.testing.expect(try store.readRecord("pending.json") == null);
     try store.directory.writeFile(std.testing.io, .{ .sub_path = "current.json", .data = "{broken" });
     try std.testing.expectError(error.ComponentStoreCorrupt, store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation));
-    try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
+    try store.versions.createDir(std.testing.io, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .default_dir);
+    try store.recover();
+    try std.testing.expect(try store.current() == null);
+    _ = try store.versions.statFile(std.testing.io, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .{});
+    fixture.reject_on_validation = 0;
+    _ = try store.install(try Fixture.release(), @embedFile("office_component_archive_fixtures/install-seed.tar.gz"), fixture.download(), fixture.platformValidation(), fixture.observer(), &cancellation);
 }
 
-test "Office recovery refuses noncanonical record identities instead of cleaning derived paths" {
+test "Office recovery isolates noncanonical records without cleaning derived paths" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var store = try fixtureStore(&temporary);
     defer store.deinit();
     const raw = "{\"schema\":1,\"installId\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"archiveSha256\":\"" ++ "a" ** 64 ++ "\"}";
     try store.directory.writeFile(std.testing.io, .{ .sub_path = "pending.json", .data = raw });
-    try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
+    try store.stages.createDir(std.testing.io, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", .default_dir);
+    try store.recover();
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+    _ = try store.stages.statFile(std.testing.io, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", .{});
 }
 
-test "component recovery rejects conflicting identities for the same current directory" {
+test "component recovery isolates conflicting pending and preserves exact current directory" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var store = try fixtureStore(&temporary);
@@ -1164,12 +1282,24 @@ test "component recovery rejects conflicting identities for the same current dir
     var conflict = receipt.record;
     conflict.archive_sha256[0] ^= 1;
     try store.writeRecord("pending", conflict);
-    try std.testing.expectError(error.ComponentStoreCorrupt, store.recover());
+    try store.recover();
     try std.testing.expect((try store.current()).?.eql(receipt.record));
     var name: [32]u8 = undefined;
     const preserved = try store.versions.openDir(std.testing.io, receipt.record.versionName(&name), .{});
     preserved.close(std.testing.io);
-    try std.testing.expect(try store.readRecord("pending.json") != null);
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+    try store.directory.writeFile(std.testing.io, .{ .sub_path = "pending.json", .data = "{broken" });
+    try store.directory.writeFile(std.testing.io, .{ .sub_path = "retired-corrupt.json", .data = "{broken" });
+    try store.recover();
+    try std.testing.expect((try store.current()).?.eql(receipt.record));
+    try std.testing.expect(try store.readRecord("pending.json") == null);
+    try std.testing.expectError(error.FileNotFound, store.directory.statFile(std.testing.io, "retired-corrupt.json", .{}));
+    const isolated = try store.directory.openDir(std.testing.io, "quarantine", .{ .iterate = true });
+    defer isolated.close(std.testing.io);
+    var entries = isolated.iterate();
+    var count: usize = 0;
+    while (try entries.next(std.testing.io)) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 3), count);
 }
 
 test "current Office validation uses only main identity and journals private selftest scratch" {
@@ -1216,3 +1346,7 @@ const fixture_removal: RetiredRemoval = .{ .context = null, .remove_fn = struct 
         try store.removeRetired(record);
     }
 }.remove };
+
+test {
+    _ = public_download;
+}

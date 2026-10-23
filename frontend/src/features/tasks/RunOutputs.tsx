@@ -1,7 +1,6 @@
 import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { isDocumentPreviewFile } from "../../bridge/document-format.ts";
-import { DocumentPreviewView } from "../task-panel/DocumentPreviewView.tsx";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../components/ui/button.tsx";
 import type {
   OutputAction,
@@ -18,6 +17,11 @@ export type OutputPreviewHandler = (
   runId: string,
   outputId: string,
 ) => DocumentPreview;
+export type OutputPreviewRenderer = (
+  preview: DocumentPreview,
+  title: string,
+  onRefresh: () => void,
+) => ReactNode;
 
 export type OutputEditResult =
   "edit_prepared" | "edit_draft_busy" | "edit_too_long" | "edit_unavailable";
@@ -36,6 +40,7 @@ export function RunOutputs({
   onAction,
   onPrepareEdit,
   onPreview,
+  renderPreview,
 }: {
   outputs: readonly DeliveredOutputView[];
   taskId?: string;
@@ -44,6 +49,7 @@ export function RunOutputs({
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreviewHandler;
+  renderPreview?: OutputPreviewRenderer;
 }) {
   const { t } = useI18n();
   if (outputs.length === 0) return null;
@@ -61,6 +67,7 @@ export function RunOutputs({
             onAction={onAction}
             onPrepareEdit={onPrepareEdit}
             onPreview={onPreview}
+            renderPreview={renderPreview}
           />
         ))}
       </ul>
@@ -76,6 +83,7 @@ function OutputRow({
   onAction,
   onPrepareEdit,
   onPreview,
+  renderPreview,
 }: {
   output: DeliveredOutputView;
   taskId?: string;
@@ -84,6 +92,7 @@ function OutputRow({
   onAction?: OutputActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreviewHandler;
+  renderPreview?: OutputPreviewRenderer;
 }) {
   const { locale, t } = useI18n();
   const nameId = useId();
@@ -299,11 +308,7 @@ function OutputRow({
             >
               {t("outputs.close_preview")}
             </Button>
-            <DocumentPreviewView
-              preview={preview}
-              title={output.displayPath}
-              onRefresh={openPreview}
-            />
+            {renderPreview?.(preview, output.displayPath, openPreview)}
           </div>
         )}
       </div>

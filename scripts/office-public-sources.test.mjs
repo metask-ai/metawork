@@ -83,3 +83,56 @@ test("public registry source qualification supports the root lock SHA512 identit
   );
   assert.equal(result.bytes, body.length);
 });
+
+const archivePin = {
+  ...pin,
+  url: "https://downloadarchive.documentfoundation.org/libreoffice/old/1/file.msi",
+};
+test("official archive accepts at most three HTTPS hops and still hashes the final body", async () => {
+  for (const final of [body, Buffer.from("wrong same-sized bytes")]) {
+    let calls = 0;
+    const result = verifyPinnedDownload(archivePin, async (_url, options) => {
+      assert.equal(options.redirect, "manual");
+      if (calls++ < 3)
+        return new Response(null, {
+          status: 302,
+          headers: { location: `https://mirror.example.org/${calls}.msi` },
+        });
+      return new Response(final);
+    });
+    if (final === body) assert.equal((await result).verified, true);
+    else await assert.rejects(result, /Office public source/u);
+    assert.equal(calls, 4);
+  }
+  let calls = 0;
+  await assert.rejects(
+    verifyPinnedDownload(archivePin, async () => {
+      calls++;
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://mirror.example.org/file.msi" },
+      });
+    }),
+    /direct complete body/u,
+  );
+  assert.equal(calls, 4);
+});
+
+test("official archive refuses credentials, parameters and HTTPS downgrade at each hop", async () => {
+  for (const location of [
+    "http://mirror.example.org/file",
+    "https://key@mirror.example.org/file",
+    "https://mirror.example.org/file?q=1",
+    "https://mirror.example.org/file#fragment",
+  ]) {
+    let calls = 0;
+    await assert.rejects(
+      verifyPinnedDownload(archivePin, async () => {
+        calls++;
+        return new Response(null, { status: 302, headers: { location } });
+      }),
+      /Invalid pinned/u,
+    );
+    assert.equal(calls, 1);
+  }
+});

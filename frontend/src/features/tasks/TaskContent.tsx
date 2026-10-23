@@ -44,6 +44,7 @@ import {
   RunOutputs,
   type OutputEditHandler,
   type OutputPreviewHandler,
+  type OutputPreviewRenderer,
 } from "./RunOutputs.tsx";
 import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
@@ -291,6 +292,7 @@ export function TaskContent({
   onOutputAction,
   onPrepareOutputEdit,
   onPreviewOutput,
+  renderOutputPreview,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -318,6 +320,7 @@ export function TaskContent({
   onOutputAction?: OutputActionHandler;
   onPrepareOutputEdit?: OutputEditHandler;
   onPreviewOutput?: OutputPreviewHandler;
+  renderOutputPreview?: OutputPreviewRenderer;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -867,6 +870,7 @@ export function TaskContent({
                 onAction={onOutputAction}
                 onPrepareEdit={onPrepareOutputEdit}
                 onPreview={onPreviewOutput}
+                renderPreview={renderOutputPreview}
               />
             )}
             {fileChangesEnabled && run.fileChanges && (

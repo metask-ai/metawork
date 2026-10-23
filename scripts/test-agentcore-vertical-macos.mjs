@@ -37,6 +37,7 @@ import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runOutputDeliveryVertical } from "./output-delivery-vertical.mjs";
+import { runOfficeInstallVertical } from "./office-install-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -420,6 +421,11 @@ let app;
 let exited;
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
+const officeInstallOnly = process.env.METAWORK_OFFICE_INSTALL_ONLY === "1";
+if (officeInstallOnly) {
+  assert.equal(process.platform, "win32");
+  assert.equal(process.env.METAWORK_LOCAL_SKILL_ROOT, undefined);
+}
 startApplication();
 
 desktopVertical: try {
@@ -429,7 +435,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly) {
+  if (!activeInputOnly && !outputOnly && !officeInstallOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -474,6 +480,37 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (officeInstallOnly) {
+    await runOfficeInstallVertical({
+      root,
+      dataRoot,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+      connectWebView: () =>
+        connectTestWebView(chromeProbePort, {
+          requestTimeoutMs: commandTimeoutMs,
+        }),
+      restart: async () => {
+        await stopApplication("Office install cold restart");
+        await rm(automationDir, { recursive: true, force: true });
+        startApplication();
+        await waitForBridge();
+      },
+      hostPid: () => app.pid,
+      evidenceDirectory: join(root, ".zig-cache/office-app-install"),
+    });
+    await stopApplication("Office install desktop verification complete");
+    process.stdout.write(
+      "Office Windows App installation passed: real public signed install, basic/full catalog binding, explicit refresh, ordinary Task during installation and cold startup.\n",
+    );
+    break desktopVertical;
+  }
   if (outputOnly) {
     assert.equal(process.platform, "win32");
     const catalog = await poll(

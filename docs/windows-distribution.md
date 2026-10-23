@@ -40,7 +40,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
 
-编译安装器前，runtime stage 必须通过主包资源检查，不得混入展开的完整 Office Skill 资源树、Python、Node 或 Office 引擎等独立组件资源。主包唯一例外是构建时按固定摘要与长度接受的自有安装资源包；该压缩输入只在用户安装组件时展开，不作为基础 Skill 的可执行来源。[产品需求](requirements.md#53-task)规定的基础 Skill 只有随程序编译的有界方法文本，不含脚本、校验 schema 或重依赖；Application 在本地数据目录按内容版本发布，不覆盖已有版本。最终安装器完成签名及身份检查后，还必须通过对应 target 的主包体积检查；超限或缺少有效基线均使 package 失败。基线安装器身份、摘要、实际字节和允许增量由 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 唯一拥有，检查完整安装器，不以单个 executable 或源码目录大小代替。Office 组件与主包分别计量，不得通过把重依赖放进低压缩率或高压缩率资源来规避主包边界。
+编译安装器前，runtime stage 必须通过主包资源检查，不得混入展开的完整 Office Skill 资源树、Python、Node 或 Office 引擎等独立组件资源。主包唯一例外是构建时按固定摘要与长度接受的自有安装资源包；该压缩输入只在用户安装组件时展开，不作为基础 Skill 的可执行来源。[产品需求](requirements.md#53-task)规定的基础 Skill 只有随程序编译的有界方法文本，不含脚本、校验 schema 或重依赖；Application 在本地数据目录按内容版本发布，不覆盖已有版本；Primary 启动在开放 catalog 前校验当前基础 Skill，缺失时重建，内容或目录异常时先原子隔离原条目，再从内嵌可信文本重建，不执行异常内容；隔离或重建失败仍明确失败，不发布异常来源。最终安装器完成签名及身份检查后，还必须通过对应 target 的主包体积检查；超限或缺少有效基线均使 package 失败。基线安装器身份、摘要、实际字节和允许增量由 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 唯一拥有，检查完整安装器，不以单个 executable 或源码目录大小代替。Office 组件与主包分别计量，不得通过把重依赖放进低压缩率或高压缩率资源来规避主包边界。
 
 交互式安装验收还必须覆盖两条路径：拒绝关闭正在运行的旧 Host 时安装取消且旧 Host 保持运行；允许关闭时旧 Host 完全退出后才安装新文件，安装完成后不自动重启应用。
 
@@ -78,7 +78,7 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 
 依赖布局由上述 canonical 输入生成；共享的离线组装器只消费固定摘要的 wheel ZIP 与 npm tar.gz，不调用 pip/npm 安装、不解析依赖或执行包安装脚本。Python 保留 wheel 原有代码、许可证、metadata、RECORD 和 `data/scripts` 资源，不生成带构建目录的启动包装器或安装记录；需要额外数据重定位的 wheel 须明确拒绝，不能假装安装成功。JavaScript 仅接受一个顶层目录，按 lock 固定的包位置写出并核验包名和版本，不生成 `.bin` 链接或消费包内嵌套依赖。源先复制到同一私有事务内并校验实际字节；压缩量、实际展开量、文件数、metadata 与路径有界，链接、reparse、碰撞和未知布局拒绝，失败不得启用半成品。producer 与后续客户端 bootstrap 使用同一组装实现；客户端仅按下文主包固定的安装输入调用同一实现。最终启用仍须匹配主包固定的完整组件清单，不把客户端生成的 recipe 或清单当作新信任来源。
 
-公开源的独立资格检查入口为 `node scripts/check-office-public-sources.mjs`。它与 producer 共用根 lock 的 JavaScript 闭包选择，只从固定 HTTPS 地址逐项 GET，以实际读取字节校验 SHA-256 或根 npm lock 的 SHA-512，不接受动态重定向、依赖解析或安装脚本，不保存和执行下载内容。LibreOffice 来源固定官方公开镜像的直取地址，不能把下载路由的临时跳转结果当作客户端信任输入。结果写入 `.zig-cache/office-public-source-verification.json`，包括实际下载量和每项通过情况；HEAD 可达或 Content-Length 不构成字节身份通过证据。
+公开源的独立资格检查入口为 `node scripts/check-office-public-sources.mjs`。它与 producer 共用根 lock 的 JavaScript 闭包选择，只从固定 HTTPS 地址逐项 GET，以实际读取字节校验 SHA-256 或根 npm lock 的 SHA-512，不做依赖解析或执行安装脚本，不保存和执行下载内容。LibreOffice 固定官方 `downloadarchive.documentfoundation.org/libreoffice/old/` 版本归档入口，只有这一来源允许最多三次 HTTPS 跳转；每跳拒绝凭据、query、fragment 和 HTTP 降级，最终实际字节仍须匹配主包固定长度、摘要和签名。镜像地址不取得独立下载 authority；其他来源继续拒绝跳转。客户端只对尚未写入 body 的瞬时连接失败最多尝试三次，全部尝试共享既有取消和超时边界；状态拒绝、部分 body、摘要或签名失败不得重试为接受。结果写入 `.zig-cache/office-public-source-verification.json`，包括实际下载量和每项通过情况；HEAD 可达或 Content-Length 不构成字节身份通过证据。
 
 该检查只证明公开来源的下载字节，不表示客户端已支持从多个公开源本地组装，也不替代签名、安装、普通权限或干净机器验收。客户端下载 authority 仍以下文主包固定的安装输入为准；供应商来源本身不能直接启用正式组件。
 
@@ -107,7 +107,7 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 
 必填 `retained` 数组最多包含八个仍获主包信任的旧组件身份，每项精确为 `archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`，不含下载 authority。当前 release 与 retained 不允许重复或冲突身份。启动仅以 current 记录的精确归档摘要查找主包已固定身份，再验证所带清单和文件；retained 不用于目录发现、安装旧版本或下载 fallback。它是信任接受集合，不是磁盘引用；非当前旧目录仍按进程内引用静止规则清理。安全修复须同时移除不再信任的旧身份；组件、解释器或引擎安全修复均需要重新发布主包信任输入。主包升级不自动下载用户未启用的组件。
 
-Application 只有持有本地数据目录 Primary authority 且组件操作已串行准入时才能修改 store。先由主包 Zig 解开并认证自有 seed，再按其清单认证 `bootstrap/plan.json` 的实际读取字节，才能从中取得下载 authority。plan 固定 schema 1、target、完整组件清单摘要及最多 64 个有名称、相对落盘路径、HTTPS 地址、实际长度和 SHA-256 或 SHA-512 的下载项；路径和名称不得重复，总下载量必须等于主包固定值。地址拒绝 credential、query、fragment、重定向与远端 manifest；不解析依赖或执行包安装脚本。所有源限量写入本次独立 staging，并对同一实际写入字节校验完整摘要与长度，串行下载的进度按聚合字节计量。磁盘预检须覆盖源、副本、完整输出及安装 scratch，不能以完整归档压缩量代替源下载量。
+Application 只有持有本地数据目录 Primary authority 且组件操作已串行准入时才能修改 store。先由主包 Zig 解开并认证自有 seed，再按其清单认证 `bootstrap/plan.json` 的实际读取字节，才能从中取得下载 authority。plan 固定 schema 1、target、完整组件清单摘要及最多 64 个有名称、相对落盘路径、HTTPS 地址、实际长度和 SHA-256 或 SHA-512 的下载项；路径和名称不得重复，总下载量必须等于主包固定值。地址拒绝 credential、query、fragment 与远端 manifest；重定向仅允许上文固定官方归档入口的有界例外；不解析依赖或执行包安装脚本。所有源限量写入本次独立 staging，并对同一实际写入字节校验完整摘要与长度，串行下载的进度按聚合字节计量。磁盘预检须覆盖源、副本、完整输出及安装 scratch，不能以完整归档压缩量代替源下载量。
 
 官方便携 Python 经原生 ZIP、PE 与 WinTrust 验证后，才沿已有 Application bootstrap 命令启动固定自有脚本。bootstrap 加入本次 pending 操作的 kill-on-close Job，再复制和重新核验全部源、只读提取 MSI、组装依赖与自有资源。父 Host 强杀、取消、期限及进程静止责任沿同一受控调用路径收口；静止无法证实时保留事务。组装完成后主包再次校验完整文件集合和主包固定的清单摘要，不接受客户端自授信任。
 
@@ -122,7 +122,7 @@ Application 只有持有本地数据目录 Primary authority 且组件操作已�
 
 `host.scope` 只标识当前 Primary Host 的进程存活范围，不保存 Task/Session 或组件版本引用，不授予组件安装、下载或执行信任。它精确为 24 字节：ASCII `MWOFS001`、little-endian u32 PID、必须为零的 u32 保留位、little-endian u64 Windows 进程创建 FILETIME。Application worker 从当前进程取得身份，经 `host.scope.next` 写入、sync、原子替换；准备发布已安装 Skill 来源前必须成功完成。旧记录可留在磁盘，但不能被另一 Host、PID 复用或非祖先进程继续使用。正式 `versions/<installId>` 入口在开始子进程前必须验证该范围；Application 专用 `--host-job` 调用继续使用独占 Job 生命周期，不依赖模型 Shell 的身份记录。具体生命周期边界由[高层架构](architecture.md#35-native-sdk)定义。
 
-替换或移除 current 前，必须先持久发布对应版本的删除意图 `retired-<installId>.json`，其内容采用同一 schema 1 记录。最多保留 128 个意图；同目录身份冲突、损坏记录或超出有界读取预算时拒绝继续，不猜测清理目标。固定 `retired.next`、`retired.json` 仅是意图发布的临时文件；恢复可清除它们，不能据此删除版本。意图描述组件自己的待清理资源，不保存或重建 Task/Session 引用，也不授予组件执行信任。它让重启后仍可定位旧版本，而无需扫描、收养或删除未登记目录。
+替换或移除 current 前，必须先持久发布对应版本的删除意图 `retired-<installId>.json`，其内容采用同一 schema 1 记录。最多保留 128 个意图；超出有界读取预算时拒绝继续，不猜测清理目标。恢复时只将损坏或与有效 current 同目录冲突的那份记录移入 store 的 `quarantine` 子目录，保留有效 current；隔离内容不再授予执行、发现或删除 authority。current 自身损坏时按未安装继续，不扫描或收养版本目录，未知目录保留并在诊断中报告。固定 `retired.next`、`retired.json` 仅是意图发布的临时文件；恢复可清除它们，不能据此删除版本。意图描述组件自己的待清理资源，不保存或重建 Task/Session 引用，也不授予组件执行信任。它让重启后仍可定位旧版本，而无需扫描、收养或删除未登记目录。
 
 Windows 资源 Job 名由已登记的随机安装或事务身份确定：版本为 `Local\MetaWork.Office.Version.<installId>`，pending 操作为 `Local\MetaWork.Office.Op.<installId>`。它们只属于本地组件生命周期，不进入 Task/Session、Bridge 或远程发布身份。registry 发布完整 Skill 来源前建立版本执行 Job；入口临时加入后立即关闭 handle，再建立其单次调用子树。封闭 reservation 设置 `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` 且 limit 为零，不能作为执行 Job 使用。已有具名对象不得接管；冷清理最多有界等待其消失，失败保留目录与记录。版本 Job 由相应版本 bookkeeping 持有，pending Job 由单次 Application 进程调用持有；二者均禁止 breakaway 且 kill-on-last-close。新调用的 Job 准入与关闭、终止、active 数观测共同决定资源是否可删。
 

@@ -41,10 +41,17 @@ pub fn prepare(allocator: std.mem.Allocator, io: std.Io, data_root: []const u8) 
 
 fn publish(io: std.Io, parent: std.Io.Dir) !void {
     verify(io, parent) catch |failure| {
-        if (failure != error.FileNotFound) return failure;
+        if (failure == error.Canceled) return failure;
         var random: [16]u8 = undefined;
         try std.Io.randomSecure(io, &random);
         var name_buffer: [64]u8 = undefined;
+        const isolated = try std.fmt.bufPrint(&name_buffer, "quarantined-{s}", .{std.fmt.bytesToHex(random, .lower)});
+        // Primary startup precedes every catalog. Preserve a changed entry by
+        // rename; never rewrite it or follow it while recreating trusted bytes.
+        parent.renamePreserve(&version, parent, isolated, io) catch |rename_failure| {
+            if (rename_failure != error.FileNotFound) return rename_failure;
+        };
+        try std.Io.randomSecure(io, &random);
         const name = try std.fmt.bufPrint(&name_buffer, ".{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
         try parent.createDir(io, name, directoryPermissions());
         var temporary_exists = true;
@@ -116,18 +123,34 @@ test "basic Office guides publish immutably without an installed interpreter" {
     try publish(io, temporary.dir);
     try verify(io, temporary.dir);
     try temporary.dir.writeFile(io, .{ .sub_path = version ++ "/docx/SKILL.md", .data = "changed" });
-    try std.testing.expectError(error.BasicSkillChanged, publish(io, temporary.dir));
-    // Never repair in place: a live catalog may still refer to this version.
+    try publish(io, temporary.dir);
+    try verify(io, temporary.dir);
     const changed = try temporary.dir.statFile(io, version ++ "/docx/SKILL.md", .{});
-    try std.testing.expectEqual(@as(u64, 7), changed.size);
+    try std.testing.expect(changed.size > 7);
+    var entries = temporary.dir.iterate();
+    var quarantines: usize = 0;
+    while (try entries.next(io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "quarantined-")) continue;
+        const isolated = try temporary.dir.openDir(io, entry.name, .{});
+        defer isolated.close(io);
+        var file = try isolated.openFile(io, "docx/SKILL.md", .{});
+        defer file.close(io);
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+        var bytes: [7]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 7), try file.readPositionalAll(io, &bytes, 0));
+        try std.testing.expectEqualStrings("changed", &bytes);
+        quarantines += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), quarantines);
 }
 
-test "basic Office publication rejects a partial existing version" {
+test "basic Office publication repairs a partial existing version before catalogs" {
     const io = std.testing.io;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.createDir(io, &version, directoryPermissions());
-    try std.testing.expectError(error.BasicSkillChanged, publish(io, temporary.dir));
+    try publish(io, temporary.dir);
+    try verify(io, temporary.dir);
 }
 
 test "basic Office source cannot acquire additional definitions or executable resources" {
@@ -136,10 +159,11 @@ test "basic Office source cannot acquire additional definitions or executable re
     defer temporary.cleanup();
     try publish(io, temporary.dir);
     try temporary.dir.writeFile(io, .{ .sub_path = version ++ "/docx/extra.py", .data = "unexpected" });
-    try std.testing.expectError(error.BasicSkillChanged, publish(io, temporary.dir));
-    try temporary.dir.deleteFile(io, version ++ "/docx/extra.py");
+    try publish(io, temporary.dir);
+    try verify(io, temporary.dir);
     try temporary.dir.createDir(io, version ++ "/extra", directoryPermissions());
-    try std.testing.expectError(error.BasicSkillChanged, publish(io, temporary.dir));
+    try publish(io, temporary.dir);
+    try verify(io, temporary.dir);
 }
 
 test "basic Office prepared source returns its complete owned canonical allocation" {

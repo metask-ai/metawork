@@ -10,6 +10,50 @@ import {
   queryOfficeAuthoring,
 } from "./office-component-sources.mjs";
 
+export async function fetchOfficeSource(
+  url,
+  { signal, fetchSource = fetch } = {},
+) {
+  const valid = (value) => {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash
+    )
+      throw Error("Invalid pinned Office public source");
+    return parsed;
+  };
+  const origin = valid(url);
+  const archive =
+    origin.origin === "https://downloadarchive.documentfoundation.org" &&
+    origin.pathname.startsWith("/libreoffice/old/");
+  for (let hops = 0; ; hops++) {
+    valid(url);
+    const response = await fetchSource(url, {
+      redirect: archive ? "manual" : "error",
+      headers: { "Accept-Encoding": "identity" },
+      signal,
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!archive || hops >= 3 || !location)
+        throw Error("Office source did not return a direct complete body");
+      valid(location);
+      url = location;
+      continue;
+    }
+    if (response.redirected) {
+      await response.body?.cancel();
+      throw Error("Office source did not return a direct complete body");
+    }
+    return response;
+  }
+}
+
 export async function verifyPinnedDownload(item, fetchSource = fetch) {
   const url = new URL(item.url);
   if (
@@ -29,9 +73,8 @@ export async function verifyPinnedDownload(item, fetchSource = fetch) {
         item.bytes > 512 * 1024 * 1024))
   )
     throw new Error("Invalid pinned Office public source");
-  const response = await fetchSource(item.url, {
-    redirect: "error",
-    headers: { "Accept-Encoding": "identity" },
+  const response = await fetchOfficeSource(item.url, {
+    fetchSource,
     signal: AbortSignal.timeout(180000),
   });
   if (response.status !== 200 || response.redirected || !response.body) {

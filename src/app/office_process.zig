@@ -235,15 +235,15 @@ fn runOwned(
     defer std.crypto.secureZero(u8, &out.bytes);
     defer std.crypto.secureZero(u8, &err.bytes);
     const out_thread = std.Thread.spawn(.{}, Capture.read, .{&out}) catch |failure| {
-        try stop(io, &child, job, null, null, quiescent);
+        try stop(io, &child, job, null, null, &out, &err, quiescent);
         return failure;
     };
     const err_thread = std.Thread.spawn(.{}, Capture.read, .{&err}) catch |failure| {
-        try stop(io, &child, job, out_thread, null, quiescent);
+        try stop(io, &child, job, out_thread, null, &out, &err, quiescent);
         return failure;
     };
     const term = monitor(io, &child, job, &out, &err, started, timeout_ms, cancellation) catch |failure| {
-        try stop(io, &child, job, out_thread, err_thread, quiescent);
+        try stop(io, &child, job, out_thread, err_thread, &out, &err, quiescent);
         return failure;
     };
     out_thread.join();
@@ -260,10 +260,14 @@ fn runOwned(
 // std.process.run cancels its pipe batch before killing the child; a live
 // Windows writer can keep that cancellation blocked. Keep one root owner and
 // bounded readers instead: terminate/join the root and Job before joining I/O.
-fn stop(io: std.Io, child: *std.process.Child, job: *windows.Job, out: ?std.Thread, err: ?std.Thread, quiescent: *bool) !void {
+fn stop(io: std.Io, child: *std.process.Child, job: *windows.Job, out: ?std.Thread, err: ?std.Thread, out_capture: *Capture, err_capture: *Capture, quiescent: *bool) !void {
     child.kill(io);
     const cleanup = job.terminateAndWait(io);
     cleanup catch job.deinit(); // closing the sole handle also kills descendants
+    // Pipe EOF also depends on unrelated inheriting processes. Our readers are
+    // bounded by this operation's lifetime, not those processes' lifetimes.
+    out_capture.stopping.store(true, .release);
+    err_capture.stopping.store(true, .release);
     if (out) |thread| thread.join();
     if (err) |thread| thread.join();
     try cleanup;
@@ -277,11 +281,25 @@ const Capture = struct {
     len: usize = 0,
     problem: ?anyerror = null,
     done: std.atomic.Value(bool) = .init(false),
+    stopping: std.atomic.Value(bool) = .init(false),
 
     fn read(self: *Capture) void {
         defer self.done.store(true, .release);
         while (self.len < self.bytes.len) {
-            const count = self.file.readStreaming(self.io, &.{self.bytes[self.len..]}) catch |failure| {
+            const available = windows.pipeAvailable(self.file.handle) catch |failure| {
+                self.problem = failure;
+                return;
+            } orelse return;
+            if (available == 0) {
+                if (self.stopping.load(.acquire)) return;
+                sleep(self.io) catch |failure| {
+                    self.problem = failure;
+                    return;
+                };
+                continue;
+            }
+            const end = self.len + @min(available, self.bytes.len - self.len);
+            const count = self.file.readStreaming(self.io, &.{self.bytes[self.len..end]}) catch |failure| {
                 if (failure != error.EndOfStream) self.problem = failure;
                 return;
             };
@@ -307,7 +325,7 @@ fn sleep(io: std.Io) !void {
     try std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }, io);
 }
 
-fn monitor(io: std.Io, child: *std.process.Child, job: *windows.Job, out: *const Capture, err: *const Capture, started: std.Io.Timestamp, timeout_ms: u32, cancellation: *const Cancellation) !std.process.Child.Term {
+fn monitor(io: std.Io, child: *std.process.Child, job: *windows.Job, out: *Capture, err: *Capture, started: std.Io.Timestamp, timeout_ms: u32, cancellation: *const Cancellation) !std.process.Child.Term {
     while (!try job.rootExited(child)) {
         try check(io, started, timeout_ms, cancellation, out, err);
         try sleep(io);
@@ -319,6 +337,8 @@ fn monitor(io: std.Io, child: *std.process.Child, job: *windows.Job, out: *const
         if (root_exited.durationTo(.now(io, .awake)).toMilliseconds() >= 2000) return error.OfficeDescendantsOutstanding;
         try sleep(io);
     }
+    out.stopping.store(true, .release);
+    err.stopping.store(true, .release);
     while (!out.done.load(.acquire) or !err.done.load(.acquire)) {
         try check(io, started, timeout_ms, cancellation, out, err);
         try sleep(io);
@@ -345,6 +365,29 @@ test "Office Application requests are absolute and cancellation precedes any spa
     const cancelled = run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, context, 1000, &cancellation).failed;
     try std.testing.expect(cancelled.cause == error.Cancelled);
     try std.testing.expect(cancelled.quiescent);
+}
+
+test "Office capture stops while another process still owns its pipe writer" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30" },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+        .create_no_window = true,
+    });
+    defer child.kill(io);
+    const file = child.stdout.?;
+    child.stdout = null;
+    defer file.close(io);
+    var capture: Capture = .{ .io = io, .file = file };
+    const thread = try std.Thread.spawn(.{}, Capture.read, .{&capture});
+    capture.stopping.store(true, .release);
+    thread.join(); // writer remains open: EOF-based readers hang here
+    try std.testing.expect(capture.done.load(.acquire));
+    try std.testing.expect(capture.resultFailure() == null);
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
 }
 
 test "bootstrap requires pending operation and manifest pins before any spawn" {

@@ -24,6 +24,7 @@ import {
   windowsVerifyArguments,
 } from "./package-windows.mjs";
 import { runChild } from "./run-child-process.mjs";
+import { fetchOfficeSource } from "./check-office-public-sources.mjs";
 import {
   officeComponentSources,
   officeDependencyRecipe,
@@ -152,9 +153,7 @@ async function fetchSource(source, name) {
     const partial = `${filename}.${randomUUID()}.partial`;
     let complete = false;
     try {
-      const response = await fetch(source.url, {
-        redirect: "error",
-        headers: { "Accept-Encoding": "identity" },
+      const response = await fetchOfficeSource(source.url, {
         signal: AbortSignal.timeout(180_000),
       });
       if (response.status !== 200 || response.redirected || !response.body)

@@ -1,4 +1,5 @@
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
+import { DocumentPreviewView } from "./DocumentPreviewView.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -3675,6 +3676,17 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
+                documentContent={
+                  filePreviewViewState.document ? (
+                    <DocumentPreviewView
+                      key={filePreviewViewState.selected.id}
+                      preview={filePreviewViewState.document}
+                      title={filePreviewViewState.selected.displayPath}
+                      onRefresh={refreshFilePreview}
+                      showRefreshAction={false}
+                    />
+                  ) : undefined
+                }
                 webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
@@ -4138,6 +4150,13 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
+                renderOutputPreview={(preview, title, onRefresh) => (
+                  <DocumentPreviewView
+                    preview={preview}
+                    title={title}
+                    onRefresh={onRefresh}
+                  />
+                )}
                 onPreviewOutput={(taskId, runId, outputId) =>
                   client.previewDocument(taskId, runId, {
                     kind: "output",

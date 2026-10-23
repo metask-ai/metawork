@@ -70,7 +70,7 @@ MetaWork 将 Office 文档处理作为用户可选安装的官方扩展能力。
 
 主包的唯一机器安装输入固定组件身份、目标平台、兼容要求、全部供应商归档与完整依赖闭包的公开 URL、摘要、容量和本地组装规则。正式安装不消费可变 `latest`，不接受模型或文档给出的下载 URL。远端清单、包索引或依赖解析不能独立扩大主包信任的集合。用户仍只安装一个 Office 组件，不逐项选择解释器和库。
 
-供应商输入继续从现有 Windows sources、Python wheel lock 与根 npm lock 生成，不复制另一份手写版本清单。LibreOffice 固定官方分发镜像的可直取版本地址；Node 使用官方归档，Python 库使用固定 PyPI wheel，JavaScript 库使用根 lock 中的完整 registry tarball 闭包，字体使用固定 commit 的资源。客户端不追随动态镜像跳转，不在安装时解析依赖或运行联网的 pip/npm；不可达或摘要不符须明确失败，不转用系统环境或未知镜像。
+供应商输入继续从现有 Windows sources、Python wheel lock 与根 npm lock 生成，不复制另一份手写版本清单。LibreOffice 固定官方版本归档入口；Node 使用官方归档，Python 库使用固定 PyPI wheel，JavaScript 库使用根 lock 中的完整 registry tarball 闭包，字体使用固定 commit 的资源。仅 LibreOffice 官方归档入口允许最多三次无凭据、无参数的 HTTPS 跳转，最终字节仍受固定长度、摘要及签名约束；其他来源拒绝跳转，不在安装时解析依赖或运行联网的 pip/npm；不可达或摘要不符须明确失败，不转用系统环境或未知镜像。
 
 此路线改变的是下载和 bootstrap，不是对当前客户端能力的描述：现有单一 tar.gz 安装路径尚未改为公共来源本地组装；正式接入前仍保持未发布状态，不能把来源核验结果当作应用安装通过。
 

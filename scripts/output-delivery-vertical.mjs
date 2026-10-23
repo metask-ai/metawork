@@ -24,7 +24,8 @@ export async function runOutputDeliveryVertical({
   restart,
   evidenceDirectory,
 }) {
-  const relative = "交付 output 中文.txt";
+  const relative = "results/交付 output 中文.txt";
+  await mkdir(path.join(workspaceRoot, "results"), { recursive: true });
   const source = path.join(workspaceRoot, relative);
   const content = "MetaWork delivered output 中文\n";
   const bytes = Buffer.from(content);

@@ -249,6 +249,16 @@ def load_layout(engine, source):
     return engine.load(source), static
 
 
+class FormulaCheckFailure(Exception):
+    def __init__(self, category):
+        self.category = category
+
+
+def engine_formulas(document, positions):
+    return {position: document.Sheets.getByName(position[0]).getCellRangeByName(position[1]).getFormula()
+            for position in positions}
+
+
 def convert(engine, source, staged, command, expected_formulas=None):
     document, layout = load_layout(engine, source) if command == "pdf" else (engine.load(source), {})
     if command == "accept":
@@ -268,12 +278,25 @@ def convert(engine, source, staged, command, expected_formulas=None):
         if source.suffix.lower() != ".xlsx":
             raise ValueError("Recalc requires an XLSX workbook")
         from spreadsheet_checks import _formulas, _check_formula_caches, _summary
+        # Compare formula representations from the same engine. Excel spelling
+        # (FALSE vs FALSE(), numeric literals, case) is not a semantic identity.
+        before = engine_formulas(document, expected_formulas)
         document.calculateAll()
         engine.save(document, staged, FILTERS[".xlsx"])
         with checked_copy(staged) as result:
-            if _formulas(result) != expected_formulas:
-                raise ValueError("Recalculation changed or removed workbook formulas")
-            _check_formula_caches(result)
+            if set(_formulas(result)) != set(expected_formulas):
+                raise FormulaCheckFailure("formula_cells_changed")
+            reopened = engine.load(result)
+            try:
+                if engine_formulas(reopened, expected_formulas) != before:
+                    raise FormulaCheckFailure("formula_changed")
+            finally:
+                reopened.close(True)
+                engine.documents.remove(reopened)
+            try:
+                _check_formula_caches(result)
+            except ValueError:
+                raise FormulaCheckFailure("formula_cache_missing") from None
             return _summary(result, len(expected_formulas))
     if command == "pdf":
         if source.suffix.lower() not in PDF_FILTERS:
@@ -367,6 +390,8 @@ def run(args):
                         details = convert(engine, input_copy, staged, args.command, expected_formulas)
             if identity(source) != before:
                 raise ValueError("Source changed during Office processing; result not published")
+            if details.get("status") == "errors_found":
+                return details
             # Windows rename refuses an existing destination, including a race.
             staged.rename(output)
     return {"status": "success", **details}
@@ -469,6 +494,9 @@ def main():
         result = selftest() if args.command == "selftest" else run(args)
         print(json.dumps(result, ensure_ascii=True), flush=True)
         return 0 if result["status"] == "success" else 1
+    except FormulaCheckFailure as failure:
+        print(json.dumps({"status": "failed", "error": failure.category}), flush=True)
+        return 1
     except Exception:
         # UNO exceptions may contain raw document paths or remote URLs.
         print(json.dumps({"status": "failed", "error": "Office operation failed; no result published"}), flush=True)

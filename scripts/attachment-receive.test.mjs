@@ -446,8 +446,8 @@ test("byte mode never subscribes to the alternate native drop path", async () =>
   let subscriptions = 0;
   const client = new BridgeClient({
     bridge: {
-      on: () => {
-        subscriptions++;
+      on: (event) => {
+        if (event === "drop:files") subscriptions++;
         return () => {};
       },
       invoke: async () => oldWire.connect,
