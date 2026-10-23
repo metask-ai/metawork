@@ -99,7 +99,7 @@ def build(component_root, plan_path, output):
         if name == "sources/office-dependency-layout.json" and json.loads(content) != plan["recipe"]:
             raise ValueError("Producer dependency recipe differs from canonical inputs")
         put("component/" + name, content)
-    for name in ("msi.py", "packages.py", "payload.py", "assemble.py"):
+    for name in ("msi.py", "packages.py", "payload.py", "assemble.py", "host_job.py"):
         put("bootstrap/" + name, bounded_read(REPO / "src/app/office_bootstrap" / name, 1024**2))
     put("bootstrap/office_archive.py", bounded_read(REPO / "src/product/control/resources/archive.py", 1024**2))
     put("bootstrap/plan.json", plan_bytes)

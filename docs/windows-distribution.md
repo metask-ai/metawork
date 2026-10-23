@@ -86,6 +86,8 @@ node scripts/build-office-component.mjs --python <absolute-builder-python> --out
 
 入口支持两种明确的生命周期 owner：模型经 Shell 调用时由入口保留整树 Job；Application 的安装自检和产品预览通过私有 Host Job 协议，在任何子进程启动前加入应用的随机 Job 并释放临时 Job handle。不得在 Host 退出后由组件长期保留该 handle。Native 能力边界见[高层架构](architecture.md#35-native-sdk)，Host 取消、超时、输出预算和物理静止的证据须独立于入口自有 Job 验收。
 
+公开源安装的临时便携 Python 复用 Application Office 进程 owner。只执行已认证 stage 中的固定 bootstrap 脚本和固定相对输入/输出路径，显式传入主包固定的 seed 与最终清单摘要；不开放任意 executable、脚本、URL 或 shell 命令。安装调用必须绑定 pending operation Job，临时解释器加入前只加载已认证代码和解析参数，不创建安装输出或子进程；加入后立即关闭自己的 Job handle，拒绝缺失、未设 kill-on-close、允许 breakaway 或已封闭的 Job。安装 worker 才是长期 handle owner，取消、期限和输出超限沿既有根进程/整树静止语义执行，无法证实静止时保留事务资源。临时环境只继承固定 OS 变量，工作目录及临时目录均归本次事务；该进程路径不替代执行前的源、解释器、seed 身份与签名检查。
+
 发布的组件目录是不可变资源；运行期的 profile、缓存和临时结果不得写回其中。引擎内嵌 Python 的字节码写入须被禁止，shared package cache 使用每次操作的临时目录，计算使用 CPU 路径，避免驱动自检和锁文件修改安装资源。不能只在打包前删除缓存来掩盖运行期修改。producer 在自检前后核对完整目录 inventory；引擎行为回归也必须验证操作没有增删或修改组件资源。归档校验仍独立执行，不因自检通过而省略。
 
 组件归档为 `tar.gz`，tar 使用 USTAR；当前 Windows producer 不生成链接或特殊成员，不包含字节码缓存、PDB 或安装器副本。归档根的 `office-runtime.json` 使用 schema 1，固定 `target`，以 `files` 列出相对 `path`、实际 `bytes` 和 `sha256`；`payloadBytes` 是清单自身之外所列文件的总字节。归档旁的机器结果记录完整压缩摘要、压缩量和含清单的实际展开量。构建完成前必须重新流式读取完整归档，检查实际成员与清单一致及 gzip CRC，不能只核对构建目录。容量与成员预算由 producer 检查拥有；安装器的受限解包验收仍需独立完成。

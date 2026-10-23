@@ -150,7 +150,7 @@ Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime AP
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `office_component_validation` | Windows 二级 | Application Office 安装 worker 使用公开 OS API 观察目标卷可用量，并以无 UI、仅本地缓存的 Authenticode policy 校验固定运行时入口；组件发布 authority 始终是主包固定的完整归档摘要，不从签名接受任意组件 | SDK 提供等价磁盘容量与 Windows 签名校验，且通过同一安装验收 |
-| `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；入口在启动子进程前加入并关闭临时 Job 引用。另只读当前 Host 自己的 PID 与进程创建时间，供 Office 入口绑定 Shell 生命周期。Job effect 只用于 Office 安装自检、产品预览及受管理版本的执行持有与清理，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消、物理静止观测及当前进程身份，并通过同一 Windows 验收 |
+| `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；组件入口在启动子进程前加入并关闭临时 Job 引用；经 Host 认证的安装便携 Python 只允许加入当前 pending operation 的 Job，并在开始安装文件 effect 前关闭自己的临时引用，不创建 Job 或取得其他进程 authority。另只读当前 Host 自己的 PID 与进程创建时间，供 Office 入口绑定 Shell 生命周期。Job effect 只用于 Office 安装自检、产品预览及受管理版本的执行持有与清理，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消、物理静止观测及当前进程身份，并通过同一 Windows 验收 |
 | `external_link_handoff` | 一级 | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 

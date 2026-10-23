@@ -123,8 +123,11 @@ if __name__ == "__main__":
     parser.add_argument("destination", type=Path)
     parser.add_argument("component_manifest_sha256")
     parser.add_argument("seed_manifest_sha256")
+    parser.add_argument("--host-job", required=True)
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("Windows is required")
+    from host_job import join
+    join(args.host_job)
     print(json.dumps(assemble(args.seed, args.downloads, args.destination,
                               args.component_manifest_sha256, args.seed_manifest_sha256)), flush=True)

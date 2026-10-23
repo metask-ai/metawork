@@ -83,6 +83,9 @@ pub const Context = struct {
 const PagePaths = struct { input: []const u8, output: []const u8, width: u16 = 1280 };
 pub const Command = union(enum) {
     selftest,
+    /// Only the caller-authenticated install stage and fixed bootstrap script.
+    /// No arbitrary executable, script, download URL or command line is accepted.
+    bootstrap: struct { component_manifest_sha256: [32]u8, seed_manifest_sha256: [32]u8 },
     render: PagePaths,
     preview: PagePaths,
     text: struct { input: []const u8, output: []const u8 },
@@ -138,7 +141,10 @@ fn runOwned(
     quiescent: *bool,
 ) !Output {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
-    if (!validPath(component_root) or !validPath(context.scratch_root) or timeout_ms == 0 or timeout_ms > 300_000) return error.InvalidOfficeRequest;
+    const bootstrap = command == .bootstrap;
+    if (!validPath(component_root) or !validPath(context.scratch_root) or timeout_ms == 0 or timeout_ms > @as(u32, if (bootstrap) 900_000 else 300_000)) return error.InvalidOfficeRequest;
+    if (bootstrap and (context.operation == null or std.mem.allEqual(u8, &command.bootstrap.component_manifest_sha256, 0) or
+        std.mem.allEqual(u8, &command.bootstrap.seed_manifest_sha256, 0))) return error.InvalidOfficeRequest;
     if (cancellation.requested.load(.acquire)) return error.Cancelled;
     const started: std.Io.Timestamp = .now(io, .awake);
     const scratch = try std.Io.Dir.cwd().openDir(io, context.scratch_root, .{ .follow_symlinks = false });
@@ -148,6 +154,7 @@ fn runOwned(
     // These fixed Host commands do not need Task/provider credentials or user
     // interpreter options. Preserve only OS context and use owned scratch.
     for ([_][]const u8{ "SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432" }) |key| {
+        if (bootstrap and !(std.mem.eql(u8, key, "SystemRoot") or std.mem.eql(u8, key, "WINDIR") or std.mem.eql(u8, key, "COMSPEC"))) continue;
         if (context.parent_environment.get(key)) |value| try environment.put(key, value);
     }
     try environment.put("TMP", context.scratch_root);
@@ -168,13 +175,28 @@ fn runOwned(
         } else owned_job = try windows.Job.init(io);
         break :job &owned_job.?;
     };
-    const entry = try std.fs.path.join(allocator, &.{ component_root, "bin", "office.exe" });
-    defer allocator.free(entry);
+    if (bootstrap and !std.mem.startsWith(u8, job.name(), "Local\\MetaWork.Office.Op.")) return error.InvalidOperationScope;
+    var argument_memory = std.heap.ArenaAllocator.init(allocator);
+    defer argument_memory.deinit();
+    const argument_allocator = argument_memory.allocator();
+    const entry = if (bootstrap) try std.fs.path.join(argument_allocator, &.{ component_root, "bootstrap", "python.exe" }) else try std.fs.path.join(argument_allocator, &.{ component_root, "bin", "office.exe" });
     // Fixed-size argument slots; no input is interpreted as a command string.
-    var arguments: [10][]const u8 = undefined;
+    var arguments: [14][]const u8 = undefined;
     arguments[0..3].* = .{ entry, "--host-job", job.name() };
     var width_buffer: [8]u8 = undefined;
+    var component_digest: [64]u8 = undefined;
+    var seed_digest: [64]u8 = undefined;
     const count: usize = switch (command) {
+        .bootstrap => |pins| value: {
+            component_digest = std.fmt.bytesToHex(pins.component_manifest_sha256, .lower);
+            seed_digest = std.fmt.bytesToHex(pins.seed_manifest_sha256, .lower);
+            const script = try std.fs.path.join(argument_allocator, &.{ component_root, "seed", "bootstrap", "assemble.py" });
+            const seed = try std.fs.path.join(argument_allocator, &.{ component_root, "seed" });
+            const downloads = try std.fs.path.join(argument_allocator, &.{ component_root, "downloads" });
+            const destination = try std.fs.path.join(argument_allocator, &.{ component_root, "component" });
+            arguments = .{ entry, "-I", "-S", "-B", "-X", "utf8", script, seed, downloads, destination, &component_digest, &seed_digest, "--host-job", job.name() };
+            break :value arguments.len;
+        },
         .selftest => value: {
             arguments[3] = "selftest";
             break :value 4;
@@ -323,6 +345,21 @@ test "Office Application requests are absolute and cancellation precedes any spa
     const cancelled = run(std.testing.allocator, std.testing.io, "C:\\missing-component", .selftest, context, 1000, &cancellation).failed;
     try std.testing.expect(cancelled.cause == error.Cancelled);
     try std.testing.expect(cancelled.quiescent);
+}
+
+test "bootstrap requires pending operation and manifest pins before any spawn" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    const cancellation: Cancellation = .{ .requested = .init(true) };
+    var context: Context = .{ .parent_environment = &environment, .scratch_root = "C:\\missing-scratch" };
+    const command: Command = .{ .bootstrap = .{ .component_manifest_sha256 = @splat(1), .seed_manifest_sha256 = @splat(2) } };
+    try std.testing.expectEqual(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "C:\\stage", command, context, 1000, &cancellation).failed.cause);
+    context.operation = .{ .create = @splat(3) };
+    try std.testing.expectEqual(error.Cancelled, run(std.testing.allocator, std.testing.io, "C:\\stage", command, context, 900_000, &cancellation).failed.cause);
+    try std.testing.expectEqual(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "C:\\stage", command, context, 900_001, &cancellation).failed.cause);
+    try std.testing.expectEqual(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "C:\\stage", .{ .bootstrap = .{ .component_manifest_sha256 = @splat(0), .seed_manifest_sha256 = @splat(2) } }, context, 1000, &cancellation).failed.cause);
+    try std.testing.expectEqual(error.InvalidOfficeRequest, run(std.testing.allocator, std.testing.io, "C:\\component", .selftest, context, 300_001, &cancellation).failed.cause);
 }
 
 test {
