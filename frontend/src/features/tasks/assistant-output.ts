@@ -262,17 +262,19 @@ export function deriveRunReadingFlow(
         input,
       },
     })),
-    ...images.map((reference, index) => ({
-      anchor: reference.presentationAnchor?.afterOutputCount ?? parts.length,
-      order: BigInt(reference.presentationAnchor?.presentationOrder ?? 0),
-      localSequence: 0,
-      index: inputs.length + submissions.length + index,
-      entry: {
-        kind: "image" as const,
-        identity: `${runId}:image:${reference.id}`,
-        reference,
-      },
-    })),
+    ...images
+      .filter((reference) => reference.presentationAnchor != null)
+      .map((reference, index) => ({
+        anchor: reference.presentationAnchor?.afterOutputCount ?? parts.length,
+        order: BigInt(reference.presentationAnchor?.presentationOrder ?? 0),
+        localSequence: 0,
+        index: inputs.length + submissions.length + index,
+        entry: {
+          kind: "image" as const,
+          identity: `${runId}:image:${reference.id}`,
+          reference,
+        },
+      })),
     ...local.map((input, index) => ({
       anchor: input.anchor.afterOutputCount,
       order: BigInt(input.anchor.afterPresentationOrder),
@@ -308,6 +310,25 @@ export function deriveRunReadingFlow(
         redacted: true,
       });
   }
+  // Legacy images have no precise anchor: keep their historical Assistant block
+  // after this Run's output, before its trailing user messages.
+  const legacyImages = images.filter(
+    (reference) => reference.presentationAnchor == null,
+  );
+  const legacyBoundary = entries.reduce(
+    (last, entry, index) =>
+      entry.kind === "assistant" || entry.kind === "image" ? index + 1 : last,
+    0,
+  );
+  entries.splice(
+    legacyBoundary,
+    0,
+    ...legacyImages.map((reference) => ({
+      kind: "image" as const,
+      identity: `${runId}:image:${reference.id}`,
+      reference,
+    })),
+  );
   return entries;
 }
 

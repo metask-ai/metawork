@@ -347,3 +347,70 @@ test("terminal supplements precede trailing messages and missing anchor pages ca
   );
   assert.equal(full.runs[0].entries.at(-1).identity, "submission:continue");
 });
+
+test("legacy images follow Run text and precede details and old or new continuation messages", () => {
+  const pictures = ["old-a", "old-b"].map((id) => ({
+    ...image(id, 0, "1"),
+    presentationAnchor: null,
+  }));
+  for (const presentationOrder of [null, "1"]) {
+    const previous = projectedRun("7", {
+      output: output({
+        commentary: ["Earlier"],
+        response: "ANSWER1",
+        responseKind: "final",
+      }),
+      additionalInputs: [input("1", 1)],
+      tools: [{ fileRefs: pictures }],
+    });
+    const next = projectedRun("8", {
+      submission: {
+        operationId: "continue",
+        anchorRunId: "7",
+        afterOutputCount: 2,
+        presentationOrder,
+        receivedAtUnixMs: null,
+      },
+    });
+    const plan = deriveTaskReadingPlan({
+      runs: [previous, next],
+      inputSubmissions: [],
+    });
+    assert.deepEqual(flowLabels(plan.runs[0].entries), [
+      [0],
+      "user:1",
+      [1],
+      "image:old-a",
+      "image:old-b",
+      "supplement",
+      "submission",
+    ]);
+    assert.deepEqual(
+      plan.runs[0].entries
+        .filter((entry) => entry.kind === "image")
+        .map((entry) => entry.identity),
+      ["7:image:old-a", "7:image:old-b"],
+    );
+    assert.equal(plan.runs[1].showRoot, false);
+  }
+});
+
+test("legacy image-only Runs place the image and details before trailing input", () => {
+  const plan = deriveTaskReadingPlan({
+    inputSubmissions: [],
+    runs: [
+      projectedRun("7", {
+        output: output(),
+        additionalInputs: [input("1", 0)],
+        tools: [
+          { fileRefs: [{ ...image("old", 0, "1"), presentationAnchor: null }] },
+        ],
+      }),
+    ],
+  });
+  assert.deepEqual(flowLabels(plan.runs[0].entries), [
+    "image:old",
+    "supplement",
+    "user:1",
+  ]);
+});
