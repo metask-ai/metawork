@@ -155,3 +155,36 @@ test("Office manifest rejects missing targets, wrong architecture and stale targ
     environment(process.cwd()).targets["macos-aarch64"].nodeId,
   );
 });
+
+test("each packed Office Skill contains the shared platform and consent instructions", async () => {
+  const { gunzipSync } = await import("node:zlib");
+  const bytes = gunzipSync(readFileSync("src/app/office-skills.tar.gz"));
+  const definitions = [];
+  for (let offset = 0; offset + 512 <= bytes.length;) {
+    const header = bytes.subarray(offset, offset + 512);
+    if (header.every((b) => b === 0)) break;
+    const name = header.subarray(0, 100).toString().replace(/\0.*$/, "");
+    const size = parseInt(
+      header.subarray(124, 136).toString().replace(/\0.*$/, ""),
+      8,
+    );
+    if (/^(docx|xlsx|pptx)\/SKILL\.md$/.test(name))
+      definitions.push(
+        bytes.subarray(offset + 512, offset + 512 + size).toString(),
+      );
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  assert.equal(definitions.length, 3);
+  for (const text of definitions) {
+    assert.equal(text.includes("{{OFFICE_EXECUTION}}"), false);
+    for (const required of [
+      "/environment/run.sh",
+      "/environment/run.cmd",
+      "fresh Node preparation requires",
+      "Download agreement does not grant",
+      "DeliverFile",
+      "checked_copy",
+    ])
+      assert.ok(text.includes(required), required);
+  }
+});

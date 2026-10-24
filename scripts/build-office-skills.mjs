@@ -79,13 +79,31 @@ function collect(directory, prefix) {
       name = `${prefix}/${entry.name}`;
     if (entry.isDirectory()) collect(source, name);
     else if (entry.isFile()) {
-      const data = read(source);
+      let data = read(source);
+      if (
+        entry.name === "SKILL.md" &&
+        directory.startsWith("src/product/skill/assets/")
+      ) {
+        const text = data.toString("utf8");
+        if (text.split("{{OFFICE_EXECUTION}}").length !== 2)
+          throw Error(
+            "Office Skill must include the shared execution instructions exactly once",
+          );
+        data = Buffer.from(
+          text.replace(
+            "{{OFFICE_EXECUTION}}",
+            read(`${common}/EXECUTION.md`).toString("utf8").trim(),
+          ),
+        );
+      }
       // Use Windows line endings for reliable cmd.exe label jumps across checkout settings.
       files.push({
         name,
         data: entry.name.endsWith(".cmd")
           ? Buffer.from(data.toString("utf8").replace(/\r?\n/g, "\r\n"))
-          : data,
+          : entry.name.endsWith(".sh")
+            ? Buffer.from(data.toString("utf8").replace(/\r\n/g, "\n"))
+            : data,
       });
     } else throw new Error("Office resource link");
   }
