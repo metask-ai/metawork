@@ -95,12 +95,19 @@ pub const PermissionReviewIdentity = struct {
 
 pub const PermissionReviewState = struct {
     pub const Phase = enum { idle, reviewing, needs_user };
+    pub const Cause = enum { unavailable, reviewer_concern, context_incomplete, timeout, call_failed, invalid_response, capacity, unsupported_tool, input_changed, state_changed };
+    /// Reason must already have passed the Host text projection. Borrowed only
+    /// for settle; it never becomes a durable approval record.
+    pub const Explanation = struct { cause: Cause = .unavailable, reason: []const u8 = "" };
 
     generation: u64 = 1,
     exhausted: bool = false,
     phase: Phase = .idle,
     identity: ?PermissionReviewIdentity = null,
     settled_request_id: u64 = 0,
+    cause: Cause = .unavailable,
+    reason: [512]u8 = @splat(0),
+    reason_len: usize = 0,
 
     pub fn invalidate(self: *PermissionReviewState) void {
         if (self.generation == std.math.maxInt(u64)) {
@@ -111,12 +118,21 @@ pub const PermissionReviewState = struct {
         self.phase = .idle;
         self.identity = null;
         self.settled_request_id = 0;
+        self.cause = .unavailable;
+        std.crypto.secureZero(u8, &self.reason);
+        self.reason_len = 0;
     }
 
-    pub fn settle(self: *PermissionReviewState, request_id: u64) void {
+    pub fn settle(self: *PermissionReviewState, request_id: u64, explanation: Explanation) void {
+        if (self.phase == .needs_user and self.settled_request_id == request_id) return;
         self.invalidate();
         self.phase = .needs_user;
         self.settled_request_id = request_id;
+        self.cause = explanation.cause;
+        if (explanation.cause == .reviewer_concern and explanation.reason.len <= self.reason.len) {
+            @memcpy(self.reason[0..explanation.reason.len], explanation.reason);
+            self.reason_len = explanation.reason.len;
+        }
     }
 
     pub fn matches(self: *const PermissionReviewState, identity: PermissionReviewIdentity) bool {
@@ -345,6 +361,22 @@ test "permission review invalidation never reuses a delegation generation" {
     try std.testing.expect(state.identity == null);
 }
 
+test "permission review first settlement keeps its reason and invalidation scrubs it" {
+    var state = PermissionReviewState{};
+    state.settle(9, .{ .cause = .reviewer_concern, .reason = "需要确认目标。" });
+    const generation = state.generation;
+    state.settle(9, .{ .cause = .timeout });
+    try std.testing.expectEqual(generation, state.generation);
+    try std.testing.expectEqual(.reviewer_concern, state.cause);
+    try std.testing.expectEqualStrings("需要确认目标。", state.reason[0..state.reason_len]);
+    try std.testing.expectEqual(.idle, state.phaseForRequest(1, 10));
+    state.invalidate();
+    try std.testing.expectEqual(@as(usize, 0), state.reason_len);
+    for (state.reason) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    state.settle(10, .{ .cause = .timeout, .reason = "Must not publish this as a model concern" });
+    try std.testing.expectEqual(@as(usize, 0), state.reason_len);
+}
+
 test "permission review projection is bound to the current request and live identity" {
     var state = PermissionReviewState{};
     try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
@@ -356,7 +388,7 @@ test "permission review projection is bound to the current request and live iden
     try std.testing.expectEqual(.idle, state.phaseForRequest(7, 2));
     state.generation += 1;
     try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
-    state.settle(1);
+    state.settle(1, .{});
     try std.testing.expectEqual(.needs_user, state.phaseForRequest(7, 1));
     try std.testing.expectEqual(.idle, state.phaseForRequest(7, 2));
     try std.testing.expectEqual(.idle, state.phaseForRequest(7, 0));

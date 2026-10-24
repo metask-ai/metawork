@@ -360,6 +360,13 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"permissionReviewExplanation\":") catch return error.SnapshotTooLarge;
+    if (review_phase == .needs_user) {
+        const review = &task.runtime.permission_review;
+        writer.print("{{\"cause\":\"{s}\",\"reason\":", .{@tagName(review.cause)}) catch return error.SnapshotTooLarge;
+        if (review.reason_len > 0) try input.text.writeJson(writer, review.reason[0..review.reason_len]) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"modelIntent\":") catch return error.SnapshotTooLarge;
     if (task.durable.model_intent) |intent| {
         writer.writeAll("{\"modelRef\":{\"sourceId\":") catch return error.SnapshotTooLarge;

@@ -5788,7 +5788,11 @@ pub const Runtime = struct {
             if (!job.done.load(.acquire)) continue;
             job.thread.?.join();
             job.thread = null;
-            if (!job.cancellation.isRequested() and self.permissionReviewAuthorized(job.prepared.identity)) {
+            // The watchdog also requests cancellation. Preserve its typed
+            // failure (notably timeout), but never accept a cancelled vote.
+            if (self.permissionReviewAuthorized(job.prepared.identity) and
+                (!job.cancellation.isRequested() or job.outcome == .failure))
+            {
                 // A credential may have become known while the review ran.
                 switch (job.outcome) {
                     .suggestion => |*suggestion| _ = self.redactWithKnownCredentialsNoFail(suggestion.reason.bytes[0..suggestion.reason.len]),
@@ -5800,7 +5804,7 @@ pub const Runtime = struct {
                     .text = self.taskRuntimeTextProjection(),
                 }) catch false;
             }
-            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity, .{ .cause = .state_changed });
             job.deinit();
             slot.* = null;
             self.bumpRevision();
@@ -5822,13 +5826,17 @@ pub const Runtime = struct {
             if (vacant == null or prepared.tool_namespace != .builtin or
                 !self.permissionReviewAuthorized(prepared.identity))
             {
-                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = if (prepared.tool_namespace != .builtin) .unsupported_tool else if (vacant == null) .capacity else .state_changed });
                 prepared.deinit();
                 self.bumpRevision();
                 continue;
             }
-            self.startPermissionReview(prepared, deadline, vacant.?) catch {
-                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+            self.startPermissionReview(prepared, deadline, vacant.?) catch |err| {
+                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = switch (err) {
+                    error.OutOfMemory => .capacity,
+                    error.ReviewInputLimit, error.WriteFailed => .context_incomplete,
+                    else => .unavailable,
+                } });
                 self.bumpRevision();
             };
         }
@@ -5915,7 +5923,7 @@ pub const Runtime = struct {
     fn shutdownPermissionReviews(self: *Runtime) void {
         for (self.permission_jobs) |entry| if (entry) |job| job.cancel();
         for (&self.permission_jobs) |*slot| if (slot.*) |job| {
-            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity, .{ .cause = .state_changed });
             job.deinit();
             slot.* = null;
         };

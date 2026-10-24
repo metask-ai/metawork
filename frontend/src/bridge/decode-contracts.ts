@@ -3350,6 +3350,7 @@ function decodeTask(
     "approvalChange",
     "approvalResult",
     "permissionReviewState",
+    "permissionReviewExplanation",
     "binding",
     "modelIntent",
     "modelSelectionAvailability",
@@ -3534,6 +3535,45 @@ function decodeTask(
     `${path}.permissionReviewState`,
     ["idle", "reviewing", "needs_user"] as const,
   );
+  let permissionReviewExplanation: TaskView["permissionReviewExplanation"] =
+    null;
+  if (item.permissionReviewExplanation !== null) {
+    const explanationPath = `${path}.permissionReviewExplanation`;
+    const explanation = object(
+      item.permissionReviewExplanation,
+      explanationPath,
+      ["cause", "reason"],
+    );
+    const cause = enumValue(explanation.cause, `${explanationPath}.cause`, [
+      "unavailable",
+      "reviewer_concern",
+      "context_incomplete",
+      "timeout",
+      "call_failed",
+      "invalid_response",
+      "capacity",
+      "unsupported_tool",
+      "input_changed",
+      "state_changed",
+    ] as const);
+    const reason =
+      explanation.reason === null
+        ? null
+        : nonEmptyString(explanation.reason, `${explanationPath}.reason`);
+    if (
+      permissionReviewState !== "needs_user" ||
+      (reason !== null &&
+        (cause !== "reviewer_concern" ||
+          new TextEncoder().encode(reason).length > 512 ||
+          reason.trim().length === 0 ||
+          /[\u0000-\u001f\u007f]/u.test(reason)))
+    )
+      fail(
+        explanationPath,
+        "expected a bounded explanation for the current manual handoff",
+      );
+    permissionReviewExplanation = { cause, reason };
+  }
   if (
     (approvalMode === "full_access") !==
       (permissionProfile === "full_access") ||
@@ -3874,6 +3914,7 @@ function decodeTask(
     approvalChange,
     approvalResult,
     permissionReviewState,
+    permissionReviewExplanation,
     binding,
     modelIntent,
     modelSelectionAvailability,

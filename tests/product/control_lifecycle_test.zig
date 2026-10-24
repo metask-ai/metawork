@@ -381,6 +381,32 @@ test "Control permission reviewer survives stale identities and unavailable manu
     try std.testing.expectEqual(.reviewer, task.durable.ui_history[0].?.answered_by.?);
 }
 
+test "Control permission reviewer preserves cancelled timeout facts without accepting cancelled votes" {
+    for ([_]bool{ false, true }) |timeout| {
+        var transport: ReviewerTransport = .{};
+        var configuration = productControlConfiguration();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        const scenario = try ReviewScenario.initWithConfiguration(configuration);
+        defer scenario.deinit();
+        _ = try scenario.control.task_runtime.testSetPermissionReviewDelegation(scenario.task_id, true);
+        try transport.awaitEntered(&scenario.control);
+        transport.released.store(true, .release);
+        try waitReviewerJobDone(&scenario.control);
+        for (scenario.control.permission_jobs) |entry| if (entry) |job| {
+            job.cancellation.request();
+            if (timeout) job.outcome = .{ .failure = .timeout };
+        };
+        scenario.control.syncLifecycle();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        const cause = task.runtime.permission_review.cause;
+        try std.testing.expectEqual(@as(@TypeOf(cause), if (timeout) .timeout else .state_changed), cause);
+        var buffer: [64 * 1024]u8 = undefined;
+        const snapshot = try scenario.control.writeAggregateFixture(&buffer);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, if (timeout) "\"cause\":\"timeout\"" else "\"cause\":\"state_changed\"") != null);
+    }
+}
+
 test "Control permission reviewer commits once-only decisions and projects audit" {
     for ([_][]const u8{
         "{\"decision\":\"allow_once\",\"reason\":\"Matches the user request\"}",
@@ -423,6 +449,8 @@ test "Control permission reviewer commits once-only decisions and projects audit
         } else {
             try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
             const manual_signals = control.task_runtime.workspaceSignals(control.task_runtime.find(task_id).?.durable.workspace_id);
+            const cause = control.task_runtime.find(task_id).?.runtime.permission_review.cause;
+            try std.testing.expectEqual(@as(@TypeOf(cause), if (index == 2) .reviewer_concern else .invalid_response), cause);
             try std.testing.expectEqual(@as(u32, 0), manual_signals.running);
             try std.testing.expectEqual(@as(u32, 1), manual_signals.attention);
             try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
@@ -471,6 +499,7 @@ test "Control permission reviewer scrubs decoded arguments and leaves MCP and Ho
             try waitControlSnapshot(&control, "\"answeredBy\":\"reviewer\"");
         } else {
             try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
+            try std.testing.expectEqual(.unsupported_tool, control.task_runtime.find(task_id).?.runtime.permission_review.cause);
             try std.testing.expectEqual(@as(usize, 0), transport.calls.load(.acquire));
             try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
         }
@@ -601,6 +630,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
     }
     try std.testing.expectEqual(.needs_user, first.runtime.permission_review.phase);
     try std.testing.expectEqual(.needs_user, control.task_runtime.find(ids[8]).?.runtime.permission_review.phase);
+    try std.testing.expectEqual(.capacity, control.task_runtime.find(ids[8]).?.runtime.permission_review.cause);
     try std.testing.expect(transport.calls.load(.acquire) <= 8);
     try std.testing.expect(!transport.exited.load(.acquire));
 }
@@ -634,7 +664,7 @@ fn reviewPreparationAllocationFailure(allocator: std.mem.Allocator, scenario: *R
         return err;
     }).?;
     defer preparation.deinit();
-    try std.testing.expect(runtime.finishPermissionReview(preparation.identity));
+    try std.testing.expect(runtime.finishPermissionReview(preparation.identity, .{}));
 }
 
 fn manualResponseAllocationFailure(allocator: std.mem.Allocator, scenario: *ReviewScenario) !void {
@@ -718,7 +748,7 @@ test "Task permission review submits only once decisions and sanitizes reviewer 
 }
 
 test "Task permission review failures and needs-user retain the original manual wait without retry" {
-    for ([_]product_task.PermissionReviewOutcome{ .{ .failure = .timeout }, reviewSuggestion(.needs_user, "Evidence is missing.") }) |outcome| {
+    for ([_]product_task.PermissionReviewOutcome{ .{ .failure = .timeout }, reviewSuggestion(.needs_user, "Evidence fixture-secret is missing.") }) |outcome| {
         const scenario = try ReviewScenario.init();
         defer scenario.deinit();
         var preparation = try scenario.prepare();
@@ -728,6 +758,11 @@ test "Task permission review failures and needs-user retain the original manual 
         try std.testing.expectEqual(@as(usize, 0), commit.calls);
         try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const review = &task.runtime.permission_review;
+        try std.testing.expectEqual(@as(@TypeOf(review.cause), if (outcome == .failure) .timeout else .reviewer_concern), review.cause);
+        try std.testing.expectEqualStrings(if (outcome == .failure) "" else "Evidence *** is missing.", review.reason[0..review.reason_len]);
+        try std.testing.expect(!scenario.control.task_runtime.finishPermissionReview(preparation.identity, .{ .cause = .unavailable }));
+        try std.testing.expectEqual(@as(@TypeOf(review.cause), if (outcome == .failure) .timeout else .reviewer_concern), review.cause);
         try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
         try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
         try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .allow_once });
@@ -817,7 +852,7 @@ test "Task permission review capacity rejection and invalid reasons leave a manu
         if (reason) |value| {
             try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, value), commit.effects(scenario)));
         } else {
-            try std.testing.expect(scenario.control.task_runtime.finishPermissionReview(preparation.identity));
+            try std.testing.expect(scenario.control.task_runtime.finishPermissionReview(preparation.identity, .{}));
         }
         try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
         try std.testing.expectEqual(@as(usize, 0), commit.calls);

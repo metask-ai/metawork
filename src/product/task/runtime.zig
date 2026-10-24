@@ -2660,7 +2660,7 @@ pub const Runtime = struct {
         const insertion = pushUiRecord(task, record);
         switch (insertion) {
             .inserted => {
-                task.runtime.permission_review.settle(request_id);
+                task.runtime.permission_review.settle(request_id, .{});
                 task.durable.recent_order = self.takeRecentOrder();
             },
             .already_resolved => {},
@@ -2712,7 +2712,11 @@ pub const Runtime = struct {
         if (task.runtime.permission_review.identity) |identity| {
             if (identity.request_id == observation.request_id) return null;
         }
-        errdefer task.runtime.permission_review.settle(observation.request_id);
+        errdefer |err| task.runtime.permission_review.settle(observation.request_id, .{ .cause = switch (@as(anyerror, err)) {
+            error.ReviewInputLimit, error.ReviewIntentUnavailable, error.WriteFailed => .context_incomplete,
+            error.OutOfMemory => .capacity,
+            else => .unavailable,
+        } });
         var pending = try access.copyPendingUiRequest(self.allocator);
         defer {
             std.crypto.secureZero(u8, pending.json);
@@ -2731,7 +2735,7 @@ pub const Runtime = struct {
         task.runtime.permission_review.identity = identity;
         task.runtime.permission_review.phase = .reviewing;
         if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) {
-            _ = self.finishPermissionReview(identity);
+            _ = self.finishPermissionReview(identity, .{ .cause = .input_changed });
             return null;
         }
         const execution = task.runtime.execution() orelse return error.ReviewUnavailable;
@@ -2806,10 +2810,10 @@ pub const Runtime = struct {
 
     /// For capacity rejection/cancellation before a worker was started as well
     /// as reviewer failure. It never answers or expires the Agent request.
-    pub fn finishPermissionReview(self: *Runtime, identity: PermissionReviewIdentity) bool {
+    pub fn finishPermissionReview(self: *Runtime, identity: PermissionReviewIdentity, explanation: task_attachment.PermissionReviewState.Explanation) bool {
         const task = self.find(identity.task_id) orelse return false;
         if (!task.runtime.permission_review.matches(identity)) return false;
-        task.runtime.permission_review.settle(identity.request_id);
+        task.runtime.permission_review.settle(identity.request_id, explanation);
         return true;
     }
 
@@ -2823,19 +2827,35 @@ pub const Runtime = struct {
         const task = self.find(identity.task_id) orelse return false;
         if (self.permission_reviews_closed) return false;
         if (!reviewTaskEligible(task) or !task.runtime.permission_review.matches(identity)) return false;
-        defer _ = self.finishPermissionReview(identity);
+        defer _ = self.finishPermissionReview(identity, .{});
         if (task.runtime.active_run_id != identity.run_id) return false;
         const run = task_state.findRun(task.durable.runs, identity.run_id) orelse return false;
         if (!std.meta.eql(identity, reviewIdentity(task, run, identity.request_id, identity.policy_generation)) or
             task_state.terminalPayload(run) != null or run.pending_termination.load(.acquire) != .none)
             return false;
         const suggestion = switch (outcome) {
-            .failure => return false,
+            .failure => |failure| {
+                _ = self.finishPermissionReview(identity, .{ .cause = switch (failure) {
+                    .timeout => .timeout,
+                    .completion => .call_failed,
+                    .invalid_output, .output_limit, .incomplete_output => .invalid_response,
+                    .invalid_input, .input_limit => .context_incomplete,
+                    .out_of_memory => .capacity,
+                    else => .unavailable,
+                } });
+                return false;
+            },
             .suggestion => |value| value,
         };
-        const choice: PermissionChoice = switch (suggestion.decision) {
-            .needs_user => return false,
-            .allow_once => if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) return false else .allow_once,
+        const choice: ?PermissionChoice = switch (suggestion.decision) {
+            .needs_user => null,
+            .allow_once => blk: {
+                if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) {
+                    _ = self.finishPermissionReview(identity, .{ .cause = .input_changed });
+                    return false;
+                }
+                break :blk .allow_once;
+            },
             .deny => .deny_once,
         };
         // Check the exact current SDK request, not just a saved UI observation.
@@ -2853,10 +2873,9 @@ pub const Runtime = struct {
             parsed.deinit();
         }
         const request = parsed.value();
-        if (request.run_id != identity.run_id or request.policy_generation != identity.policy_generation or
-            std.mem.indexOfScalar(agent.PermissionChoice, request.responses, permissionChoice(choice)) == null)
-        {
-            return false;
+        if (request.run_id != identity.run_id or request.policy_generation != identity.policy_generation) return false;
+        if (choice) |value| {
+            if (std.mem.indexOfScalar(agent.PermissionChoice, request.responses, permissionChoice(value)) == null) return false;
         }
         if (suggestion.reason.len == 0 or suggestion.reason.len > permission_review.max_reason_bytes) {
             return false;
@@ -2870,7 +2889,11 @@ pub const Runtime = struct {
         if (projected.truncated or !validReviewReason(projected.value)) {
             return false;
         }
-        var prepared = try self.respondUi(identity.task_id, identity.run_id, identity.request_id, .{ .permission = choice });
+        if (choice == null) {
+            _ = self.finishPermissionReview(identity, .{ .cause = .reviewer_concern, .reason = projected.value });
+            return false;
+        }
+        var prepared = try self.respondUi(identity.task_id, identity.run_id, identity.request_id, .{ .permission = choice.? });
         if (!prepared.history_inserted) {
             prepared.rollback();
             return false;
