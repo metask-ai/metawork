@@ -16,6 +16,25 @@ if (
     "Use the canonical Office resource generator Node/zlib from the manifest",
   );
 const read = (name) => readFileSync(path.join(root, name));
+const downloadSummary = [
+  "| Native platform | Input target key | Python payload bytes | Node payload bytes |",
+  "| --- | --- | ---: | ---: |",
+  ...Object.entries(sources.targets).map(
+    ([key, t]) =>
+      `| ${key.startsWith("windows-") ? "Windows" : "macOS"} ${key.endsWith("aarch64") ? "arm64" : "x64"} | \`${key}\` | ${t.downloadTotals.python.totalBytes} | ${t.downloadTotals.node.totalBytes} |`,
+  ),
+].join("\n");
+const executionTemplate = read(`${common}/EXECUTION.md`)
+  .toString("utf8")
+  .trim();
+if (executionTemplate.split("{{OFFICE_DOWNLOAD_SUMMARY}}").length !== 2)
+  throw Error(
+    "Office execution instructions must include the download summary exactly once",
+  );
+const execution = executionTemplate.replace(
+  "{{OFFICE_DOWNLOAD_SUMMARY}}",
+  downloadSummary,
+);
 function constants(t) {
   return {
     OFFICE_NAMESPACE: sources.namespace,
@@ -89,13 +108,10 @@ function collect(directory, prefix) {
           throw Error(
             "Office Skill must include the shared execution instructions exactly once",
           );
-        data = Buffer.from(
-          text.replace(
-            "{{OFFICE_EXECUTION}}",
-            read(`${common}/EXECUTION.md`).toString("utf8").trim(),
-          ),
-        );
+        data = Buffer.from(text.replace("{{OFFICE_EXECUTION}}", execution));
       }
+      if (source === `${common}/EXECUTION.md`)
+        data = Buffer.from(execution + "\n");
       // Use Windows line endings for reliable cmd.exe label jumps across checkout settings.
       files.push({
         name,

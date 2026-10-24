@@ -176,7 +176,7 @@ test("each packed Office Skill contains the shared platform and consent instruct
   }
   assert.equal(definitions.length, 3);
   for (const text of definitions) {
-    assert.equal(text.includes("{{OFFICE_EXECUTION}}"), false);
+    assert.doesNotMatch(text, /\{\{OFFICE_[A-Z_]+\}\}/);
     for (const required of [
       "/environment/run.sh",
       "/environment/run.cmd",

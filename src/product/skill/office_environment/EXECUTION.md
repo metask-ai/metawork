@@ -1,6 +1,8 @@
 ## Execution environment
 
-Use only this Skill's fixed private runtimes. Target inputs exist for Windows x64/ARM64 and macOS arm64/x64. Select the native OS and architecture in [environment inputs](environment/environment.json); never choose an interpreter from PATH or infer paths from this Skill's parent directory.
+Use only this Skill's fixed private runtimes. Match the native OS and architecture to the generated table below. The fixed prepare/run entry selects the native target automatically; no target argument is accepted. Read the download estimate directly from this table. Use Read if additional [environment input](environment/environment.json) details are needed before preparation; never choose an interpreter from PATH or infer paths from this Skill's parent directory.
+
+{{OFFICE_DOWNLOAD_SUMMARY}}
 
 | Platform | Fixed prepare entry | Fixed run entry |
 | --- | --- | --- |
@@ -9,7 +11,7 @@ Use only this Skill's fixed private runtimes. Target inputs exist for Windows x6
 
 Use the existing Shell with each argument quoted separately. Resource files need no executable bit. Examples below using `run.cmd` mean the selected absolute run entry above; on macOS always substitute `/bin/sh "${CLAUDE_SKILL_DIR}/environment/run.sh"`. Do not execute `.cmd` on macOS or use a system Node/Python.
 
-Run never downloads. Use it to perform the needed operation and detect a missing environment. Before first preparation, explain the purpose and the selected target's `downloadTotals.python.totalBytes` or `downloadTotals.node.totalBytes` from the environment inputs, then obtain the user's agreement. These totals include interpreter and locked library payloads; indexes, retries and transport overhead are extra, so present an estimated network download. Prepare may download: call it only after consent has been obtained, even for an intended reuse. No arbitrary URL, version, package or root arguments are accepted. Allow 30 minutes per runtime download, 10 minutes for dependency installation and bounded final checks; observe long work through the existing Shell background/output tools.
+Run never downloads. Use it to perform the needed operation and detect a missing environment. Before first preparation, explain the purpose and the matching row's Python or Node payload bytes, then obtain the user's agreement. These totals include interpreter and locked library payloads; indexes, retries and transport overhead are extra, so present an estimated network download. Prepare may download: call it only after consent has been obtained, even for an intended reuse. No arbitrary URL, version, package or root arguments are accepted. Allow 30 minutes per runtime download, 10 minutes for dependency installation and bounded final checks; observe long work through the existing Shell background/output tools.
 
 On macOS, **fresh Node preparation requires the exact private Python already prepared**. It does not download Python implicitly. When Node and its prerequisite are missing, explain their combined download and prepare Python, then Node, after agreement. XLSX-only Python work needs no Node. Completed Node can be reused and run without Python; Python validation or reading of documents separately needs Python. Windows keeps both languages independently preparable. Download agreement does not grant filesystem or Shell permissions: follow the existing approval mechanism if the shared root is outside the Workspace, and explain refusals without changing roots. `full_access` adds no product installation gate.
 
