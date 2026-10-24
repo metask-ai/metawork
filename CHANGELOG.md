@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-24
+
+### Added
+
+- 内置 DOCX、PPTX 与 XLSX Office Skills，并为 Windows 与 macOS 的 x86_64/ARM64 目标锁定私有 Python、Node 和文档库输入；依赖经现有 Shell 与权限链按需准备到应用私有目录，不依赖或改写系统解释器。各目标的真实桌面与正式分发证据仍以验证规范记录的边界为准。
+- Run 的可信文件交付记录新增“检查文件”“定位文件”“另存为”和“继续修改”操作；每次操作都重新核验当前 Workspace 授权与实际文件字节，另存通过系统对话框原子发布，目标路径不会进入 Renderer。
+- 新增模型首次设置与不可用状态的引导界面，根据实际 Account、Provider、模型目录和持久化状态提供登录、配置、重试或恢复入口。
+- Task 会话为用户消息、Agent 输出和生成图片新增持久化呈现锚点，分页、恢复和增量刷新保持稳定阅读顺序。
+
+### Changed
+
+- 消息信息栏统一使用实际模型元数据，不再由不同消息类型各自拼接模型说明。
+- 更新 MetaWork 标志、字标、应用图标与托盘图标，并为 Windows 主包增加体积和资源预算检查。
+- Native SDK 升级至 `@zogien/native-sdk 0.11.0-fork.4`，窗口顶部缩放改由 SDK 原生能力承担。
+
+### Fixed
+
+- 修复 Metask 凭据续期时未保留等待消息，以及模型目录变化后 credential authority 未随新授权推进的问题；既有 Task 已持有的执行 binding 不被追溯替换。
+- 修复 Windows 升级时托盘驻留 Host 未退出便替换运行文件的问题。
+- 修复复制操作和时间戳作用到错误消息，以及旧历史图片与末尾用户输入顺序不稳定的问题。
+
 ## [0.2.6] - 2026-10-21
 
 ### Added
@@ -428,7 +449,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.6...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/metask-ai/metawork/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/metask-ai/metawork/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/metask-ai/metawork/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/metask-ai/metawork/compare/v0.2.3...v0.2.4
