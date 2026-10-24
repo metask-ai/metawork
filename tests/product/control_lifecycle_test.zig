@@ -768,7 +768,18 @@ test "Task permission review submits only once decisions and sanitizes reviewer 
 }
 
 test "Task permission review failures and needs-user retain the original manual wait without retry" {
-    for ([_]product_task.PermissionReviewOutcome{ .{ .failure = .timeout }, reviewSuggestion(.needs_user, "Evidence fixture-secret is missing.") }) |outcome| {
+    const Case = struct {
+        outcome: product_task.PermissionReviewOutcome,
+        cause: product_task.testing.attachment_module.PermissionReviewState.Cause,
+    };
+    for ([_]Case{
+        .{ .outcome = .{ .failure = .timeout }, .cause = .timeout },
+        .{ .outcome = .{ .failure = .{ .completion = .malformed_response } }, .cause = .invalid_response },
+        .{ .outcome = .{ .failure = .{ .completion = .unsupported_response } }, .cause = .invalid_response },
+        .{ .outcome = .{ .failure = .{ .completion = .{ .provider_rejected = .{ .status = 503, .category = .provider_failure } } } }, .cause = .call_failed },
+        .{ .outcome = reviewSuggestion(.needs_user, "Evidence fixture-secret is missing."), .cause = .reviewer_concern },
+    }) |case| {
+        const outcome = case.outcome;
         const scenario = try ReviewScenario.init();
         defer scenario.deinit();
         var preparation = try scenario.prepare();
@@ -779,10 +790,10 @@ test "Task permission review failures and needs-user retain the original manual 
         try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
         const review = &task.runtime.permission_review;
-        try std.testing.expectEqual(@as(@TypeOf(review.cause), if (outcome == .failure) .timeout else .reviewer_concern), review.cause);
+        try std.testing.expectEqual(case.cause, review.cause);
         try std.testing.expectEqualStrings(if (outcome == .failure) "" else "Evidence *** is missing.", review.reason[0..review.reason_len]);
         try std.testing.expect(!scenario.control.task_runtime.finishPermissionReview(preparation.identity, .{ .cause = .unavailable }));
-        try std.testing.expectEqual(@as(@TypeOf(review.cause), if (outcome == .failure) .timeout else .reviewer_concern), review.cause);
+        try std.testing.expectEqual(case.cause, review.cause);
         try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
         try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
         try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .allow_once });

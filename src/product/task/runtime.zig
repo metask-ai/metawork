@@ -2822,7 +2822,10 @@ pub const Runtime = struct {
             .failure => |failure| {
                 _ = self.finishPermissionReview(identity, .{ .cause = switch (failure) {
                     .timeout => .timeout,
-                    .completion => .call_failed,
+                    .completion => |completion_failure| switch (completion_failure) {
+                        .malformed_response, .unsupported_response => .invalid_response,
+                        else => .call_failed,
+                    },
                     .invalid_output, .output_limit, .incomplete_output => .invalid_response,
                     .invalid_input, .input_limit => .context_incomplete,
                     .out_of_memory => .capacity,
