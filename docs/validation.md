@@ -121,6 +121,8 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 
 实际点击三项“检查文件”均显示检查时与交付一致；依次点击“继续修改”将引用加入同 Task Composer，保留已有草稿且不自动发送。正常退出同一开发版后冷启动，三项成果恢复相同 delivery ID、大小和摘要，重新检查仍一致；重启后的 Composer 为空，此证据不声明草稿跨重启持久化。精确身份与观察见 `.zig-cache/office-dev-{ui-identity,ui-observation,file-verification}.json`；原稿与环境基线分别为 `.zig-cache/office-dev-original-baseline.json`、`.zig-cache/office-dev-environment-before.json`。本轮不继续正式分发验收，其他原生架构、最低系统及无干预模型执行缺口保留。
 
+本轮实现收尾时，在 `e89b8eec` 的代码上再次执行 `npm run check`，canonical staged Core verifier、Renderer wire/typecheck 与严格 Native 检查全部通过，日志为 `.zig-cache/office-closeout-check.log`。此检查不改变上述完整 Node suite 的失败结论，也不替代未执行的平台回归。
+
 ### E-MAC-OFFICE-DMG-20261024
 
 用户明确授权上传后，`4ba05c36` 的 `package-macos.mjs arm64` 正式入口以 exit 0 完成。Apple submission `b6cd09ca-3e6c-4061-aeb4-3295be5537c0` 为 `Accepted`，审查日志无 issues；staple/validate、Gatekeeper assessment、DMG 校验及只读挂载后的应用签名、executable integrity 和系统基线声明复核通过。上传文件 SHA-256 为 `998dea9c119f561fb4499343dea06cb2a66066210dcfd4bd5ae8507a044a3c6c`；staple 后最终 DMG 为 10,319,472 bytes，SHA-256 `e4081cadd71b6cedfa71114843f9f1b7985fbeed921b8fb92e8097cf5d92c712`。它是取消修复后的独立产物，不使用旧 submission 替代验收。身份、公证日志和完整入口日志见 `.zig-cache/office-package-current-identity.json`、`.zig-cache/office-notary-current-{info,log}.json` 和 `.zig-cache/office-package-current.log`。
