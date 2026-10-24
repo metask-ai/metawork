@@ -52,6 +52,8 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
 
+资源生成器使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记，保持严格整包字节比较。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 同输入产物比对。
+
 Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。`python -X utf8 scripts/check-office-preparation-failures.py --download` 覆盖缺失环境、无效目标、损坏正式目录保留、原生负退出码、目标被占用、下载失败及摘要拒绝后的清理；还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。
 
 真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Dtarget=x86_64-windows-msvc -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建，再运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的资源绝对路径、新建、工作副本修改及重新读取；不请求远端模型。桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs`，覆盖新 Task、显式刷新、冷启动和发布失败不阻止启动；它不运行或替代通用键盘焦点探针。通用成果交付另由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的既有桌面入口验证。

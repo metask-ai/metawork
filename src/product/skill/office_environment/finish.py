@@ -5,17 +5,19 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from configuration import current
 
 
 def check(root):
-    if "{}.{}.{}".format(*sys.version_info[:3]) != json.loads((Path(__file__).parent / "environment.json").read_text())["python"]["version"]:
+    if "{}.{}.{}".format(*sys.version_info[:3]) != current()["python"]["version"]:
         raise RuntimeError("Unexpected private Python version")
     sys.path.insert(0, str(root / "packages"))
     import defusedxml.ElementTree
     import lxml.etree
     import openpyxl
     import PIL.Image
-    expected = dict(line.split()[0].split("==") for line in (Path(__file__).parent / "requirements.txt").read_text().splitlines() if line)
+    expected = dict(line.split()[0].split("==") for line in (Path(__file__).parent / current()["requirements"]).read_text().splitlines() if line)
     if any(importlib.metadata.version(k) != v for k, v in expected.items()):
         raise RuntimeError("Private Python libraries differ from their lock")
 
@@ -49,7 +51,7 @@ if __name__ == "__main__":
         # configuration. Do not print user configuration or credentials.
         subprocess.run([sys.executable, "-I", "-B", "-m", "pip", "--disable-pip-version-check", "install",
                         "--require-hashes", "--only-binary", ":all:", "--no-compile", "--no-user", "--no-cache-dir",
-                        "--target", str(stage / "packages"), "-r", str(resources / "requirements.txt")], check=True, timeout=600)
+                        "--target", str(stage / "packages"), "-r", str(resources / current()["requirements"])], check=True, timeout=600)
         check(stage)
         publish(stage, final)
         print(final)

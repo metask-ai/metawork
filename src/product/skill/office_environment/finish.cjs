@@ -5,7 +5,7 @@ const { createRequire } = require("node:module");
 const { spawnSync } = require("node:child_process");
 
 function check(root) {
-  if (process.version !== "v" + require("./environment.json").node.version)
+  if (process.version !== "v" + require("./configuration.cjs").node.version)
     throw new Error("Unexpected private Node version");
   const load = createRequire(path.join(root, "package.json"));
   for (const [name, version] of Object.entries(
