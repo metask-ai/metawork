@@ -136,12 +136,12 @@ test("Windows packaging stages the canonical tray icon at its runtime path", () 
   }
 });
 
-test("Windows installer closes the old Host before replacement and does not restart it", () => {
+test("Windows installer force closes a tray-resident old Host before replacement and does not restart it", () => {
   const installer = readFileSync(
     new URL("../packaging/windows/metawork.iss", import.meta.url),
     "utf8",
   );
-  assert.match(installer, /^CloseApplications=yes$/mu);
+  assert.match(installer, /^CloseApplications=force$/mu);
   assert.match(installer, /^RestartApplications=no$/mu);
 });
 

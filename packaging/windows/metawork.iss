@@ -33,7 +33,9 @@ UninstallDisplayIcon={app}\app-icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-CloseApplications=yes
+; A tray-resident Host can outlive Restart Manager's normal shutdown request.
+; Let Restart Manager terminate it after its shutdown timeout before replacement.
+CloseApplications=force
 RestartApplications=no
 UsePreviousAppDir=yes
 OutputBaseFilename=metawork

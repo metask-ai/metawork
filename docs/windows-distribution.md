@@ -27,7 +27,7 @@ Inno 编译器按显式环境变量、标准安装目录、`PATH` 和 Windows �
 
 Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Windows 应用，不成为应用 runtime owner，也不替代 Native SDK package。
 
-安装器必须在替换 runtime stage 前处理仍在运行的已安装 MetaWork。`packaging/windows/metawork.iss` 固定启用 `CloseApplications=yes`，并以 `RestartApplications=no` 禁止安装完成后擅自恢复 Host；用户取消关闭时安装不得继续覆盖正在使用的文件。第一次部署具备单实例能力的版本时，旧 Host 尚未持有数据目录 lease，也不理解新的启动转交协议，因此“先退出旧 Host，再替换应用”本身就是 rollout 的正确性边界，不能依赖新版本在启动后补救跨代双写。
+安装器必须在替换 runtime stage 前处理仍在运行的已安装 MetaWork，包括隐藏到托盘的 Host。`packaging/windows/metawork.iss` 固定启用 `CloseApplications=force`：由 Windows Restart Manager 请求关闭，超时仍未退出时终止旧进程，再替换文件；强制终止可能中断正在执行的 Task，升级前应先结束工作。安装器以 `RestartApplications=no` 禁止安装完成后擅自恢复 Host；用户取消关闭时安装不得继续覆盖正在使用的文件。第一次部署具备单实例能力的版本时，旧 Host 尚未持有数据目录 lease，也不理解新的启动转交协议，因此“先退出旧 Host，再替换应用”本身就是 rollout 的正确性边界，不能依赖新版本在启动后补救跨代双写。
 
 ## 固定流程
 
