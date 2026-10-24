@@ -1,4 +1,5 @@
-"""Opt-in Windows qualification: real downloads into an isolated test profile."""
+"""Opt-in native qualification: real downloads into an isolated test profile."""
+import argparse
 import concurrent.futures
 import atexit
 import hashlib
@@ -12,16 +13,22 @@ import tempfile
 import threading
 import urllib.request
 
+import office_qualification as qualification
+
 REPO = Path(__file__).resolve().parents[1]
-if sys.platform != "win32" or sys.argv[1:] not in (["--download"], ["--download", "--network-config-probe"]):
-    raise SystemExit("Usage on Windows: python scripts/check-office-private-environment.py --download [--network-config-probe]")
-scratch = Path(tempfile.mkdtemp(prefix="office-private qualification ", dir=REPO / ".zig-cache"))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--download", action="store_true", required=True)
+parser.add_argument("--network-config-probe", action="store_true")
+qualification.target_option(parser)
+args = parser.parse_args()
+qualification.require_native(parser, args.target)
+scratch = Path(tempfile.mkdtemp(prefix="office-private 中文 ' qualification ", dir=REPO / ".zig-cache"))
 resources = scratch / "resources"
 resources.mkdir()
-subprocess.run(["tar.exe", "-xf", str(REPO / "src/app/office-skills.tar.gz"), "-C", str(resources)], check=True)
+qualification.extract(REPO / "src/app/office-skills.tar.gz", resources)
 entry = resources / "docx/environment"
 profile = scratch / "profile"
-env = dict(os.environ, LOCALAPPDATA=str(profile), NODE_OPTIONS="", NODE_PATH="")
+env = qualification.environment(profile)
 network_requests = []
 if "--network-config-probe" in sys.argv:
     class Mirror(BaseHTTPRequestHandler):
@@ -62,22 +69,23 @@ if "--network-config-probe" in sys.argv:
 
 
 def command(name, *args, environment=env):
-    quoted = " ".join('"' + str(value) + '"' for value in [entry / name, *args])
-    result = subprocess.run('cmd.exe /d /s /c "' + quoted + '"', env=environment,
-                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+    result = qualification.command(entry, name, args, environment)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     return result.stdout
 
 
 # Duplicate fresh preparations race on publication, not writes in one directory.
+if sys.platform == "darwin":
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: command("prepare.cmd", "python"), range(2)))
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
     node_results = list(pool.map(lambda _: command("prepare.cmd", "node"), range(2)))
 command("prepare.cmd", "python")
-home = profile / "MetaWork/OfficeDependencies"
+home = qualification.dependency_root(profile)
 assert len(list(home.glob("node-*"))) == 1
 assert len(list(home.glob("python-*"))) == 1
-assert not list(home.glob(".*.tmp"))
+assert not [p for p in home.iterdir() if p.name.startswith(".")]
 if "--network-config-probe" in sys.argv:
     assert any(p.startswith("/pypi/simple/openpyxl/") for p in network_requests), network_requests
     assert any(p.startswith("/npm/docx/-/") for p in network_requests), network_requests
@@ -94,6 +102,14 @@ before = inventory()
 offline = dict(env, HTTPS_PROXY="http://127.0.0.1:1", HTTP_PROXY="http://127.0.0.1:1", ALL_PROXY="http://127.0.0.1:1")
 command("prepare.cmd", "python", environment=offline)
 command("prepare.cmd", "node", environment=offline)
+if sys.platform == "darwin":
+    python_final = next(home.glob("python-*"))
+    hidden_python = python_final.with_name("fixture-python-unavailable")
+    python_final.rename(hidden_python)
+    try:
+        command("prepare.cmd", "node", environment=offline)
+    finally:
+        hidden_python.rename(python_final)
 work = scratch / "work"
 work.mkdir()
 (work / "create.cjs").write_text('''const fs=require("node:fs"),path=require("node:path");
@@ -119,6 +135,6 @@ for suffix, source in [("docx", "created.docx"), ("pptx", "created.pptx"), ("xls
     assert result["format"] == suffix
     assert "中文" in json.dumps(result, ensure_ascii=False)
 assert before == inventory(), "Document processing changed the completed environment"
-print(json.dumps({"scratch": str(scratch), "concurrent_node_publish": True, "offline_reuse": True,
+print(json.dumps({"target": args.target, "scratch": str(scratch), "concurrent_node_publish": True, "offline_reuse": True,
                   "docx_pptx_creation": True, "xlsx_edit": True, "three_format_read": True,
                   "environment_unchanged": True, "files": len(before), "network_config_requests": len(network_requests)}, ensure_ascii=True))

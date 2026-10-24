@@ -103,7 +103,16 @@ fn publish(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir) !void {
         try visit(allocator, io, directory, true);
         try visit(allocator, io, directory, false);
     }
-    try parent.renamePreserve(name, parent, &version, io);
+    if (builtin.os.tag == .macos) {
+        @import("metawork_office_resource_publish_compat").publish(parent, name, &version) catch |failure| {
+            if (failure != error.PathAlreadyExists) return failure;
+            const winner = try parent.openDir(io, &version, .{ .follow_symlinks = false, .iterate = true });
+            defer winner.close(io);
+            return visit(allocator, io, winner, false);
+        };
+    } else {
+        try parent.renamePreserve(name, parent, &version, io);
+    }
     pending = false;
 }
 

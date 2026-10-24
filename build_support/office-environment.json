@@ -1,27 +1,152 @@
 {
-  "python": {
-    "version": "3.13.15",
-    "url": "https://api.nuget.org/v3-flatcontainer/python/3.13.15/python.3.13.15.nupkg",
-    "sha256": "05357887df50d3153efc681bdf432c321d3e2f9ce5788f99f4515b27e8fda0ac",
-    "bytes": 14391248
+  "schemaVersion": 2,
+  "namespace": "MetaWork/OfficeDependencies",
+  "generator": {
+    "node": "24.21.0",
+    "zlib": "1.3.2.1-motley-8002e91"
   },
-  "node": {
-    "version": "24.19.0",
-    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip",
-    "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
-    "bytes": 37304352,
-    "archiveRoot": "node-v24.19.0-win-x64"
-  },
-  "downloadTotals": {
-    "python": {
-      "librariesBytes": 11530133,
-      "totalBytes": 25921381,
-      "lockSha256": "e56c376aed92ce394606416b75a5fbac390fdce03339ed830ad9e24b59521c25"
+  "targets": {
+    "windows-x86_64": {
+      "python": {
+        "version": "3.13.15",
+        "url": "https://api.nuget.org/v3-flatcontainer/python/3.13.15/python.3.13.15.nupkg",
+        "sha256": "05357887df50d3153efc681bdf432c321d3e2f9ce5788f99f4515b27e8fda0ac",
+        "bytes": 14391248
+      },
+      "node": {
+        "version": "24.19.0",
+        "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip",
+        "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
+        "bytes": 37304352,
+        "archiveRoot": "node-v24.19.0-win-x64"
+      },
+      "requirements": "requirements.txt",
+      "layout": {
+        "version": "layout-1",
+        "pythonExecutable": "tools/python.exe",
+        "nodeExecutable": "node-v24.19.0-win-x64/node.exe",
+        "npmCli": "node-v24.19.0-win-x64/node_modules/npm/bin/npm-cli.js"
+      },
+      "downloadTotals": {
+        "python": {
+          "librariesBytes": 11530133,
+          "totalBytes": 25921381,
+          "lockSha256": "e56c376aed92ce394606416b75a5fbac390fdce03339ed830ad9e24b59521c25"
+        },
+        "node": {
+          "librariesBytes": 3057557,
+          "totalBytes": 40361909,
+          "lockSha256": "ef72e813ed9990cf0d0c0944ff265d0b4ca81875227b32e2fe6fd4089cb05897"
+        }
+      }
     },
-    "node": {
-      "librariesBytes": 3057557,
-      "totalBytes": 40361909,
-      "lockSha256": "ef72e813ed9990cf0d0c0944ff265d0b4ca81875227b32e2fe6fd4089cb05897"
+    "windows-aarch64": {
+      "python": {
+        "target": "windows-aarch64",
+        "version": "3.13.15",
+        "url": "https://api.nuget.org/v3-flatcontainer/pythonarm64/3.13.15/pythonarm64.3.13.15.nupkg",
+        "sha256": "3c1b1fdf56adc14634165df922d447520aefdc4a8411a34c34d8a062a4edf494",
+        "bytes": 13762836
+      },
+      "node": {
+        "target": "windows-aarch64",
+        "version": "24.19.0",
+        "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-arm64.zip",
+        "sha256": "8502f4a50b458d4cc38ed8f2001556c2cd239d464920f74017926ccb1e1c157f",
+        "bytes": 33463079,
+        "archiveRoot": "node-v24.19.0-win-arm64"
+      },
+      "requirements": "requirements.windows-aarch64.txt",
+      "layout": {
+        "version": "layout-2",
+        "pythonExecutable": "tools/python.exe",
+        "nodeExecutable": "node-v24.19.0-win-arm64/node.exe",
+        "npmCli": "node-v24.19.0-win-arm64/node_modules/npm/bin/npm-cli.js"
+      },
+      "downloadTotals": {
+        "python": {
+          "librariesBytes": 6521248,
+          "totalBytes": 20284084,
+          "lockSha256": "15e13f0a96e5688d327f47f43ad878040270db3894304db5662c34f58e46fabb"
+        },
+        "node": {
+          "librariesBytes": 3057557,
+          "totalBytes": 36520636,
+          "lockSha256": "ef72e813ed9990cf0d0c0944ff265d0b4ca81875227b32e2fe6fd4089cb05897"
+        }
+      }
+    },
+    "macos-aarch64": {
+      "python": {
+        "target": "macos-aarch64",
+        "version": "3.13.15",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+        "sha256": "b9054a9d3d54f4cb5573d44907fddb29874b08909bde73f29f2868cf872223ee",
+        "bytes": 25293188
+      },
+      "node": {
+        "target": "macos-aarch64",
+        "version": "22.23.4",
+        "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-darwin-arm64.tar.gz",
+        "sha256": "c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428",
+        "bytes": 49996369,
+        "archiveRoot": "node-v22.23.4-darwin-arm64"
+      },
+      "requirements": "requirements.macos-aarch64.txt",
+      "layout": {
+        "version": "layout-2",
+        "pythonExecutable": "python/bin/python3.13",
+        "nodeExecutable": "node-v22.23.4-darwin-arm64/bin/node",
+        "npmCli": "node-v22.23.4-darwin-arm64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "downloadTotals": {
+        "python": {
+          "librariesBytes": 13634462,
+          "totalBytes": 38927650,
+          "lockSha256": "f6e6b3c57f819de70b26d115c7dbad8c25c0f58ac3c4e822f72a6a9a52f7ee1b"
+        },
+        "node": {
+          "librariesBytes": 3057557,
+          "totalBytes": 53053926,
+          "lockSha256": "ef72e813ed9990cf0d0c0944ff265d0b4ca81875227b32e2fe6fd4089cb05897"
+        }
+      }
+    },
+    "macos-x86_64": {
+      "python": {
+        "target": "macos-x86_64",
+        "version": "3.13.15",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-apple-darwin-install_only.tar.gz",
+        "sha256": "49f0d97f506b855eed60b74a8ac138595c5b39799a6aa5e0d7ca8abe1019a4d4",
+        "bytes": 25037769
+      },
+      "node": {
+        "target": "macos-x86_64",
+        "version": "22.23.4",
+        "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-darwin-x64.tar.gz",
+        "sha256": "efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819",
+        "bytes": 51190214,
+        "archiveRoot": "node-v22.23.4-darwin-x64"
+      },
+      "requirements": "requirements.macos-x86_64.txt",
+      "layout": {
+        "version": "layout-2",
+        "pythonExecutable": "python/bin/python3.13",
+        "nodeExecutable": "node-v22.23.4-darwin-x64/bin/node",
+        "npmCli": "node-v22.23.4-darwin-x64/lib/node_modules/npm/bin/npm-cli.js"
+      },
+      "downloadTotals": {
+        "python": {
+          "librariesBytes": 10258468,
+          "totalBytes": 35296237,
+          "lockSha256": "a4bd2c07fff698bfb6e156c1638fe625ebf5accd1843ba2833328b182470c5e4"
+        },
+        "node": {
+          "librariesBytes": 3057557,
+          "totalBytes": 54247771,
+          "lockSha256": "ef72e813ed9990cf0d0c0944ff265d0b4ca81875227b32e2fe6fd4089cb05897"
+        }
+      }
     }
   }
 }

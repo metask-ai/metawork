@@ -34,7 +34,10 @@ import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
-import { runOutputDeliveryVertical } from "./output-delivery-vertical.mjs";
+import {
+  runOutputDeliveryVertical,
+  runOfficeDeliveryHostProbe,
+} from "./output-delivery-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -129,12 +132,15 @@ appEnvironment.PATH =
       ].join(path.delimiter)
     : "/usr/bin:/bin";
 
-const builtinSkillNames =
-  process.platform === "win32" ? ["docx", "pptx", "xlsx"] : [];
+assert.ok(
+  ["win32", "darwin"].includes(process.platform),
+  "Office desktop qualification requires a supported native platform",
+);
+const builtinSkillNames = ["docx", "pptx", "xlsx"];
+const officeNamespace = JSON.parse(
+  await readFile(join(root, "build_support/office-environment.json"), "utf8"),
+).namespace.split("/");
 const builtinOfficeOnly = process.env.METAWORK_BUILTIN_OFFICE_ONLY === "1";
-if (builtinOfficeOnly) {
-  assert.equal(process.platform, "win32");
-}
 
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
@@ -722,8 +728,20 @@ desktopVertical: try {
         assert.ok(
           task.skillCatalog.skills.some((item) => item.invocationName === name),
         );
+      return created;
     };
-    await verifyNewTask(catalogSnapshot.catalog);
+    const officeTask = await verifyNewTask(catalogSnapshot.catalog);
+    const deliveredOffice = await runOfficeDeliveryHostProbe({
+      created: officeTask,
+      workspaceRoot: canonicalWorkspace,
+      fixture: join(root, "tests/fixtures/office/sample.docx"),
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+    });
     const refresh = await invokeBridge(
       "metawork.workspaces.refreshSkillCatalog",
       {
@@ -752,8 +770,24 @@ desktopVertical: try {
         cold.catalog.skills.some((item) => item.invocationName === name),
       );
     await verifyNewTask(cold.catalog);
+    const restoredOffice = (await snapshot()).tasks
+      .find((t) => t.id === deliveredOffice.taskId)
+      ?.runs.find((r) => r.id === deliveredOffice.runId);
+    assert.deepEqual(restoredOffice?.outputs, [deliveredOffice.output]);
+    process.stdout.write(
+      "Actual Office DeliverFile receipt and cold-history projection passed; Renderer output gestures are separately scoped.\n",
+    );
     await assert.rejects(
-      readdir(join(platformHome, "MetaWork", "OfficeDependencies")),
+      readdir(
+        process.platform === "win32"
+          ? join(platformHome, ...officeNamespace)
+          : join(
+              platformHome,
+              "Library",
+              "Application Support",
+              ...officeNamespace,
+            ),
+      ),
       { code: "ENOENT" },
     );
     await stopApplication("built-in Office publication failure fixture");

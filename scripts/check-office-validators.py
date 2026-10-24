@@ -84,7 +84,7 @@ class OriginalReaders(unittest.TestCase):
         before = set(self.root.iterdir())
         import os
         result = subprocess.run(
-            ([str(ENTRY), "python"] if ENTRY is not None else [sys.executable, "-B"])
+            ((["/bin/sh", str(ENTRY), "python"] if ENTRY.suffix == ".sh" else [str(ENTRY), "python"]) if ENTRY is not None else [sys.executable, "-B"])
             + [str(OFFICE / "validate.py"), str(self.original)],
             env={**os.environ, "TMP": str(self.root), "TEMP": str(self.root), "TMPDIR": str(self.root)},
             capture_output=True, text=True, timeout=15)

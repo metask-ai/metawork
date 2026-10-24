@@ -5,23 +5,7 @@ description: Create, read, edit, combine, split, and refine PowerPoint presentat
 
 # PPTX Skill
 
-## Execution environment
-
-This is a complete built-in Skill. Its private environment may not be prepared yet. Only Windows x64 automatic preparation is supported.
-
-Use the absolute resource entries `${CLAUDE_SKILL_DIR}/environment/prepare.cmd` and `${CLAUDE_SKILL_DIR}/environment/run.cmd` through the existing Shell, preserving Windows argument quoting. Never infer an executable from the parent of this resource directory.
-
-First use `prepare.cmd python` or `prepare.cmd node` only to reuse an existing environment **after consent has already been obtained**, or use `run.cmd python ...` / `run.cmd node ...` to execute: run never downloads and reports a missing environment. Before first preparation, tell the user its purpose and `downloadTotals.python.totalBytes` or `downloadTotals.node.totalBytes` for the needed language from [environment inputs](environment/environment.json), then ask for agreement. Each total includes the interpreter and all locked library archives for a fresh preparation; index metadata, retries and transport overhead are extra, so describe it as an estimated network download. DOCX/PPTX creation and Python validation may need both environments; state the combined total when both are needed. Then call the fixed prepare entry for the needed language. No arbitrary URL, package list or version arguments are supported. Allow up to 30 minutes for interpreter download and 10 minutes for dependency installation; use the existing Shell background/output tools if its foreground limit is shorter. If preparation fails or is refused, explain the limitation and continue what is possible. Do not install globally or change user configuration. Consent is a conversation instruction; full_access has no additional product installation gate.
-
-The prepared directories are shared under the user's LocalAppData/MetaWork/OfficeDependencies. Do not automatically update, rename, delete or repair completed environments. If an existing environment fails validation, report it as unavailable and give the exact directory printed by `prepare.cmd`. Explain manual recovery: stop every Task and external script using that directory, exit MetaWork, and confirm no consuming processes remain. Only then may the user explicitly choose to remove that one directory, reopen MetaWork and consent to preparing it again. Never remove the parent OfficeDependencies directory, other environments, Skill resources or documents. A successful rename does not prove that no process uses the environment; if consumers cannot be confirmed stopped, leave it untouched. Private dependencies are not an execution sandbox. Write task scripts, working copies and outputs in the Task workspace. Use `from office_archive import checked_copy` and load only the private checked path inside its context when passing an existing Office file to a library. Never overwrite the attachment original.
-
-This edition cannot render documents, export PDF, accept revisions or recalculate formulas. Do not invent visual QA or calculation results. XLSX may request recalculation on open, but this does not calculate or populate caches now.
-
-## Read, check and deliver
-
-For bounded structured text: `run.cmd python "${CLAUDE_SKILL_DIR}/environment/read.py" input.docx new-content.json` (also XLSX/PPTX). For XML work, run the scripts under `scripts/office/` with `run.cmd python`, using new output directories. Reopen and inspect changed content and validate supported structures before delivery. Report unsupported features and checks not performed.
-
-Call the Host tool `DeliverFile` with the actual Task Workspace-relative output path, e.g. `{"path":"results/report.docx"}`. This is a tool call, not a Shell command or text to print. Deliver only finished files requested by the user, not temporary XML, scripts or check output.
+{{OFFICE_EXECUTION}}
 
 ## Workflows
 

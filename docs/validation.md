@@ -52,11 +52,82 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
 
-Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。`python -X utf8 scripts/check-office-preparation-failures.py --download` 覆盖缺失环境、无效目标、损坏正式目录保留、原生负退出码、目标被占用、下载失败及摘要拒绝后的清理；还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。
+资源生成器使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记，保持严格整包字节比较。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 同输入产物比对。
 
-真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Dtarget=x86_64-windows-msvc -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建，再运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的资源绝对路径、新建、工作副本修改及重新读取；不请求远端模型。桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs`，覆盖新 Task、显式刷新、冷启动和发布失败不阻止启动；它不运行或替代通用键盘焦点探针。通用成果交付另由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的既有桌面入口验证。
+私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`，macOS 使用 `python3`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格与引号路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。可传 `--target windows-x86_64|windows-aarch64|macos-aarch64|macos-x86_64`，默认当前原生目标；请求其他目标明确失败，不能把静态检查报告为执行通过。macOS 先并发准备 Python，再并发准备 Node，并验证 Node 已就绪时无需 Python 即可复用。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。
+
+`python -X utf8 scripts/check-office-preparation-failures.py --download` 采用相同目标规则，覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理；Windows 保留原生负退出码用例，macOS 追加缺 Python 前置条件、空目录/普通文件/符号链接拒绝。还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。准备的外层预算覆盖生产下载、安装、发布后检查和有界收尾，文档执行仍保留独立短预算。`python3 scripts/check-office-publication.py` 在 macOS 覆盖 ctypes 排他发布的占位保留、并发唯一赢家及取消后子进程 join；Host seam 的对应回归接入正式 Native graph。
+
+真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串和空缓存，不请求远端模型。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
+
+同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
+
+桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。
 
 这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
+
+### E-MAC-OFFICE-INPUTS-20261024
+
+2026-10-24，macOS 27.0.1 arm64、Zig 0.16.0，跨平台实施分支在 `914c5a98` 基础上进行输入资格检查。官方固定发行包与所选 wheel 已实际下载并核验摘要、大小和布局；Windows ARM64 的 CPython、Node PE machine 均为 `0xaa64`，NuGet 携带 VC runtime。macOS standalone Python 的 pip、ssl、ctypes 及锁定的 lxml、Pillow、openpyxl、defusedxml 实际加载成功；搬移到含中文、空格和单引号的目录后新进程仍能加载。Python 发行包及 arm64 wheel 的 53 个原生 image 的加载依赖未发现构建机器绝对路径。Node 固定库经私有 npm 安装及搬移后加载成功。具体接受输入由 Office 机器 manifest/lock 拥有，缓存中的候选不自动成为产品输入。
+
+Node 24 Darwin 候选的 Mach-O 最低系统为 13.5，高于 canonical Core 与应用的 13.0 基线，故拒绝接纳。固定 Node 22 候选的两个 Darwin 二进制最低系统为 11.0，且现有 `registerHooks` API 可用；仅调整 macOS 候选，Windows x64 的版本、锁和身份保持。此检查不等于最低系统的实际运行验收。
+
+`zig build build-office-skill-shell --prefix .zig-cache/office-core-qualification` 后，`python3 scripts/check-office-skill-shell.py --home-probe` 通过 canonical staged Core、loopback Provider 与真实 Bash，在两个独立 Task 工作区验证 Shell HOME 等于传入的 canonical user home，未随工作区改变。该模式不准备依赖、不证明三格式或桌面链路。输入、布局、原生依赖及 HOME 探针缓存位于 `.zig-cache/office-input-p0/`；macOS Intel、Windows ARM64 原生执行、最低系统与正式安装产物仍待验收。
+
+### E-MAC-OFFICE-PREPARATION-20261024
+
+macOS 27.0.1 arm64 的固定入口真实联网准备、Python/Node 并发发布、离线复用与新建 Node 的 Python 前置条件通过；已经就绪的 Node 在测试临时移走私有 Python 后仍可离线复用。中文、空格和单引号 HOME 下三格式新建/修改/读取通过，前后 7,523 个环境文件内容一致。隔离镜像场景观察到 66 个实际请求，固定私有目标未受 npm 全局安装配置影响。负面入口通过缺环境、非法目标、损坏/空目录/文件/链接占位保留、断网、SHA 拒绝、明确单目录人工恢复及兄弟目录保留。证据见 `.zig-cache/office-private-macos.log`、`.zig-cache/office-failures-macos.log` 及各自输出的隔离目录；这些结果不证明其他平台执行策略。
+
+Darwin Python 发布与取消回归 3/3、Host 排他发布定向回归 2/2、资源及架构边界 37/37 通过。正式 Native graph 为 228/228 steps、1,385 passed、9 skipped；首次在沙箱中因 loopback/UDS 监听权限失败，允许测试监听后完整入口通过，未跳过 Core。完整日志为 `.zig-cache/office-native-test.log`。Windows/macOS 同输入 archive 比对、Windows ARM64/macOS Intel 原生运行、系统基线与正式分发仍未验收，DAG 不据本机通过关闭这些证据要求。
+
+### E-MAC-OFFICE-CORE-20261024
+
+macOS 27.0.1 arm64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24，三个独立 Session 均从 Core 临时 `activation-*/environment/run.sh` 经真实 Bash 完成 DOCX/XLSX/PPTX 新建、原件摘要保留、工作副本定向修改和结构化读取；每次操作后私有环境内容 inventory 一致。XLSX 公式 `=1+2` 保留为公式字符串，缓存为空，未报告计算结果。共享执行说明实际进入三份物化 Skill。原件/OOXML validator 在私有 Python 下为 11/11，资源构建 suite 为 6/6；日志为 `.zig-cache/office-core-macos.log`、`.zig-cache/office-validators-macos.log`。该 fixture 只证明真实 Core/资源/Shell 链，不证明远端模型规划、桌面成果手势或分发执行策略。
+
+后续在 `0620800a` 加 qualification source diff SHA-256 `e54695cf860df9a5b8c20acb3fdf63001845d274f8e9a0058caa365621619f4f` 上验证默认权限拒绝、默认权限 `allow_once`、`full_access` 三个场景，实际 callback 数分别为 1、1、0。拒绝后无文档输出，允许后同一物化入口完成 XLSX 创建/修改/读取，环境内容不变；原有三格式入口复验通过。fixture 的 Shell policy 为 unrestricted，不扩大为 OS sandbox 或模型同意的证据。精确输入与 probe 身份见 `.zig-cache/office-permission-source.{json,patch}`，结果见 `.zig-cache/office-permission-probe.log` 和 `.zig-cache/office-core-permission-regression.log`。
+
+### E-MAC-OFFICE-DESKTOP-20261024
+
+macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24，automation Debug 在 `a9b424c3` 加 source diff SHA-256 `957588375f09d5358d6180d3f60772ec5b0032092b9006daf109305766112962` 上通过 Office 桌面专用入口。真实 Workspace/Task catalog 包含 docx、pptx、xlsx；新 Task、刷新、冷启动均保留，篡改发布副本后只有 Office 来源不可用，应用正常运行。真实 `DeliverFile` 的路径、大小、摘要及 delivery ID 与成果投影一致，冷历史恢复同一成果，未创建私有环境。受测 executable SHA-256 为 `87ed8c9c35870b61adb7a91c5773319f657ef2e5701bec5131759c72ece19213`；fixture 原件摘要与结构 validator 通过。日志及精确输入见 `.zig-cache/office-desktop-macos.log`、`.zig-cache/office-desktop-source.{json,patch}`、`.zig-cache/office-fixture-validation.log`。不据此声明 Renderer 按钮手势或真实模型规划通过。
+
+最终 `npm run check`、受影响资源/架构 38/38 和正式 Native graph 228/228 steps、1,385 passed、9 skipped 通过，日志分别为 `.zig-cache/office-check-final.log`、`.zig-cache/office-final-affected.log`、`.zig-cache/office-native-final.log`。完整 Node 集为 899 passed、2 skipped、1 failed；未改动的 `scripts/task-panel.test.mjs` 在第 103 项通过后被 SIGKILL，独立 TAP 复测同样如此，根因未定位。该测试及其 Renderer/test-support 输入相对主分支无改动；未修改或跳过断言来获得全绿。完整与独立诊断见 `.zig-cache/office-node-full.log`、`.zig-cache/office-task-panel-retest.log`。
+
+后续定向诊断中，第 104 项单独运行通过，与第 103 项一起运行则焦点身份断言失败：实际为侧栏开关，预期为文档链接。1 GiB 堆上限下原 suite 在同一位置发生 V8 OOM；仅将 DOM 身份不等时的错误输出限制为有界描述的临时诊断导入，使全部 122 项执行完毕，结果为 121 passed、1 failed。此诊断没有关闭原 suite 的失败，也尚未解释跨用例焦点变化的根因；卸载后等待一帧的临时对照仍失败，相关产品与正式测试均未修改。日志为 `.zig-cache/office-task-panel-{focused,pair,bounded-heap,bounded-diagnostics,drained-pair}.log`。
+
+正式 arm64 打包通过既有生产 CSP、automation isolation、Developer ID 签名与 DMG 创建；只为该调用设置 `DEVELOPER_DIR` 选择已有 Xcode 27，未更改全局工具链。应用和 DMG 的严格 codesign 复核通过。最终 DMG 为 10,317,498 bytes，SHA-256 `9cb81de648a7d50bf79edb04c53fb7ef3678d01370fdf21a8ef04dbd482685f3`；Apple `notarytool submit` 返回 `HTTPClientError.connectTimeout`，打包入口明确失败，未执行公证通过后的 Gatekeeper/DMG 内运行验收。因此正式分发仍未通过，不能把已生成产物当作可发布结果。日志及产物身份见 `.zig-cache/office-package-macos.log`、`.zig-cache/office-package-identity.json`。
+
+| 目标          | 当前证据边界                                                                                       | 尚缺证据                                                          |
+| ------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| macOS arm64   | 当前系统私有环境、三格式、真实 Core、开发版模型辅助续跑/成果手势/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、无干预模型 smoke；正式 DMG 的 Office 执行链 |
+| macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                                                     | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
+| Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                                                  | 原生环境/Core/桌面、ARM64 installer 分发                          |
+| Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                                               | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
+
+### E-MAC-OFFICE-CANCELLATION-20261024
+
+继续复核发现 `Popen` 在子进程已启动、但 handle 尚未返回的窗口被取消时，不能删除 stage 的未静止标记。真实子进程加构造边界故障注入证明：异常返回后子进程仍在，标记必须保留；测试清理方取得其自有 handle 并确认退出后才删除 fixture。准备入口的摘要检查也纳入同一 owned-child 等待链。Darwin 发布/取消回归 4/4、真实固定入口的摘要拒绝/正常准备/精确恢复、资源 suite 6/6、Host 资源发布定向测试与架构 guard 均通过；不扩大 Windows x64 行为。日志为 `.zig-cache/office-cancel-failures.log` 和 `.zig-cache/office-cancel-architecture.log`。该修复只收口既有取消合同，不新增恢复状态或用户选项。
+
+公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
+
+在 `47a947d1` 上追加的隔离桌面探针到达 Office 成果回执后，因原生窗口工具无法绑定 automation bundle ID 而未取得 Renderer 手势证据；等待观察超时，测试明确失败并退出其自有进程。没有对普通用户窗口执行操作，也不把该工具绑定失败归因于产品按钮。探针源码和日志保存在 `.zig-cache/office-cua-probe-source.mjs`、`.zig-cache/office-cua-probe.log`；成果检查/继续修改草稿仍未验收。用户确认目前没有其他原生机器或 CI 入口，因此上表的 macOS Intel、Windows ARM64、Windows x64 本次回归及最低系统缺口继续保留。
+
+### E-MAC-OFFICE-DEV-20261024
+
+用户将本轮范围收敛到 `npm run dev` 的功能验收，停止追加分发验收。macOS arm64 使用现有 Metask `glm-5.3-flash`；没有新增 Provider 或凭据。开发入口实际构建并启动；为了绑定原生窗口，canonical SDK 本地 packager 给同一 Debug 可执行文件增加 `.app` 外壳，签名前核对可执行文件相同，按开发入口签名后复核 file-backed sections 未变。此包装不构建 Release、不上传；身份见 `.zig-cache/office-dev-ui-identity.json`。
+
+实际模型的准备阶段发现目标键与下载量指引不够直接，`8ee13fa2` 从唯一 manifest 自动生成摘要。随后真实 Shell 暴露 Node 入口把 `work/script.cjs` 当包名的问题；`02f9f51d` 将脚本入口解析为绝对路径，保留其余参数。现有 Core qualification 改用嵌套相对 Node 脚本与相对 Python 脚本：旧资源明确失败 `Cannot find module scripts/create.cjs`，修复后三格式创建、工作副本修改、读取、原稿与环境内容不变通过。资源 suite 6/6、Host 资源发布 1/1 通过；日志为 `.zig-cache/office-relative-{before-fix,after-fix,resources,native}.log`。该结果仍不替代其他架构的原生回归。
+
+开发版 UI 受测 `8ee13fa2`、Task 21、现有 Metask 模型，按锁定入口真实准备私有环境并创建三份 original。模型误用了未安装的 Python PPT 库；首轮随后出现活动传递失败，第二轮停止，经两次普通续跑指令指导使用现有 XML helper 后完成，不能视为无干预 smoke。最终 Word/PPT 的 pack、validate、read 通过，Excel 标题已修改、公式 `=1+2` 保留且缓存为空。三份 original 摘要与 7,523 个环境文件内容均不变。PPT 首次交付返回 `capacity`，串行重试取得可信回执；三份实际 `DeliverFile` 的路径、大小与摘要均匹配独立文件核验。
+
+实际点击三项“检查文件”均显示检查时与交付一致；依次点击“继续修改”将引用加入同 Task Composer，保留已有草稿且不自动发送。正常退出同一开发版后冷启动，三项成果恢复相同 delivery ID、大小和摘要，重新检查仍一致；重启后的 Composer 为空，此证据不声明草稿跨重启持久化。精确身份与观察见 `.zig-cache/office-dev-{ui-identity,ui-observation,file-verification}.json`；原稿与环境基线分别为 `.zig-cache/office-dev-original-baseline.json`、`.zig-cache/office-dev-environment-before.json`。本轮不继续正式分发验收，其他原生架构、最低系统及无干预模型执行缺口保留。
+
+本轮实现收尾时，在 `e89b8eec` 的代码上再次执行 `npm run check`，canonical staged Core verifier、Renderer wire/typecheck 与严格 Native 检查全部通过，日志为 `.zig-cache/office-closeout-check.log`。此检查不改变上述完整 Node suite 的失败结论，也不替代未执行的平台回归。
+
+### E-MAC-OFFICE-DMG-20261024
+
+用户明确授权上传后，`4ba05c36` 的 `package-macos.mjs arm64` 正式入口以 exit 0 完成。Apple submission `b6cd09ca-3e6c-4061-aeb4-3295be5537c0` 为 `Accepted`，审查日志无 issues；staple/validate、Gatekeeper assessment、DMG 校验及只读挂载后的应用签名、executable integrity 和系统基线声明复核通过。上传文件 SHA-256 为 `998dea9c119f561fb4499343dea06cb2a66066210dcfd4bd5ae8507a044a3c6c`；staple 后最终 DMG 为 10,319,472 bytes，SHA-256 `e4081cadd71b6cedfa71114843f9f1b7985fbeed921b8fb92e8097cf5d92c712`。它是取消修复后的独立产物，不使用旧 submission 替代验收。身份、公证日志和完整入口日志见 `.zig-cache/office-package-current-identity.json`、`.zig-cache/office-notary-current-{info,log}.json` 和 `.zig-cache/office-package-current.log`。
+
+从该 DMG 只读挂载启动真实正式 App，使用独立 HOME；通过精确 `.app` 路径绑定原生窗口，设置页的自动工作区路径与隔离 HOME 一致，技能页实际显示 docx/pptx/xlsx 三项。应用自行发布的资源根摘要与当前 canonical archive 一致，未自动准备私有环境。记录见 `.zig-cache/office-dmg-ui-observation.json` 和 `.zig-cache/office-distribution-state.json`。后续 loopback Provider 的合成凭据保存被自动审批拒绝，未取得明确保存授权；隔离 metadata 中没有已保存 Provider，测试进程已清理。当前结果只证明正式包启动及 catalog，不证明正式 App 的 Office 解释器执行、成果按钮或完整分发矩阵。
 
 ### E-WIN-OFFICE-SIMPLE-20261024
 

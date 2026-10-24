@@ -2637,6 +2637,14 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/app_single_instance/windows.zig";
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
+  const officePublish = "src/native_sdk_compat/office_resource_publish.zig";
+  assert.deepEqual(externSymbols(read(officePublish), ["c"]), ["renameatx_np"]);
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("metawork_office_resource_publish_compat")'),
+    ),
+    ["src/app/office_skills.zig"],
+  );
 
   assert.doesNotMatch(compatSource + window, /system_webview_window_controls/);
   assert.ok(

@@ -12,11 +12,46 @@ fn event(_: ?*anyopaque, _: ?*const wire.RunContextV1, _: wire.BytesViewV1) call
     return wire.EVENT_CONTINUE;
 }
 
+const PermissionProbe = struct {
+    deny: bool,
+    requests: usize = 0,
+
+    fn answer(ctx: ?*anyopaque, _: ?*const wire.RunContextV1, encoded: wire.BytesViewV1, response: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const self: *PermissionProbe = @ptrCast(@alignCast(ctx orelse return wire.UI_FATAL));
+        const out = response orelse return wire.UI_FATAL;
+        var request = core.decodeUiRequest(std.heap.c_allocator, core.borrowedBytes(encoded) catch return wire.UI_FATAL) catch return wire.UI_FATAL;
+        defer request.deinit();
+        if (request.value != .permission) return wire.UI_FATAL;
+        const permission = request.value.permission;
+        const bytes = core.encodeUiResponse(std.heap.c_allocator, request.value, .{ .permission = .{
+            .permission = if (self.deny) .deny_once else .allow_once,
+            .request_id = permission.request_id,
+            .policy_generation = permission.policy_generation,
+        } }) catch return wire.UI_FATAL;
+        out.* = .{ .ptr = bytes.ptr, .len = bytes.len };
+        self.requests += 1;
+        return wire.UI_ANSWERED;
+    }
+
+    fn release(_: ?*anyopaque, response: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const value = response orelse return;
+        if (value.ptr) |ptr| std.heap.c_allocator.free(ptr[0..@intCast(value.len)]);
+        value.* = .{ .ptr = null, .len = 0 };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const api = try core.Api.discover();
     const workspace = init.environ_map.get("METAWORK_OFFICE_CORE_WORKSPACE") orelse return error.MissingFixtureWorkspace;
     const root = init.environ_map.get("METAWORK_OFFICE_CORE_SKILLS") orelse return error.MissingFixtureSkills;
     const name = init.environ_map.get("METAWORK_OFFICE_CORE_SKILL") orelse return error.MissingFixtureSkill;
+    const home = init.environ_map.get("METAWORK_OFFICE_CORE_HOME") orelse workspace;
+    const permission_case = init.environ_map.get("METAWORK_OFFICE_CORE_PERMISSION_CASE");
+    if (permission_case) |case| {
+        if (!std.mem.eql(u8, case, "deny") and !std.mem.eql(u8, case, "allow") and !std.mem.eql(u8, case, "full")) return error.InvalidPermissionProbe;
+    }
+    const default_permission = if (permission_case) |case| !std.mem.eql(u8, case, "full") else false;
+    var permission_probe = PermissionProbe{ .deny = if (permission_case) |case| std.mem.eql(u8, case, "deny") else false };
     const tools = [_]wire.BytesViewV1{core.bytesView("Bash")};
     var diagnostic: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
     defer api.bufferRelease()(&diagnostic);
@@ -35,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
     var query = std.mem.zeroes(wire.SkillCatalogQueryV1);
     query.struct_size = @sizeOf(wire.SkillCatalogQueryV1);
     query.workspace_root = core.bytesView(workspace);
-    query.workspace_home = core.bytesView(workspace);
+    query.workspace_home = core.bytesView(home);
     query.workspace_epoch = core.bytesView("1");
     query.additional_sources = @ptrCast(&source);
     query.additional_source_count = 1;
@@ -60,12 +95,12 @@ pub fn main(init: std.process.Init) !void {
     var host = std.mem.zeroes(wire.SessionHostConfigV1);
     host.struct_size = @sizeOf(wire.SessionHostConfigV1);
     host.provider_kind_code = wire.PROVIDER_ANTHROPIC;
-    host.permission_mode_code = wire.PERMISSION_FULL_ACCESS;
+    host.permission_mode_code = if (default_permission) wire.PERMISSION_DEFAULT else wire.PERMISSION_FULL_ACCESS;
     host.shell_policy_code = wire.SHELL_UNRESTRICTED;
     host.api_key = core.bytesView("office-local-fixture");
     host.base_url = core.bytesView(init.environ_map.get("METAWORK_OFFICE_CORE_URL") orelse return error.MissingFixtureUrl);
     host.workspace_root = core.bytesView(workspace);
-    host.workspace_home = core.bytesView(workspace);
+    host.workspace_home = core.bytesView(home);
     host.allowed_tools = &tools;
     host.allowed_tool_count = tools.len;
     host.skill_catalog = catalog;
@@ -73,6 +108,11 @@ pub fn main(init: std.process.Init) !void {
     var callbacks = std.mem.zeroes(wire.SessionCallbacksV1);
     callbacks.struct_size = @sizeOf(wire.SessionCallbacksV1);
     callbacks.on_event = event;
+    if (permission_case != null) {
+        callbacks.ctx = &permission_probe;
+        callbacks.on_ui_request = PermissionProbe.answer;
+        callbacks.release_response = PermissionProbe.release;
+    }
     var session_config = std.mem.zeroes(wire.SessionCreateConfigV1);
     session_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
     session_config.host = &host;
@@ -88,4 +128,9 @@ pub fn main(init: std.process.Init) !void {
     defer std.heap.c_allocator.free(arguments);
     try require(api.session().runSkill(session.?, 1, core.bytesView(selected orelse return error.MissingBuiltinSkill), core.bytesView(parsed.value.catalog_revision), core.bytesView(arguments), &options, &result, &diagnostic), diagnostic);
     if (result.stop_reason_code != wire.STOP_END_TURN) return error.IncompleteOfficeRun;
+    if (permission_case != null) {
+        const expected: usize = if (default_permission) 1 else 0;
+        if (permission_probe.requests != expected) return error.UnexpectedPermissionCallbacks;
+        std.debug.print("Office permission callbacks: {d}\n", .{permission_probe.requests});
+    }
 }

@@ -2,6 +2,8 @@
 const { createRequire, registerHooks } = require("node:module");
 const { pathToFileURL } = require("node:url");
 const path = require("node:path");
+if (require("./configuration.cjs").target !== "windows-x86_64")
+  require("./finish.cjs").check(process.env.METAWORK_OFFICE_ENV);
 const load = createRequire(
   path.join(process.env.METAWORK_OFFICE_ENV, "package.json"),
 );
@@ -20,4 +22,5 @@ registerHooks({
 });
 process.argv = [process.execPath, ...process.argv.slice(3)];
 if (!process.argv[1]) throw new Error("A JavaScript script is required");
+process.argv[1] = path.resolve(process.argv[1]);
 require("node:module").runMain();

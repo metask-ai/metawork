@@ -249,11 +249,15 @@ Automatic 的 Skill query authority 来自 owning interactive Task 的可用 Ses
 
 Application 发布随主包压缩携带的完整 Office Skill、必要 helper 和 OOXML 校验资源。资源按内容哈希发布到自有目录，不覆盖已有版本；发布失败只撤销 Office 来源，应用继续启动。不维护基础/完整双来源或组件版本 catalog lease；准备依赖不替换来源，不要求刷新已有 Task。资源入口必须是明确的绝对路径，不从 AgentCore 临时物化目录的父路径推断程序位置。旧资源目录首版不自动清理。
 
-Office 使用固定 Windows x64 私有 Python 与 Node，解释器和各自文档库同处一个按环境内容命名的目录。身份只由平台、固定发行包、依赖锁和必要布局决定，不包含 Skill 文案或业务脚本。不探测组合系统解释器和全局包，不新增 Host 工具、Product 环境对象、Bridge/Snapshot、current 指针、版本选择、修复或回收状态机。依赖准备由 Agent 经现有 Shell 和权限执行；对话授权不冒充额外产品 Gate。
+Office 的机器输入按 Windows x64/arm64 与 macOS arm64/x64 精确选择私有 Python、Node 和目标 wheel，验收范围由[验证规范](validation.md#office-skill-与私有环境验证)记录。解释器和各自文档库同处一个按环境内容命名的目录；Windows x64 的既有发行、锁、身份及 Python/Node 独立准备保持。身份采用选定发行记录 JSON、对应库锁和布局标记的同一 SHA-256 构造，不包含 Skill 文案、业务脚本、下载量或用户目录。输入和 namespace 只由 Office manifest/lock 定义，生成常量不是第二份 authority。不探测组合系统解释器和全局包，不新增 Host 工具、Product 环境对象、Bridge/Snapshot、current 指针、版本选择、修复或回收状态机。依赖准备由 Agent 经现有 Shell 和权限执行；对话下载同意不授予文件权限，full_access 不增加额外产品安装 Gate。
 
-固定准备入口只接受 Python、Node 两个目标。独立临时目录下载、完整校验、安装锁定库并验证后，以不覆盖的同卷原子改名发布。并发允许重复构建，输家验证并复用已完成目录，只清理自己的临时输出。临时共享冲突允许有限短重试，永久错误明确失败。正式目录不原地修改、不自动隔离或删除；改名成功不能证明无人使用。校验失败须说明不可用和精确目录，提供人工恢复指引：停止所有使用该目录的 Task 与外部脚本，退出应用并确认没有使用进程后，由用户明确选择只清理这一目录，再重新启动并同意准备；无法确认使用者已停止时保持原状，不清理父目录、其他环境或文档。Python 不用搬移的 venv，包只接受带哈希的固定 wheel；Node 以独立锁文件安装且禁用安装脚本。薄调用脚本只设置单次解释器/库路径，不隐式下载、不改 Task 长期环境，不提供沙箱保证。
+依赖根为 Windows `%LOCALAPPDATA%/MetaWork/OfficeDependencies` 与 macOS `$HOME/Library/Application Support/MetaWork/OfficeDependencies`，不从 Task Workspace、应用数据名称或 Core 临时 Skill 路径推导。同一用户下相同内容身份有意跨构建和 Task 复用，测试以独立 HOME/LOCALAPPDATA 隔离。正式路径项必须为真实目录，符号链接或异常占位对象须保留并拒绝；不原地修改是行为合同，不保证文件系统只读或隔离同用户进程。
 
-读取用户镜像、代理和证书配置沿用包管理器机制，不写用户配置；关键安装目标、内容身份和安装行为仍固定，不自建配置解析或选源系统。固定来源、信任和主包资源接受规则见 [Windows 分发](windows-distribution.md#office-skill-与私有依赖)。普通启动不下载、全量哈希或自检环境，也不登记健康数据库。首版不自动更新、修复或回收，明确接受旧目录积累。
+macOS 首次新建 Node 需要已准备的固定私有 Python，通过其标准库执行 Darwin 排他发布；Node 就绪后的检查、复用和执行不依赖 Python。准备器不得隐式下载此前置环境。Agent 按实际缺失部分说明 Python/Node 各自或合计的预计下载量并取得同意，再按 Python→Node 顺序准备；仅需 Python 时不下载 Node。Windows 继续独立准备两种语言。所有入口均为明确绝对资源路径，macOS 通过 `/bin/sh` 调用，不要求物化文件有执行位。
+
+固定准备入口只接受 Python、Node 两个目标。独立临时目录下载、完整校验、安装锁定库并验证后，以不覆盖的同卷原子改名发布。macOS 只使用 `renameatx_np(RENAME_EXCL)`，不以普通 rename、复制或 `mv -n` 替代。并发允许重复构建，输家从赢家的真实解释器启动新进程核验后复用；新增目标发布后同样必须从最终路径启动新进程检查可搬移性。发布后检查失败保留正式目录并报告不可用，不回滚删除。取消或超时先停止并 join 自有子进程，不能确认后代已停止时保留自身 stage，不扫描其他残留。临时共享冲突允许有限短重试，永久错误明确失败。正式目录不原地修改、不自动隔离或删除；改名成功不能证明无人使用。校验失败须说明不可用和精确目录，提供人工恢复指引：停止所有使用该目录的 Task 与外部脚本，退出应用并确认没有使用进程后，由用户明确选择只清理这一目录，再重新启动并同意准备；无法确认使用者已停止时保持原状，不清理父目录、其他环境或文档。Python 不用搬移的 venv，包只接受带哈希的固定 wheel；Node 以独立锁文件安装且禁用安装脚本。薄调用脚本只设置单次解释器/库路径，不隐式下载、不改 Task 长期环境，不提供沙箱保证。
+
+读取用户镜像、代理和证书配置沿用包管理器机制，不写用户配置；关键安装目标、内容身份和安装行为仍固定，不自建配置解析或选源系统。固定来源、信任和主包资源接受规则分别见 [Windows 分发](windows-distribution.md#office-skill-与私有依赖)与 [macOS 分发](macos-distribution.md#office-skill-与私有依赖)。普通启动不下载、全量哈希或自检环境，也不登记健康数据库。首版不自动更新、修复或回收，明确接受旧目录积累。
 
 ### 2.5 MCP authority
 

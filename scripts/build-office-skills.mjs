@@ -1,5 +1,5 @@
 // Deterministic, standard USTAR/gzip resources. No runtime component manifest.
-import { createHash } from "node:crypto";
+import { environment } from "./office-environment.mjs";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,54 +7,86 @@ import { gzipSync } from "node:zlib";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const common = "src/product/skill/office_environment";
-const sources = JSON.parse(
-  readFileSync(path.join(root, "build_support/office-environment.json")),
-);
-const hash = (value) => createHash("sha256").update(value).digest("hex");
+const sources = environment(root);
+if (
+  process.versions.node !== sources.generator.node ||
+  process.versions.zlib !== sources.generator.zlib
+)
+  throw Error(
+    "Use the canonical Office resource generator Node/zlib from the manifest",
+  );
 const read = (name) => readFileSync(path.join(root, name));
-for (const [language, lock] of [
-  ["python", "requirements.txt"],
-  ["node", "package-lock.json"],
-]) {
-  const totals = sources.downloadTotals?.[language];
-  if (
-    !Number.isSafeInteger(totals?.librariesBytes) ||
-    !Number.isSafeInteger(totals?.totalBytes) ||
-    totals.librariesBytes <= 0 ||
-    totals.totalBytes !== sources[language].bytes + totals.librariesBytes ||
-    totals.lockSha256 !== hash(read(`${common}/${lock}`))
-  )
-    throw new Error(
-      `Remeasure Office ${language} download totals for the current lock`,
-    );
+const downloadSummary = [
+  "| Native platform | Input target key | Python payload bytes | Node payload bytes |",
+  "| --- | --- | ---: | ---: |",
+  ...Object.entries(sources.targets).map(
+    ([key, t]) =>
+      `| ${key.startsWith("windows-") ? "Windows" : "macOS"} ${key.endsWith("aarch64") ? "arm64" : "x64"} | \`${key}\` | ${t.downloadTotals.python.totalBytes} | ${t.downloadTotals.node.totalBytes} |`,
+  ),
+].join("\n");
+const executionTemplate = read(`${common}/EXECUTION.md`)
+  .toString("utf8")
+  .trim();
+if (executionTemplate.split("{{OFFICE_DOWNLOAD_SUMMARY}}").length !== 2)
+  throw Error(
+    "Office execution instructions must include the download summary exactly once",
+  );
+const execution = executionTemplate.replace(
+  "{{OFFICE_DOWNLOAD_SUMMARY}}",
+  downloadSummary,
+);
+function constants(t) {
+  return {
+    OFFICE_NAMESPACE: sources.namespace,
+    METAWORK_OFFICE_TARGET: t.target,
+    PYTHON_ID: t.pythonId,
+    PYTHON_URL: t.python.url,
+    PYTHON_SHA: t.python.sha256,
+    NODE_ID: t.nodeId,
+    NODE_URL: t.node.url,
+    NODE_SHA: t.node.sha256,
+    NODE_FOLDER: t.node.archiveRoot,
+    PYTHON_EXE: t.layout.pythonExecutable,
+    NODE_EXE: t.layout.nodeExecutable,
+  };
 }
-// Display-only totals stay outside the installed environment identity.
-const pythonId = hash(
-  JSON.stringify(sources.python) +
-    read(`${common}/requirements.txt`) +
-    "layout-1",
-);
-const nodeId = hash(
-  JSON.stringify(sources.node) +
-    read(`${common}/package-lock.json`) +
-    "layout-1",
-);
-const commands =
-  Object.entries({
-    PYTHON_ID: pythonId,
-    PYTHON_URL: sources.python.url,
-    PYTHON_SHA: sources.python.sha256,
-    NODE_ID: nodeId,
-    NODE_URL: sources.node.url,
-    NODE_SHA: sources.node.sha256,
-    NODE_FOLDER: `node-v${sources.node.version}-win-x64`,
-  })
-    .map(([key, value]) => {
-      if (!/^[A-Za-z0-9:/._-]+$/.test(value))
-        throw new Error("Unsafe fixed environment input");
-      return `set "${key}=${value}"`;
-    })
-    .join("\r\n") + "\r\n";
+function safe(value) {
+  if (!/^[A-Za-z0-9:/._%+-]+$/.test(value))
+    throw Error("Unsafe fixed environment input");
+  return value;
+}
+const commands = [
+  '@if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" goto office_arm64',
+  '@if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" goto office_arm64',
+  '@if /i not "%PROCESSOR_ARCHITECTURE%"=="AMD64" exit /b 2',
+  ...Object.entries(constants(sources.targets["windows-x86_64"])).map(
+    ([k, v]) => `@set "${k}=${safe(v)}"`,
+  ),
+  "@exit /b 0",
+  ":office_arm64",
+  ...Object.entries(constants(sources.targets["windows-aarch64"])).map(
+    ([k, v]) => `@set "${k}=${safe(v)}"`,
+  ),
+  "@exit /b 0",
+  "",
+].join("\r\n");
+const shell = [
+  'case "$(/usr/bin/uname -m)" in',
+  ...[
+    ["arm64", "macos-aarch64"],
+    ["x86_64", "macos-x86_64"],
+  ].flatMap(([arch, key]) => [
+    `${arch})`,
+    ...Object.entries(constants(sources.targets[key])).map(
+      ([k, v]) => `${k}='${safe(v)}'`,
+    ),
+    ";;",
+  ]),
+  '*) echo "Unsupported Office target" >&2; exit 2 ;;',
+  "esac",
+  "export METAWORK_OFFICE_TARGET",
+  "",
+].join("\n");
 const files = [];
 function collect(directory, prefix) {
   for (const entry of readdirSync(path.join(root, directory), {
@@ -66,13 +98,28 @@ function collect(directory, prefix) {
       name = `${prefix}/${entry.name}`;
     if (entry.isDirectory()) collect(source, name);
     else if (entry.isFile()) {
-      const data = read(source);
+      let data = read(source);
+      if (
+        entry.name === "SKILL.md" &&
+        directory.startsWith("src/product/skill/assets/")
+      ) {
+        const text = data.toString("utf8");
+        if (text.split("{{OFFICE_EXECUTION}}").length !== 2)
+          throw Error(
+            "Office Skill must include the shared execution instructions exactly once",
+          );
+        data = Buffer.from(text.replace("{{OFFICE_EXECUTION}}", execution));
+      }
+      if (source === `${common}/EXECUTION.md`)
+        data = Buffer.from(execution + "\n");
       // Use Windows line endings for reliable cmd.exe label jumps across checkout settings.
       files.push({
         name,
         data: entry.name.endsWith(".cmd")
           ? Buffer.from(data.toString("utf8").replace(/\r?\n/g, "\r\n"))
-          : data,
+          : entry.name.endsWith(".sh")
+            ? Buffer.from(data.toString("utf8").replace(/\r\n/g, "\n"))
+            : data,
       });
     } else throw new Error("Office resource link");
   }
@@ -83,6 +130,10 @@ for (const skill of ["docx", "xlsx", "pptx"]) {
   files.push({
     name: `${skill}/environment/environment.cmd`,
     data: Buffer.from(commands),
+  });
+  files.push({
+    name: `${skill}/environment/environment.sh`,
+    data: Buffer.from(shell),
   });
   files.push({
     name: `${skill}/environment/environment.json`,
@@ -139,6 +190,8 @@ const archive = gzipSync(
   Buffer.concat([...files.map(tarFile), Buffer.alloc(1024)]),
   { level: 9 },
 );
+// RFC 1952 unknown OS: remove the sole host-specific gzip header byte.
+archive[9] = 255;
 const destination = path.join(root, "src/app/office-skills.tar.gz");
 if (process.argv.includes("--check")) {
   if (!readFileSync(destination).equals(archive))
@@ -147,5 +200,5 @@ if (process.argv.includes("--check")) {
     );
 } else writeFileSync(destination, archive);
 console.log(
-  `Office Skills: ${files.length} files, ${archive.length} compressed bytes; Python ${pythonId}, Node ${nodeId}`,
+  `Office Skills: ${files.length} files, ${archive.length} compressed bytes; ${Object.keys(sources.targets).length} targets`,
 );

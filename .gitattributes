@@ -1,1 +1,6 @@
 /src/product/control/persistence/migrations/*.sql text eol=lf
+# Office locks and resource bytes must survive checkout settings unchanged.
+# The resource producer explicitly emits CRLF for cmd and LF for sh.
+/src/product/skill/assets/** -text
+/src/product/skill/office_environment/** -text
+/src/product/control/resources/archive.py -text

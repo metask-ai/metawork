@@ -2,7 +2,8 @@
 setlocal EnableExtensions DisableDelayedExpansion
 if "%LOCALAPPDATA%"=="" exit /b 2
 call "%~dp0environment.cmd"
-set "BASE=%LOCALAPPDATA%\MetaWork\OfficeDependencies"
+if errorlevel 1 exit /b 2
+set "BASE=%LOCALAPPDATA%\%OFFICE_NAMESPACE:/=\%"
 set "NODE_OPTIONS="
 set "NODE_PATH="
 if "%~1"=="python" goto python

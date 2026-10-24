@@ -132,3 +132,11 @@ DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事�
 现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；DMG 是只读拖拽分发容器，不是带安装逻辑的 PKG，也不提供更新能力。`.dev` identity 仍是当前产品 Bundle ID，不因产物改为 DMG 而自动升级成独立 production channel。
 
 普通 `check`、`test`、Debug/Release build、Windows baseline 和 automation 不依赖 Apple Development、Developer ID 或 notary credential，也不访问真实 Keychain。
+
+## Office Skill 与私有依赖
+
+Office 能力由[产品需求](requirements.md#53-task)拥有，跨平台准备、执行和故障恢复只由 [Product Skill 合同](product-architecture.md#内置-office-skill)定义。主包携带压缩 Skill、固定入口与锁定输入，不携带 Python、Node 或文档库；Application 资源发布仍属于自有数据根，macOS 排他发布只经[已登记窄 seam](architecture.md#35-native-sdk)。
+
+macOS 的固定 Python 来源为 Astral `python-build-standalone` 的标准 GIL `install_only` 发行包，Node 来源为官方 Darwin archive；arm64 与 x64 分别锁定输入和原生 wheel，不查询 latest、不安装 uv、不消费系统解释器或 Homebrew fallback。固定发行摘要在解包和执行前完整核验；发行归档接受检查须覆盖相对链接、执行位、可搬移性及系统基线，系统 tar 可保留受信任固定发行所需内部链接。这不降低用户附件的有界归档规则。解释器、原生扩展和其动态依赖的最低系统不能高于应用从 canonical Core 派生的基线。
+
+固定 Shell 入口只使用基线系统已有的绝对工具路径；缺少工具明确失败，不静默切换来源或能力。包管理器保留既有用户网络配置，私有安装目标、哈希和禁用安装脚本等参数固定，不修改全局 PATH、用户配置或系统安装位置。Apple Development 的开发执行不能替代 Developer ID 应用/DMG 的运行验收；正式产物须实际验证私有解释器和 wheel 扩展可执行，不删除 quarantine、关闭校验或临时重签第三方 artifact 取得通过。两个架构、最低系统、当前系统与正式分发证据分别记录于[验证规范](validation.md#office-skill-与私有环境验证)；尚缺证据的目标不得报告正式分发通过。
