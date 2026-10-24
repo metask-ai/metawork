@@ -22,7 +22,9 @@ import office_qualification as qualification
 REPO = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--profile", type=Path)
-parser.add_argument("--home-probe", action="store_true", help="Check actual Core Bash HOME in two independent workspaces; no private environment needed")
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument("--home-probe", action="store_true", help="Check actual Core Bash HOME in two independent workspaces; no private environment needed")
+mode.add_argument("--permission-probe", action="store_true", help="Check default deny/allow-once and full-access through the same materialized entry")
 qualification.target_option(parser)
 args = parser.parse_args()
 qualification.require_native(parser, args.target)
@@ -70,8 +72,9 @@ def sse(tool_input=None):
     return "".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events).encode()
 
 
-for kind in (("docx", "xlsx") if args.home_probe else ("docx", "xlsx", "pptx")):
-    work = scratch / kind
+for case in (("deny", "allow", "full") if args.permission_probe else (("docx", "xlsx") if args.home_probe else ("docx", "xlsx", "pptx"))):
+    kind = "xlsx" if args.permission_probe else case
+    work = scratch / case
     work.mkdir()
     output = work / ("created." + kind)
     edited = work / ("edited." + kind)
@@ -150,8 +153,13 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                 else:
                     assert state["calls"] == 2
                     results = [c for m in payload["messages"] for c in m.get("content", []) if isinstance(c, dict) and c.get("type") == "tool_result"]
-                    assert results and not results[-1].get("is_error"), results
-                    assert marker in "\n".join(texts(results[-1])), results[-1]
+                    assert results, results
+                    if args.permission_probe and case == "deny":
+                        assert results[-1].get("is_error"), results[-1]
+                        assert marker not in "\n".join(texts(results[-1])), results[-1]
+                    else:
+                        assert not results[-1].get("is_error"), results
+                        assert marker in "\n".join(texts(results[-1])), results[-1]
                     response = sse()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -170,10 +178,21 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                    METAWORK_OFFICE_CORE_HOME=str(Path.home().resolve()) if args.home_probe else str(profile if sys.platform == "darwin" else Path.home().resolve()),
                    METAWORK_OFFICE_CORE_SKILLS=str(skills), METAWORK_OFFICE_CORE_SKILL=kind,
                    METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages")
+        env.pop("METAWORK_OFFICE_CORE_PERMISSION_CASE", None)
+        if args.permission_probe:
+            env["METAWORK_OFFICE_CORE_PERMISSION_CASE"] = case
         result = subprocess.run([str(probe)], env=env, capture_output=True, timeout=180)
         if result.returncode or state["error"]:
             raise RuntimeError(str(scratch) + "\n" + str(state["error"]) + "\n" + result.stderr.decode("utf-8", errors="replace"))
         assert state["calls"] == 2
+        if args.permission_probe:
+            expected = 0 if case == "full" else 1
+            assert "Office permission callbacks: " + str(expected) in result.stderr.decode("utf-8", errors="replace")
+            if case == "deny":
+                assert not output.exists() and not edited.exists() and not (work / "read.json").exists(), "Denied Shell executed a document operation"
+                assert inventory() == before_environment, "Denied Shell changed the private environment"
+                print(json.dumps({"permission": case, "callbacks": expected, "no_execution": True, "environment_unchanged": True}), flush=True)
+                continue
         if args.home_probe:
             actual = (work / "home.txt").read_text(encoding="utf-8")
             assert actual == str(Path.home().resolve()), (actual, Path.home())
@@ -186,7 +205,7 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
             cell = next(c for sheet in parsed["sheets"] for c in sheet["cells"] if c["cell"] == "B1")
             assert cell["formula"] is True and cell["value"] == "=1+2" and cell["cached"] is None
         assert inventory() == before_environment, "Core document processing changed the private environment"
-        print(json.dumps({"skill": kind, "materialized_entry": state["entry"], "actual_core_bash": True, "create_edit_read": True,
+        print(json.dumps({"skill": kind, "permission": case if args.permission_probe else "full", "materialized_entry": state["entry"], "actual_core_bash": True, "create_edit_read": True,
                           "original_sha256": hashlib.sha256(output.read_bytes()).hexdigest()}, ensure_ascii=True), flush=True)
     finally:
         server.shutdown()
