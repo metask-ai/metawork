@@ -23,7 +23,11 @@ export function ApprovalPanel({
   pending: PendingUi;
   task: Pick<
     TaskView,
-    "uiHistory" | "restorePermission" | "permissionReviewState"
+    | "uiHistory"
+    | "restorePermission"
+    | "permissionReviewState"
+    | "permissionReviewExplanation"
+    | "approvalMode"
   >;
   busy: boolean;
   responsePhase: UiResponsePhase;
@@ -47,18 +51,24 @@ export function ApprovalPanel({
     fileCandidate ? "approval.deny_session_file" : "approval.deny_session",
   );
   const diagnostic = diagnoseRepeatedPermission(task, pending);
+  const presentation = pending.presentation;
+  const isCommand =
+    pending.toolNamespace === "builtin" && pending.tool === "Bash";
+  const command =
+    presentation?.kind === "command" ? presentation.command : null;
+  const description =
+    presentation?.kind === "command" ? presentation.description : null;
+  const target =
+    presentation && presentation.kind !== "command"
+      ? presentation.target
+      : null;
+  const explanation = task.permissionReviewExplanation;
 
   const respondPermission = (permission: PermissionChoice) =>
     respond({ kind: "permission", permission });
 
   const status =
-    responsePhase === "idle" ? (
-      task.permissionReviewState === "needs_user" ? (
-        <p role="status" aria-live="polite">
-          {t("approval.review_needs_user")}
-        </p>
-      ) : null
-    ) : (
+    responsePhase === "idle" ? null : (
       <p
         data-phase={responsePhase}
         role={responsePhase === "failed" ? "alert" : "status"}
@@ -79,7 +89,13 @@ export function ApprovalPanel({
       kind="permission"
       busy={responseInFlight}
       label={t("approval.response_required")}
-      title={t("approval.allow_tool", { tool: pending.tool })}
+      title={
+        isCommand
+          ? t("approval.action.command")
+          : presentation
+            ? t(`approval.action.${presentation.kind}`)
+            : t("approval.allow_tool", { tool: pending.tool })
+      }
       status={status}
     >
       {pending.redacted && (
@@ -87,9 +103,77 @@ export function ApprovalPanel({
           {t("privacy.sensitive_hidden")}
         </p>
       )}
-      <DetailField label={t("approval.arguments")}>
-        <CodeBlock value={pending.args} />
+      <DetailField label={t("approval.confirmation_reason")}>
+        <p
+          className="approval-scope-value"
+          role={
+            responsePhase === "idle" &&
+            task.permissionReviewState === "needs_user" &&
+            task.approvalMode !== "manual"
+              ? "status"
+              : undefined
+          }
+          aria-live={
+            responsePhase === "idle" &&
+            task.permissionReviewState === "needs_user" &&
+            task.approvalMode !== "manual"
+              ? "polite"
+              : undefined
+          }
+        >
+          {task.approvalMode === "manual"
+            ? t("approval.manual_mode")
+            : task.permissionReviewState === "needs_user"
+              ? t(`approval.handoff.${explanation?.cause ?? "unavailable"}`)
+              : t("approval.confirm_request")}
+        </p>
       </DetailField>
+      {explanation?.reason && (
+        <DetailField label={t("approval.reviewer_note")}>
+          <p className="approval-scope-value">{explanation.reason}</p>
+        </DetailField>
+      )}
+      {isCommand && (
+        <DetailField label={t("approval.agent_purpose")}>
+          <p className="approval-scope-value">
+            {description || t("approval.purpose_unavailable")}
+          </p>
+        </DetailField>
+      )}
+      {target !== null && (
+        <DetailField
+          label={t(
+            presentation?.kind === "web_fetch"
+              ? "approval.target_url"
+              : "approval.target_file",
+          )}
+        >
+          <p className="approval-scope-value">{target}</p>
+        </DetailField>
+      )}
+      {command ? (
+        <DetailField label={t("approval.command")}>
+          <CodeBlock value={command} />
+          <p className="approval-scope-expiry">
+            {t("approval.command_effects")}
+          </p>
+        </DetailField>
+      ) : !presentation || isCommand ? (
+        <DetailField label={t("approval.arguments")}>
+          {isCommand && (
+            <p className="approval-scope-expiry">
+              {t("approval.command_unavailable")}
+            </p>
+          )}
+          <CodeBlock value={pending.args} />
+        </DetailField>
+      ) : null}
+      {presentation && (!isCommand || command) && (
+        <details className="approval-request-details">
+          <summary>{t("approval.full_request")}</summary>
+          <CodeBlock value={pending.args} />
+        </details>
+      )}
       <DetailField label={t("approval.scope")}>
         <p className="approval-scope-value">
           {sessionChoiceAvailable
@@ -98,7 +182,7 @@ export function ApprovalPanel({
               : t("approval.scope_session_available")
             : t("approval.scope_once")}
         </p>
-        {fileCandidate && (
+        {fileCandidate && fileCandidate.target !== target && (
           <p className="approval-scope-value">{fileCandidate.target}</p>
         )}
         {sessionChoiceAvailable && (

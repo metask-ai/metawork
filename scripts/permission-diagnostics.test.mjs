@@ -12,6 +12,7 @@ const pending = {
   toolNamespace: "builtin",
   tool: "Bash",
   toolBinding: "bash-binding",
+  presentation: null,
   args: "redacted at the diagnostic boundary",
   availableChoices: ["deny_once", "allow_once", "allow_session"],
   policyGeneration: "7",

@@ -7114,6 +7114,27 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow-wrap: anywhere;
 }
 
+.approval-request-details {
+  min-width: 0;
+}
+
+.approval-request-details > summary {
+  color: var(--ui-content-muted);
+  cursor: pointer;
+  width: fit-content;
+  padding-block: 6px;
+}
+
+.approval-request-details > summary:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.approval-request-details[open] > .code-block-preview {
+  margin-top: 8px;
+}
+
 .approval-scope-expiry {
   margin-top: 4px;
   color: var(--ui-content-muted);
@@ -7202,9 +7223,18 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   }
 
   .ai-intervention-actions > button,
-  .approval-action-cluster,
-  .approval-action-cluster .approval-split-main {
+  .approval-action-cluster {
     width: 100%;
+  }
+
+  .approval-action-cluster .approval-split-main {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+  }
+
+  .approval-split-trigger {
+    flex-shrink: 0;
   }
 }
 

@@ -870,6 +870,10 @@ export type PendingUi = {
   tool: string;
   toolBinding: string;
   args: string;
+  presentation:
+    | { kind: "command"; command: string; description: string | null }
+    | { kind: "read" | "write" | "edit" | "web_fetch"; target: string }
+    | null;
   availableChoices: PermissionChoice[];
   policyGeneration: string;
   canonicalArgumentsDigest: string;

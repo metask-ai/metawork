@@ -526,12 +526,16 @@ pub fn writePendingUi(
     const candidate_target = if (permission.candidate) |candidate| candidate.target else null;
     const target_sensitive = if (candidate_target) |target| text.containsSensitive(target) else false;
     const visible_candidate = if (target_sensitive) null else permission.candidate;
+    var presentation_buffer: [128 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &presentation_buffer);
+    var presentation_writer = std.Io.Writer.fixed(&presentation_buffer);
+    const presentation_redacted = try writePermissionPresentation(&presentation_writer, text, permission);
     writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
         request_id,
         run_id,
         order,
         text.containsSensitive(permission.tool.name) or
-            text.containsSensitive(permission.arguments_json) or target_sensitive,
+            text.containsSensitive(permission.arguments_json) or target_sensitive or presentation_redacted,
     }) catch return error.SnapshotTooLarge;
     writer.print("\"kind\":\"permission\",\"toolNamespace\":\"{s}\",\"tool\":", .{
         @tagName(permission.tool.namespace),
@@ -541,7 +545,9 @@ pub fn writePendingUi(
     writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, permission.tool.binding);
     writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-    try text.writeJson(writer, permission.arguments_json);
+    try text.writeJson(writer, if (presentation_redacted) "***" else permission.arguments_json);
+    writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
+    writer.writeAll(presentation_writer.buffered()) catch return error.SnapshotTooLarge;
     writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
     var wrote_choice = false;
     for (permission.responses) |choice| {
@@ -937,6 +943,59 @@ const BashInput = struct {
     command: []const u8,
     description: ?[]const u8 = null,
 };
+
+/// Only declared built-in argument shapes produce operation facts. Shell text
+/// and Agent descriptions are never classified into effects or safety labels.
+fn writePermissionPresentation(writer: *std.Io.Writer, text: TextProjection, permission: agent.PermissionRequest) Error!bool {
+    const kind = std.meta.stringToEnum(enum { Bash, Read, Write, Edit, WebFetch }, permission.tool.name);
+    if (permission.tool.namespace != .builtin or kind == null or permission.arguments_json.len > 128 * 1024) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    }
+    var scratch: [128 * 1024]u8 = undefined;
+    var allocator = JsonScratch.init(&scratch);
+    defer allocator.clear();
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed, .duplicate_field_behavior = .@"error" };
+    if (kind.? == .Bash) {
+        const parsed = std.json.parseFromSliceLeaky(BashInput, allocator.allocator(), permission.arguments_json, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        writer.writeAll("{\"kind\":\"command\",\"command\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, parsed.command);
+        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
+        try writeOptionalProjectedValue(writer, text, parsed.description);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return text.containsSensitive(parsed.command) or (if (parsed.description) |description| text.containsSensitive(description) else false);
+    }
+    if (kind.? == .WebFetch) {
+        const parsed = std.json.parseFromSliceLeaky(WebFetchInput, allocator.allocator(), permission.arguments_json, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        writer.writeAll("{\"kind\":\"web_fetch\",\"target\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, parsed.url);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return text.containsSensitive(parsed.url);
+    }
+    const parsed = std.json.parseFromSliceLeaky(FileMutationInput, allocator.allocator(), permission.arguments_json, options) catch {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    };
+    writer.print("{{\"kind\":\"{s}\",\"target\":", .{switch (kind.?) {
+        .Read => "read",
+        .Write => "write",
+        .Edit => "edit",
+        else => unreachable,
+    }}) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, parsed.file_path);
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+    return text.containsSensitive(parsed.file_path);
+}
+
+fn writeOptionalProjectedValue(writer: *std.Io.Writer, text: TextProjection, value: ?[]const u8) Error!void {
+    if (value) |present| try text.writeJson(writer, present) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
 
 const ReadInput = struct {
     file_path: []const u8,

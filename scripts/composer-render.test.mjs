@@ -584,6 +584,7 @@ test("pending UI follows the unified Assistant output without technical history"
         redacted: false,
         kind: "permission",
         tool: "Bash",
+        presentation: null,
         args: "npm test",
         availableChoices: ["deny_once", "allow_once"],
       },

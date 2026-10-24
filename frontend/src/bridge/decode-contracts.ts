@@ -3163,6 +3163,48 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
+function decodePermissionPresentation(
+  value: unknown,
+  path: string,
+  namespace: unknown,
+  tool: unknown,
+): PendingUi["presentation"] {
+  if (value === null) return null;
+  const kind = enumValue((value as JsonObject)?.kind, `${path}.kind`, [
+    "command",
+    "read",
+    "write",
+    "edit",
+    "web_fetch",
+  ] as const);
+  const tools = {
+    command: "Bash",
+    read: "Read",
+    write: "Write",
+    edit: "Edit",
+    web_fetch: "WebFetch",
+  };
+  if (namespace !== "builtin" || tool !== tools[kind])
+    fail(path, "presentation must match the built-in request identity");
+  const item = object(
+    value,
+    path,
+    kind === "command"
+      ? ["kind", "command", "description"]
+      : ["kind", "target"],
+  );
+  if (kind === "command")
+    return {
+      kind,
+      command: stringValue(item.command, `${path}.command`),
+      description:
+        item.description === null
+          ? null
+          : stringValue(item.description, `${path}.description`),
+    };
+  return { kind, target: stringValue(item.target, `${path}.target`) };
+}
+
 function decodePendingUi(value: unknown, path: string): PendingUi | null {
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value))
@@ -3179,6 +3221,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       "tool",
       "toolBinding",
       "args",
+      "presentation",
       "availableChoices",
       "policyGeneration",
       "canonicalArgumentsDigest",
@@ -3247,6 +3290,12 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
         "Session choices require a permission candidate",
       );
     return {
+      presentation: decodePermissionPresentation(
+        item.presentation,
+        `${path}.presentation`,
+        item.toolNamespace,
+        item.tool,
+      ),
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
       order: positiveWireId(item.order, `${path}.order`),

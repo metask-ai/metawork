@@ -46,6 +46,7 @@ function pending(identity) {
     redacted: false,
     kind: "permission",
     tool: "Read",
+    presentation: null,
     args: "README.md",
   };
 }

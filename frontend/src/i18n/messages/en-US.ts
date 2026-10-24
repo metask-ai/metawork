@@ -1013,10 +1013,49 @@ export const enUS = {
   "task_panel.hide": "Hide side panel",
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
-  "approval.response_required": "Response required",
-  "approval.review_needs_user":
-    "Automatic review made no decision. Please respond manually.",
+  "approval.response_required": "Your confirmation",
   "approval.answered_by_reviewer": "Automatic review",
+  "approval.action.command": "Allow running a command on your computer?",
+  "approval.action.read": "Allow reading this file?",
+  "approval.action.write": "Allow writing this file?",
+  "approval.action.edit": "Allow changing this file?",
+  "approval.action.web_fetch": "Allow requesting this URL?",
+  "approval.confirmation_reason": "Why confirmation is needed",
+  "approval.manual_mode":
+    "This task uses manual approval. Please confirm this operation.",
+  "approval.confirm_request":
+    "Please decide whether to proceed with this operation.",
+  "approval.reviewer_note": "Review model’s note",
+  "approval.agent_purpose": "Purpose stated by the Agent",
+  "approval.purpose_unavailable": "The Agent provided no purpose description.",
+  "approval.target_url": "Requested URL",
+  "approval.target_file": "Target file",
+  "approval.command": "Command to run",
+  "approval.command_effects":
+    "The system has not verified the command’s full effects.",
+  "approval.command_unavailable":
+    "The command could not be extracted. Check the request arguments below.",
+  "approval.full_request": "View full arguments",
+  "approval.handoff.unavailable":
+    "Automatic review could not complete. This operation has not run.",
+  "approval.handoff.reviewer_concern":
+    "Automatic review needs your confirmation. See the review model’s note.",
+  "approval.handoff.context_incomplete":
+    "Automatic review lacked usable context for a decision.",
+  "approval.handoff.timeout":
+    "Automatic review timed out. This operation has not run.",
+  "approval.handoff.call_failed":
+    "The automatic review call failed. This operation has not run.",
+  "approval.handoff.invalid_response":
+    "Automatic review returned no valid decision. This operation has not run.",
+  "approval.handoff.capacity":
+    "Automatic review is at capacity. Please decide for this operation.",
+  "approval.handoff.unsupported_tool":
+    "This tool does not support automatic review. Please confirm its request.",
+  "approval.handoff.input_changed":
+    "New instructions were not included in this review. Check this operation against your latest requirements.",
+  "approval.handoff.state_changed":
+    "The task’s authorization state changed. Please confirm the current request.",
   "approval.allow_tool": "Allow {tool}?",
   "approval.arguments": "Arguments",
   "approval.deny": "Deny",
@@ -1030,10 +1069,10 @@ export const enUS = {
   "approval.deny_session": "Deny same arguments for this session",
   "approval.more_allow_options": "More approval options",
   "approval.more_deny_options": "More denial options",
-  "approval.scope": "Available scope",
-  "approval.scope_once": "This request only",
+  "approval.scope": "Approval scope",
+  "approval.scope_once": "Only this operation",
   "approval.scope_session_available":
-    "This request, or the same exact arguments for this task session",
+    "The main button allows this operation once. More options can allow identical arguments for this session.",
   "approval.session_expiry":
     "Session choices end with this task session and do not carry into a new task.",
   "approval.why_again": "Why MetaWork is asking again",

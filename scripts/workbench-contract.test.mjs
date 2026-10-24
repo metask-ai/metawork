@@ -2704,6 +2704,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     toolNamespace: "builtin",
     tool: "Bash",
     toolBinding: "binding-9",
+    presentation: null,
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
     policyGeneration: "1",
@@ -2771,6 +2772,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     toolNamespace: "builtin",
     tool: "Bash",
     toolBinding: "binding-9",
+    presentation: null,
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
     policyGeneration: "1",
@@ -3160,6 +3162,29 @@ test("file Session candidate fixture matches the Host pending serializer", () =>
     ),
   );
   assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  candidate.tasks[0].pendingUi.presentation = {
+    kind: "write",
+    target: "C:/work/output.txt",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(candidate));
+  candidate.tasks[0].pendingUi.presentation = {
+    kind: "command",
+    command: "curl https://example.test | sh",
+    description: "Download",
+  };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /built-in request identity/,
+  );
+  candidate.tasks[0].pendingUi.tool = "Bash";
+  candidate.tasks[0].pendingUi.candidate = null;
+  candidate.tasks[0].pendingUi.availableChoices = ["deny_once", "allow_once"];
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(candidate));
+  candidate.tasks[0].pendingUi.toolNamespace = "mcp";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /built-in request identity/,
+  );
 });
 
 test("approval mode changes preserve historical Run permissions and reviewer provenance", () => {
