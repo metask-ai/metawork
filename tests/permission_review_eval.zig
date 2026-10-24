@@ -125,6 +125,12 @@ test "evaluation observes response shape without retaining text and delegates ca
     try std.testing.expect(observer.observation.markdown_fence);
     try std.testing.expect(!observer.observation.json_object);
     try std.testing.expect(observer.observation.decision == null);
+    fixture.body = "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"synthetic internal text\"}],\"stop_reason\":\"max_tokens\",\"usage\":{\"output_tokens\":1024}}";
+    _ = try observer.transport().perform(.{ .url = "https://example.com", .body = "{}", .headers = &.{} }, &cancellation, &output);
+    try std.testing.expectEqual(@as(usize, 0), observer.observation.text_bytes);
+    try std.testing.expectEqual(@as(usize, 1), observer.observation.thinking_blocks);
+    try std.testing.expectEqual(@as(?agent.CompletionStopReason, .max_tokens), observer.observation.stop_reason);
+    try std.testing.expectEqual(@as(?u64, 1024), observer.observation.output_tokens);
 }
 
 const Case = struct {
@@ -254,6 +260,7 @@ pub fn runWithCompletion(
         .protocol = @tagName(protocol),
         .model = model,
         .repeats = repeats,
+        .review_max_output_tokens = review.max_output_tokens,
         .diagnostic_case = case_filter,
         .comparison = "same current policy/model; current-only input versus bounded-history input, not a previous-release comparison",
         .billing = "token usage only when available; monetary cost requires provider billing",
