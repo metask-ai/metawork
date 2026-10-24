@@ -526,10 +526,14 @@ pub fn writePendingUi(
     const candidate_target = if (permission.candidate) |candidate| candidate.target else null;
     const target_sensitive = if (candidate_target) |target| text.containsSensitive(target) else false;
     const visible_candidate = if (target_sensitive) null else permission.candidate;
-    var presentation_buffer: [128 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &presentation_buffer);
-    var presentation_writer = std.Io.Writer.fixed(&presentation_buffer);
-    const presentation_redacted = try writePermissionPresentation(&presentation_writer, text, permission);
+    var presentation_scratch: [128 * 1024]u8 = undefined;
+    var presentation_allocator = JsonScratch.init(&presentation_scratch);
+    defer presentation_allocator.clear();
+    const presentation = permissionPresentation(permission, presentation_allocator.allocator());
+    const presentation_redacted = if (presentation) |value|
+        text.containsSensitive(value.target) or (if (value.description) |description| text.containsSensitive(description) else false)
+    else
+        false;
     writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
         request_id,
         run_id,
@@ -547,7 +551,7 @@ pub fn writePendingUi(
     writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, if (presentation_redacted) "***" else permission.arguments_json);
     writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
-    writer.writeAll(presentation_writer.buffered()) catch return error.SnapshotTooLarge;
+    try writePermissionPresentation(writer, text, presentation);
     writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
     var wrote_choice = false;
     for (permission.responses) |choice| {
@@ -946,51 +950,47 @@ const BashInput = struct {
 
 /// Only declared built-in argument shapes produce operation facts. Shell text
 /// and Agent descriptions are never classified into effects or safety labels.
-fn writePermissionPresentation(writer: *std.Io.Writer, text: TextProjection, permission: agent.PermissionRequest) Error!bool {
+const PermissionPresentation = struct {
+    kind: enum { command, read, write, edit, web_fetch },
+    target: []const u8,
+    description: ?[]const u8 = null,
+};
+
+fn permissionPresentation(permission: agent.PermissionRequest, allocator: std.mem.Allocator) ?PermissionPresentation {
     const kind = std.meta.stringToEnum(enum { Bash, Read, Write, Edit, WebFetch }, permission.tool.name);
     if (permission.tool.namespace != .builtin or kind == null or permission.arguments_json.len > 128 * 1024) {
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-        return false;
+        return null;
     }
-    var scratch: [128 * 1024]u8 = undefined;
-    var allocator = JsonScratch.init(&scratch);
-    defer allocator.clear();
     const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed, .duplicate_field_behavior = .@"error" };
     if (kind.? == .Bash) {
-        const parsed = std.json.parseFromSliceLeaky(BashInput, allocator.allocator(), permission.arguments_json, options) catch {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-            return false;
-        };
-        writer.writeAll("{\"kind\":\"command\",\"command\":") catch return error.SnapshotTooLarge;
-        try text.writeJson(writer, parsed.command);
-        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-        try writeOptionalProjectedValue(writer, text, parsed.description);
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-        return text.containsSensitive(parsed.command) or (if (parsed.description) |description| text.containsSensitive(description) else false);
+        const parsed = std.json.parseFromSliceLeaky(BashInput, allocator, permission.arguments_json, options) catch return null;
+        return .{ .kind = .command, .target = parsed.command, .description = parsed.description };
     }
     if (kind.? == .WebFetch) {
-        const parsed = std.json.parseFromSliceLeaky(WebFetchInput, allocator.allocator(), permission.arguments_json, options) catch {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-            return false;
-        };
-        writer.writeAll("{\"kind\":\"web_fetch\",\"target\":") catch return error.SnapshotTooLarge;
-        try text.writeJson(writer, parsed.url);
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-        return text.containsSensitive(parsed.url);
+        const parsed = std.json.parseFromSliceLeaky(WebFetchInput, allocator, permission.arguments_json, options) catch return null;
+        return .{ .kind = .web_fetch, .target = parsed.url };
     }
-    const parsed = std.json.parseFromSliceLeaky(FileMutationInput, allocator.allocator(), permission.arguments_json, options) catch {
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-        return false;
-    };
-    writer.print("{{\"kind\":\"{s}\",\"target\":", .{switch (kind.?) {
-        .Read => "read",
-        .Write => "write",
-        .Edit => "edit",
+    const parsed = std.json.parseFromSliceLeaky(FileMutationInput, allocator, permission.arguments_json, options) catch return null;
+    return .{ .kind = switch (kind.?) {
+        .Read => .read,
+        .Write => .write,
+        .Edit => .edit,
         else => unreachable,
-    }}) catch return error.SnapshotTooLarge;
-    try text.writeJson(writer, parsed.file_path);
+    }, .target = parsed.file_path };
+}
+
+fn writePermissionPresentation(writer: *std.Io.Writer, text: TextProjection, presentation: ?PermissionPresentation) Error!void {
+    const value = presentation orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"kind\":\"{s}\",\"{s}\":", .{ @tagName(value.kind), if (value.kind == .command) "command" else "target" }) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, value.target);
+    if (value.kind == .command) {
+        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
+        try writeOptionalProjectedValue(writer, text, value.description);
+    }
     writer.writeByte('}') catch return error.SnapshotTooLarge;
-    return text.containsSensitive(parsed.file_path);
 }
 
 fn writeOptionalProjectedValue(writer: *std.Io.Writer, text: TextProjection, value: ?[]const u8) Error!void {

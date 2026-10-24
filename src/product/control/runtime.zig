@@ -18050,6 +18050,38 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     try std.testing.expect(writer.buffered().len <= allowance);
 }
 
+test "Product view permission presentation preserves deferred string positions across tiny chunks" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const request = testPermissionRequest("Bash", "{\"command\":\"echo \\\"中文\\\" \\u0053ECRET-KEY\",\"description\":\"查看输出\"}");
+    var expected_storage: [8192]u8 = undefined;
+    var expected = std.Io.Writer.fixed(&expected_storage);
+    try task_test_view.writePendingUi(&expected, control.taskTextProjection(), 1, 1, 1, request);
+    for (1..18) |chunk_size| {
+        var plan: view_plan.Plan = .{ .id = 1 };
+        defer plan.clear(std.testing.allocator);
+        var skeleton: [8192]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&skeleton);
+        control.capture_view = &plan;
+        control.view_credentials = &.{"SECRET-KEY"};
+        {
+            defer control.capture_view = null;
+            defer control.view_credentials = null;
+            try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        }
+        try plan.seal(std.testing.allocator, 96 * 1024, writer.buffered());
+        @memset(&skeleton, 0);
+        var output: [8192]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < plan.total) {
+            const size = @min(chunk_size, plan.total - offset);
+            _ = try plan.writeNext(output[offset..][0..size]);
+            offset += size;
+        }
+        try std.testing.expectEqualStrings(expected.buffered(), output[0..offset]);
+    }
+}
+
 test "permission pending presentation stays bound to built-in arguments and hides decoded credentials" {
     var control = try testRuntime();
     defer control.deinit();
