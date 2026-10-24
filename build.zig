@@ -516,6 +516,7 @@ fn addLifecycleTests(
         "tests/agent/event_pump_test.zig",
         "tests/product/control_lifecycle_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
+        "tests/integration/lifecycle/metask_credential_test.zig",
     };
     for (roots) |root| {
         const cases = b.createModule(.{
@@ -680,6 +681,9 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_product_workspace", modules.product_workspace);
     fixture.addImport("metawork_account_contract", modules.account_contract);
+    fixture.addImport("metawork_account", modules.account);
+    fixture.addImport("models_coordinator", modules.models_coordinator);
+    fixture.addImport("metask_transport", modules.metask_transport);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
     fixture.addImport("product_models_ports", modules.models_ports);
     fixture.addImport("event_pump", modules.event_pump);
@@ -2363,11 +2367,11 @@ fn selectedArtifact(b: *std.Build) ArtifactOption {
 }
 
 fn addOfficeQualification(b: *std.Build, app: *std.Build.Module, fixture: *std.Build.Module, link_libc: bool, tests: *std.Build.Step) void {
+    const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
+    tests.dependOn(&b.addRunArtifact(validation_tests).step);
     if (app.resolved_target.?.result.os.tag == .windows) {
         const job_tests = b.addTest(.{ .name = "office-process-job", .root_module = existingImport(app, "office_process_windows") });
         tests.dependOn(&b.addRunArtifact(job_tests).step);
-        const validation_tests = b.addTest(.{ .name = "office-component-windows", .root_module = existingImport(app, "office_component_windows") });
-        tests.dependOn(&b.addRunArtifact(validation_tests).step);
         const process_tests = b.addTest(.{ .name = "office-process", .root_module = existingImport(app, "office_process") });
         tests.dependOn(&b.addRunArtifact(process_tests).step);
         const core_shell = b.addExecutable(.{ .name = "office-core-shell", .root_module = b.createModule(.{
