@@ -166,6 +166,11 @@ export function ApprovalPanel({
             </p>
           )}
           <CodeBlock value={pending.args} />
+          {isCommand && (
+            <p className="approval-scope-expiry">
+              {t("approval.command_effects")}
+            </p>
+          )}
         </DetailField>
       ) : null}
       {presentation && (!isCommand || command) && (

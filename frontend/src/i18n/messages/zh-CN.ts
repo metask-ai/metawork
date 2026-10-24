@@ -905,7 +905,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.confirm_request": "请确认是否继续执行本次操作。",
   "approval.reviewer_note": "审核模型说明",
   "approval.agent_purpose": "用途（Agent 提供）",
-  "approval.purpose_unavailable": "Agent 未提供用途说明。",
+  "approval.purpose_unavailable": "暂无可用的用途说明。",
   "approval.target_url": "访问网址",
   "approval.target_file": "目标文件",
   "approval.command": "将执行的命令",

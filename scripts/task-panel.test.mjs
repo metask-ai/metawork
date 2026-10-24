@@ -6708,6 +6708,16 @@ test("permission cards distinguish Agent purpose from the visible command and ac
       ),
     );
     assert.ok(screen.getByText(translate(locale, "approval.manual_mode")));
+    // Raw arguments still contain an Agent description; unavailable metadata
+    // must not claim it was never supplied or omit the Bash qualification.
+    assert.ok(
+      within(
+        screen.getByRole("group", {
+          name: translate(locale, "approval.agent_purpose"),
+        }),
+      ).getByText(translate(locale, "approval.purpose_unavailable")),
+    );
+    assert.ok(screen.getByText(translate(locale, "approval.command_effects")));
     assert.equal(
       screen.getByText(source.pendingUi.args).closest("details"),
       null,

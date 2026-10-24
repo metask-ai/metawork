@@ -1027,7 +1027,7 @@ export const enUS = {
     "Please decide whether to proceed with this operation.",
   "approval.reviewer_note": "Review model’s note",
   "approval.agent_purpose": "Purpose stated by the Agent",
-  "approval.purpose_unavailable": "The Agent provided no purpose description.",
+  "approval.purpose_unavailable": "No purpose description is available.",
   "approval.target_url": "Requested URL",
   "approval.target_file": "Target file",
   "approval.command": "Command to run",
