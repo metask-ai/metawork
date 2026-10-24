@@ -172,6 +172,12 @@ const Host = struct {
         }
         var backend = CompletionHttp{ .allocator = self.init.gpa, .io = self.init.io };
         const protocol = protocol_adapter.toAgent(input.target.protocol);
+        if (std.mem.eql(u8, self.init.environ_map.get("METAWORK_REVIEW_EVAL_SCHEMA_PROBE") orelse "", "1")) {
+            return @import("permission_schema_probe").run(self.init, .{
+                .target = .{ .provider_id = input.target.provider_id, .protocol = protocol, .base_url = input.target.base_url, .model = input.target.model },
+                .credential = input.api_key,
+            }, backend.transport(), self.revision);
+        }
         var observed = evaluation.ObservedTransport{ .inner = backend.transport() };
         const completion = try agent.Completion.init(self.init.gpa, observed.transport(), .{
             .target = .{ .provider_id = input.target.provider_id, .protocol = protocol, .base_url = input.target.base_url, .model = input.target.model },

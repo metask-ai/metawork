@@ -367,6 +367,12 @@ pub fn build(b: *std.Build) void {
     review_eval_main.addImport("completion_http_backend", review_http_backend);
     review_eval_main.addImport("permission_review_evaluation", review_eval_module);
     modules.app.addImport("permission_review_evaluation", review_eval_module);
+    const schema_probe = b.createModule(.{ .root_source_file = b.path("tests/permission_schema_probe.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    schema_probe.addImport("metawork_agent", modules.agent);
+    schema_probe.addImport("permission_review", modules.product_permission_review);
+    modules.app.addImport("permission_schema_probe", schema_probe);
+    b.step("test-permission-schema-probe", "Verify the Account-only format capability probe")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = schema_probe })).step);
     b.step("test-permission-review-evaluation", "Verify the live evaluation's safe observations")
         .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = review_eval_module })).step);
     const account_review_eval = b.option(bool, "permission-review-account-eval", "Build an opt-in Account-owned live permission evaluation instead of the desktop entry") orelse false;
