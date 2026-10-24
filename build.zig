@@ -360,8 +360,19 @@ pub fn build(b: *std.Build) void {
     });
     review_eval_module.addImport("metawork_agent", modules.agent);
     review_eval_module.addImport("permission_review", modules.product_permission_review);
-    review_eval_module.addImport("completion_http_backend", review_http_backend);
-    const review_eval = b.addExecutable(.{ .name = "permission-review-eval", .root_module = review_eval_module });
+    const review_eval_main = b.createModule(.{ .root_source_file = b.path("tests/permission_review_eval_main.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    review_eval_main.addImport("metawork_agent", modules.agent);
+    review_eval_main.addImport("completion_http_backend", review_http_backend);
+    review_eval_main.addImport("permission_review_evaluation", review_eval_module);
+    modules.app.addImport("permission_review_evaluation", review_eval_module);
+    b.step("test-permission-review-evaluation", "Verify the live evaluation's safe observations")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = review_eval_module })).step);
+    const account_review_eval = b.option(bool, "permission-review-account-eval", "Build an opt-in Account-owned live permission evaluation instead of the desktop entry") orelse false;
+    if (account_review_eval) {
+        if (artifact != .development) @panic("Account evaluation requires the development credential owner; automation credentials remain isolated");
+        artifacts.exe.root_module.root_source_file = b.path("tests/permission_review_account_main.zig");
+    }
+    const review_eval = b.addExecutable(.{ .name = "permission-review-eval", .root_module = review_eval_main });
     b.step("check-permission-review-eval", "Compile the opt-in live-model permission evaluation")
         .dependOn(&review_eval.step);
     b.step("eval-permission-review", "Run opt-in live-model permission evaluation (requires explicit test credentials)")

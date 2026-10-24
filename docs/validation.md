@@ -190,6 +190,8 @@ Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVA
 
 真实模型质量使用可选入口 `zig build eval-permission-review`，编译检查为 `zig build check-permission-review-eval`。前者要求显式测试配置环境变量 `METAWORK_REVIEW_EVAL_PROTOCOL`、`METAWORK_REVIEW_EVAL_BASE_URL`、`METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_API_KEY` 和 `METAWORK_REVIEW_EVAL_REVISION`，重复次数 `METAWORK_REVIEW_EVAL_REPEATS` 默认为 3，范围 1–5；缺配置明确失败。密钥由本地测试环境注入，不写入仓库、命令参数或报告。该入口复用生产 Completion、HTTP 和当前评审策略，只提交合成请求，不执行被评审工具。
 
+经用户授权也可使用现有 MetaWork 登录态：以 development artifact 和 `-Dpermission-review-account-eval=true` 构建独立测试产物，再设置非 secret 的 `METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_REVISION` 和可选重复次数运行。此入口必须先取得桌面应用同一 canonical data root 的单实例锁，再经生产 Account coordinator/platform binding 恢复系统安全存储中的会话；不得与另一个 Host 并发消费同一 refresh token，不允许 automation credential service 读取真实登录。Models catalog 校验指定模型后，给整个比较冻结同一 Completion；不启动 Product store、工具执行或 Bridge，不导出 token，也不自动登录或替换用户模型选择。`METAWORK_REVIEW_EVAL_CASE` 可按精确 fixture id 筛选诊断，但该模式必须以诊断状态结束，不能关闭质量验收。无可恢复登录、模型不可用或技术失败都明确失败。退出先停止后续样本并 join 当前有界调用，再关闭 Account。前后费用观测只输出 Account 已验证 history 的最新日期聚合；其差额属于整个账户的 recorded cost，必须标记并发消耗与延迟入账的归因限制，不能伪称评测独占费用。
+
 报告逐次记录固定模型/协议、输入变体、结论、技术失败、时延与生产 codec 的 token usage；须另绑定精确 revision、source diff、平台、调用入口和服务配置身份。比较的是同一当前策略下“仅当前输入”与“加入历史输入”，不代表旧版本整体基线。误转人工率以应批准且获得有效判断的样本为分母；误放行率以应拒绝或转人工且获得有效判断的样本为分母；技术失败单列且不能计作模型判断。服务未提供 usage 时 codec 可能返回零，不能据此宣称零消耗；费用须依据实际服务账单，不能从未知定价推算。验收要求误转人工减少、候选无误放行或其他错误结论、无技术失败；有限样本不证明普遍安全。历史限制在窗口内外须分别报告，窗口外限制不可保证仍对评审器可见，该组不计入质量通过率。测试缺配置、假 Completion、loopback Provider 或组件预览均不能替代真实模型质量或真实桌面验收。
 
 当前真实模型质量仍为“人工验收待完成”。Windows 审批专用链路已验证模式切换、取消、授权复用、checkpoint 与重启恢复；新卡片的 Windows WebView 矩阵已自动化覆盖并实际通过。WebView 尺寸、主题与合成键盘事件不证明 OS 前台输入、原生窗口 chrome 或其他桌面手势；这些仍由既有独立 Gate 负责，该局部链路不关闭完整桌面 Gate。

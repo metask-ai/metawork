@@ -927,3 +927,8 @@ test "Application file delivery freezes Workspace root and keeps all file reads 
     stopped.join();
     try std.testing.expectEqual(.cancelled, work.outcome.?.failed);
 }
+
+// Compiled only by the explicit account-evaluation build entry.
+pub fn runPermissionReviewEvaluation(init: std.process.Init) !void {
+    return @import("app/permission_review_account_eval.zig").run(init);
+}
