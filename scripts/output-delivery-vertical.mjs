@@ -402,3 +402,83 @@ export async function runOutputDeliveryVertical({
     webview?.close();
   }
 }
+
+// Office's platform probe shares the delivery owner. It proves the real App/Core
+// receipt and cold-history projection; Renderer buttons remain a separate probe.
+export async function runOfficeDeliveryHostProbe({
+  created,
+  workspaceRoot,
+  fixture,
+  invoke,
+  snapshot,
+  poll,
+  provider,
+  toolSse,
+  textSse,
+}) {
+  await invoke("metawork.tasks.rename", {
+    taskId: created.taskId,
+    title: "Office delivery fixture",
+  });
+  const relative = "results/Office 中文.docx";
+  await mkdir(path.join(workspaceRoot, "results"), { recursive: true });
+  const bytes = await readFile(fixture);
+  await writeFile(path.join(workspaceRoot, relative), bytes, { flag: "wx" });
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  let receipt;
+  provider.enqueue(
+    toolSse("office-delivery", "office-delivery", "DeliverFile", {
+      path: relative,
+    }),
+    (payload) => {
+      const results = payload.messages
+        .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+        .filter(
+          (b) =>
+            b.type === "tool_result" && b.tool_use_id === "office-delivery",
+        );
+      assert.equal(results.length, 1);
+      assert.equal(results[0].is_error ?? false, false);
+      const content = results[0].content;
+      receipt = JSON.parse(
+        typeof content === "string"
+          ? content
+          : content.map((b) => b.text ?? "").join(""),
+      );
+      assert.equal(receipt.status, "verified_for_delivery");
+      assert.equal(receipt.path, relative);
+      assert.equal(receipt.sha256, digest);
+      assert.equal(receipt.size_bytes, bytes.length);
+      return textSse("office-delivered", "OFFICE_DELIVERED");
+    },
+  );
+  const started = await invoke("metawork.tasks.run", {
+    taskId: created.taskId,
+    expectedBindingEpoch: created.bindingEpoch,
+    input: {
+      kind: "text",
+      text: "Deliver the finished Office fixture in results/Office 中文.docx.",
+    },
+  });
+  assert.equal(started.accepted, true);
+  const run = await poll(
+    async () => {
+      if (provider.error) throw provider.error;
+      const task = (await snapshot()).tasks.find(
+        (t) => t.id === created.taskId,
+      );
+      const run = task?.runs.find((r) => r.id === started.runId);
+      return run?.terminal ? run : null;
+    },
+    60000,
+    "Office actual DeliverFile completion",
+  );
+  assert.equal(run.terminal.outcome, "completed");
+  assert.ok(receipt);
+  assert.equal(run.outputs.length, 1);
+  const output = run.outputs[0];
+  assert.equal(output.id, receipt.delivery_id);
+  assert.equal(output.sizeBytes, String(bytes.length));
+  assert.deepEqual(await readFile(path.join(workspaceRoot, relative)), bytes);
+  return { taskId: created.taskId, runId: run.id, output, digest };
+}

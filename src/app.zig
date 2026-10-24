@@ -574,7 +574,7 @@ pub fn run(init: std.process.Init) !void {
         single_instance_state.deinit();
     }
 
-    const builtin_skill_root: ?[:0]u8 = if (@import("builtin").os.tag == .windows)
+    const builtin_skill_root: ?[:0]u8 = if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .macos)
         office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir()) catch |failure| failed: {
             std.log.warn("Office Skill publication unavailable: {s}", .{@errorName(failure)});
             break :failed null;
