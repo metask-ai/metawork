@@ -52,7 +52,7 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
 
-Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。`python -X utf8 scripts/check-office-preparation-failures.py --download` 覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理。
+Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。`python -X utf8 scripts/check-office-preparation-failures.py --download` 覆盖缺失环境、无效目标、损坏正式目录保留、原生负退出码、目标被占用、下载失败及摘要拒绝后的清理；还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。
 
 真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Dtarget=x86_64-windows-msvc -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建，再运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的资源绝对路径、新建、工作副本修改及重新读取；不请求远端模型。桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs`，覆盖新 Task、显式刷新、冷启动和发布失败不阻止启动；它不运行或替代通用键盘焦点探针。通用成果交付另由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的既有桌面入口验证。
 
@@ -69,6 +69,18 @@ Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-offic
 最终 `node scripts/package-windows.mjs` 通过 production CSP、automation isolation、canonical Core runtime assets、runtime stage 及原有主包体积 Gate。未签名 x64 安装器为 8,896,664 bytes，较原预算基线增加 455,568 bytes，低于 1,048,576 bytes 允许增量；SHA-256 为 `eb371061267381db9bbd144bd01f1bde9a9925b25bc81ca7cbd7011aee7798e7`。未执行签名发布、推送或合入。
 
 本地证据为 `.zig-cache/office-final-{network-config,preparation-failures,core-shell,check,architecture,archives,validators,package}.log`、`.zig-cache/office-builtin-desktop-final.log`、`.zig-cache/office-delivery-desktop-final.log`、`.zig-cache/office-simplification-tests.log` 与 `.zig-cache/office-simplification-node-limited.log`；隔离文件位于各 qualification 日志记录的目录。
+
+### E-WIN-OFFICE-RECOVERY-20261024
+
+在 `5e2d9fa2` 基础上补充用户授权的最小恢复指引、慢速下载和下载总量说明。没有新增自动修复、目录隔离、管理对象或生命周期状态。损坏环境的诊断显示精确目录，要求先停止所有使用者并退出应用，再由用户明确选择只清理该目录；原生负 NTSTATUS 同样报告不可用。
+
+实际读取并校验锁内 5 个 Python wheel 和 28 个 npm tarball：Python 库为 11,530,133 bytes，含解释器总计 25,921,381 bytes；Node 库为 3,057,557 bytes，含解释器总计 40,361,909 bytes。总量仅表达首次准备的固定文件 payload，不含索引元数据、重试或传输开销。汇总记录关联依赖锁摘要，锁变更而未重新测量会在资源构建时失败。两套环境的既有身份和下载入口逐字节保持不变。最终内嵌资源 SHA-256 为 `5705709c30a71dd725b93310dbea534e9893a47169cd0662edf19173b92a74f8`；Windows batch 资源统一为 CRLF，避免实际发现的标签跳转失败。
+
+最终恢复入口验证通过：损坏正式目录保持原状，诊断明确停止使用者和精确清理范围；隔离 fixture 经显式单目录清理后真实重新准备成功，离线复用正常、兄弟环境未改变。canonical Core 的三个 Skill 临时物化、创建、工作副本修改和重新读取通过。资源一致性与架构边界 35/35、`npm run check`、格式和变更文档链接检查通过。证据在 `.zig-cache/office-followup-{download-measure,failures,core-shell,node,check,format}.log`；实际下载文件的大小和摘要明细保存在 `.zig-cache/office-download-artifacts.json`。
+
+使用生产 curl 参数的隔离 HTTPS 探针通过：393,216 bytes 的持续慢速传输耗时 323.09 秒，越过原 300 秒期限且字节完全一致；完全停滞的传输在 90.64 秒后以 exit 28 中止。参数保留 30 秒连接期限、1,024 bytes/s 的 90 秒低速检测和 1,800 秒总期限。测试只对自身临时证书显式设置信任，未修改系统证书或产品下载来源；证据为 `.zig-cache/office-followup-slow.log` 和 `.zig-cache/office-followup-stall.log`。
+
+最终 Windows x64 未签名安装器为 8,898,119 bytes，SHA-256 为 `7a71b79e6e205a0835584e5a69491f1254ddf926888c520a2d98766ff4f0af3d`，通过未修改的整包体积 Gate；证据为 `.zig-cache/office-followup-package.log`。本轮未执行签名发布，原有完整桌面焦点和其他平台验收缺口不因本次定向验证关闭。
 
 ## 标准入口
 

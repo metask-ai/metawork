@@ -12,6 +12,23 @@ const sources = JSON.parse(
 );
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const read = (name) => readFileSync(path.join(root, name));
+for (const [language, lock] of [
+  ["python", "requirements.txt"],
+  ["node", "package-lock.json"],
+]) {
+  const totals = sources.downloadTotals?.[language];
+  if (
+    !Number.isSafeInteger(totals?.librariesBytes) ||
+    !Number.isSafeInteger(totals?.totalBytes) ||
+    totals.librariesBytes <= 0 ||
+    totals.totalBytes !== sources[language].bytes + totals.librariesBytes ||
+    totals.lockSha256 !== hash(read(`${common}/${lock}`))
+  )
+    throw new Error(
+      `Remeasure Office ${language} download totals for the current lock`,
+    );
+}
+// Display-only totals stay outside the installed environment identity.
 const pythonId = hash(
   JSON.stringify(sources.python) +
     read(`${common}/requirements.txt`) +
@@ -48,8 +65,16 @@ function collect(directory, prefix) {
     const source = `${directory}/${entry.name}`,
       name = `${prefix}/${entry.name}`;
     if (entry.isDirectory()) collect(source, name);
-    else if (entry.isFile()) files.push({ name, data: read(source) });
-    else throw new Error("Office resource link");
+    else if (entry.isFile()) {
+      const data = read(source);
+      // Use Windows line endings for reliable cmd.exe label jumps across checkout settings.
+      files.push({
+        name,
+        data: entry.name.endsWith(".cmd")
+          ? Buffer.from(data.toString("utf8").replace(/\r?\n/g, "\r\n"))
+          : data,
+      });
+    } else throw new Error("Office resource link");
   }
 }
 for (const skill of ["docx", "xlsx", "pptx"]) {

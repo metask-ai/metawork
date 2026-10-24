@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,13 +19,13 @@ entry = resources / "docx/environment"
 offline = dict(os.environ, HTTPS_PROXY="http://127.0.0.1:1", HTTP_PROXY="http://127.0.0.1:1", ALL_PROXY="http://127.0.0.1:1")
 
 
-def command(profile, script, *arguments, network=False):
+def command(profile, script, *arguments, network=False, expect_success=False):
     values = [entry / script, *arguments]
     quoted = " ".join('"' + str(value) + '"' for value in values)
     result = subprocess.run('cmd.exe /d /s /c "' + quoted + '"',
                             env=dict(os.environ if network else offline, LOCALAPPDATA=str(profile)),
                             capture_output=True, timeout=360)
-    assert result.returncode != 0, result.stdout
+    assert (result.returncode == 0) == expect_success, (result.stdout + result.stderr).decode("utf-8", errors="replace")
     return result
 
 
@@ -51,9 +52,25 @@ for language in ("python", "node"):
     (final / "preserve.txt").write_text("completed but unusable fixture", encoding="utf-8")
 before = inventory(home)
 for language in ("python", "node"):
-    command(broken, "prepare.cmd", language)
+    result = command(broken, "prepare.cmd", language)
+    diagnostic = result.stderr.decode("utf-8", errors="replace")
+    identity = re.search(language.upper() + r'_ID=([a-f0-9]+)', config)[1]
+    assert str(home / (language + "-" + identity)) in diagnostic, diagnostic
+    assert "Manual recovery:" in diagnostic and "Confirm no consumers remain" in diagnostic, diagnostic
 assert before == inventory(home)
 assert len(list(home.iterdir())) == 2, "Preparation repaired/quarantined an existing directory"
+
+# Missing native DLLs can produce a negative NTSTATUS, which must not be
+# treated as success by the batch check branch.
+prepare_text = (entry / "prepare.cmd").read_text()
+native_failure = prepare_text.replace(
+    '"%FINAL%\\tools\\python.exe" -I -B "%~dp0finish.py" --check "%FINAL%"',
+    'cmd.exe /d /c exit -1073741515')
+assert native_failure != prepare_text
+(entry / "crashed-check.cmd").write_text(native_failure, encoding="utf-8", newline="\r\n")
+result = command(broken, "crashed-check.cmd", "python")
+assert b"Manual recovery:" in result.stderr
+assert before == inventory(home)
 
 unwritable = scratch / "occupied profile"
 (unwritable / "MetaWork").mkdir(parents=True)
@@ -71,4 +88,20 @@ assert not list((failed / "MetaWork/OfficeDependencies").iterdir()), "Failed dow
 rejected = scratch / "hash profile"
 command(rejected, "prepare.cmd", "python", network=True)
 assert not list((rejected / "MetaWork/OfficeDependencies").iterdir()), "Hash rejection left extracted or published files"
-print("Missing/invalid target, damaged final preservation, occupied destination, download failure and hash rejection passed: " + str(scratch))
+
+# Follow the manual instructions only in our deliberately broken fixture. No
+# process has ever used this fake environment; preserve the sibling directory.
+python_id = re.search(r'PYTHON_ID=([a-f0-9]+)', config)[1]
+python_final = home / ("python-" + python_id)
+assert python_final.resolve().is_relative_to(scratch.resolve())
+assert python_final.resolve() == home.resolve() / ("python-" + python_id)
+shutil.rmtree(python_final)
+# Restore the isolated hash-rejection edit, not any production resource.
+(entry / "environment.cmd").write_text(config, encoding="utf-8", newline="\n")
+command(broken, "prepare.cmd", "python", network=True, expect_success=True)
+command(broken, "prepare.cmd", "python", expect_success=True)
+assert (python_final / "tools/python.exe").is_file()
+for relative, digest in before.items():
+    if relative.startswith("node-"):
+        assert hashlib.sha256((home / relative).read_bytes()).hexdigest() == digest
+print("Failure isolation, exact recovery guidance, manual single-directory removal, fresh preparation and offline reuse passed: " + str(scratch))

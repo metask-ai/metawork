@@ -36,7 +36,7 @@ if %ATTEMPT% LSS 8 goto stage
 echo Unable to create an independent Office preparation directory. 1>&2
 exit /b 1
 :download
-curl.exe --fail --silent --show-error --location --proto =https --proto-redir =https --connect-timeout 30 --max-time 300 --output "%STAGE%\download.zip" "%URL%"
+curl.exe --fail --silent --show-error --location --proto =https --proto-redir =https --connect-timeout 30 --speed-limit 1024 --speed-time 90 --max-time 1800 --output "%STAGE%\download.zip" "%URL%"
 if errorlevel 1 goto failed
 certutil.exe -hashfile "%STAGE%\download.zip" SHA256 | findstr.exe /i /x /c:"%SHA%" >nul
 if errorlevel 1 goto failed
@@ -59,7 +59,12 @@ if "%KIND%"=="python" (
 ) else (
   "%FINAL%\%NODE_FOLDER%\node.exe" "%~dp0finish.cjs" --check "%FINAL%"
 )
-exit /b %errorlevel%
+if "%errorlevel%"=="0" exit /b 0
+echo Office environment unavailable: "%FINAL%". 1>&2
+echo Manual recovery: stop all tasks and scripts using this directory, then exit MetaWork. 1>&2
+echo Confirm no consumers remain before explicitly choosing to remove only this exact directory. 1>&2
+echo Do not remove its parent directory. Reopen MetaWork and request preparation again. 1>&2
+exit /b 1
 :failed
 echo Office dependency preparation failed. No completed environment was replaced. 1>&2
 rem Only this invocation's unpublished directory is owned for cleanup.
