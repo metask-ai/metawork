@@ -1,6 +1,5 @@
 export const RENDERER_BRIDGE_CONTRACT_ID = "metawork.renderer-bridge";
 export const RENDERER_BRIDGE_CONTRACT_REVISION = 1 as const;
-
 export const commands = {
   ping: "metawork.smoke.ping",
   pingAck: "metawork.smoke.eventAck",
@@ -49,11 +48,6 @@ export const commands = {
   previewFile: "metawork.files.preview",
   readPreviewImage: "metawork.files.preview.readImageChunk",
   releasePreview: "metawork.files.preview.release",
-  openDocument: "metawork.documents.open",
-  readDocument: "metawork.documents.read",
-  readDocumentChunk: "metawork.documents.readImageChunk",
-  releaseDocumentRead: "metawork.documents.releaseRead",
-  closeDocument: "metawork.documents.close",
   fileChangeDiff: "metawork.files.diff",
   beginAttachmentAdd: "metawork.attachments.beginAdd",
   appendAttachmentAdd: "metawork.attachments.appendAdd",
@@ -72,12 +66,6 @@ export const commands = {
   accountRefreshSummary: "metawork.account.refreshSummary",
   accountOpenRecharge: "metawork.account.openRecharge",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
-  officeInstall: "metawork.office.install",
-  officeRepair: "metawork.office.repair",
-  officeRemove: "metawork.office.remove",
-  officeRetry: "metawork.office.retry",
-  officeCleanup: "metawork.office.cleanup",
-  officeCancel: "metawork.office.cancel",
   modelsResetStore: "metawork.models.resetStore",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
   selectModelsDefault: "metawork.models.selectDefault",
@@ -118,7 +106,6 @@ export const commands = {
   deleteScheduledTask: "metawork.scheduledTasks.delete",
   recoverScheduledTaskStore: "metawork.scheduledTasks.recoverStore",
 } as const;
-
 export const events = {
   hostSignal: "metawork:host-signal",
   workbench: "metawork:workbench-changed",

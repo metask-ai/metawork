@@ -3,31 +3,25 @@ name: xlsx
 description: Create, read, edit, clean, format, calculate, and convert spreadsheets. Use for .xlsx, .csv, .tsv, Excel, formulas, charts, tabular data, financial models, and spreadsheet deliverables. Do not use for Word documents or Google Sheets API integration.
 ---
 
-# Execution environment
+# XLSX creation, editing and analysis
 
-Skill resource directory: `${CLAUDE_SKILL_DIR}`
+## Execution environment
 
-This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
+This is a complete built-in Skill. Its private environment may not be prepared yet. Only Windows x64 automatic preparation is supported.
 
-Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
+Use the absolute resource entries `${CLAUDE_SKILL_DIR}/environment/prepare.cmd` and `${CLAUDE_SKILL_DIR}/environment/run.cmd` through the existing Shell, preserving Windows argument quoting. Never infer an executable from the parent of this resource directory.
 
-The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
+First use `prepare.cmd python` or `prepare.cmd node` only to reuse an existing environment **after consent has already been obtained**, or use `run.cmd python ...` / `run.cmd node ...` to execute: run never downloads and reports a missing environment. Before first preparation, tell the user its purpose and `downloadTotals.python.totalBytes` or `downloadTotals.node.totalBytes` for the needed language from [environment inputs](environment/environment.json), then ask for agreement. Each total includes the interpreter and all locked library archives for a fresh preparation; index metadata, retries and transport overhead are extra, so describe it as an estimated network download. DOCX/PPTX creation and Python validation may need both environments; state the combined total when both are needed. Then call the fixed prepare entry for the needed language. No arbitrary URL, package list or version arguments are supported. Allow up to 30 minutes for interpreter download and 10 minutes for dependency installation; use the existing Shell background/output tools if its foreground limit is shorter. If preparation fails or is refused, explain the limitation and continue what is possible. Do not install globally or change user configuration. Consent is a conversation instruction; full_access has no additional product installation gate.
 
-Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
+The prepared directories are shared under the user's LocalAppData/MetaWork/OfficeDependencies. Do not automatically update, rename, delete or repair completed environments. If an existing environment fails validation, report it as unavailable and give the exact directory printed by `prepare.cmd`. Explain manual recovery: stop every Task and external script using that directory, exit MetaWork, and confirm no consuming processes remain. Only then may the user explicitly choose to remove that one directory, reopen MetaWork and consent to preparing it again. Never remove the parent OfficeDependencies directory, other environments, Skill resources or documents. A successful rename does not prove that no process uses the environment; if consumers cannot be confirmed stopped, leave it untouched. Private dependencies are not an execution sandbox. Write task scripts, working copies and outputs in the Task workspace. Use `from office_archive import checked_copy` and load only the private checked path inside its context when passing an existing Office file to a library. Never overwrite the attachment original.
 
-Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
+This edition cannot render documents, export PDF, accept revisions or recalculate formulas. Do not invent visual QA or calculation results. XLSX may request recalculation on open, but this does not calculate or populate caches now.
 
-## Explicit file delivery
+## Read, check and deliver
 
-Reopen the XLSX, check that formulas are preserved and recalculated values are current, and verify totals, errors and the affected layout. State any checks you could not perform. Host file verification does not establish document quality.
+For bounded structured text: `run.cmd python "${CLAUDE_SKILL_DIR}/environment/read.py" input.docx new-content.json` (also XLSX/PPTX). For XML work, run the scripts under `scripts/office/` with `run.cmd python`, using new output directories. Reopen and inspect changed content and validate supported structures before delivery. Report unsupported features and checks not performed.
 
-After checking the final file, call the Host tool `DeliverFile` with arguments `{"path":"results/workbook.xlsx"}`, using the actual Task Workspace-relative path with forward slashes. This is a tool call, not a Shell command or text to print. Submit only the finished files requested by the user; keep unpacked XML, scripts, temporary files and preview images as working material unless explicitly requested.
-
-Observe the actual tool result. `verified_for_delivery` confirms the Host checked the bytes and issued a receipt; the Task Outputs record determines registration. If the tool is unavailable or fails, report that delivery was not confirmed. A Markdown path or Shell output cannot register an Output. Describe the changes and any remaining limitations after the real result.
-
-Do not change a file after submitting it; finish further edits and checks before submitting the new result. A read-only analysis can end with a conversational answer and does not require a new file.
-
-Save Python examples as a script and run `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python work.py`. For creation, use the packaged openpyxl, pandas or xlsxwriter. For an existing workbook, keep `load_workbook` or `read_excel` inside `checked_copy` and save to a separate output.
+Call the Host tool `DeliverFile` with the actual Task Workspace-relative output path, e.g. `{"path":"results/report.docx"}`. This is a tool call, not a Shell command or text to print. Deliver only finished files requested by the user, not temporary XML, scripts or check output.
 
 # Requirements for Outputs
 
@@ -36,7 +30,7 @@ Save Python examples as a script and run `"${CLAUDE_SKILL_DIR}/../../bin/office.
 ### Professional Font
 - Use a consistent, professional font (e.g., Arial, Times New Roman) for all deliverables unless otherwise instructed by the user
 
-### Zero Formula Errors
+### Formula checks
 - Every Excel model MUST be delivered with ZERO formula errors (#REF!, #DIV/0!, #VALUE!, #N/A, #NAME?)
 
 ### Preserve Existing Templates (when updating templates)
@@ -88,232 +82,23 @@ Unless otherwise stated by the user or existing template
   - "Source: Bloomberg Terminal, 8/15/2025, AAPL US Equity"
   - "Source: FactSet, 8/20/2025, Consensus Estimates Screen"
 
-# XLSX creation, editing, and analysis
+## Working with openpyxl
 
-## Overview
-
-A user may ask you to create, edit, or analyze the contents of an .xlsx file. You have different tools and workflows available for different tasks.
-
-## Important Requirements
-
-**Formula recalculation**: Use the component `recalc` command on a working copy, with a new output path. It checks preserved formulas, actual caches and errors before publishing. Do not claim success from old cached values or an exit code alone.
-
-**Layout inspection**: Run `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render calculated.xlsx pages` to produce page PNGs, or `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" pdf calculated.xlsx workbook.pdf` for PDF export, with a new output path. These operations render saved values without calculating formulas; recalculate a working copy explicitly first when current results are required. Missing formula caches appear blank. Inspect every affected page, charts, print ranges and Chinese text before delivery. Conditional formatting and data validation are omitted, and expression-based defined names are removed from the rendering copy; the result reports these limitations. Active objects, unsupported extensions and unsafe chart/print references are rejected. Do not claim full layout fidelity when a feature is omitted or rendering fails. The source workbook and its formulas remain unchanged.
-
-## Reading and analyzing data
-
-### Data analysis with pandas
-For data analysis, visualization, and basic operations, use **pandas** which provides powerful data manipulation capabilities:
+Use the fixed openpyxl library for data, formulas, styles, tables and supported charts. Pandas, NumPy and XlsxWriter are not part of this Skill.
 
 ```python
-import pandas as pd
+from pathlib import Path
+from openpyxl import Workbook, load_workbook
+from openpyxl.workbook.properties import CalcProperties
+from office_archive import checked_copy
 
-# Read Excel
-df = pd.read_excel('file.xlsx')  # Default: first sheet
-all_sheets = pd.read_excel('file.xlsx', sheet_name=None)  # All sheets as dict
-
-# Analyze
-df.head()      # Preview data
-df.info()      # Column info
-df.describe()  # Statistics
-
-# Write Excel
-df.to_excel('output.xlsx', index=False)
+with checked_copy("input.xlsx") as checked:
+    workbook = load_workbook(checked, data_only=False)
+    sheet = workbook.active
+    sheet["C2"] = "=SUM(A2:B2)"
+    workbook.calculation = CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
+    workbook.save("updated.xlsx")
+    workbook.close()
 ```
 
-## Excel File Workflows
-
-## CRITICAL: Use Formulas, Not Hardcoded Values
-
-**Always use Excel formulas instead of calculating values in Python and hardcoding them.** This ensures the spreadsheet remains dynamic and updateable.
-
-### ❌ WRONG - Hardcoding Calculated Values
-```python
-# Bad: Calculating in Python and hardcoding result
-total = df['Sales'].sum()
-sheet['B10'] = total  # Hardcodes 5000
-
-# Bad: Computing growth rate in Python
-growth = (df.iloc[-1]['Revenue'] - df.iloc[0]['Revenue']) / df.iloc[0]['Revenue']
-sheet['C5'] = growth  # Hardcodes 0.15
-
-# Bad: Python calculation for average
-avg = sum(values) / len(values)
-sheet['D20'] = avg  # Hardcodes 42.5
-```
-
-### ✅ CORRECT - Using Excel Formulas
-```python
-# Good: Let Excel calculate the sum
-sheet['B10'] = '=SUM(B2:B9)'
-
-# Good: Growth rate as Excel formula
-sheet['C5'] = '=(C4-C2)/C2'
-
-# Good: Average using Excel function
-sheet['D20'] = '=AVERAGE(D2:D19)'
-```
-
-This applies to ALL calculations - totals, percentages, ratios, differences, etc. The spreadsheet should be able to recalculate when source data changes.
-
-## Common Workflow
-1. **Choose tool**: pandas for data, openpyxl for formulas/formatting
-2. **Create/Load**: Create new workbook or load existing file
-3. **Modify**: Add/edit data, formulas, and formatting
-4. **Save**: Write to file
-5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the component `recalc` command and a new output path
-   ```bash
-   "${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc output.xlsx calculated.xlsx
-   ```
-6. **Verify and fix any errors**:
-   - The script returns JSON with error details
-   - If `status` is `errors_found`, check `error_summary` for specific error types and locations
-   - Fix the identified errors and recalculate again
-   - Common errors to fix:
-     - `#REF!`: Invalid cell references
-     - `#DIV/0!`: Division by zero
-     - `#VALUE!`: Wrong data type in formula
-     - `#NAME?`: Unrecognized formula name
-
-### Creating new Excel files
-
-```python
-# Using openpyxl for formulas and formatting
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-
-wb = Workbook()
-sheet = wb.active
-
-# Add data
-sheet['A1'] = 'Hello'
-sheet['B1'] = 'World'
-sheet.append(['Row', 'of', 'data'])
-
-# Add formula
-sheet['B2'] = '=SUM(A1:A10)'
-
-# Formatting
-sheet['A1'].font = Font(bold=True, color='FF0000')
-sheet['A1'].fill = PatternFill('solid', start_color='FFFF00')
-sheet['A1'].alignment = Alignment(horizontal='center')
-
-# Column width
-sheet.column_dimensions['A'].width = 20
-
-wb.save('output.xlsx')
-```
-
-### Editing existing Excel files
-
-```python
-# Using openpyxl to preserve formulas and formatting
-from openpyxl import load_workbook
-
-# Load existing file
-wb = load_workbook('existing.xlsx')
-sheet = wb.active  # or wb['SheetName'] for specific sheet
-
-# Working with multiple sheets
-for sheet_name in wb.sheetnames:
-    sheet = wb[sheet_name]
-    print(f"Sheet: {sheet_name}")
-
-# Modify cells
-sheet['A1'] = 'New Value'
-sheet.insert_rows(2)  # Insert row at position 2
-sheet.delete_cols(3)  # Delete column 3
-
-# Add new sheet
-new_sheet = wb.create_sheet('NewSheet')
-new_sheet['A1'] = 'Data'
-
-wb.save('modified.xlsx')
-```
-
-## Recalculating formulas
-
-Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the component to produce a recalculated working copy:
-
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc <input.xlsx> <new-output.xlsx> [--timeout seconds]
-```
-
-Example:
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" recalc output.xlsx calculated.xlsx --timeout 30
-```
-
-The script:
-- Uses a temporary LibreOffice profile without installing user macros
-- Recalculates all formulas in all sheets
-- Scans ALL cells for Excel errors (#REF!, #DIV/0!, etc.)
-- Returns JSON with detailed error locations and counts
-- Uses the component's sole Office engine and private profile; no user macros run
-
-## Formula Verification Checklist
-
-Quick checks to ensure formulas work correctly:
-
-### Essential Verification
-- [ ] **Test 2-3 sample references**: Verify they pull correct values before building full model
-- [ ] **Column mapping**: Confirm Excel columns match (e.g., column 64 = BL, not BK)
-- [ ] **Row offset**: Remember Excel rows are 1-indexed (DataFrame row 5 = Excel row 6)
-
-### Common Pitfalls
-- [ ] **NaN handling**: Check for null values with `pd.notna()`
-- [ ] **Far-right columns**: FY data often in columns 50+
-- [ ] **Multiple matches**: Search all occurrences, not just first
-- [ ] **Division by zero**: Check denominators before using `/` in formulas (#DIV/0!)
-- [ ] **Wrong references**: Verify all cell references point to intended cells (#REF!)
-- [ ] **Cross-sheet references**: Use correct format (Sheet1!A1) for linking sheets
-
-### Formula Testing Strategy
-- [ ] **Start small**: Test formulas on 2-3 cells before applying broadly
-- [ ] **Verify dependencies**: Check all cells referenced in formulas exist
-- [ ] **Test edge cases**: Include zero, negative, and very large values
-
-### Interpreting recalculation output
-The script returns JSON with error details:
-```json
-{
-  "status": "success",           // or "errors_found"
-  "total_errors": 0,              // Total error count
-  "total_formulas": 42,           // Number of formulas in file
-  "error_summary": {              // Only present if errors found
-    "#REF!": {
-      "count": 2,
-      "locations": ["Sheet1!B5", "Sheet1!C10"]
-    }
-  }
-}
-```
-
-## Best Practices
-
-### Library Selection
-- **pandas**: Best for data analysis, bulk operations, and simple data export
-- **openpyxl**: Best for complex formatting, formulas, and Excel-specific features
-
-### Working with openpyxl
-- Cell indices are 1-based (row=1, column=1 refers to cell A1)
-- Use `data_only=True` to read calculated values: `load_workbook('file.xlsx', data_only=True)`
-- **Warning**: If opened with `data_only=True` and saved, formulas are replaced with values and permanently lost
-- For large files: Use `read_only=True` for reading or `write_only=True` for writing
-- Formulas are preserved but not evaluated - use the component `recalc` command to update values
-
-### Working with pandas
-- Specify data types to avoid inference issues: `pd.read_excel('file.xlsx', dtype={'id': str})`
-- For large files, read specific columns: `pd.read_excel('file.xlsx', usecols=['A', 'C', 'E'])`
-- Handle dates properly: `pd.read_excel('file.xlsx', parse_dates=['date_column'])`
-
-## Code Style Guidelines
-**IMPORTANT**: When generating Python code for Excel operations:
-- Write minimal, concise Python code without unnecessary comments
-- Avoid verbose variable names and redundant operations
-- Avoid unnecessary print statements
-
-**For Excel files themselves**:
-- Add comments to cells with complex formulas or important assumptions
-- Document data sources for hardcoded values
-- Include notes for key calculations and model sections
+For new workbooks start with Workbook(), save to a new output and reopen to check values, formula text and styles. Prefer formulas for derived values. Cached values may be absent or stale; data_only=True does not calculate. Bound dense iteration for sparse worksheets. Preserve templates and disclose features a library cannot retain; do not silently claim full fidelity.

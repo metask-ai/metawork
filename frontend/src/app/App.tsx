@@ -1,5 +1,4 @@
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
-import { DocumentPreviewView } from "./DocumentPreviewView.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -16,9 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
-
 import { AppShell } from "./AppShell.tsx";
-import type { OfficeComponentResult } from "../bridge/contracts.ts";
 import {
   documentHasAttention,
   subscribeDocumentAttention,
@@ -207,13 +204,10 @@ import {
   readLocalPreference,
   writeLocalPreference,
 } from "../platform/local-preferences.ts";
-
 const modelSetupPreferenceKey = "metawork.model-setup-handled";
-
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
-
 function taskModelSelectionMessageId(
   availability: TaskModelSelectionAvailability | undefined,
 ): MessageId {
@@ -229,7 +223,6 @@ function taskModelSelectionMessageId(
       return "settings.task_model_task_unavailable";
   }
 }
-
 type MutationReason =
   | TaskCreateReason
   | TaskCompactReason
@@ -237,23 +230,31 @@ type MutationReason =
   | TaskRunReason
   | SendInputReason
   | TaskModelSelectionReason;
-
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
 }
-
 const automaticWorkspaceOptionId = "automatic";
-
 type FileChangeDiffUiState =
-  | { phase: "idle"; diff: null; requestGeneration?: undefined }
-  | { phase: "loading"; diff: null; requestGeneration: number }
+  | {
+      phase: "idle";
+      diff: null;
+      requestGeneration?: undefined;
+    }
+  | {
+      phase: "loading";
+      diff: null;
+      requestGeneration: number;
+    }
   | {
       phase: "settled";
       diff: FileChangeDiffResult;
       requestGeneration: number;
     }
-  | { phase: "failed"; diff: null; requestGeneration: number };
-
+  | {
+      phase: "failed";
+      diff: null;
+      requestGeneration: number;
+    };
 type FileChangesIdentity = {
   taskId: string;
   runId: string;
@@ -263,10 +264,13 @@ type FileChangesIdentity = {
   diffs: Record<string, FileChangeDiffUiState>;
   focus: FileChangeFocus | null;
 };
-
 type FileChangesUiState =
-  { kind: "closed" } | (FileChangesIdentity & { kind: "open" });
-
+  | {
+      kind: "closed";
+    }
+  | (FileChangesIdentity & {
+      kind: "open";
+    });
 function orderedFileChanges(changes: FileChangeView[]): FileChangeView[] {
   return [...changes].sort((left, right) => {
     const leftOrder = BigInt(left.order);
@@ -274,7 +278,6 @@ function orderedFileChanges(changes: FileChangeView[]): FileChangeView[] {
     return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
   });
 }
-
 type LocalTaskSubmission = {
   operationId: string;
   taskId: string | null;
@@ -284,7 +287,6 @@ type LocalTaskSubmission = {
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
 };
-
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
@@ -386,7 +388,6 @@ export default function App() {
     failed: failUiResponse,
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
-
   const client = useMemo(() => new BridgeClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
@@ -416,11 +417,9 @@ export default function App() {
   const [localSubmissions, setLocalSubmissions] = useState<
     LocalTaskSubmission[]
   >([]);
-
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
   }
-
   const snapshot = workbench.snapshot;
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
@@ -446,7 +445,6 @@ export default function App() {
         : { ...goals, [taskId]: { taskId, oldestRunId: runId } };
     });
   }
-
   const [historyRequests, setHistoryRequests] = useState<
     Record<string, HistoryGoal>
   >({});
@@ -464,7 +462,6 @@ export default function App() {
   );
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = workbench.activeTaskId;
-
   function focusTaskPanelTab(tabId: string) {
     window.requestAnimationFrame(() => {
       const tab = [
@@ -477,7 +474,6 @@ export default function App() {
       });
     });
   }
-
   function openFilePreview(
     taskId: string,
     runId: string,
@@ -497,7 +493,6 @@ export default function App() {
     filePreviewTabs.open(taskId, runId, selected);
     focusTaskPanelTab(tab.tabId);
   }
-
   function refreshFilePreview() {
     const active = taskPanel.activeTab;
     if (!active || active.kind !== "preview") return;
@@ -507,13 +502,11 @@ export default function App() {
       displayPath: active.displayPath,
     });
   }
-
   function clearFileChanges() {
     fileChangesGeneration.current += 1;
     fileChangeRequestsInFlight.current.clear();
     setFileChanges({ kind: "closed" });
   }
-
   function requestFileChangeDiff(
     taskId: string,
     runId: string,
@@ -608,7 +601,6 @@ export default function App() {
         fileChangeRequestsInFlight.current.delete(requestKey);
       });
   }
-
   function openFileChanges(
     taskId: string,
     runId: string,
@@ -694,7 +686,6 @@ export default function App() {
     );
     if (!focus) focusTaskPanelTab(tab.tabId);
   }
-
   function loadFileChangeDiff(change: FileChangeView) {
     if (fileChanges.kind === "closed") return;
     const current = fileChanges.diffs[change.id];
@@ -715,11 +706,9 @@ export default function App() {
       fileChanges.sessionGeneration,
     );
   }
-
   useEffect(() => {
     clearFileChanges();
   }, [workbench.activeTaskId]);
-
   useEffect(() => {
     setFileChanges((current) => {
       if (current.kind === "closed") return current;
@@ -763,7 +752,6 @@ export default function App() {
       };
     });
   }, [snapshot.revision, snapshot.tasks, snapshot.taskIndex]);
-
   const panelTask = route === "workbench" ? activeTask : null;
   const taskPanel = useTaskPanelTarget(
     panelTask,
@@ -792,21 +780,10 @@ export default function App() {
     ) => client.previewFile(taskId, runId, referenceId, options),
     [client],
   );
-  const loadDocumentPreview = useCallback(
-    (taskId: string, runId: string, referenceId: string, signal: AbortSignal) =>
-      client.previewDocument(
-        taskId,
-        runId,
-        { kind: "fileReference", id: referenceId },
-        signal,
-      ),
-    [client],
-  );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
-    loadDocumentPreview,
   );
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
@@ -944,13 +921,11 @@ export default function App() {
     completionAcknowledgement,
     completionAcknowledgementFailure,
   );
-
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined")
       return;
     return subscribeDocumentAttention(document, window, setDocumentAttention);
   }, []);
-
   useEffect(() => {
     if (completionAcknowledgement === null) return;
     const { taskId, runId, key } = completionAcknowledgement;
@@ -985,7 +960,6 @@ export default function App() {
       ? current.refresh()
       : Promise.reject(new Error("Workbench connection is unavailable"));
   }, []);
-
   const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
     newTaskDraftActive || Boolean(activeTask?.inputAcceptance.available);
@@ -1133,18 +1107,15 @@ export default function App() {
             snapshot.capabilities.scheduledTasks ||
             snapshot.capabilities.scheduledTaskRecoveryAvailable,
         });
-
   function rememberModelSetupIntroduction() {
     if (modelSetupHandled) return;
     setModelSetupHandled(true);
     writeLocalPreference(modelSetupPreferenceKey, "true");
   }
-
   function finishModelSetupIntroduction() {
     rememberModelSetupIntroduction();
     setModelSetupOpen(false);
   }
-
   function openModelSetup() {
     modelSetupReturnFocus.current =
       document.activeElement instanceof HTMLElement &&
@@ -1153,7 +1124,6 @@ export default function App() {
         : composer.current;
     setModelSetupOpen(true);
   }
-
   useEffect(() => {
     const start = () => setModelSetupComposing(true);
     const end = () => setModelSetupComposing(false);
@@ -1164,7 +1134,6 @@ export default function App() {
       document.removeEventListener("compositionend", end);
     };
   }, []);
-
   useEffect(() => {
     if (bridgeUnavailable) return;
     if (hasReadyModels || newTaskModelState.valid) {
@@ -1219,7 +1188,6 @@ export default function App() {
     newTaskRequestedModel,
     setupNotice?.action,
   ]);
-
   function runModelSetupAction(action: ModelSetupAction) {
     switch (action) {
       case "start":
@@ -1252,13 +1220,11 @@ export default function App() {
       ? activeTask.binding.model
       : selectedModelLabel;
   const taskModelPolicy = taskModelSelectionPolicy(activeTask);
-
   // The Host result is already committed. A failed follow-up refresh is
   // published by the connection owner, never reported as a failed operation.
   async function refreshCommittedView() {
     await refreshSnapshot().catch(() => undefined);
   }
-
   useEffect(() => {
     const errorCode = snapshot.account.errorCode;
     if (errorCode === "none" || errorCode === "user_cancelled") return;
@@ -1272,7 +1238,6 @@ export default function App() {
       ),
     );
   }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
-
   useEffect(() => {
     let cancelled = false;
     const current = new WorkbenchConnection(client, {
@@ -1418,7 +1383,6 @@ export default function App() {
     });
     connection.current = current;
     void current.start().catch(() => undefined);
-
     const onPageHide = () => {
       void current.stop();
     };
@@ -1432,7 +1396,6 @@ export default function App() {
       void current.stop();
     };
   }, [client, observeUiResponseSnapshot, taskDrafts.pruneDrafts]);
-
   useEffect(() => {
     const management =
       route === "skills"
@@ -1467,7 +1430,6 @@ export default function App() {
     localSubmissions,
     historyCursor,
   ]);
-
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
@@ -1485,7 +1447,6 @@ export default function App() {
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
   }, [bridgeUnavailable, modelSetupOpen]);
-
   useEffect(() => {
     if (!client.available()) return;
     return client.onShortcut((detail) => {
@@ -1494,13 +1455,11 @@ export default function App() {
       openSettings();
     });
   }, [bridgeUnavailable, client]);
-
   useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
     taskPanelOpeners.current.clear();
   }, [workbench.activeTaskId]);
-
   useEffect(() => {
     if (
       !snapshot.newTaskAdmission.available ||
@@ -1518,7 +1477,6 @@ export default function App() {
     snapshot.newTaskAdmission.available,
     workbench.draftOpen,
   ]);
-
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
     if (!requestId) return;
@@ -1526,7 +1484,6 @@ export default function App() {
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
     window.requestAnimationFrame(() => target?.focus());
   }
-
   function dismissTaskPanel(restoreFocus = true) {
     const panel = document.getElementById("task-panel");
     const focusWasInside = panel?.contains(document.activeElement) === true;
@@ -1541,7 +1498,6 @@ export default function App() {
     if (restoreFocus && focusWasInside && focusTarget)
       window.requestAnimationFrame(() => focusTarget.focus());
   }
-
   function closeTaskPanelTab(tabId: string) {
     const tab = taskPanel.session.tabs.find(
       (candidate) => candidate.tabId === tabId,
@@ -1572,14 +1528,12 @@ export default function App() {
       });
     });
   }
-
   function focusPendingFromTaskPanel() {
     const panel = document.getElementById("task-panel");
     if (panel && window.getComputedStyle(panel).position === "fixed")
       dismissTaskPanel(false);
     window.requestAnimationFrame(focusPendingRequest);
   }
-
   function toggleRightPanel(_opener: HTMLButtonElement) {
     if (rightPanelOpen) {
       dismissTaskPanel(false);
@@ -1588,7 +1542,6 @@ export default function App() {
     setRightPanelOpen(true);
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
   }
-
   function closeDeleteConfirmation() {
     setConfirmDelete(false);
     window.requestAnimationFrame(() => {
@@ -1598,7 +1551,6 @@ export default function App() {
       taskRow?.focus();
     });
   }
-
   function beginTaskPendingOperation(scope: string, operation: string) {
     if (taskPendingScopes.current.has(scope)) return false;
     if (!taskPendingScopes.current.begin(scope)) return false;
@@ -1607,7 +1559,6 @@ export default function App() {
     });
     return true;
   }
-
   function endTaskPendingOperation(scope: string) {
     taskPendingScopes.current.end(scope);
     setTaskPending((current) => {
@@ -1617,7 +1568,6 @@ export default function App() {
       return next;
     });
   }
-
   function setCancelPendingForTask(taskId: string, pending: boolean) {
     if (pending) cancelPendingTasks.current.begin(taskId);
     else cancelPendingTasks.current.end(taskId);
@@ -1628,7 +1578,6 @@ export default function App() {
       return next;
     });
   }
-
   async function retryViewSynchronization(
     replaceConnection = false,
     expectedGeneration?: string,
@@ -1667,7 +1616,6 @@ export default function App() {
         connectionRetryRef.current = null;
     }
   }
-
   async function runAccountCommand(
     invoke: () => Promise<{
       accepted: boolean;
@@ -1712,7 +1660,6 @@ export default function App() {
       setAccountBusy(false);
     }
   }
-
   async function openAccountRecharge() {
     if (bridgeUnavailable || accountBusyRef.current) return;
     accountBusyRef.current = true;
@@ -1737,7 +1684,6 @@ export default function App() {
       setAccountBusy(false);
     }
   }
-
   async function runExecutionCommand(
     invoke: () => Promise<{
       accepted: boolean;
@@ -1779,9 +1725,10 @@ export default function App() {
       setExecutionBusy(false);
     }
   }
-
   async function mutateAutomaticWorkspaceRoot(
-    invoke: () => Promise<{ outcome: "applied" | "cancelled" }>,
+    invoke: () => Promise<{
+      outcome: "applied" | "cancelled";
+    }>,
   ): Promise<"applied" | "cancelled" | false> {
     if (bridgeUnavailable) return false;
     try {
@@ -1793,21 +1740,6 @@ export default function App() {
       return false;
     }
   }
-
-  async function mutateOffice(
-    invoke: () => Promise<OfficeComponentResult>,
-  ): Promise<OfficeComponentResult | null> {
-    if (bridgeUnavailable) return null;
-    try {
-      const result = await invoke();
-      await refreshCommittedView();
-      return result;
-    } catch {
-      await refreshSnapshot().catch(() => undefined);
-      return null;
-    }
-  }
-
   function publishApprovalObservations(results: ApprovalObservation[]) {
     for (const result of results) {
       const audience = { scope: "task" as const, taskId: result.taskId };
@@ -1824,7 +1756,6 @@ export default function App() {
         setStatus(attentionStatus("permission.change.not_confirmed", audience));
     }
   }
-
   async function setTaskApprovalMode(targetMode: ApprovalMode) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -1860,7 +1791,6 @@ export default function App() {
       await refreshSnapshot().catch(() => undefined);
     }
   }
-
   async function refreshTaskApprovalMode() {
     const taskId = activeTask?.id;
     if (!taskId || bridgeUnavailable) return;
@@ -1884,7 +1814,6 @@ export default function App() {
       );
     }
   }
-
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     const option = taskModelOptions.find(
@@ -1931,7 +1860,6 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
-
   async function selectMetaskModel(modelId: string) {
     const provider = metaskProvider;
     if (!provider) return;
@@ -1969,7 +1897,6 @@ export default function App() {
       }),
     );
   }
-
   async function cancelAccountOperation() {
     if (
       viewSyncFailed ||
@@ -2006,7 +1933,6 @@ export default function App() {
       setAccountCancelBusy(false);
     }
   }
-
   async function chooseWorkspaceForDraft() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
     workspaceBusyRef.current = true;
@@ -2060,7 +1986,6 @@ export default function App() {
       setWorkspaceBusy(false);
     }
   }
-
   function setDraftWorkspaceById(workspaceId: string) {
     if (workbenchMutationDisabled) return;
     if (workspaceId === automaticWorkspaceOptionId) {
@@ -2094,7 +2019,6 @@ export default function App() {
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-
   function beginNewTask() {
     pendingTaskSelection.current = null;
     newTaskSubmissionInstance.current += 1;
@@ -2111,13 +2035,11 @@ export default function App() {
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-
   function openTask(taskId: string) {
     pendingTaskSelection.current = null;
     setRoute("workbench");
     dispatchWorkbench({ type: "task.selected", taskId });
   }
-
   function openSettings(target: SettingsFocusTarget = "title") {
     if (modelSetupOpen) {
       modelSetupReturnFocus.current = null;
@@ -2133,7 +2055,6 @@ export default function App() {
     setSettingsFocus(target);
     setSettingsOpen(true);
   }
-
   function closeSettings() {
     setSettingsOpen(false);
     window.requestAnimationFrame(() => {
@@ -2141,7 +2062,6 @@ export default function App() {
       settingsRestoreFocus.current = null;
     });
   }
-
   async function submitRun() {
     if (
       !canSubmit ||
@@ -2268,9 +2188,14 @@ export default function App() {
     );
     await refreshSnapshot().catch(() => undefined);
   }
-
   async function addAttachments(
-    input?: { paths: string[] } | { files: File[] },
+    input?:
+      | {
+          paths: string[];
+        }
+      | {
+          files: File[];
+        },
   ) {
     if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
       setAttachmentError("input_busy");
@@ -2379,7 +2304,6 @@ export default function App() {
       }
     }
   }
-
   droppedAttachmentHandlerRef.current = (paths) => {
     if (
       paths.length === 0 ||
@@ -2390,14 +2314,12 @@ export default function App() {
       return;
     void addAttachments({ paths });
   };
-
   useEffect(() => {
     if (!client.available()) return;
     return client.onFileDrop((paths) => {
       droppedAttachmentHandlerRef.current(paths);
     });
   }, [bridgeGeneration]);
-
   async function removeAttachment(token: string) {
     if (
       attachmentBusyRef.current ||
@@ -2437,7 +2359,6 @@ export default function App() {
       },
     });
   }
-
   async function cancelRun() {
     if (bridgeUnavailable) return;
     const taskId = !newTaskDraftActive ? activeTask?.id : undefined;
@@ -2477,7 +2398,6 @@ export default function App() {
       if (taskId) setCancelPendingForTask(taskId, false);
     }
   }
-
   async function compactTask() {
     if (
       viewSyncFailed ||
@@ -2532,7 +2452,6 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
-
   function composerDraftFromRunInput(
     input: RunInputView,
   ): ComposerDraft | null {
@@ -2566,7 +2485,6 @@ export default function App() {
       maxValues: Math.min(descriptor.maxValues, maxSkillArguments),
     };
   }
-
   async function refreshComposerSkillCatalog() {
     if (
       skillCatalogBusy ||
@@ -2624,7 +2542,6 @@ export default function App() {
       setSkillCatalogBusy(false);
     }
   }
-
   async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
     const key = skillRefreshKey(target);
     if (skillRefreshPending.current.has(key) || bridgeUnavailable) return;
@@ -2655,7 +2572,6 @@ export default function App() {
       }));
     }
   }
-
   async function commitSkillSourceMutation(
     mutation: () => Promise<
       import("../bridge/contracts.ts").SkillSourceSettingsResult
@@ -2684,7 +2600,6 @@ export default function App() {
       setSourceMutationBusy(false);
     }
   }
-
   async function commitSkillMutation(
     mutation: () => Promise<SkillMutationResult>,
   ): Promise<SkillMutationResult> {
@@ -2692,10 +2607,11 @@ export default function App() {
     if (result.accepted) await refreshCommittedView();
     return result;
   }
-
   async function setSkillEnabled(
     target:
-      | { scope: "personal" }
+      | {
+          scope: "personal";
+        }
       | {
           scope: "project";
           workspaceId: string;
@@ -2716,7 +2632,6 @@ export default function App() {
     await refreshCommittedView();
     return result;
   }
-
   async function commitMcpMutation(
     mutation: () => Promise<McpMutationResult>,
   ): Promise<McpMutationResult> {
@@ -2729,7 +2644,6 @@ export default function App() {
       throw error;
     }
   }
-
   async function refreshMcpCatalog(): Promise<McpRefreshResult> {
     try {
       const result = await client.refreshMcpCatalog();
@@ -2740,7 +2654,6 @@ export default function App() {
       throw error;
     }
   }
-
   async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
     try {
       const result = await client.applyMcpConfiguration();
@@ -2751,7 +2664,6 @@ export default function App() {
       throw error;
     }
   }
-
   async function testMcpConnection(
     expectedGeneration: string,
     serverId: string,
@@ -2768,7 +2680,6 @@ export default function App() {
       throw error;
     }
   }
-
   function runSlashCommand(command: SlashCommandName) {
     switch (command) {
       case "new":
@@ -2779,7 +2690,6 @@ export default function App() {
         return;
     }
   }
-
   async function renameTask(task = activeTask) {
     if (
       !task ||
@@ -2821,7 +2731,6 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
-
   async function setArchived(
     archived: boolean,
     task: TaskSummary | TaskView | null = activeTask,
@@ -2868,7 +2777,6 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
-
   async function deleteTask(task = activeTask) {
     if (
       !task ||
@@ -2916,13 +2824,11 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
-
   function selectSearchResult(result: SearchResult) {
     openTask(result.taskId);
     setSearchOpen(false);
     setSearchQuery("");
   }
-
   function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
     openTask(task.id);
     if (action === "rename") {
@@ -2936,7 +2842,6 @@ export default function App() {
     }
     window.requestAnimationFrame(() => setConfirmDelete(true));
   }
-
   async function respondUi(payload: UiResponsePayload) {
     const pending = activeTask?.pendingUi;
     if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
@@ -2976,7 +2881,6 @@ export default function App() {
       { scope: "task", taskId },
     );
   }
-
   const outputEditAudience = attachmentAudience.current;
   function prepareOutputEdit(
     taskId: string,
@@ -3020,7 +2924,6 @@ export default function App() {
     });
     return "edit_prepared";
   }
-
   function prepareRetry(input: RunInputView) {
     if (!activeTask || !taskCanCompose) return;
     if (input.kind === "skill") {
@@ -3103,7 +3006,6 @@ export default function App() {
     }
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-
   async function refreshAfterCommit(
     success: MessageId,
     operation: MessageId,
@@ -3121,7 +3023,6 @@ export default function App() {
       );
     }
   }
-
   async function reconcileCommandTimeout(
     error: unknown,
     operation: MessageId,
@@ -3144,7 +3045,6 @@ export default function App() {
     }
     return true;
   }
-
   const connectionShellStatus = statuses.connection;
   const connectionFailure = connectionFailurePresentation(
     connectionShellStatus,
@@ -3162,7 +3062,6 @@ export default function App() {
         onRetry={() => void retryViewSynchronization()}
       />
     );
-
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
     ? t(newTaskDraftActive ? "task.new" : "task.open")
@@ -3526,13 +3425,7 @@ export default function App() {
         selected: activePreview.reference,
         phase: activePreview.kind === "loading" ? "loading" : "settled",
         preview:
-          activePreview.kind === "loading" || activePreview.kind === "document"
-            ? null
-            : activePreview.preview,
-        document:
-          activePreview.kind === "document"
-            ? activePreview.document
-            : undefined,
+          activePreview.kind === "loading" ? null : activePreview.preview,
       };
   const activePanelView = taskPanel.activeTab
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
@@ -3569,7 +3462,6 @@ export default function App() {
         : previewMatchesTarget && filePreviewViewState
           ? filePreviewViewState.selected.displayPath
           : t("file_preview.title");
-
   return (
     <AppShell
       taskTitle={
@@ -3858,17 +3750,6 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
-                documentContent={
-                  filePreviewViewState.document ? (
-                    <DocumentPreviewView
-                      key={filePreviewViewState.selected.id}
-                      preview={filePreviewViewState.document}
-                      title={filePreviewViewState.selected.displayPath}
-                      onRefresh={refreshFilePreview}
-                      showRefreshAction={false}
-                    />
-                  ) : undefined
-                }
                 webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
@@ -3931,11 +3812,6 @@ export default function App() {
             account={snapshot.account}
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
-            office={snapshot.office}
-            onOfficeAction={(action, generation) =>
-              mutateOffice(() => client.manageOffice(action, generation))
-            }
-            onOfficeCancel={(id) => mutateOffice(() => client.cancelOffice(id))}
             customProviderCapabilities={{
               management: snapshot.capabilities.customProviderManagement,
               secretCapture: snapshot.capabilities.customProviderSecretCapture,
@@ -4332,19 +4208,6 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
-                renderOutputPreview={(preview, title, onRefresh) => (
-                  <DocumentPreviewView
-                    preview={preview}
-                    title={title}
-                    onRefresh={onRefresh}
-                  />
-                )}
-                onPreviewOutput={(taskId, runId, outputId) =>
-                  client.previewDocument(taskId, runId, {
-                    kind: "output",
-                    id: outputId,
-                  })
-                }
                 onOutputAction={(taskId, runId, outputId, action, signal) =>
                   client.outputAction(taskId, runId, outputId, action, signal)
                 }

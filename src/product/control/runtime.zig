@@ -1,8 +1,4 @@
 const std = @import("std");
-const office_component = @import("product_office_component");
-pub const OfficeWire = @import("product_office_view_contract");
-pub const OfficeKind = office_component.Kind;
-pub const OfficeAdmission = office_component.Admission;
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
@@ -14,14 +10,6 @@ const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const output_check = @import("output_check.zig");
-const document_sessions = @import("product_document_preview_session");
-pub const DocumentPreviewLimits = document_sessions.Limits;
-pub const DocumentPreviewInput = document_sessions.contract.Input;
-pub const DocumentPreviewRequest = document_sessions.contract.Request;
-pub const DocumentPreviewSelector = document_sessions.Selector;
-pub const DocumentPreviewState = document_sessions.State;
-pub const DocumentPreviewResult = document_sessions.Result;
-pub const DocumentPreviewSink = document_sessions.Sink;
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_control_attachment_staging");
@@ -387,8 +375,6 @@ pub const SkillMutationResult = skill_runtime.MutationResult;
 pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
 
-pub const OfficeComponentConfiguration = office_component.Configuration;
-
 pub const Configuration = struct {
     run_clock: task_runtime.RunClock = .{},
     change_notifier: ChangeNotifier = .{},
@@ -407,7 +393,6 @@ pub const Configuration = struct {
     skill_enablement: SkillEnablementConfiguration = .{},
     skill_sources: skill_runtime.SourceConfiguration = .{},
     builtin_skill_root: ?[]const u8 = null,
-    office_component: OfficeComponentConfiguration = .{},
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
@@ -1085,39 +1070,6 @@ pub const FileChangeDiffAdmission = union(enum) {
     immediate: FileChangeDiffReason,
 };
 
-fn controlOfficeView(context: *anyopaque) office_component.View {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.officeComponentView();
-}
-fn controlOfficeBegin(context: *anyopaque, kind: office_component.Kind, generation: u64) office_component.Admission {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.beginOfficeOperation(kind, generation);
-}
-fn controlOfficeAttempt(context: *anyopaque, id: u64) ?*office_component.Attempt {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.officeAttempt(id);
-}
-fn controlOfficeCancel(context: *anyopaque, id: u64) office_component.Admission {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.cancelOfficeOperation(id);
-}
-fn controlOfficeProgress(context: *anyopaque, id: u64, progress: office_component.Progress) void {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    self.reportOfficeProgress(id, progress);
-}
-fn controlOfficeComplete(context: *anyopaque, id: u64, completion: office_component.Completion) bool {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.completeOfficeOperation(id, completion);
-}
-fn controlOfficeResources(context: *anyopaque, capacity: bool, cleanup_pending: bool) void {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    self.setOfficeResourceFacts(capacity, cleanup_pending);
-}
-fn controlOfficeSource(context: *anyopaque, root: ?[]const u8, lifetime: ?lifecycle.CatalogSourceLifetime) !bool {
-    const self: *Runtime = @ptrCast(@alignCast(context));
-    return self.replaceBuiltinSkillSource(.{ .root = root, .lifetime = lifetime });
-}
-
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
 const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
@@ -1266,7 +1218,6 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
-    office: office_component.State,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1347,8 +1298,6 @@ pub const Runtime = struct {
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
-    documents: document_sessions.Sessions = .{},
-    document_preparation: ?control_ports.DocumentPreviewPreparation = null,
     output_file_reveal: ?control_ports.OutputFileReveal = null,
     output_file_save: ?control_ports.OutputFileSave = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
@@ -1640,7 +1589,6 @@ pub const Runtime = struct {
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
         var control: Runtime = .{
-            .office = office_component.State.init(configuration.office_component),
             .allocator = allocator,
             .io = io,
             .agent_runtime = agent_runtime,
@@ -1742,118 +1690,6 @@ pub const Runtime = struct {
             .free_fn = freeWorkspaceStorage,
             .redact_fn = redactWorkspaceStorage,
         };
-    }
-
-    pub fn setDocumentPreviewPreparation(self: *Runtime, preparation: control_ports.DocumentPreviewPreparation) void {
-        self.document_preparation = preparation;
-    }
-
-    const DocumentReference = struct { workspace_id: u64, workspace_epoch: u64, input: document_sessions.contract.Input };
-    fn documentReference(self: *const Runtime, task_id: u64, run_id: u64, selector: document_sessions.Selector, storage: *[4096]u8) !DocumentReference {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
-        const task = self.task_runtime.findConst(task_id) orelse return error.MissingPreview;
-        if (task.deletion != .idle) return error.MissingPreview;
-        switch (selector) {
-            .output => |id| {
-                const current = try self.outputFileAuthority(task_id, run_id, id);
-                return .{ .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .input = .{ .workspace_root = current.workspace_root, .relative_path = current.locator, .expected = .{ .size_bytes = current.size_bytes, .sha256 = current.sha256 } } };
-            },
-            .reference => |id| {
-                if (id.len == 0 or id.len > 128 or self.containsKnownCredential(id)) return error.RestrictedPreview;
-                const current = self.task_runtime.fileReference(task_id, run_id, id) orelse return error.MissingPreview;
-                if (!self.filePreviewWorkspaceAuthorized(current) or self.containsKnownCredential(current.workspace_root) or self.containsKnownCredential(current.locator)) return error.RestrictedPreview;
-                const relative = switch (current.locator_kind) {
-                    .workspace_path => current.locator,
-                    .absolute_path => absoluteReferenceRelativePath(current.workspace_root, current.locator, storage) orelse return error.RestrictedPreview,
-                    .uri => return error.UnsupportedPreview,
-                };
-                return .{ .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .input = .{ .workspace_root = current.workspace_root, .relative_path = relative, .expected = null } };
-            },
-        }
-    }
-    fn documentComponentIdentity(self: *const Runtime) ![32]u8 {
-        const current = self.office.current orelse return error.OfficePreviewUnavailable;
-        if (!self.office.supported or self.office.health != .ready or current.state != .ready or self.office.shutting_down or
-            (if (self.office.operation) |operation| operation.kind == .remove else false)) return error.OfficePreviewUnavailable;
-        return current.identity;
-    }
-    /// Deep copy on main; only Application may capture actual bytes on worker.
-    pub fn copyDocumentPreviewTarget(self: *const Runtime, allocator: std.mem.Allocator, task_id: u64, run_id: u64, selector: document_sessions.Selector) !document_sessions.Target {
-        const component = try self.documentComponentIdentity();
-        var relative: [4096]u8 = undefined;
-        const current = try self.documentReference(task_id, run_id, selector, &relative);
-        const reference = switch (selector) {
-            .output => "",
-            .reference => |id| id,
-        };
-        const root_len = current.input.workspace_root.len;
-        const path_len = current.input.relative_path.len;
-        const storage = try allocator.alloc(u8, root_len + path_len + reference.len);
-        @memcpy(storage[0..root_len], current.input.workspace_root);
-        @memcpy(storage[root_len..][0..path_len], current.input.relative_path);
-        @memcpy(storage[root_len + path_len ..], reference);
-        return .{ .allocator = allocator, .storage = storage, .task_id = task_id, .run_id = run_id, .selector = switch (selector) {
-            .output => |id| .{ .output = id },
-            .reference => .{ .reference = storage[root_len + path_len ..] },
-        }, .workspace_id = current.workspace_id, .workspace_epoch = current.workspace_epoch, .security_epoch = self.projection_security_epoch, .component = component, .input = .{ .workspace_root = storage[0..root_len], .relative_path = storage[root_len..][0..path_len], .expected = current.input.expected } };
-    }
-    pub fn revalidateDocumentPreviewTarget(self: *const Runtime, target: *const document_sessions.Target) !void {
-        if (target.security_epoch == 0 or target.security_epoch != self.projection_security_epoch) return error.StaleSecurityEpoch;
-        const component = try self.documentComponentIdentity();
-        if (!std.mem.eql(u8, &component, &target.component)) return error.OfficePreviewUnavailable;
-        var relative: [4096]u8 = undefined;
-        const current = try self.documentReference(target.task_id, target.run_id, target.selector, &relative);
-        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
-            !std.mem.eql(u8, current.input.workspace_root, target.input.workspace_root) or
-            !std.mem.eql(u8, current.input.relative_path, target.input.relative_path) or !std.meta.eql(current.input.expected, target.input.expected)) return error.RestrictedPreview;
-    }
-    fn documentPolicy(self: *Runtime) document_sessions.Policy {
-        return .{ .context = self, .validate_fn = documentValidate, .contains_fn = documentContains, .overlap_fn = documentOverlap };
-    }
-    fn documentValidate(context: *anyopaque, target: *const document_sessions.Target) !void {
-        try (@as(*Runtime, @ptrCast(@alignCast(context)))).revalidateDocumentPreviewTarget(target);
-    }
-    fn documentContains(context: *anyopaque, bytes: []const u8) bool {
-        return (@as(*Runtime, @ptrCast(@alignCast(context)))).containsKnownCredential(bytes);
-    }
-    fn documentOverlap(context: *anyopaque) !usize {
-        return (@as(*Runtime, @ptrCast(@alignCast(context)))).filePreviewCredentialOverlap();
-    }
-    pub const DocumentPreviewAdmission = union(enum) { queued: u64, immediate: document_sessions.State };
-    pub fn beginDocumentPreview(self: *Runtime, request_id: u64, task_id: u64, run_id: u64, selector: document_sessions.Selector) DocumentPreviewAdmission {
-        const preparation = self.document_preparation orelse return .{ .immediate = .unavailable };
-        var target = self.copyDocumentPreviewTarget(self.allocator, task_id, run_id, selector) catch |failure| return .{ .immediate = document_sessions.failureState(failure) };
-        var consumed = false;
-        defer if (!consumed) target.deinit();
-        const id = self.documents.open(self.io, self.allocator, .{ .context = self.change_notifier.context, .wake_fn = self.change_notifier.wake }, self.documentPolicy(), preparation, target, request_id) catch |failure| return .{ .immediate = document_sessions.failureState(failure) };
-        consumed = true;
-        _ = self.change_notifier.notify();
-        return .{ .queued = id };
-    }
-    pub fn readDocumentPreview(self: *Runtime, id: u64, request_id: u64, request: document_sessions.contract.Request) !void {
-        try self.documents.read(self.documentPolicy(), id, request_id, request);
-    }
-    pub fn readDocumentPreviewChunk(self: *Runtime, id: u64, offset: usize) ![]const u8 {
-        return self.documents.chunk(self.documentPolicy(), id, offset);
-    }
-    pub fn releaseDocumentPreviewRead(self: *Runtime, id: u64) void {
-        self.documents.releaseRead(id);
-    }
-    pub fn closeDocumentPreview(self: *Runtime, id: u64) bool {
-        return self.documents.close(id, .cancelled);
-    }
-    pub fn drainDocumentPreviews(self: *Runtime, sink: document_sessions.Sink) void {
-        self.documents.drain(self.documentPolicy(), sink);
-    }
-    pub fn documentPreviewNeedsWake(self: *const Runtime) bool {
-        return self.documents.needsWake();
-    }
-    pub fn documentPreviewResourceReleased(self: *const Runtime, id: u64) bool {
-        return if (self.documents.lane) |lane| !lane.hasResource(id) else true;
-    }
-    pub fn shutdownDocumentPreviews(self: *Runtime) void {
-        self.documents.shutdown() catch std.log.warn("document preview shutdown retained physical resources", .{});
     }
 
     /// Main-loop admission only; does no file I/O and copies the exact trusted
@@ -3876,51 +3712,6 @@ pub const Runtime = struct {
         return self.skill.personalCatalogProjection();
     }
 
-    pub fn officeManagement(self: *Runtime) control_ports.OfficeManagement {
-        return .{ .context = self, .view_fn = controlOfficeView, .begin_fn = controlOfficeBegin, .attempt_fn = controlOfficeAttempt, .cancel_fn = controlOfficeCancel, .progress_fn = controlOfficeProgress, .complete_fn = controlOfficeComplete, .resources_fn = controlOfficeResources, .source_fn = controlOfficeSource };
-    }
-
-    pub fn officeComponentView(self: *const Runtime) office_component.View {
-        return self.office.view();
-    }
-
-    pub fn beginOfficeOperation(self: *Runtime, kind: office_component.Kind, expected_generation: u64) office_component.Admission {
-        if (self.shutting_down) return .{ .reason = .shutting_down };
-        self.syncLifecycle();
-        if (kind != .cleanup and self.skill.reconciliationPending()) return .{ .reason = .busy };
-        const result = self.office.begin(kind, expected_generation);
-        if (result.accepted and kind == .remove) self.documents.closeAll(.unavailable);
-        if (result.changed) self.bumpRevision();
-        return result;
-    }
-
-    pub fn officeAttempt(self: *Runtime, id: u64) ?*office_component.Attempt {
-        const operation = self.office.operation orelse return null;
-        return if (operation.id == id) &self.office.attempt else null;
-    }
-
-    pub fn cancelOfficeOperation(self: *Runtime, id: u64) office_component.Admission {
-        const result = self.office.cancel(id);
-        if (result.changed) self.bumpRevision();
-        return result;
-    }
-
-    pub fn reportOfficeProgress(self: *Runtime, id: u64, progress: office_component.Progress) void {
-        if (self.office.progress(id, progress)) self.bumpRevision();
-    }
-
-    pub fn completeOfficeOperation(self: *Runtime, id: u64, completion: office_component.Completion) bool {
-        const applied = self.office.finish(id, completion);
-        if (applied) self.bumpRevision();
-        return applied;
-    }
-
-    pub fn setOfficeResourceFacts(self: *Runtime, installation_capacity: bool, cleanup_pending: bool) void {
-        const capacity_changed = self.office.setInstallationCapacity(installation_capacity);
-        const cleanup_changed = self.office.setCleanupPending(cleanup_pending);
-        if (capacity_changed or cleanup_changed) self.bumpRevision();
-    }
-
     pub fn replaceBuiltinSkillSource(self: *Runtime, source: skill_runtime.BuiltinSource) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -5346,9 +5137,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
-        self.office.beginShutdown();
         self.output_checks.stopAdmission();
-        self.documents.stopAdmission(.cancelled);
         self.cancelSnapshot();
         self.shutting_down = true;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
@@ -7043,8 +6832,6 @@ pub const Runtime = struct {
         try self.writeAccount(writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer);
-        writer.writeAll(",\"office\":") catch return error.SnapshotTooLarge;
-        std.json.Stringify.value(OfficeWire.View.from(self.office.view()), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
@@ -7846,7 +7633,6 @@ pub const Runtime = struct {
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.output_checks.deinit();
-        self.documents.deinit() catch std.log.warn("document preview resources retained until process exit", .{});
         self.executor.deinit();
         self.approval_executor.deinit();
         for (&self.preview_images) |*slot| if (slot.*) |image| {
@@ -7903,7 +7689,6 @@ pub const Runtime = struct {
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
         self.shutdownOutputChecks();
-        self.shutdownDocumentPreviews();
         self.drainFileChangeCompletions(.{
             .context = self,
             .complete_fn = discardFileChangeDiffCompletion,
@@ -9692,7 +9477,6 @@ pub const Runtime = struct {
     fn invalidateProjectionSecurity(self: *Runtime) void {
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
-        self.documents.closeAll(.stale_security);
         if (self.projection_security_epoch != 0)
             self.projection_security_epoch = std.math.add(u64, self.projection_security_epoch, 1) catch 0;
         // Security revocation must be published even if the surrounding command
@@ -10476,15 +10260,7 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const OutputFileEffect = OutputCheckHarness;
-    pub const DocumentEffect = DocumentRuntimeHarness;
-    pub fn documentPreviewFixture(effect: *DocumentEffect) !Runtime {
-        var control = try testRuntime();
-        errdefer control.deinit();
-        testDocumentOffice(&control);
-        try recordTestOutput(&control, @splat(3), "report.docx");
-        control.setDocumentPreviewPreparation(.{ .context = effect, .prepare_fn = DocumentRuntimeHarness.factory });
-        return control;
-    }
+
     pub const OutputSaveEffect = OutputSaveHarness;
     pub fn bindOutputSaveEffect(control: *Runtime, effect: *OutputSaveEffect) void {
         effect.bind(control);
@@ -10502,11 +10278,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn filePreviewFixture(root: []const u8) !Runtime {
         return testImagePreviewRuntime(root);
     }
-    pub fn expireDocumentPreview(control: *Runtime) void {
-        for (control.documents.slots) |entry| if (entry) |session| {
-            session.touched.nanoseconds -= (@as(i96, DocumentPreviewLimits.idle_ms) + 1) * std.time.ns_per_ms;
-        };
-    }
+
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
     }
@@ -22362,144 +22134,4 @@ test "Save As picker cancellation deadline and shutdown preserve the pre-publica
     try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), save.releases);
-}
-
-fn testDocumentOffice(control: *Runtime) void {
-    control.office.supported = true;
-    control.office.available = true;
-    control.office.health = .ready;
-    control.office.current = .{ .identity = @splat(1), .state = .ready };
-}
-test "document target freezes receipt identity and ordinary references without borrowing Task memory" {
-    var control = try testRuntime();
-    defer control.deinit();
-    testDocumentOffice(&control);
-    try recordTestOutput(&control, @splat(3), "report.docx");
-    var target = try control.copyDocumentPreviewTarget(std.testing.allocator, 3, 7, .{ .output = @splat(3) });
-    defer target.deinit();
-    try std.testing.expectEqual(@as(u64, 42), target.input.expected.?.size_bytes);
-    try control.revalidateDocumentPreviewTarget(&target);
-    control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?.sha256[0] ^= 1;
-    try std.testing.expectError(error.RestrictedPreview, control.revalidateDocumentPreviewTarget(&target));
-    control.task_runtime.tasks[0].?.durable.runs[0].?.outputs[0].?.sha256[0] ^= 1;
-    control.task_runtime.tasks[0].?.deletion = .deleting;
-    try std.testing.expectError(error.MissingPreview, control.revalidateDocumentPreviewTarget(&target));
-    control.task_runtime.tasks[0].?.deletion = .idle;
-    control.office.current.?.identity[0] ^= 1;
-    try std.testing.expectError(error.OfficePreviewUnavailable, control.revalidateDocumentPreviewTarget(&target));
-    control.office.current.?.identity[0] ^= 1;
-    control.invalidateProjectionSecurity();
-    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateDocumentPreviewTarget(&target));
-
-    var references = try testImagePreviewRuntime("C:/workspace");
-    defer references.deinit();
-    testDocumentOffice(&references);
-    var ordinary = try references.copyDocumentPreviewTarget(std.testing.allocator, 3, 7, .{ .reference = "file-3-1-1-1" });
-    defer ordinary.deinit();
-    try std.testing.expect(ordinary.input.expected == null);
-    try std.testing.expectEqualStrings("image.jpg", ordinary.input.relative_path);
-    try std.testing.expectEqualStrings("file-3-1-1-1", ordinary.selector.reference);
-    try references.revalidateDocumentPreviewTarget(&ordinary);
-    const original = references.task_runtime.fileReference(3, 7, ordinary.selector.reference).?;
-    try std.testing.expect(ordinary.input.workspace_root.ptr != original.workspace_root.ptr);
-    try std.testing.expect(ordinary.input.relative_path.ptr != original.locator.ptr);
-    try std.testing.expect(ordinary.selector.reference.ptr != original.id.ptr);
-    @constCast(original.locator)[0] = 'I';
-    try std.testing.expectError(error.RestrictedPreview, references.revalidateDocumentPreviewTarget(&ordinary));
-    @constCast(original.locator)[0] = 'i';
-}
-const DocumentRuntimeHarness = struct {
-    cleanup_failure: bool = false,
-    main_thread: std.Thread.Id,
-    text: []const u8,
-    cleaned: bool = false,
-    releases: usize = 0,
-    calls: usize = 0,
-    released: usize = 0,
-    last: document_sessions.State = .failed,
-    active: bool = true,
-    const pages = [_]document_sessions.contract.Page{.{ .file = "page-0001.png", .bytes = 4, .sha256 = "2" ** 64, .width = 1280, .height = 1656 }};
-    const manifest: document_sessions.contract.Manifest = .{ .schema = 1, .format = .docx, .sourceText = .{ .file = "source-text.txt", .bytes = 1, .sha256 = "2" ** 64 }, .textScope = "ooxml_xml_text_and_attributes_without_ocr", .omissions = &.{}, .kind = .pages, .pages = @constCast(&pages) };
-    fn get(context: *anyopaque) *DocumentRuntimeHarness {
-        return @ptrCast(@alignCast(context));
-    }
-    fn factory(context: *anyopaque, input: document_sessions.contract.Input) !document_sessions.contract.Owned {
-        const self = get(context);
-        std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
-        try std.testing.expectEqualStrings("report.docx", input.relative_path);
-        try std.testing.expectEqual(@as(u64, 42), input.expected.?.size_bytes);
-        return .{ .context = self, .prepare_fn = prepare, .material_fn = material, .read_fn = read, .cancel_fn = cancel, .cleanup_fn = cleanup, .release_fn = release };
-    }
-    fn prepare(context: *anyopaque) !void {
-        std.debug.assert(std.Thread.getCurrentId() != get(context).main_thread);
-    }
-    fn material(context: *anyopaque) !document_sessions.contract.Material {
-        const self = get(context);
-        return .{ .source = .{ .size_bytes = 42, .sha256 = @splat(2) }, .manifest = &manifest, .grid = null, .source_text = self.text };
-    }
-    fn read(_: *anyopaque, _: document_sessions.contract.Request) !document_sessions.contract.Read {
-        return .{ .allocator = std.testing.allocator, .value = .{ .page = try std.testing.allocator.dupe(u8, "page") } };
-    }
-    fn cancel(_: *anyopaque) void {}
-    fn cleanup(context: *anyopaque) !void {
-        const self = get(context);
-        std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
-        if (self.cleanup_failure) return error.PreviewRestartRequired;
-        self.cleaned = true;
-    }
-    fn release(context: *anyopaque) void {
-        const self = get(context);
-        std.debug.assert(std.Thread.getCurrentId() == self.main_thread and self.cleaned);
-        self.releases += 1;
-    }
-    fn isActive(context: *anyopaque, _: u64) bool {
-        return get(context).active;
-    }
-    fn complete(context: *anyopaque, result: document_sessions.Result) void {
-        const self = get(context);
-        self.calls += 1;
-        self.last = result.state;
-    }
-    fn releasedFn(context: *anyopaque, _: u64, _: document_sessions.State) void {
-        get(context).released += 1;
-    }
-    fn sink(self: *DocumentRuntimeHarness) document_sessions.Sink {
-        return .{ .context = self, .active_fn = isActive, .complete_fn = complete, .released_fn = releasedFn };
-    }
-    fn wait(self: *DocumentRuntimeHarness, control: *Runtime, calls: usize, releases: usize) !void {
-        const start: std.Io.Timestamp = .now(std.testing.io, .awake);
-        while (start.durationTo(.now(std.testing.io, .awake)).toMilliseconds() < 5000) {
-            control.drainDocumentPreviews(self.sink());
-            if (self.calls >= calls and self.released >= releases) return;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        }
-        return error.TestTimeout;
-    }
-};
-test "Runtime document policy consumes real known credentials and revokes a ready page" {
-    for ([_][]const u8{ "safe body", "document SECRET-KEY body" }) |body| {
-        var control = try testRuntime();
-        defer control.deinit();
-        testDocumentOffice(&control);
-        try recordTestOutput(&control, @splat(3), "report.docx");
-        var harness: DocumentRuntimeHarness = .{ .main_thread = std.Thread.getCurrentId(), .text = body };
-        control.setDocumentPreviewPreparation(.{ .context = &harness, .prepare_fn = DocumentRuntimeHarness.factory });
-        const admission = control.beginDocumentPreview(10, 3, 7, .{ .output = @splat(3) });
-        try std.testing.expect(admission == .queued);
-        if (std.mem.startsWith(u8, body, "document")) {
-            try harness.wait(&control, 1, 1);
-            try std.testing.expectEqual(document_sessions.State.restricted, harness.last);
-        } else {
-            try harness.wait(&control, 1, 0);
-            try std.testing.expectEqual(document_sessions.State.ready, harness.last);
-            const id = admission.queued;
-            try control.readDocumentPreview(id, 11, .{ .page = 0 });
-            try harness.wait(&control, 2, 0);
-            try std.testing.expectEqualStrings("page", try control.readDocumentPreviewChunk(id, 0));
-            control.learnProjectionCredential("new-document-security-boundary");
-            try std.testing.expectError(error.StaleSecurityEpoch, control.readDocumentPreviewChunk(id, 4));
-            try harness.wait(&control, 2, 1);
-        }
-        try std.testing.expectEqual(1, harness.releases);
-    }
 }

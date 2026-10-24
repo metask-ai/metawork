@@ -1,0 +1,91 @@
+//! Public canonical ABI qualification of materialized built-in Skill resources.
+const std = @import("std");
+const core = @import("lifecycle_fixture").sdk;
+const wire = core.types;
+
+fn require(status: u32, diagnostic: wire.OwnedBytesV1) !void {
+    if (status == wire.STATUS_OK) return;
+    std.debug.print("Core status={d}: {s}\n", .{ status, core.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch "unreadable" });
+    return error.CoreCallFailed;
+}
+fn event(_: ?*anyopaque, _: ?*const wire.RunContextV1, _: wire.BytesViewV1) callconv(.c) u32 {
+    return wire.EVENT_CONTINUE;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const api = try core.Api.discover();
+    const workspace = init.environ_map.get("METAWORK_OFFICE_CORE_WORKSPACE") orelse return error.MissingFixtureWorkspace;
+    const root = init.environ_map.get("METAWORK_OFFICE_CORE_SKILLS") orelse return error.MissingFixtureSkills;
+    const name = init.environ_map.get("METAWORK_OFFICE_CORE_SKILL") orelse return error.MissingFixtureSkill;
+    const tools = [_]wire.BytesViewV1{core.bytesView("Bash")};
+    var diagnostic: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+    defer api.bufferRelease()(&diagnostic);
+    var config = std.mem.zeroes(wire.RuntimeConfigV1);
+    config.struct_size = @sizeOf(wire.RuntimeConfigV1);
+    config.builtin_tools = &tools;
+    config.builtin_tool_count = tools.len;
+    var runtime: ?*wire.RuntimeHandle = null;
+    try require(api.runtime().create()(&config, null, &runtime, &diagnostic), diagnostic);
+    defer _ = api.runtime().destroy()(runtime.?, null);
+    var source = std.mem.zeroes(wire.SkillSourceV1);
+    source.struct_size = @sizeOf(wire.SkillSourceV1);
+    source.scope_code = wire.SKILL_SOURCE_USER;
+    source.root = core.bytesView(root);
+    source.source_instance_id = core.bytesView("builtin-office");
+    var query = std.mem.zeroes(wire.SkillCatalogQueryV1);
+    query.struct_size = @sizeOf(wire.SkillCatalogQueryV1);
+    query.workspace_root = core.bytesView(workspace);
+    query.workspace_home = core.bytesView(workspace);
+    query.workspace_epoch = core.bytesView("1");
+    query.additional_sources = @ptrCast(&source);
+    query.additional_source_count = 1;
+    var catalog: ?*wire.SkillCatalogHandle = null;
+    var descriptor: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
+    defer api.bufferRelease()(&descriptor);
+    try require(api.skill().resolveCatalog()(runtime.?, &query, &catalog, &descriptor, &diagnostic), diagnostic);
+    defer _ = api.skill().releaseCatalog()(catalog.?, null);
+    var parsed = try core.decodeSkillCatalog(std.heap.c_allocator, try core.borrowedBytes(.{ .ptr = descriptor.ptr, .len = descriptor.len }));
+    defer parsed.deinit();
+    if (parsed.value.skills.len != 3) return error.IncompleteBuiltinCatalog;
+    var selected: ?[]const u8 = null;
+    var ids: [3]wire.BytesViewV1 = undefined;
+    for (parsed.value.skills, &ids) |skill, *id| {
+        id.* = core.bytesView(skill.skill_id);
+        if (std.mem.eql(u8, name, skill.invocation_name)) selected = skill.skill_id;
+    }
+    var policy = std.mem.zeroes(wire.SkillPolicyV1);
+    policy.struct_size = @sizeOf(wire.SkillPolicyV1);
+    policy.granted_skill_ids = &ids;
+    policy.granted_skill_id_count = ids.len;
+    var host = std.mem.zeroes(wire.SessionHostConfigV1);
+    host.struct_size = @sizeOf(wire.SessionHostConfigV1);
+    host.provider_kind_code = wire.PROVIDER_ANTHROPIC;
+    host.permission_mode_code = wire.PERMISSION_FULL_ACCESS;
+    host.shell_policy_code = wire.SHELL_UNRESTRICTED;
+    host.api_key = core.bytesView("office-local-fixture");
+    host.base_url = core.bytesView(init.environ_map.get("METAWORK_OFFICE_CORE_URL") orelse return error.MissingFixtureUrl);
+    host.workspace_root = core.bytesView(workspace);
+    host.workspace_home = core.bytesView(workspace);
+    host.allowed_tools = &tools;
+    host.allowed_tool_count = tools.len;
+    host.skill_catalog = catalog;
+    host.skill_policy = &policy;
+    var callbacks = std.mem.zeroes(wire.SessionCallbacksV1);
+    callbacks.struct_size = @sizeOf(wire.SessionCallbacksV1);
+    callbacks.on_event = event;
+    var session_config = std.mem.zeroes(wire.SessionCreateConfigV1);
+    session_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
+    session_config.host = &host;
+    session_config.model = core.bytesView("office-fixture-model");
+    var session: ?*wire.SessionHandle = null;
+    try require(api.session().create()(runtime.?, &session_config, &callbacks, &session, &diagnostic), diagnostic);
+    defer _ = api.session().destroy()(session.?, null);
+    var options = std.mem.zeroes(wire.RunOptionsV1);
+    options.struct_size = @sizeOf(wire.RunOptionsV1);
+    options.max_turns = 2;
+    var result = std.mem.zeroes(wire.RunResultV1);
+    const arguments = try core.encodeSkillArguments(std.heap.c_allocator, &.{});
+    defer std.heap.c_allocator.free(arguments);
+    try require(api.session().runSkill(session.?, 1, core.bytesView(selected orelse return error.MissingBuiltinSkill), core.bytesView(parsed.value.catalog_revision), core.bytesView(arguments), &options, &result, &diagnostic), diagnostic);
+    if (result.stop_reason_code != wire.STOP_END_TURN) return error.IncompleteOfficeRun;
+}

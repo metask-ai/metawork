@@ -1,6 +1,6 @@
 # MetaWork Windows 分发
 
-> 状态：Windows 主包、Office 组件 producer、Authenticode 与发布验证的 source of truth
+> 状态：Windows 主包、Office 资源与私有依赖、Authenticode 与发布验证的 source of truth
 
 `npm run package:windows` 是 Windows 安装 artifact 的正式工程入口，默认选择 x64；`npm run package:windows -- arm64` 选择 ARM64。每次调用只输出所选架构的一个版本化安装器：
 
@@ -40,11 +40,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
 
-编译安装器前，runtime stage 必须通过主包资源检查，不得混入展开的完整 Office Skill 资源树、Python、Node 或 Office 引擎等独立组件资源。主包唯一例外是构建时按固定摘要与长度接受的自有安装资源包；该压缩输入只在用户安装组件时展开，不作为基础 Skill 的可执行来源。[产品需求](requirements.md#53-task)规定的基础 Skill 只有随程序编译的有界方法文本，不含脚本、校验 schema 或重依赖；Application 在本地数据目录按内容版本发布，不覆盖已有版本；Primary 启动在开放 catalog 前校验当前基础 Skill，缺失时重建，内容或目录异常时先原子隔离原条目，再从内嵌可信文本重建，不执行异常内容；隔离或重建失败仍明确失败，不发布异常来源。最终安装器完成签名及身份检查后，还必须通过对应 target 的主包体积检查；超限或缺少有效基线均使 package 失败。基线安装器身份、摘要、实际字节和允许增量由 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 唯一拥有，检查完整安装器，不以单个 executable 或源码目录大小代替。Office 组件与主包分别计量，不得通过把重依赖放进低压缩率或高压缩率资源来规避主包边界。
-
-交互式安装验收还必须覆盖两条路径：拒绝关闭正在运行的旧 Host 时安装取消且旧 Host 保持运行；允许关闭时旧 Host 完全退出后才安装新文件，安装完成后不自动重启应用。
-
-任一步失败都不会报告 package 成功，也不会从 signed mode 静默降级为 unsigned mode。
+编译安装器前，runtime stage 必须通过主包资源检查，不混入展开的 Office 资源树、Python、Node 或文档库。完整 Skill/helper/必要 XSD 以压缩内嵌资源随主包发布，解包前接受固定摘要、大小及路径检查；不以压缩规避内容边界。发布失败不阻止应用启动。最终安装器仍必须通过 [`build_support/main-package-size.json`](../build_support/main-package-size.json) 定义的真实安装包预算，不以单个 executable 或资源压缩量代替。
 
 ## 签名边界
 
@@ -66,68 +62,10 @@ signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选�
 
 工具能力参考 [Inno Setup 官方说明](https://jrsoftware.org/isinfo.php)、[ISCC 命令行](https://jrsoftware.org/ishelp/topic_compilercmdline.htm)和 [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)。
 
-## 独立 Office 运行时构建
+## Office Skill 与私有依赖
 
-Office 重依赖由独立组件 producer 构建，不进入主程序 runtime stage。目前 producer 只接受 Windows x64 构建主机和 x64 组件；其可构建不表示应用已开放组件安装，也不表示 ARM64 或干净机器通过验收。
+Office 能力与用户授权由[产品需求](requirements.md#53-task)拥有，准备与执行生命周期由 [Product Skill 合同](product-architecture.md#内置-office-skill)拥有。主包仅携带完整 Skill、固定准备/调用脚本及锁定输入，不携带解释器或第三方文档库，不运行组件 producer 或系统安装器。
 
-```powershell
-node scripts/build-office-component.mjs --python <absolute-builder-python> --output <new-absolute-output.tar.gz>
-```
+首版自动准备只支持 Windows x64：Python 使用固定官方 CPython NuGet 分发，Node 使用固定官方 Windows ZIP；所有发行包在解包或执行前必须完整匹配主包输入的摘要。Python requirements 固定全部直接/传递依赖和 wheel 哈希，拒绝源码编译；Node 使用独立最小 package-lock 的完整性身份并禁用安装脚本。具体版本、来源、摘要和依赖集合由唯一机器输入拥有，不在本文镜像。
 
-构建解释器只属于 producer，不成为交付物对系统 Python 的依赖。唯一供应商输入为 [`office-runtime.windows-x64.sources.json`](../build_support/office-runtime.windows-x64.sources.json)，固定引擎、所带 Python、Node、私有中文字体以及公开来源 bootstrap 所用临时便携 Python 的来源与摘要；Python wheel 身份由 [`office-python.windows-x64.lock.json`](../build_support/office-python.windows-x64.lock.json) 固定并绑定现有依赖输入，JavaScript 创作库从现有 `package-lock.json` 取得完整闭包和嵌套位置。producer 不复制整个开发依赖树，不安装全局 Office 或注册全局字体。临时便携 Python 不进入完整组件的常驻运行时，固定来源不等于客户端已支持该 bootstrap。
-
-依赖布局由上述 canonical 输入生成；共享的离线组装器只消费固定摘要的 wheel ZIP 与 npm tar.gz，不调用 pip/npm 安装、不解析依赖或执行包安装脚本。Python 保留 wheel 原有代码、许可证、metadata、RECORD 和 `data/scripts` 资源，不生成带构建目录的启动包装器或安装记录；需要额外数据重定位的 wheel 须明确拒绝，不能假装安装成功。JavaScript 仅接受一个顶层目录，按 lock 固定的包位置写出并核验包名和版本，不生成 `.bin` 链接或消费包内嵌套依赖。源先复制到同一私有事务内并校验实际字节；压缩量、实际展开量、文件数、metadata 与路径有界，链接、reparse、碰撞和未知布局拒绝，失败不得启用半成品。producer 与后续客户端 bootstrap 使用同一组装实现；客户端仅按下文主包固定的安装输入调用同一实现。最终启用仍须匹配主包固定的完整组件清单，不把客户端生成的 recipe 或清单当作新信任来源。
-
-公开源的独立资格检查入口为 `node scripts/check-office-public-sources.mjs`。它与 producer 共用根 lock 的 JavaScript 闭包选择，只从固定 HTTPS 地址逐项 GET，以实际读取字节校验 SHA-256 或根 npm lock 的 SHA-512，不做依赖解析或执行安装脚本，不保存和执行下载内容。LibreOffice 固定官方 `downloadarchive.documentfoundation.org/libreoffice/old/` 版本归档入口，只有这一来源允许最多三次 HTTPS 跳转；每跳拒绝凭据、query、fragment 和 HTTP 降级，最终实际字节仍须匹配主包固定长度、摘要和签名。镜像地址不取得独立下载 authority；其他来源继续拒绝跳转。客户端只对尚未写入 body 的瞬时连接失败最多尝试三次，全部尝试共享既有取消和超时边界；状态拒绝、部分 body、摘要或签名失败不得重试为接受。结果写入 `.zig-cache/office-public-source-verification.json`，包括实际下载量和每项通过情况；HEAD 可达或 Content-Length 不构成字节身份通过证据。
-
-该检查只证明公开来源的下载字节，不表示客户端已支持从多个公开源本地组装，也不替代签名、安装、普通权限或干净机器验收。客户端下载 authority 仍以下文主包固定的安装输入为准；供应商来源本身不能直接启用正式组件。
-
-供应商输入必须通过摘要与适用的 Authenticode 校验；MSI 通过 Windows 只读数据库 API 和进程内 CAB API 提取到新的 staging 目录，不运行 MSI action、custom action、msiexec 或安装服务，保留许可证和运行所需的 app-local Microsoft 库。提取器在隔离子进程中运行，不能把其临时工作目录切换用于桌面主进程。MSI source 目录只映射到自有根内，不使用目标系统目录属性；CAB 成员须与有界 File 表逐项一致，实际大小、未知/重复成员、路径碰撞或额外介质均拒绝。输入锁拒绝写入与替换，并重新核验实际源字节。x64 输入仅按 sources 中的精确 File identity 排除重复目标的 ARM64 运行库；不以覆盖顺序选择架构，也不建立通用 MSI 条件求值器。组件入口拥有解释器和引擎进程树，组件内的私有字体由引擎加载。默认要求签署 MetaWork 自有入口并立即验证；显式 `--signing none` 仅产生开发组件，不能作为正式分发通过证据。签名身份与工具继续遵守上文的[签名边界](#签名边界)。
-
-入口支持两种明确的生命周期 owner：模型经 Shell 调用时由入口保留整树 Job；Application 的安装自检和产品预览通过私有 Host Job 协议，在任何子进程启动前加入应用的随机 Job 并释放临时 Job handle。不得在 Host 退出后由组件长期保留该 handle。Native 能力边界见[高层架构](architecture.md#35-native-sdk)，Host 取消、超时、输出预算和物理静止的证据须独立于入口自有 Job 验收。
-
-公开源安装的临时便携 Python 复用 Application Office 进程 owner。只执行已认证 stage 中的固定 bootstrap 脚本和固定相对输入/输出路径，显式传入主包固定的 seed 与最终清单摘要；不开放任意 executable、脚本、URL 或 shell 命令。安装调用必须绑定 pending operation Job，临时解释器加入前只加载已认证代码和解析参数，不创建安装输出或子进程；加入后立即关闭自己的 Job handle，拒绝缺失、未设 kill-on-close、允许 breakaway 或已封闭的 Job。安装 worker 才是长期 handle owner，取消、期限和输出超限沿既有根进程/整树静止语义执行，无法证实静止时保留事务资源。临时环境只继承固定 OS 变量，工作目录及临时目录均归本次事务；该进程路径不替代执行前的源、解释器、seed 身份与签名检查。
-
-发布的组件目录是不可变资源；运行期的 profile、缓存和临时结果不得写回其中。引擎内嵌 Python 的字节码写入须被禁止，shared package cache 使用每次操作的临时目录，计算使用 CPU 路径，避免驱动自检和锁文件修改安装资源。不能只在打包前删除缓存来掩盖运行期修改。producer 在自检前后核对完整目录 inventory；引擎行为回归也必须验证操作没有增删或修改组件资源。归档校验仍独立执行，不因自检通过而省略。
-
-组件归档为 `tar.gz`，tar 使用 USTAR；当前 Windows producer 不生成链接或特殊成员，不包含字节码缓存、PDB 或安装器副本。归档根的 `office-runtime.json` 使用 schema 1，固定 `target`，以 `files` 列出相对 `path`、实际 `bytes` 和 `sha256`；`payloadBytes` 是清单自身之外所列文件的总字节。归档旁的机器结果记录完整压缩摘要、压缩量和含清单的实际展开量。构建完成前必须重新流式读取完整归档，检查实际成员与清单一致及 gzip CRC，不能只核对构建目录。容量与成员预算由 producer 检查拥有；安装器的受限解包验收仍需独立完成。
-
-这些 producer 来源不授予客户端任意下载 authority。正式客户端须由主包固定其接受的组件发布身份、完整文件清单摘要与自有安装输入摘要；组件内引擎或解释器安全更新因此需要同步发布主包信任信息。主包升级不自动下载用户尚未启用的 Office 组件。完整 Skill 工作流、安装事务、签名后位置与干净机器验收通过前，不得将开发归档登记为可安装的正式组件。
-
-
-自有安装输入使用 `node scripts/build-office-install-seed.mjs <prepared-component> <canonical-download-cache> <new-absolute-seed.tar.gz>` 构建。配套资源只允许当前仓库对应的完整 Skill、适配代码、自有入口及安装 metadata；不得混入供应商解释器、转换引擎、文档库或其安装器。输入与已验证 producer 资源和 canonical 锁必须一致，使用有独立清单的 USTAR `tar.gz`，并受单独的小资源预算及原有实际主安装包总预算约束。资源构建不登记正式 release，也不表示客户端已经安装或启用组件。小资源随主包、重依赖按需下载的边界不允许通过压缩来绕过内容检查。
-
-构建期与离线 bootstrap 共用运行时布局和完整清单生成实现；bootstrap 在私有事务中重新核验全部固定源，组装期间不执行组件资源。完整清单可以由实际组装字节确定性重建，但其完整字节摘要必须与主包固定的 producer 清单摘要相同，失败不得写出可接受清单或启用组件；客户端生成的摘要不能成为新的信任来源。配套资源不必复制整份完整清单以扩大主包。该资格仍须与客户端 Zig 首阶段、下载、签名、最终位置自检及事务验收分别核对。
-
-官方便携 Python 的首阶段由主包 Zig 准备，不能借用尚未认证的解释器。该输入只接受固定 Windows 扁平 classic ZIP：复用 Zig 标准 ZIP 结构、raw Deflate 和 CRC，在有界 owned memory 中固定实际读出的完整归档字节及摘要，再校验 local/central 一致、实际输出、完整压缩流与路径/成员/metadata 预算。拒绝 ZIP64、descriptor、加密、链接/特殊项、目录、别名、额外字段、前缀与尾部数据；不把这项窄格式扩为通用解包工具。解包只创建一份新的 bootstrap 子目录，失败须验证所属身份后清理，不得覆盖或删除已有目录。安装 owner 随后复用既有 PE 与 Windows WinTrust 校验，全部成功前不能执行解释器；签名拒绝不能用其他用户上下文、PowerShell 策略变更或未登记验证入口转为接受。
-
-## 客户端 Office 安装事务
-
-主包接受的 Windows x64 组件由 [`office-component-release.windows-x64.json`](../build_support/office-component-release.windows-x64.json) 唯一固定，并在构建时校验、编译到 Application。安装输入使用 schema 2、protocolRevision 1 与 target `x86_64-windows-msvc`。必填 `seed` 固定主包内自有 USTAR gzip 输入的 `archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`；归档路径固定为 `build_support/office-install-seed.windows-x64.tar.gz`，构建拒绝摘要、大小或预算不符。`release: null` 表示尚未登记可供正式客户端安装的组件，携带资源包本身不能开放下载。非空 release 固定 producer 的同组组件身份字段，另以 `downloadBytes` 描述全部公开源的实际下载量；不再提供完整组件下载 URL，不保留旧下载实现。
-
-必填 `retained` 数组最多包含八个仍获主包信任的旧组件身份，每项精确为 `archiveSha256`、`manifestSha256`、`archiveBytes`、`unpackedBytes` 和 `files`，不含下载 authority。当前 release 与 retained 不允许重复或冲突身份。启动仅以 current 记录的精确归档摘要查找主包已固定身份，再验证所带清单和文件；retained 不用于目录发现、安装旧版本或下载 fallback。它是信任接受集合，不是磁盘引用；非当前旧目录仍按进程内引用静止规则清理。安全修复须同时移除不再信任的旧身份；组件、解释器或引擎安全修复均需要重新发布主包信任输入。主包升级不自动下载用户未启用的组件。
-
-Application 只有持有本地数据目录 Primary authority 且组件操作已串行准入时才能修改 store。先由主包 Zig 解开并认证自有 seed，再按其清单认证 `bootstrap/plan.json` 的实际读取字节，才能从中取得下载 authority。plan 固定 schema 1、target、完整组件清单摘要及最多 64 个有名称、相对落盘路径、HTTPS 地址、实际长度和 SHA-256 或 SHA-512 的下载项；路径和名称不得重复，总下载量必须等于主包固定值。地址拒绝 credential、query、fragment 与远端 manifest；重定向仅允许上文固定官方归档入口的有界例外；不解析依赖或执行包安装脚本。所有源限量写入本次独立 staging，并对同一实际写入字节校验完整摘要与长度，串行下载的进度按聚合字节计量。磁盘预检须覆盖源、副本、完整输出及安装 scratch，不能以完整归档压缩量代替源下载量。
-
-官方便携 Python 经原生 ZIP、PE 与 WinTrust 验证后，才沿已有 Application bootstrap 命令启动固定自有脚本。bootstrap 加入本次 pending 操作的 kill-on-close Job，再复制和重新核验全部源、只读提取 MSI、组装依赖与自有资源。父 Host 强杀、取消、期限及进程静止责任沿同一受控调用路径收口；静止无法证实时保留事务。组装完成后主包再次校验完整文件集合和主包固定的清单摘要，不接受客户端自授信任。
-
-先检查目标 PE machine，校验 MetaWork 入口及所带 Python、Node、引擎入口的 Authenticode，再将已认证字节移入独立最终候选目录。候选目录尚不可发布为 catalog 或当前可用版本，仅本次安装事务可启动受控自检。Windows 在执行资源后可能暂时无法移动其目录，因此完整运行自检只在最终候选位置执行。最终位置必须重新检查 PE 与签名，再通过 Application Office Job 完成自检，成功后才能原子替换当前记录。失败保留旧当前版本；不得把未签名开发 witness 接到正式客户端。受控调用仅继承固定 OS 环境，以事务 scratch 为工作和临时目录，不继承 Task 或 Provider credential。
-
-引擎私有配置目录由组件原生入口单独拥有，不能随文档、安装阶段或预览 scratch 的任意深度增长。入口在启动解释器前，通过 Windows LocalAppData Known Folder 固定选择 `MetaWork/OfficeProfiles/<随机身份>`，覆盖其子进程专用的 `METAWORK_OFFICE_PROFILE`；不使用继承的 TMP/APPDATA 决定该配置根，不在失败后切换目录。配置路径必须满足固定长度预算，否则明确失败。文档输入、产物和其他临时文件仍遵循原 scratch 的 owner。该目录不承载用户 Office 配置、组件版本引用或 Task/Session 数据。
-
-每次调用持有独立的非继承 `Local\MetaWork.Office.Profile.<身份>` kill-on-close Job；它嵌套于已有 Host 或版本执行范围，不取代外层取消及强杀责任。目录的恢复记录为同级 `<身份>.scope`，精确 40 字节：ASCII `MWOFP001` 后接目录身份的 32 个小写十六进制 ASCII 字符。入口先取得独占 Job，写入并 sync 同级 `<身份>.next` 后原子发布记录，最后创建目录和启动子进程；`.next` 仅为未发布的机械临时文件，不授予目录清理身份。正常结束只有在子树静止后才能删除目录及记录；强杀留下的记录由下一次调用有界恢复。恢复只处理此命名空间内格式正确的记录，无法独占相应 Job 时保留；未登记目录不收养。删除不跟随 reparse point，父目录持有防替换 handle，未知记录、超限、清理或静止验证失败均明确失败并保留未完成工作。该格式只属于组件临时资源恢复，不改变组件 store、Task 或 Session 的持久格式。
-
-
-组件 store 的持久记录仅描述组件自身，不写入 Task 或 Session。`current.json` 与 `pending.json` 使用 schema 1、`installId`（32 位小写十六进制随机身份）及 `archiveSha256`（64 位小写十六进制）；固定 `.next` 文件是机械临时文件，不授予身份。阶段目录为 `staging/<installId>`，最终版本目录为 `versions/<installId>`，不得覆盖既有目录。新安装与修复都使用独立身份，不原地替换仍被引用的资源。`archiveSha256` 继续表示合格 producer 归档的真实身份，不改写为 recipe 或客户端组装摘要；完整组件清单 pin 另行验证。因此不迁移既有 current/pending 格式，也不重新解释旧记录。归档摘要不重复拼进长运行时路径，以避免供应商 Windows loader 的路径限制。
-
-`host.scope` 只标识当前 Primary Host 的进程存活范围，不保存 Task/Session 或组件版本引用，不授予组件安装、下载或执行信任。它精确为 24 字节：ASCII `MWOFS001`、little-endian u32 PID、必须为零的 u32 保留位、little-endian u64 Windows 进程创建 FILETIME。Application worker 从当前进程取得身份，经 `host.scope.next` 写入、sync、原子替换；准备发布已安装 Skill 来源前必须成功完成。旧记录可留在磁盘，但不能被另一 Host、PID 复用或非祖先进程继续使用。正式 `versions/<installId>` 入口在开始子进程前必须验证该范围；Application 专用 `--host-job` 调用继续使用独占 Job 生命周期，不依赖模型 Shell 的身份记录。具体生命周期边界由[高层架构](architecture.md#35-native-sdk)定义。
-
-替换或移除 current 前，必须先持久发布对应版本的删除意图 `retired-<installId>.json`，其内容采用同一 schema 1 记录。最多保留 128 个意图；超出有界读取预算时拒绝继续，不猜测清理目标。恢复时只将损坏或与有效 current 同目录冲突的那份记录移入 store 的 `quarantine` 子目录，保留有效 current；隔离内容不再授予执行、发现或删除 authority。current 自身损坏时按未安装继续，不扫描或收养版本目录，未知目录保留并在诊断中报告。固定 `retired.next`、`retired.json` 仅是意图发布的临时文件；恢复可清除它们，不能据此删除版本。意图描述组件自己的待清理资源，不保存或重建 Task/Session 引用，也不授予组件执行信任。它让重启后仍可定位旧版本，而无需扫描、收养或删除未登记目录。
-
-Windows 资源 Job 名由已登记的随机安装或事务身份确定：版本为 `Local\MetaWork.Office.Version.<installId>`，pending 操作为 `Local\MetaWork.Office.Op.<installId>`。它们只属于本地组件生命周期，不进入 Task/Session、Bridge 或远程发布身份。registry 发布完整 Skill 来源前建立版本执行 Job；入口临时加入后立即关闭 handle，再建立其单次调用子树。封闭 reservation 设置 `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` 且 limit 为零，不能作为执行 Job 使用。已有具名对象不得接管；冷清理最多有界等待其消失，失败保留目录与记录。版本 Job 由相应版本 bookkeeping 持有，pending Job 由单次 Application 进程调用持有；二者均禁止 breakaway 且 kill-on-last-close。新调用的 Job 准入与关闭、终止、active 数观测共同决定资源是否可删。
-
-移除先提交 current 缺席，再由 owner 将新 catalog 来源切回基础 Skill；原有 catalog 继续持有旧资源。后台清理接收 owner 生成的进程内受保护身份快照，只有零引用的已认领条目或没有进程内引用的已登记意图才可删除；current 与 pending 的同目录保护仍必须独立检查。删除意图指向仍为 current 的版本时，只撤销意图，保留版本字节。物理删除成功后才能移除对应意图，失败与取消保留剩余工作；崩溃在两者之间时可幂等收口。启动清理仍以 Primary authority 和进程静止为前提，不能将内存引用丢失本身视为外层 Shell 进程已退出的证明。
-
-pending 必须先于阶段写入；只有最终位置验证完成后才能提交 current。取消先等待进程与下载真正静止，再删除本次未提交资源；进程静止无法证实则保留事务并明确失败。current 提交后到达的取消不能撤销已提交事实；清理失败如实表示待清理。原子替换后的持久化结果不确定时保留 pending 与候选目录，禁止猜测回滚。恢复只在启动或 worker 已静止时读取 canonical current/pending：已提交候选予以保留，未提交候选只清理 pending 精确登记的目录，不扫描或收养未登记目录，不重放下载、自检或激活。旧版本最终清理由进程内 catalog lease、执行进程及预览 handle 的引用拥有者决定，安装事务不得自行删除旧版本。 Application 资源 owner 持有每个候选或当前版本的本地引用；退休时只消费自己的引用，catalog 回调和进程/预览 pin 只原子增减计数。零引用不可重新取得；registry owner 只选择零引用的清理候选，物理删除在独立有界 Application worker 内执行，join 后 owner 才消费结果并释放条目，避免在 Native loop 删除整套运行时。current 或 pending 指向同一安装目录时必须拒绝，即使记录摘要不一致。清理失败保留待清理条目，shutdown 在外部引用未静止时不得销毁 bookkeeping。这些引用不写入磁盘；本地记录冲突不能授予清理 authority。
-
-机械事务测试与开发组件安装验证不表示正式签名发布、公开下载服务、干净机器或应用 UI 已通过验收。实际发布仍须通过完整的目标平台分发验证。
+引导不得依赖尚未下载的解释器；使用公司策略允许且经过真实 AgentCore Shell 验证的既有系统能力，不绕过企业策略、不预建多套静默 fallback。已知发行包完整摘要通过后可使用成熟解包工具；这不降低用户附件 ZIP helper 的有界安全规则。镜像/代理/证书兼容必须实际验证，既有直接 URL 不被当作自动支持镜像，不输出认证配置或凭据。准备及调用不修改全局 PATH、文件关联或用户包管理器配置，不提权；每个环境由独立临时目录验证后原子发布，不能覆盖或修改正在使用的目录。

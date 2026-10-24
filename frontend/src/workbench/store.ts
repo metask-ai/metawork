@@ -1,7 +1,6 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
 import { emptyViewVersions, initialViewScope } from "../bridge/contracts.ts";
 import { navigableTasks } from "./task-visibility.ts";
-
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
   snapshotReceivedAt: number | null;
@@ -11,7 +10,6 @@ export type WorkbenchState = {
   draftOpen: boolean;
   draftWorkspaceId: string | null;
 };
-
 export type WorkbenchAction =
   | {
       type: "generation.started";
@@ -23,33 +21,25 @@ export type WorkbenchAction =
       receivedAt: number;
       generation?: string;
     }
-  | { type: "security.invalidated"; securityEpoch: string; generation: string }
-  | { type: "task.selected"; taskId: string }
-  | { type: "task.draft.opened"; workspaceId: string | null }
-  | { type: "task.draft.closed" };
-
+  | {
+      type: "security.invalidated";
+      securityEpoch: string;
+      generation: string;
+    }
+  | {
+      type: "task.selected";
+      taskId: string;
+    }
+  | {
+      type: "task.draft.opened";
+      workspaceId: string | null;
+    }
+  | {
+      type: "task.draft.closed";
+    };
 export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
-    office: {
-      generation: "1",
-      supported: false,
-      health: "unavailable",
-      offered: null,
-      current: null,
-      updateAvailable: false,
-      operation: null,
-      terminal: null,
-      cleanupPending: false,
-      actions: {
-        install: false,
-        repair: false,
-        remove: false,
-        retry: false,
-        cleanup: false,
-        cancel: false,
-      },
-    },
     revision: "0",
     blockVersions: emptyViewVersions,
     securityEpoch: "1",
@@ -192,7 +182,6 @@ export const initialWorkbenchState: WorkbenchState = {
   draftOpen: false,
   draftWorkspaceId: null,
 };
-
 export function workbenchReducer(
   state: WorkbenchState,
   action: WorkbenchAction,
@@ -223,7 +212,6 @@ export function workbenchReducer(
       draftOpen: false,
       draftWorkspaceId: null,
     };
-
   if (action.type === "security.invalidated") {
     if (action.generation !== state.connectionGeneration) return state;
     return {
@@ -235,7 +223,6 @@ export function workbenchReducer(
       snapshotReceivedAt: null,
     };
   }
-
   if (action.type === "generation.started") {
     if (action.generation === state.connectionGeneration) return state;
     return {
@@ -249,7 +236,6 @@ export function workbenchReducer(
       draftWorkspaceId: null,
     };
   }
-
   const generation = action.generation ?? state.connectionGeneration;
   if (generation !== state.connectionGeneration) return state;
   let snapshot = action.snapshot;
@@ -292,7 +278,6 @@ export function workbenchReducer(
       ],
     };
   }
-
   if (state.draftOpen)
     return {
       ...state,
@@ -304,7 +289,6 @@ export function workbenchReducer(
       // must survive so reauthorization can restore the same text.
       draftWorkspaceId: state.draftWorkspaceId,
     };
-
   const availableTasks = navigableTasks(snapshot);
   const activeTaskStillExists = availableTasks.some(
     (task) => task.id === state.activeTaskId,

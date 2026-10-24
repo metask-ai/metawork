@@ -6,15 +6,15 @@
 
 ## 1. 技术决策与非目标
 
-| 架构节点 | 选择 | 定位 |
-| --- | --- | --- |
-| Application | Zig | composition、跨 owner 编排、平台 capability 适配与生命周期 |
-| Renderer | React + Tailwind | 唯一正式 UI，由 Native SDK System WebView 托管 |
-| Bridge | Zig | Renderer 协议、authority 与 ProductDelivery 边界 |
-| Product | Zig | 产品事实、行为、事务、持久化和恢复的逻辑边界 |
-| Agent | Zig + Metask AgentCore | MetaWork-owned 执行边界及其对 canonical AgentCore bundle 的唯一消费路径 |
-| Storage | Zig + SQLite | MetaWork-owned、无业务语义的 SQL contract 与 backend 边界 |
-| Native SDK | Native SDK | Application 消费的外部桌面能力依赖 |
+| 架构节点    | 选择                   | 定位                                                                    |
+| ----------- | ---------------------- | ----------------------------------------------------------------------- |
+| Application | Zig                    | composition、跨 owner 编排、平台 capability 适配与生命周期              |
+| Renderer    | React + Tailwind       | 唯一正式 UI，由 Native SDK System WebView 托管                          |
+| Bridge      | Zig                    | Renderer 协议、authority 与 ProductDelivery 边界                        |
+| Product     | Zig                    | 产品事实、行为、事务、持久化和恢复的逻辑边界                            |
+| Agent       | Zig + Metask AgentCore | MetaWork-owned 执行边界及其对 canonical AgentCore bundle 的唯一消费路径 |
+| Storage     | Zig + SQLite           | MetaWork-owned、无业务语义的 SQL contract 与 backend 边界               |
+| Native SDK  | Native SDK             | Application 消费的外部桌面能力依赖                                      |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface、可替换框架 facade 或平行系统能力协议。
 
@@ -105,27 +105,27 @@ MetaWork 不在本仓库 vendor、patch 或直接修改已安装 SDK，不从本
 
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统 effect 入口。Bridge 和 Application 只能消费完成 transport authority 所需的公开 contract、data-only DTO 与 opaque identifier；这些值不授予任意系统执行权，也不得传播到 Product owner。
 
-| Native SDK surface | 允许消费者 | 边界 |
-| --- | --- | --- |
-| Runtime API | Application | 正常系统 effect 与 SDK-owned runtime state |
-| WebView UI/input API | Renderer、browser-side Bridge | 只消费 `app.zon` 已开放的呈现与用户输入能力，不授予 Product authority 或通用系统 effect |
-| 标准 WebView Clipboard API | Renderer | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
-| 标准 WebView paste 事件 | Renderer | 只允许普通 Composer 的显式图片粘贴输入，按文件附件合同消费本次 File；不开放主动 clipboard read |
-| Bridge API / data-only DTO | Bridge、Application | transport、source/window authority 与无执行权数据 |
-| `PlatformServices` public primitive | Application 的主循环唤醒、附件图片解码、已登记一级 compatibility seam | 唤醒与附件仅按下述边界消费；其他调用只补 Runtime API 的明确缺口 |
-| 公开 PNG 编码 API | Application | 只用于下述附件内存图片转换 |
-| 公开 OS API / platform handle | 已登记二级 compatibility seam | 只补 SDK 也未提供原语的明确缺口 |
-| `PlatformServices.context` | 无 | SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转 |
+| Native SDK surface                  | 允许消费者                                                            | 边界                                                                                                    |
+| ----------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Runtime API                         | Application                                                           | 正常系统 effect 与 SDK-owned runtime state                                                              |
+| WebView UI/input API                | Renderer、browser-side Bridge                                         | 只消费 `app.zon` 已开放的呈现与用户输入能力，不授予 Product authority 或通用系统 effect                 |
+| 标准 WebView Clipboard API          | Renderer                                                              | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
+| 标准 WebView paste 事件             | Renderer                                                              | 只允许普通 Composer 的显式图片粘贴输入，按文件附件合同消费本次 File；不开放主动 clipboard read          |
+| Bridge API / data-only DTO          | Bridge、Application                                                   | transport、source/window authority 与无执行权数据                                                       |
+| `PlatformServices` public primitive | Application 的主循环唤醒、附件图片解码、已登记一级 compatibility seam | 唤醒与附件仅按下述边界消费；其他调用只补 Runtime API 的明确缺口                                         |
+| 公开 PNG 编码 API                   | Application                                                           | 只用于下述附件内存图片转换                                                                              |
+| 公开 OS API / platform handle       | 已登记二级 compatibility seam                                         | 只补 SDK 也未提供原语的明确缺口                                                                         |
+| `PlatformServices.context`          | 无                                                                    | SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                                                     |
 
 Application 只通过以下受限路径消费系统 effect、主循环唤醒与附件图片处理：
 
-| 路径 | 调用链 | 适用条件 |
-| --- | --- | --- |
-| 正常路径 | Application → Native SDK Runtime API → SDK internals → OS | Runtime API 已提供完整能力 |
-| 主循环唤醒正常路径 | Application → 公开 `PlatformServices.wake` → SDK platform loop | 只提交有界、非阻塞的跨线程唤醒，不执行窗口或 Product effect |
-| 附件图片正常路径 | Application → SDK 公开图片解码与 PNG 编码 API | 只完成下述有界内存图片转换 |
-| 一级兼容 | Application narrow seam → public `PlatformServices` primitive → OS | Runtime API 缺失，但 SDK 公开低层原语足够 |
-| 二级兼容 | Application narrow platform seam → public OS API | SDK 没有可用原语，必须暂时补齐平台实现 |
+| 路径               | 调用链                                                             | 适用条件                                                    |
+| ------------------ | ------------------------------------------------------------------ | ----------------------------------------------------------- |
+| 正常路径           | Application → Native SDK Runtime API → SDK internals → OS          | Runtime API 已提供完整能力                                  |
+| 主循环唤醒正常路径 | Application → 公开 `PlatformServices.wake` → SDK platform loop     | 只提交有界、非阻塞的跨线程唤醒，不执行窗口或 Product effect |
+| 附件图片正常路径   | Application → SDK 公开图片解码与 PNG 编码 API                      | 只完成下述有界内存图片转换                                  |
+| 一级兼容           | Application narrow seam → public `PlatformServices` primitive → OS | Runtime API 缺失，但 SDK 公开低层原语足够                   |
+| 二级兼容           | Application narrow platform seam → public OS API                   | SDK 没有可用原语，必须暂时补齐平台实现                      |
 
 主循环唤醒是 Application 对 SDK 公开跨线程 enqueue 原语的正常消费，不属于 compatibility capability。Application 在 Native 服务就绪且 wake 可用后才发布回调，以生产者启动或 owner 内同步建立可见性；关闭时先停止入口并 join 在途生产者，再清理平台引用。Native 就绪前的单实例激活只保留有界合并需求，由主线程绑定回调时消费；就绪后的单实例通知显式失败时，不得为尚未消费的本次需求返回成功，也不得撤销较早已接受的需求或自动重放。SDK 调用成功只代表 enqueue 合同，不代表窗口已激活或 Product effect 已完成；最终 effect 仍由主线程处理。这项许可不开放其他低层系统 effect。
 
@@ -147,27 +147,13 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 当前登记的 compatibility capability 为：
 
-| Capability | 层级 | 允许边界 | 删除条件 |
-| --- | --- | --- | --- |
-| `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
-| `office_component_validation` | Windows 二级 | Application Office 安装 worker 使用公开 OS API 观察目标卷可用量，并以无 UI、仅本地缓存的 Authenticode policy 校验固定运行时入口；组件发布 authority 始终是主包固定的完整归档摘要，不从签名接受任意组件 | SDK 提供等价磁盘容量与 Windows 签名校验，且通过同一安装验收 |
-| `office_process_tree` | Windows 二级 | Application Office worker 的专用 Job：非继承 kill-on-close、随机进程内名称、根进程退出观测和整树终止；组件入口在启动子进程前加入并关闭临时 Job 引用；经 Host 认证的安装便携 Python 只允许加入当前 pending operation 的 Job，并在开始安装文件 effect 前关闭自己的临时引用，不创建 Job 或取得其他进程 authority。另只读当前 Host 自己的 PID 与进程创建时间，供 Office 入口绑定 Shell 生命周期，并只观测 Office 捕获管道的待读字节数，避免 reader 的退出依赖其他进程持有的继承 writer。Job effect 只用于 Office 安装自检、产品预览及受管理版本的执行持有与清理，不开放任意进程或桌面能力 | SDK 提供等价整树 ownership、Host 强杀、取消、物理静止观测及当前进程身份，并通过同一 Windows 验收 |
-| `external_link_handoff` | 一级 | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
-| `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
+| Capability                    | 层级       | 允许边界                                                                                                                                           | 删除条件                                                                                                                                       |
+| ----------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app_single_instance`         | 二级       | 应用实例仲裁与 second-launch activation transport                                                                                                  | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown                                                                   |
+| `external_link_handoff`       | 一级       | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
+| `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API                                                                                     | SDK 原生产生等价资源与 metadata 并通过分发验收                                                                                                 |
 
 `external_link_handoff` 只允许三种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
-
-`office_component_validation` 只由 Application 安装事务消费，不访问 SDK 私有 context，也不向 Product、Bridge 或 Renderer 暴露系统 handle。磁盘检查使用调用方可用字节；签名检查在阶段目录和最终版本目录均执行，禁止弹出 UI、联网补取证书或将失败降级为成功。精确下载来源、摘要与接受格式由 [Windows 分发](windows-distribution.md#客户端-office-安装事务) 定义。
-
-`office_process_tree` 只补当前 SDK 未公开的 Windows Office Job、自身进程身份与 Office 捕获管道只读观测能力。Application 相应资源 owner 保留唯一长期 Job handle，组件入口只临时打开、验证 kill-on-close 且禁止 breakaway 的 Job、加入自身并在创建 Python 前关闭临时 handle。Host 硬杀由 OS 关闭最后引用并终止整树；显式失败、取消与超时则先由唯一标准库 child owner kill/wait 根进程，再终止 Job 并观测 active process 数归零，最后 join 有界 stdout/stderr reader。不能先等待仍被子进程占用的管道再请求终止。清理无法证实时必须返回失败，调用方不得发布结果或删除仍可能使用的组件和预览资源。该 seam 不维护窗口或 Native Runtime 状态，不修改 SDK 源码，也不成为通用进程服务。
-
-受管理版本的 registry 持有按安装身份命名的 Office Job；入口在创建自己的调用 Job 与任何子进程前加入该版本 Job，随后关闭临时引用。版本 Job 负责资源持有与 Host 退出，入口自己的调用 Job 负责单次 Shell 范围，两者不替代 AgentCore 的外层执行。registry 只在验证后的来源发布前进行有界 kernel object 创建；终止、等待和文件删除仍在 worker，回调只维护原子引用。
-
-清理必须在零进程内引用的基础上，将对应 Job 封闭为零 active-process limit，再终止并观测 active 数归零，持有封闭的 Job 完成文件与删除意图收口后才释放。冷清理不能接管旧 Job；只允许独占创建同身份的封闭 reservation，已有对象则有界等待，超时或观测失败保留资源并报告未静止。安装 pending 的自检使用按事务身份命名的独占 Job，恢复阶段目录及未提交候选前同样取得该事务的封闭 reservation。依据 [Windows Job 对象生命周期](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)，对象要在最后 handle 关闭且关联进程终止后才销毁；不得把 Host 退出、内存引用消失或取消回执单独视为该证明。入口拒绝已封闭的 Job，OS 的零进程限制同时防止“先读取旧限制、后加入”的竞争。
-
-预览资源从创建目录前到物理删除完成持续持有独占 operation Job，转换调用借用该持有范围；引擎退出后仍打开的预览不能失去保护。目录中的有界归属记录绑定 operation、实际父目录和目录身份。启动检查与显式清理由既有 Office worker 有界扫描，只有归属记录及当前目录身份一致、且独占取得同身份的新封闭 Job 后才能删除；已有 Job 时立即保留，不接管、不按 PID 推断静止。缺失或损坏的记录、目录替换、链接及超过单次扫描界限的资源保留并如实报告待清理。该记录只授予精确临时目录的回收权，不持久引用组件版本，也不建立预览缓存。
-
-模型 Shell 路径仍由 AgentCore 执行，Office 入口只管理自己的子树。Application 在发布已安装 Skill 来源前，以 Primary authority 原子写出当前 Host 的 PID 和进程创建时间；组件入口只接受处于自身祖先链中且创建时间一致的 Host，并持有本次 Shell 祖先至该 Host 的 Windows process handle。启动任何子进程前确认范围仍存活，等待时同时观察子进程和这些 handle；Shell 范围或 Host 结束即退出入口，由它独占的 kill-on-close Job 终止子树。不得按可复用 PID、进程名或 Host 之上的 Explorer/终端状态判断生命周期。损坏、缺失、已过期或非祖先 Host 的记录不允许安装资源开始执行；开发树与 Application 专用 Host Job 路径不因此获得任意进程管理 authority。AgentCore 返回取消完成本身不证明 Office 后代已物理退出，版本与临时资源清理仍须独立证明静止。
 
 `app_single_instance` 必须同时满足：
 
@@ -213,11 +199,11 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过 Snapshot 重建视图；Application restart 先恢复经过校验的 Product history，Conversation attachment 只能经用户显式恢复事务重建。Bridge transport、Product durable fact 与 Agent execution fact 不能相互覆盖，精确事务见[Product 架构](product-architecture.md)。
 
-| 模型 | 故障隔离 | 架构地位 |
-| --- | --- | --- |
-| 同进程 + bounded Executor | 无进程级隔离 | 当前实现拓扑 |
-| 单 AgentCore Worker | Host 与 AgentCore crash 隔离 | 已选择的正式方向，尚未实现 |
-| 每 active Session Worker | Session 级隔离 | 只有单 Worker 证据不足时才评估 |
+| 模型                      | 故障隔离                     | 架构地位                       |
+| ------------------------- | ---------------------------- | ------------------------------ |
+| 同进程 + bounded Executor | 无进程级隔离                 | 当前实现拓扑                   |
+| 单 AgentCore Worker       | Host 与 AgentCore crash 隔离 | 已选择的正式方向，尚未实现     |
+| 每 active Session Worker  | Session 级隔离               | 只有单 Worker 证据不足时才评估 |
 
 统一 Zig 和线程池不提供进程隔离；当前 AgentCore fatal 可以带走 Host 与全部进程内 Session。独立 fault-domain 证据支持单 AgentCore Worker 方向，但 spike IPC 不是产品协议，也不证明 Worker 已实现。正式 Worker 必须独立定义 versioned transport、capacity/backpressure、ownership、correlation、credential、disconnect、Run cause 与 shutdown；不得把当前 checkpoint recovery 误报为 in-flight Run 或 Worker crash recovery。证据状态见[验证规范](validation.md)。
 

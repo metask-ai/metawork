@@ -1,8 +1,5 @@
 import { outputActionStates } from "./contracts.ts";
-import {
-  decodeTaskApprovalResultWire,
-  decodeOfficeComponentView,
-} from "./generated-wire.ts";
+import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
 import {
   exactKeys,
   fail,
@@ -124,9 +121,7 @@ import {
   type WorkspaceChoice,
   type WorkspaceView,
 } from "./contracts.ts";
-
 type JsonObject = Record<string, unknown>;
-
 export function decodeOutputActionResult(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "state"]);
   return {
@@ -135,7 +130,6 @@ export function decodeOutputActionResult(value: unknown) {
     state: enumValue(item.state, "$.state", outputActionStates),
   };
 }
-
 export function decodeOutputActionCancel(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "cancelled"]);
   return {
@@ -144,7 +138,6 @@ export function decodeOutputActionCancel(value: unknown) {
     cancelled: booleanValue(item.cancelled, "$.cancelled"),
   };
 }
-
 export function decodeExternalLinkOpenResult(value: unknown) {
   const item = object(value, "$", ["outcome"]);
   return {
@@ -155,7 +148,6 @@ export function decodeExternalLinkOpenResult(value: unknown) {
     ] as const),
   };
 }
-
 const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [
   "queued",
@@ -174,7 +166,6 @@ const nonTerminalRunPhases = [
   "waiting_ui",
   "stopping",
 ] as const;
-
 const nonTerminalCompactPhases = ["queued", "compacting", "stopping"] as const;
 const runOutcomes = [
   "completed",
@@ -458,13 +449,11 @@ const catalogRefreshReasons = [
   "capacity_reached",
   "shutting_down",
 ] as const;
-
 function nonEmptyString(value: unknown, path: string) {
   const result = stringValue(value, path);
   if (result.length === 0) fail(path, "expected non-empty string");
   return result;
 }
-
 function decimalString(value: unknown, path: string, signed = false) {
   const result = stringValue(value, path);
   const unsignedPattern = /^(0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?$/;
@@ -476,15 +465,12 @@ function decimalString(value: unknown, path: string, signed = false) {
     fail(path, "expected canonical decimal string");
   return result;
 }
-
 function nullableDecimalString(value: unknown, path: string, signed = false) {
   return value === null ? null : decimalString(value, path, signed);
 }
-
 function nullableWireId(value: unknown, path: string) {
   return value === null ? null : wireId(value, path);
 }
-
 function calendarDate(value: unknown, path: string) {
   const result = stringValue(value, path);
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(result);
@@ -517,21 +503,17 @@ function calendarDate(value: unknown, path: string) {
     fail(path, "expected valid calendar date");
   return result;
 }
-
 function nullableCalendarDate(value: unknown, path: string) {
   return value === null ? null : calendarDate(value, path);
 }
-
 function calendarDayNumber(value: string) {
-  return Math.floor(Date.parse(`${value}T00:00:00Z`) / 86_400_000);
+  return Math.floor(Date.parse(`${value}T00:00:00Z`) / 86400000);
 }
-
 function nonNegativeFiniteNumber(value: unknown, path: string) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
     fail(path, "expected non-negative finite number");
   return value;
 }
-
 function nullableObject<T>(
   value: unknown,
   path: string,
@@ -539,7 +521,6 @@ function nullableObject<T>(
 ): T | null {
   return value === null ? null : decode(value, path);
 }
-
 function nullableEnum<const T extends readonly string[]>(
   value: unknown,
   path: string,
@@ -547,7 +528,6 @@ function nullableEnum<const T extends readonly string[]>(
 ): T[number] | null {
   return value === null ? null : enumValue(value, path, values);
 }
-
 function decodeRunInput(value: unknown, path: string): RunInputView {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     fail(path, "expected object");
@@ -653,7 +633,6 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
     redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
-
 function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
   const item = object(value, path, [
     "availability",
@@ -759,7 +738,6 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     issues,
   };
 }
-
 function decodeSkillManagement(
   value: unknown,
   path: string,
@@ -976,7 +954,6 @@ function decodeSkillManagement(
     assets,
   } as SkillManagementView;
 }
-
 function decodeSkillOrigin(
   value: unknown,
   path: string,
@@ -992,7 +969,6 @@ function decodeSkillOrigin(
     scope: enumValue(item.scope, `${path}.scope`, skillOriginScopes),
   };
 }
-
 function decodeSkillSourceSettings(
   value: unknown,
   path: string,
@@ -1081,7 +1057,6 @@ function decodeSkillSourceSettings(
     fail(`${path}.recovery`, "invalid source recovery authority");
   return { revision, health, entries, recovery };
 }
-
 function decodeSkillSourceDiscovery(
   value: unknown,
   path: string,
@@ -1134,7 +1109,6 @@ function decodeSkillSourceDiscovery(
     fail(path, "expected the complete scoped root checks");
   return checks;
 }
-
 function assertSourceDiscoverySettings(
   discovery: SkillSourceDiscovery,
   settings: SkillSourceSettings,
@@ -1151,11 +1125,9 @@ function assertSourceDiscoverySettings(
       fail(path, "root checks must use the committed source selection");
   }
 }
-
 function nullableBoolean(value: unknown, path: string): boolean | null {
   return value === null ? null : booleanValue(value, path);
 }
-
 function modelTokenLimit(value: unknown, path: string): string | null {
   if (value === null) return null;
   const result = positiveWireId(value, path);
@@ -1166,7 +1138,6 @@ function modelTokenLimit(value: unknown, path: string): string | null {
     fail(path, "expected positive u64 token limit");
   return result;
 }
-
 function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
   const item = object(value, path, [
     "maxInputTokens",
@@ -1298,7 +1269,6 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     },
   };
 }
-
 function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(value, path, [
     "state",
@@ -1630,7 +1600,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     summary: { operation, usageEligibility, wallet, usage, history },
   };
 }
-
 function decodeModelRef(value: unknown, path: string) {
   if (value === null) return null;
   const item = object(value, path, ["sourceId", "modelId"]);
@@ -1642,13 +1611,11 @@ function decodeModelRef(value: unknown, path: string) {
     fail(path, "a model reference requires source and model identities");
   return result;
 }
-
 function decodeRequiredModelRef(value: unknown, path: string) {
   const result = decodeModelRef(value, path);
   if (result === null) fail(path, "expected model reference");
   return result;
 }
-
 function decodeCustomProviders(value: unknown, path: string) {
   const customProviders = arrayValue(value, path, (value, itemPath) => {
     const provider = object(value, itemPath, [
@@ -1774,7 +1741,6 @@ function decodeCustomProviders(value: unknown, path: string) {
   }
   return customProviders;
 }
-
 function decodeCatalogModels(value: unknown, path: string): CatalogModelView[] {
   const models = arrayValue(value, path, (value, modelPath) => {
     const model = object(value, modelPath, [
@@ -1798,7 +1764,6 @@ function decodeCatalogModels(value: unknown, path: string): CatalogModelView[] {
     fail(path, "model identities must be unique");
   return models;
 }
-
 function decodeModels(value: unknown, path: string): ModelsView {
   const item = object(value, path, [
     "availability",
@@ -1959,7 +1924,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
     ),
   };
 }
-
 function decodeNewTaskAdmission(
   value: unknown,
   path: string,
@@ -1972,7 +1936,6 @@ function decodeNewTaskAdmission(
     "activeSelectionRevision",
     "state",
   ]);
-
   const state = enumValue(item.state, `${path}.state`, newTaskAdmissionStates);
   const activeModelRef = decodeModelRef(
     item.activeModelRef,
@@ -2008,7 +1971,6 @@ function decodeNewTaskAdmission(
     state,
   };
 }
-
 function decodeFileReference(value: unknown, path: string): FileReferenceView {
   const raw = record(value, path);
   const generated = Object.hasOwn(raw, "generatedImage");
@@ -2027,7 +1989,6 @@ function decodeFileReference(value: unknown, path: string): FileReferenceView {
     displayPath: stringValue(item.displayPath, `${path}.displayPath`),
   };
 }
-
 export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");
   const hasImage = Object.hasOwn(raw, "image");
@@ -2176,7 +2137,6 @@ export function decodePreviewRelease(
   )
     fail("$", "invalid preview release confirmation");
 }
-
 export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
   const recordValue = record(value, "$fileChangeDiff");
   const status = enumValue(recordValue.status, "$fileChangeDiff.status", [
@@ -2216,7 +2176,6 @@ export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
     content: "",
   };
 }
-
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
     "bash",
@@ -2307,7 +2266,6 @@ function decodeTool(value: unknown, path: string): ToolView {
     ),
   };
 }
-
 function toolPresentationKind(name: unknown) {
   switch (name) {
     case "Read":
@@ -2332,7 +2290,6 @@ function toolPresentationKind(name: unknown) {
       return null;
   }
 }
-
 function decodeToolPresentation(
   value: unknown,
   path: string,
@@ -2467,7 +2424,6 @@ function decodeToolPresentation(
     }
   }
 }
-
 function decodeBashPresentation(
   value: unknown,
   path: string,
@@ -2515,7 +2471,6 @@ function decodeBashPresentation(
     },
   };
 }
-
 function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
   return value === null
     ? null
@@ -2540,7 +2495,6 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
         };
       })();
 }
-
 function decodeRunOutput(value: unknown, path: string): RunView["output"] {
   const outputItem = object(value, path, [
     "commentary",
@@ -2574,7 +2528,6 @@ function decodeRunOutput(value: unknown, path: string): RunView["output"] {
   };
   return output;
 }
-
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
@@ -2733,7 +2686,6 @@ function decodeRun(value: unknown, path: string): RunView {
     outputs: decodeDeliveredOutputs(item.outputs, `${path}.outputs`),
   };
 }
-
 function decodeDeliveredOutputs(
   value: unknown,
   path: string,
@@ -2780,7 +2732,6 @@ function decodeDeliveredOutputs(
     };
   });
 }
-
 function decodeRunFileChanges(
   value: unknown,
   path: string,
@@ -2847,7 +2798,6 @@ function decodeRunFileChanges(
   );
   return { observation, changes };
 }
-
 function decodeRunActivity(value: unknown, path: string): RunActivity | null {
   if (value === null) return null;
   const kind = stringValue(record(value, path).kind, `${path}.kind`);
@@ -2888,7 +2838,6 @@ function decodeRunActivity(value: unknown, path: string): RunActivity | null {
   }
   return fail(`${path}.kind`, "unexpected Run activity");
 }
-
 function decodeConversationContext(value: unknown, path: string) {
   const item = object(value, path, ["pressure", "lastAutoCompact"]);
   const pressure =
@@ -2989,7 +2938,6 @@ function decodeConversationContext(value: unknown, path: string) {
         })();
   return { pressure, lastAutoCompact };
 }
-
 function decodeCompact(value: unknown, path: string): CompactView {
   const item = object(value, path, [
     "operationId",
@@ -3038,7 +2986,6 @@ function decodeCompact(value: unknown, path: string): CompactView {
     },
   };
 }
-
 function validateRunTerminalState(
   phase: RunView["phase"],
   terminal: RunView["terminal"],
@@ -3074,7 +3021,6 @@ function validateRunTerminalState(
         fail(path, "failed Run phase and outcome must agree");
   }
 }
-
 function decodePermissionHistory(
   value: unknown,
   path: string,
@@ -3124,7 +3070,6 @@ function decodePermissionHistory(
     ),
   };
 }
-
 function decodeUiRecord(value: unknown, path: string): UiRecord {
   const item = object(value, path, [
     "requestId",
@@ -3192,7 +3137,6 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
-
 function decodePendingUi(value: unknown, path: string): PendingUi | null {
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value))
@@ -3304,7 +3248,6 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
   }
   return fail(`${path}.kind`, "unexpected request kind");
 }
-
 function decodeTaskMcpAuthority(
   value: unknown,
   path: string,
@@ -3327,7 +3270,6 @@ function decodeTaskMcpAuthority(
     fail(`${path}.selection`, "unavailable authority cannot have a selection");
   return { kind, selection: null };
 }
-
 function decodeTaskApprovalChange(
   value: unknown,
   path: string,
@@ -3343,7 +3285,6 @@ function decodeTaskApprovalChange(
     ] as const),
   };
 }
-
 function decodeTaskApprovalResult(
   value: unknown,
   path: string,
@@ -3357,14 +3298,12 @@ function decodeTaskApprovalResult(
   if (reason === null) fail(`${path}.reason`, "expected failure reason");
   return { revision, outcome, reason };
 }
-
 function inputOperationId(value: unknown, path: string): string {
   const id = stringValue(value, path);
   if (!/^[!-~]{1,64}$/.test(id))
     fail(path, "expected bounded printable operation identity");
   return id;
 }
-
 function decodeTask(
   value: unknown,
   path: string,
@@ -3498,7 +3437,6 @@ function decodeTask(
     )
       fail(path, "Run page disagrees with its manifest");
   }
-
   for (const run of runs) {
     for (const input of run.additionalInputs) {
       if (
@@ -3933,7 +3871,6 @@ function decodeTask(
     uiHistory,
   };
 }
-
 function decodeWorkspace(value: unknown, path: string): WorkspaceView {
   const item = object(value, path, [
     "id",
@@ -4020,7 +3957,6 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     },
   };
 }
-
 function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   const item = object(value, path, [
     "id",
@@ -4262,7 +4198,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     occurrences,
   };
 }
-
 function decodeMcpManagement(value: unknown, path: string): McpManagementView {
   const item = object(value, path, [
     "availability",
@@ -4704,7 +4639,6 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     servers,
   };
 }
-
 export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
   const item = object(value, path, [
     "taskId",
@@ -4754,7 +4688,6 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
     ] as const),
   };
 }
-
 function decodeRunManifest(value: unknown, path: string): RunManifest {
   const item = object(value, path, [
     "id",
@@ -4787,7 +4720,6 @@ function decodeRunManifest(value: unknown, path: string): RunManifest {
     ),
   };
 }
-
 function decodeTaskSummary(value: unknown, path: string): TaskSummary {
   const item = object(value, path, [
     "id",
@@ -4909,7 +4841,6 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
     fail(path, "inconsistent active Compact");
   return summary;
 }
-
 export function decodeViewVersions(value: unknown): ViewVersions {
   const item = object(value, "$.blockVersions", viewBlockNames);
   return Object.fromEntries(
@@ -4919,7 +4850,6 @@ export function decodeViewVersions(value: unknown): ViewVersions {
     ]),
   ) as ViewVersions;
 }
-
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const view = object(value, "$", [
     "revision",
@@ -4954,7 +4884,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "permissions",
     "account",
     "models",
-    "office",
     "newTaskAdmission",
     "automaticWorkspaceRoot",
     "skillCatalog",
@@ -5490,7 +5419,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     )
   )
     fail("$.receipts", "receipt identity mismatch");
-
   if ((view.searchIndex !== null) !== scope.search)
     fail("$.searchIndex", "search scope mismatch");
   const searchIndex =
@@ -5529,7 +5457,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       searchIndex.length
   )
     fail("$.searchIndex", "duplicate search Run");
-
   const summary = taskIndex.find((task) => task.id === scope.taskId);
   if ((summary !== undefined) !== (taskPage !== null))
     fail("$.taskPage", "Task presence disagrees with index");
@@ -5663,7 +5590,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     permissions,
     account: decodeAccount(root.account, "$.account"),
     models: decodeModels(root.models, "$.models"),
-    office: decodeOfficeComponentView(root.office, "$.office"),
     newTaskAdmission: decodeNewTaskAdmission(
       root.newTaskAdmission,
       "$.newTaskAdmission",
@@ -5676,7 +5602,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     tasks,
   };
 }
-
 export function decodeAccountCommandResult(
   value: unknown,
 ): AccountCommandResult {
@@ -5693,7 +5618,6 @@ export function decodeAccountCommandResult(
     fail("$", "a rejected command cannot expose an attempt");
   return { accepted, errorCode, attemptId };
 }
-
 export function decodeExecutionCommandResult(
   value: unknown,
 ): ExecutionCommandResult {
@@ -5709,7 +5633,6 @@ export function decodeExecutionCommandResult(
     fail("$", "accepted and errorCode must agree");
   return { accepted, errorCode, attemptId: null };
 }
-
 export function decodeRendererBridgeConnect(value: unknown) {
   const acceptedValue = booleanValue(
     (value as JsonObject)?.accepted,
@@ -5766,7 +5689,6 @@ export function decodeRendererBridgeConnect(value: unknown) {
     error: enumValue(item.error, "$.error", rendererBridgeConnectErrors),
   };
 }
-
 export function decodeRevisionNotification(value: unknown) {
   const item = object(value, "$", ["generation", "revision", "securityEpoch"]);
   return {
@@ -5775,7 +5697,6 @@ export function decodeRevisionNotification(value: unknown) {
     securityEpoch: positiveU64WireId(item.securityEpoch, "$.securityEpoch"),
   };
 }
-
 function decodeSignal(value: unknown, keys: readonly string[]): HostSignal {
   const item = object(value, "$", keys);
   const sequence = positiveNumber(item.sequence, "$.sequence");
@@ -5786,7 +5707,6 @@ function decodeSignal(value: unknown, keys: readonly string[]): HostSignal {
     sequence,
   };
 }
-
 export function decodeHostSignalEvent(value: unknown): HostSignal {
   const keys = [
     "sequence",
@@ -5800,7 +5720,6 @@ export function decodeHostSignalEvent(value: unknown): HostSignal {
   nonNegativeNumber(item.requestBytes, "$.requestBytes");
   return signal;
 }
-
 export function decodePingResponse(value: unknown): HostSignal {
   return decodeSignal(value, [
     "sequence",
@@ -5809,7 +5728,6 @@ export function decodePingResponse(value: unknown): HostSignal {
     "onMainThread",
   ]);
 }
-
 export function assertSignalAcknowledged(value: unknown, sequence: number) {
   const item = object(value, "$", [
     "sequence",
@@ -5823,7 +5741,6 @@ export function assertSignalAcknowledged(value: unknown, sequence: number) {
   stringValue(item.origin, "$.origin");
   booleanValue(item.onMainThread, "$.onMainThread");
 }
-
 export function assertDisconnected(value: unknown, generation: string) {
   const item = object(value, "$", ["generation", "detached"]);
   if (
@@ -5832,7 +5749,6 @@ export function assertDisconnected(value: unknown, generation: string) {
   )
     fail("$", "disconnect response mismatch");
 }
-
 export function assertWindowChromeHandled(value: unknown, generation: string) {
   const item = object(value, "$", ["generation", "handled"]);
   if (
@@ -5841,15 +5757,23 @@ export function assertWindowChromeHandled(value: unknown, generation: string) {
   )
     fail("$", "window chrome acknowledgement mismatch");
 }
-
 export type WindowChromeEnvironment = {
   generation: string;
-  insets: { top: number; left: number; bottom: number; right: number };
-  buttons: { x: number; y: number; width: number; height: number };
+  insets: {
+    top: number;
+    left: number;
+    bottom: number;
+    right: number;
+  };
+  buttons: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   rendererControls: boolean;
   maximized: boolean;
 };
-
 export function decodeWindowChromeEnvironment(
   value: unknown,
 ): WindowChromeEnvironment {
@@ -5890,7 +5814,6 @@ export function decodeWindowChromeEnvironment(
     maximized: booleanValue(item.maximized, "$.maximized"),
   };
 }
-
 export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     fail("$", "expected workspace choice object");
@@ -5905,7 +5828,6 @@ export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
     workspaceId: positiveWireId(item.workspaceId, "$.workspaceId"),
   };
 }
-
 export function decodeSkillImportPreview(value: unknown): SkillImportPreview {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     fail("$", "expected Skill import preview object");
@@ -5938,7 +5860,6 @@ export function decodeSkillImportPreview(value: unknown): SkillImportPreview {
     totalBytes: positiveNumber(item.totalBytes, "$.totalBytes"),
   };
 }
-
 export function decodeMcpMutationResult(value: unknown): McpMutationResult {
   const item = object(value, "$", ["outcome", "desiredGeneration"]);
   const outcome = enumValue(item.outcome, "$.outcome", [
@@ -5973,7 +5894,6 @@ export function decodeMcpMutationResult(value: unknown): McpMutationResult {
     fail("$.desiredGeneration", "known mutation outcome requires generation");
   return { outcome, desiredGeneration };
 }
-
 export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
   const item = object(value, "$", ["outcome"]);
   return {
@@ -5986,7 +5906,6 @@ export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
     ] as const),
   };
 }
-
 export function decodeMcpConfigurationApplyResult(
   value: unknown,
 ): McpConfigurationApplyResult {
@@ -6000,7 +5919,6 @@ export function decodeMcpConfigurationApplyResult(
     ] as const),
   };
 }
-
 export function decodeMcpConnectionTestResult(
   value: unknown,
 ): McpConnectionTestResult {
@@ -6016,7 +5934,6 @@ export function decodeMcpConnectionTestResult(
     ] as const),
   };
 }
-
 export function decodeMcpAuthorizationResult(
   value: unknown,
 ): McpAuthorizationResult {
@@ -6036,7 +5953,6 @@ export function decodeMcpAuthorizationResult(
     fail("$.operationId", "only a started authorization has an operation id");
   return { outcome, operationId };
 }
-
 export function decodeMcpAuthorizationCancelResult(
   value: unknown,
 ): McpAuthorizationCancelResult {
@@ -6052,7 +5968,6 @@ export function decodeMcpAuthorizationCancelResult(
     ] as const),
   };
 }
-
 export function decodeSkillMutationResult(value: unknown): SkillMutationResult {
   const item = object(value, "$", [
     "accepted",
@@ -6097,7 +6012,6 @@ export function decodeSkillMutationResult(value: unknown): SkillMutationResult {
     ] as const),
   };
 }
-
 export function decodeSkillEnablementResult(
   value: unknown,
 ): SkillEnablementResult {
@@ -6136,7 +6050,6 @@ export function decodeSkillEnablementResult(
     ] as const),
   };
 }
-
 export function decodeSkillSourceSettingsResult(
   value: unknown,
 ): SkillSourceSettingsResult {
@@ -6157,7 +6070,6 @@ export function decodeSkillSourceSettingsResult(
     reason: enumValue(item.reason, "$.reason", skillSourceSettingsReasons),
   };
 }
-
 export function decodeSkillExportResult(value: unknown): SkillExportResult {
   const item = object(value, "$", ["exported", "fileName", "reason"]);
   const exported = booleanValue(item.exported, "$.exported");
@@ -6176,7 +6088,6 @@ export function decodeSkillExportResult(value: unknown): SkillExportResult {
     reason: nonEmptyString(item.reason, "$.reason"),
   };
 }
-
 export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
   const item = object(value, "$", [
     "available",
@@ -6207,7 +6118,6 @@ export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
     reason: nonEmptyString(item.reason, "$.reason"),
   };
 }
-
 export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
   const item = object(value, "$", [
     "accepted",
@@ -6241,7 +6151,6 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     reason: enumValue(item.reason, "$.reason", taskCreateReasons),
   };
 }
-
 export function decodeTaskRunResult(
   value: unknown,
   expectedTaskId: string,
@@ -6267,7 +6176,6 @@ export function decodeTaskRunResult(
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
   };
 }
-
 export function decodeTaskCompletionSeenResult(
   value: unknown,
   expectedTaskId: string,
@@ -6284,7 +6192,6 @@ export function decodeTaskCompletionSeenResult(
     marked: booleanValue(item.marked, "$.marked"),
   };
 }
-
 export function decodeTaskApprovalModeResult(
   value: unknown,
   expectedTaskId: string,
@@ -6318,7 +6225,6 @@ export function decodeTaskApprovalModeResult(
     reason: enumValue(item.reason, "$.reason", taskApprovalModeReasons),
   };
 }
-
 export function decodeTaskModelSelectionResult(
   value: unknown,
   expectedTaskId: string,
@@ -6353,7 +6259,6 @@ export function decodeTaskModelSelectionResult(
     reason: enumValue(item.reason, "$.reason", taskModelSelectionReasons),
   };
 }
-
 export function decodeTaskCompactResult(
   value: unknown,
   expectedTaskId: string,
@@ -6384,7 +6289,6 @@ export function decodeTaskCompactResult(
     reason: enumValue(item.reason, "$.reason", taskCompactReasons),
   };
 }
-
 export function decodeTaskRestoreResult(
   value: unknown,
   expectedTaskId: string,
@@ -6415,7 +6319,6 @@ export function decodeTaskRestoreResult(
     reason: enumValue(item.reason, "$.reason", taskRestoreReasons),
   };
 }
-
 export function assertCompactCancelAccepted(
   value: unknown,
   taskId: string,
@@ -6429,7 +6332,6 @@ export function assertCompactCancelAccepted(
   )
     fail("$", "Compact cancel response mismatch");
 }
-
 export function decodeScheduledTaskMutationResult(
   value: unknown,
   expectedId?: string,
@@ -6449,7 +6351,6 @@ export function decodeScheduledTaskMutationResult(
     epoch: positiveWireId(item.epoch, "$.epoch"),
   };
 }
-
 export function decodeScheduledTaskEnabledResult(
   value: unknown,
   expectedId: string,
@@ -6470,7 +6371,6 @@ export function decodeScheduledTaskEnabledResult(
     enabled,
   };
 }
-
 export function decodeScheduledTaskRunResult(
   value: unknown,
   expectedId: string,
@@ -6490,7 +6390,6 @@ export function decodeScheduledTaskRunResult(
     taskId: positiveWireId(item.taskId, "$.taskId"),
   };
 }
-
 export function assertScheduledTaskDeleted(value: unknown, expectedId: string) {
   const item = object(value, "$", ["scheduledTaskId", "deleted"]);
   if (positiveWireId(item.scheduledTaskId, "$.scheduledTaskId") !== expectedId)
@@ -6498,7 +6397,6 @@ export function assertScheduledTaskDeleted(value: unknown, expectedId: string) {
   if (!booleanValue(item.deleted, "$.deleted"))
     fail("$.deleted", "expected deletion confirmation");
 }
-
 const persistenceRecoveryOutcomes = [
   "recovered",
   "stale_revision",
@@ -6508,14 +6406,12 @@ const persistenceRecoveryOutcomes = [
   "outcome_unknown",
   "shutting_down",
 ] as const satisfies readonly PersistenceRecoveryOutcome[];
-
 export function decodePersistenceRecoveryResult(value: unknown) {
   const item = object(value, "$", ["outcome"]);
   return {
     outcome: enumValue(item.outcome, "$.outcome", persistenceRecoveryOutcomes),
   };
 }
-
 export function decodeCatalogRefreshResult<
   Identity extends "workspaceId" | "taskId",
 >(
@@ -6540,7 +6436,6 @@ export function decodeCatalogRefreshResult<
     reason,
   } as CatalogRefreshResult<Identity>;
 }
-
 export function decodeSkillCatalogRefreshResult(
   value: unknown,
 ): SkillCatalogRefreshResult {
@@ -6554,7 +6449,6 @@ export function decodeSkillCatalogRefreshResult(
     fail("$", "accepted and reason must agree");
   return { accepted, reason };
 }
-
 export function assertCancelAccepted(
   value: unknown,
   taskId: string,
@@ -6568,7 +6462,6 @@ export function assertCancelAccepted(
   )
     fail("$", "cancel response mismatch");
 }
-
 export function assertUiResponseAccepted(
   value: unknown,
   taskId: string,
@@ -6584,7 +6477,6 @@ export function assertUiResponseAccepted(
   )
     fail("$", "UI response identity mismatch");
 }
-
 export function assertTaskFlag(
   value: unknown,
   taskId: string,
@@ -6597,7 +6489,6 @@ export function assertTaskFlag(
   )
     fail("$", `${flag} response mismatch`);
 }
-
 export function assertTaskArchived(
   value: unknown,
   taskId: string,
@@ -6610,7 +6501,6 @@ export function assertTaskArchived(
   )
     fail("$", "archive response mismatch");
 }
-
 export function decodeAttachmentChooseResult(
   value: unknown,
 ): AttachmentChooseResult {
@@ -6690,12 +6580,10 @@ export function decodeAttachmentChooseResult(
     fail("$.attachments", "attachment tokens must be unique");
   return { status, attachments };
 }
-
 export function decodeAttachmentReleaseResult(value: unknown) {
   const item = object(value, "$", ["released"]);
   return { released: booleanValue(item.released, "$.released") };
 }
-
 export function decodeAutomaticWorkspaceRootMutationResult(
   value: unknown,
 ): AutomaticWorkspaceRootMutationResult {
@@ -6707,7 +6595,6 @@ export function decodeAutomaticWorkspaceRootMutationResult(
     ] as const),
   };
 }
-
 export function decodeAttachmentReceiveResult(
   value: unknown,
 ): AttachmentReceiveResult {
@@ -6724,7 +6611,6 @@ export function decodeAttachmentReceiveResult(
     fail("$.status", "expected ready or rejected");
   return result;
 }
-
 export function decodeAttachmentReceiveAcceptance(value: unknown) {
   if ((value as JsonObject)?.status === "accepted") {
     object(value, "$", ["status"]);
@@ -6735,7 +6621,6 @@ export function decodeAttachmentReceiveAcceptance(value: unknown) {
     fail("$.status", "expected accepted or rejected");
   return result;
 }
-
 export function decodeAttachmentAddResult(value: unknown): AttachmentAddResult {
   const root = value as JsonObject;
   if (
@@ -6791,7 +6676,6 @@ export function decodeAttachmentCancelResult(
   const item = object(value, "$", ["status", "released"]);
   return { status, released: booleanValue(item.released, "$.released") };
 }
-
 function inputSequence(value: unknown, path: string): number {
   const result = positiveNumber(value, path);
   if (result > 64) fail(path, "input sequence exceeds the Run limit");
@@ -6901,7 +6785,6 @@ function decodeAdditionalInputs(
   if (records.length > 64) fail(path, "too many additional inputs");
   return records;
 }
-
 function decodeInputSubmission(value: unknown, path: string): InputSubmission {
   const item = object(value, path, [
     "operationId",
@@ -6930,7 +6813,6 @@ function decodeInputSubmission(value: unknown, path: string): InputSubmission {
     afterOutputCount,
   };
 }
-
 export function decodeSendInputResult(
   value: unknown,
   expectedTaskId: string,

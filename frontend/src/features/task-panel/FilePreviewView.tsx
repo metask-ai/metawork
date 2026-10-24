@@ -1,6 +1,5 @@
-import type { DocumentPreview } from "../../bridge/document-preview.ts";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
 import {
   Markdown,
@@ -12,14 +11,11 @@ import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { HighlightedSource } from "./HighlightedSource.tsx";
 import type { FilePreviewMode } from "./useTaskPanelViewStates.ts";
-
 export type FilePreviewViewState = {
   selected: FileReferenceView;
   phase: "loading" | "settled";
   preview: FilePreview | null;
-  document?: DocumentPreview;
 };
-
 export function FilePreviewView({
   state,
   mode,
@@ -28,7 +24,6 @@ export function FilePreviewView({
   onScrollTopChange,
   onRetry,
   webLink,
-  documentContent,
 }: {
   state: FilePreviewViewState;
   mode: FilePreviewMode;
@@ -37,7 +32,6 @@ export function FilePreviewView({
   onScrollTopChange: (scrollTop: number) => void;
   onRetry: () => void;
   webLink: MarkdownWebLink;
-  documentContent?: ReactNode;
 }) {
   const { t } = useI18n();
   const root = useRef<HTMLDivElement | null>(null);
@@ -49,7 +43,6 @@ export function FilePreviewView({
     : status && status !== "loading" && status !== "ready"
       ? (`file_preview.state.${status}` as const)
       : "file_preview.state.error";
-
   useLayoutEffect(() => {
     if (mode !== "preview") return;
     const document = root.current?.querySelector<HTMLElement>(
@@ -57,9 +50,6 @@ export function FilePreviewView({
     );
     if (document) document.scrollTop = scrollTop;
   }, [mode, scrollTop, state.selected.id, status]);
-
-  if (state.document) return documentContent;
-
   return (
     <Tabs.Root
       ref={root}
@@ -163,7 +153,6 @@ export function FilePreviewView({
     </Tabs.Root>
   );
 }
-
 export function FilePreviewRefreshAction({
   state,
   onRefresh,
@@ -172,7 +161,6 @@ export function FilePreviewRefreshAction({
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
-
   return (
     <button
       type="button"

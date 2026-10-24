@@ -1,6 +1,6 @@
 # PptxGenJS Tutorial
 
-Run saved authoring code with `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`, using the component's PptxGenJS. Read SKILL.md for original-file handling, rendering and required QA.
+Run saved authoring code with `"${CLAUDE_SKILL_DIR}/environment/run.cmd" node create.cjs`, using the fixed private PptxGenJS. Read SKILL.md for original-file handling and supported content checks.
 
 ## Setup & Basic Structure
 
@@ -237,7 +237,7 @@ slide.addImage({
 
 ### Icon Libraries
 
-For icon rendering, use `react-icons`, `react`, `react-dom`, and `sharp` when they are available in the Task's Node.js environment. Check availability before selecting this workflow; follow the dependency handling in [SKILL.md](SKILL.md).
+Only the fixed PptxGenJS dependencies are provided. Do not select examples requiring React, Sharp or other additional packages; use supported shapes or user-provided images.
 
 Popular icon sets in react-icons:
 - `react-icons/fa` - Font Awesome

@@ -7,16 +7,6 @@ import { JSDOM } from "jsdom";
 import { createElement, createRef, useState } from "react";
 import { createServer } from "vite";
 
-const initialOfficeView = JSON.parse(
-  readFileSync(
-    new URL(
-      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
-      import.meta.url,
-    ),
-    "utf8",
-  ),
-).office;
-
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
   url: "http://localhost/",
@@ -423,9 +413,6 @@ function settingsElement(account, overrides = {}) {
       },
     },
     createElement(SettingsPage, {
-      office: initialOfficeView,
-      onOfficeAction: async () => null,
-      onOfficeCancel: async () => null,
       account,
       models: readySettingsModels,
       automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,

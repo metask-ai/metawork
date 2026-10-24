@@ -488,15 +488,15 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 
 不得把 Task 生命周期、当前 Run 阶段和最近一次 Run 结果压成一个 enum。Host projection 提供 Task 状态和逐 Run terminal 历史，Renderer 从最后一个 terminal Run 派生最近结果与展示标签，不接收或维护 Task 级结果副本。
 
-| 状态轴               | 值                                                    | 含义                                            |
-| -------------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| Task lifecycle       | `open / closing`                                      | 当前 attachment 是否正在收口                    |
-| Archived             | `false / true`                                        | Task 是否参与日常列表                           |
-| Deletion status      | `idle / deleting / failed`                            | 删除用例的等待、进行中与显式重试事实            |
-| Active operation     | `none / run / compact / restore`                      | 当前占用唯一 Session operation 槽的操作种类     |
-| Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态          |
-| Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态      |
-| Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
+| 状态轴               | 值                                                    | 含义                                         |
+| -------------------- | ----------------------------------------------------- | -------------------------------------------- |
+| Task lifecycle       | `open / closing`                                      | 当前 attachment 是否正在收口                 |
+| Archived             | `false / true`                                        | Task 是否参与日常列表                        |
+| Deletion status      | `idle / deleting / failed`                            | 删除用例的等待、进行中与显式重试事实         |
+| Active operation     | `none / run / compact / restore`                      | 当前占用唯一 Session operation 槽的操作种类  |
+| Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态       |
+| Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态   |
+| Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task    |
 | View sync            | `ready / syncing / failed`                            | 当前连接已确认、最近一次合格读取成功且无故障 |
 
 `draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only 同源模型选择；发送前必须同时满足相应 Workspace admission、默认执行配置与所选模型 authority。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
@@ -507,19 +507,19 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.3 展示标签与优先级
 
-| 条件                                         | English UI           | 中文 UI      | 主要动作                    |
-| -------------------------------------------- | -------------------- | ------------ | --------------------------- |
-| draft page                                   | New task             | 新建任务     | 输入并发送                  |
+| 条件                                         | English UI              | 中文 UI        | 主要动作                       |
+| -------------------------------------------- | ----------------------- | -------------- | ------------------------------ |
+| draft page                                   | New task                | 新建任务       | 输入并发送                     |
 | view sync = failed                           | Workbench is not synced | 工作台尚未同步 | 重试同步，禁用依赖 Host 的操作 |
-| waiting_user + permission review = reviewing | Automatic review     | 自动评审中   | 可直接批准、拒绝或停止      |
-| waiting_user + no active permission review   | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
-| run phase = stopping                         | Stopping             | 正在停止     | 等待真实结果                |
-| run phase = running                          | Working              | 正在工作     | 草拟、发送文本插话或停止      |
-| run phase = queued                           | Queued               | 排队中       | 草拟或停止            |
-| no active Run + outcome = completed          | Completed            | 已完成       | 继续输入、打开结果          |
-| no active Run + outcome = cancelled          | Stopped              | 已停止       | 继续输入或重试              |
-| no active Run + outcome = failed             | Failed               | 失败         | 修复问题、重试或继续        |
-| no active Run + outcome = interrupted        | Interrupted          | 意外中断     | 查看说明并明确继续          |
+| waiting_user + permission review = reviewing | Automatic review        | 自动评审中     | 可直接批准、拒绝或停止         |
+| waiting_user + no active permission review   | Needs your attention    | 需要你处理     | 回答、批准、拒绝或停止         |
+| run phase = stopping                         | Stopping                | 正在停止       | 等待真实结果                   |
+| run phase = running                          | Working                 | 正在工作       | 草拟、发送文本插话或停止       |
+| run phase = queued                           | Queued                  | 排队中         | 草拟或停止                     |
+| no active Run + outcome = completed          | Completed               | 已完成         | 继续输入、打开结果             |
+| no active Run + outcome = cancelled          | Stopped                 | 已停止         | 继续输入或重试                 |
+| no active Run + outcome = failed             | Failed                  | 失败           | 修复问题、重试或继续           |
+| no active Run + outcome = interrupted        | Interrupted             | 意外中断       | 查看说明并明确继续             |
 
 表格按优先级匹配。`Completed` 等 terminal 标签只描述最近一次执行；归档状态由独立标记表达，不得覆盖需要处理或正在停止的运行状态。
 
@@ -579,14 +579,14 @@ AgentCore typed CoreEvent
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
 
-| 槽位              | 出现条件                                                                  | 更新方式                                                           |
-| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| User instruction  | Run 存在                                                                  | 历史稳定；正文下方始终有复制动作，可用时带弱化提交时间             |
-| Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | 按插话锚点分为连续阅读块；closed part 稳定，尾部原位增长、定性或回滚  |
-| Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开 |
-| Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                      |
-| Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                      |
-| Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 紧随所属 final/partial 回复正文；纯图标复制入口 + 可用时的弱化完成时间         |
+| 槽位              | 出现条件                                                                  | 更新方式                                                               |
+| ----------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| User instruction  | Run 存在                                                                  | 历史稳定；正文下方始终有复制动作，可用时带弱化提交时间                 |
+| Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | 按插话锚点分为连续阅读块；closed part 稳定，尾部原位增长、定性或回滚   |
+| Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开     |
+| Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                          |
+| Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                          |
+| Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 紧随所属 final/partial 回复正文；纯图标复制入口 + 可用时的弱化完成时间 |
 
 `RunProcess` 同时承担 active Run 的唯一 live status 与 terminal Run 的历史 Tool 入口：
 
@@ -744,12 +744,12 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。失败或未知的已分离提交保留完整内容供显式放回编辑器，不覆盖较新的 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。current Workspace 的 `loading / unavailable` 只影响 Skill 候选；Automatic Task 的初始准备 loading 另按 §8.3 阻止首个 Run，文字保持可编辑。
 
-| Task state | Composer behavior |
-| --- | --- |
+| Task state                                        | Composer behavior                                   |
+| ------------------------------------------------- | --------------------------------------------------- |
 | idle / queued / starting / running / waiting_user | 允许有效发送，Task 决定何时执行；请求回答独立于消息 |
-| stopping / compact / restore / 收尾 | 允许有效发送并显示等待；不以执行阶段冻结输入 |
-| failed / interrupted | 允许有资格的新意图，旧失败不自动重发 |
-| archived / 删除中 / 真实 authority 或容量失效 | 保留草稿，按 Host 接收资格说明不可发送原因 |
+| stopping / compact / restore / 收尾               | 允许有效发送并显示等待；不以执行阶段冻结输入        |
+| failed / interrupted                              | 允许有资格的新意图，旧失败不自动重发                |
+| archived / 删除中 / 真实 authority 或容量失效     | 保留草稿，按 Host 接收资格说明不可发送原因          |
 
 输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 输入框左下角作为紧凑下拉菜单出现，紧邻模型选择，只显示当前模式名称；展开列出三种模式名称及各自一句简短说明，不在输入框上方保留独立设置区或铺开说明，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
@@ -758,7 +758,6 @@ Task 决定同步插话或等待下一轮，不使用 `UiBackend.poll()`。Rende
 追加消息与普通用户消息使用相同气泡和复制操作，安全正文靠右显示，不另做状态卡片，不隐藏在默认折叠的技术过程内。内部采纳状态不改变消息外观或位置。Renderer 按 Host 提供的 `afterOutputCount` 将插话放在前 N 个 canonical 输出槽位之后，空的已闭合槽位和脱敏尾部占位仍参与计数，不能先按正文非空过滤再定位。按消息提交顺序对锚点取前缀最大值，再与当前输出槽位数取较小值；同一位置按递增消息 identity 排列，锚点超过实际输出时放在末尾，撤回导致后续锚点下降也不得颠倒用户消息。两个插话边界之间排序后相邻的 Assistant part 连续呈现，不按序号是否连续判断，也不切割同一流式 Markdown。整份临时输出被丢弃并重试时，重试可复用原槽位而显示在插话上方，这是接受的显示差异，不承诺严格的首次出现时间线。采纳锚点保留为内部事实，不产生额外消息、状态说明或重复正文。
 
 命令超时后按 [Bridge 对账合同](renderer-bridge-contract.md)刷新并显示结果未知，不自动重发，不阻塞后续新意图；提交已与草稿分离，旧 connection 的迟到回执不能清除新草稿或抢回焦点。消息采纳不强制滚动或打开右栏；左侧不新增消息槽位图标，既有 completion receipt 与 Schedule 完成确认语义不改变。
-
 
 ### 8.2 文件附件
 
@@ -892,7 +891,6 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - 文件预览使用 Task Panel 顶部对象标签表达当前路径，活动标签右侧只提供刷新和标签关闭/面板隐藏动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供更弱层级的“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换标签后恢复各文件自己的模式和滚动位置，关闭后重开恢复默认模式；非活动视图不保留隐藏正文；
 - Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，只有 HTTP(S) 链接可按主阅读流相同的 Host handoff 与就地失败反馈打开，不接受 `mailto` 或新增资源读取、网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
 - 静态 PNG、JPEG 与静态 WebP 文件在同一预览标签中显示 Host 交付的完整原图，实际 WebView 解码完成前保持 loading，完成后按解码尺寸保持比例并使用容器内可用空间，不显示源码模式或原始 Base64。APNG/动画 WebP、单图超限和窗口累计容量不足分别解释原因，不静默缩图；容量不足允许用户关闭现有预览后重试。内联图片离开保留区域释放资源，重新接近时按需读取；
-- Windows 的 DOCX/PPTX/PDF 与 XLSX 在 Office 环境就绪且 Host 准入通过后使用文档预览会话。DOCX/PPTX/PDF 提供当前页、总页数与前后翻页；实际图片解码前保持加载。XLSX 默认按工作表与有界区域显示只读网格，标明隐藏工作表；在同一预览内提供“只读单元格/打印版面”视图切换，版面按工作簿的可见工作表和打印设置分页，不复用网格的省略说明。切换保持源身份和会话，读取与解码过程中保持忙态并丢弃旧视图内容；单元格详情分别显示公式、保存值和数字格式，缺少保存值不得伪装成零或已重算。图表、合并单元格等省略内容就地说明；不执行公式、外部链接或脚本，不在 Renderer 解析 Office 文件。未就绪、受限、变化、超限、到期与清理未确认有独立文字反馈；刷新关闭旧会话并重新准备，关闭标签、切换 Task 或授权失效后清空内容。文档页面与普通图片共享窗口额度、传输和解码准入。XLSX 版面只使用保存值，缺缓存留空；版面不支持或超限时说明网格仍可使用，空工作表与空白打印页不混为处理失败；
 - 普通文本、代码文件及其他已支持的文本格式显示中性等宽源码，保留空白并允许自身横向滚动，不增加模式切换。源码左侧显示从 1 开始的单列行号；行号与正文共用滚动容器，横向滚动时固定在左侧，不进入文本选择、复制内容或辅助技术朗读，只编号当前实际显示的文件前缀且不推断截断后的未读取行数。已识别且处于 Renderer 高亮预算内的代码文件自动渐进增强为主题适配的语法颜色，Markdown 的“源码”模式同样适用；未知格式、超出预算、模块加载失败、grammar 异常或高亮结果校验失败时静默保留完整纯文本，不自动猜测语言、不增加状态、重试、开关或语言选择。HTML、SVG 与 XML 即使显示 markup 语法颜色也始终只渲染惰性源码，不形成真实元素、执行脚本或加载资源，界面不为这一限制增加常驻提示或说明入口。只有具备经验证的独立隔离容器和受控资源读取能力后才能开放页面渲染，不能复用应用主页面执行 HTML 或放宽安全策略作为临时方案。文件预览不做 diff、range 高亮、自动刷新或文件 watcher；
 - UI-only `loading` 不进入 Host wire；稳定呈现状态为 `ready | missing | restricted | unsupported | changing | error`，传输的 `busy` 有界重新排队并保持 loading，安全代次重试规则由 [Renderer Bridge 合同](renderer-bridge-contract.md#file-preview-command) 定义。`changing`、`error` 与累计容量不足可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
 - Renderer 为每个文件标签独立维护 request generation。首次打开和刷新推进该标签 generation；关闭标签、切换 Task、reference 从新 snapshot 消失或该标签后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容。切换到其他标签只卸载当前文件 DOM，不清除仍打开标签的已读取 bytes；重新激活 ready 标签不请求，关闭后显式重开才重新请求；
@@ -908,7 +906,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前 Task 的 Review 标签内并存，不形成跨 Task、跨关闭或持久化的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭 Review 标签、替换其 Run、切换 Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；
 - ready diff 使用等宽 unified-diff 视图，显示新旧双行号与整行增删背景；Renderer 使用 hunk header 计算行号和可证明的未修改行缺口，但不重复显示原始 `@@ … @@` 文本。长行在正文区域横向滚动，路径可截断但必须能取得完整值。malformed 或未识别行安全降级为原文，不执行正文或依赖颜色表达唯一语义；
 - `diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；ready artifact 不提供刷新，只有瞬时 capacity 或普通请求失败提供重试。第一版不合并为累计或 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供语法 token 高亮、Accept/Reject、revert、stage 或 Output 标记；
-- `Outputs` 当前只展示固定 Host 交付动作已验证登记的文件，不从 created 记录、普通引用或工具文本推断。仅真实记录非空时显示紧凑列表；显示交付时大小，路径脱敏时隐藏名称和位置。每项提供“检查文件”“定位文件”和“另存为”，当前 Task 可接收输入时还提供“继续修改”：每次点击独立调用 Host 校验，忙时禁用重复动作并提供取消；取消等待 Host 实际终态，不能立即伪称已取消；检查只表示检查时一致，变化、缺失、受限、超时与失败在该行明确呈现。定位结果只说明系统已接收请求；断连禁用操作，换 Task、失效或卸载取消在途请求并丢弃旧响应。另存只在系统对话框选择目标，不在 Renderer 编辑或显示目标路径；对话框允许正常停留，取消或关闭由系统交互完成。复制后只按 Host 终态显示已保存、目标已变化、失败或清理未完成；发布提交点之后取消被拒绝时继续呈现实际结果。未取得保存终态的 transport 失败只能显示结果未确认并提示检查所选位置，不能断言目标未变化或操作已取消，也不自动重试。继续修改须先检查源文件，再在同一 Task 的 Composer 加入用户可编辑的文件引用并聚焦输入；保留已有文字和附件，不覆盖 Skill 或未完成的斜杠输入，也不自动发送。冲突、容量不足和陈旧 audience 在成果行解释，切换 Task 或断连后的旧结果不得填入新输入框。Office 格式的成果提供显式“预览”动作，在成果行内展开同一文档预览组件；请求使用精确成果身份，不能降为普通文件引用绕过交付摘要。关闭返回该动作焦点，换 Task、断连或卸载关闭预览；预览读取或展示不得改变成果本身。链接与结构化成果尚未开放。
+- `Outputs` 当前只展示固定 Host 交付动作已验证登记的文件，不从 created 记录、普通引用或工具文本推断。仅真实记录非空时显示紧凑列表；显示交付时大小，路径脱敏时隐藏名称和位置。每项提供“检查文件”“定位文件”和“另存为”，当前 Task 可接收输入时还提供“继续修改”：每次点击独立调用 Host 校验，忙时禁用重复动作并提供取消；取消等待 Host 实际终态，不能立即伪称已取消；检查只表示检查时一致，变化、缺失、受限、超时与失败在该行明确呈现。定位结果只说明系统已接收请求；断连禁用操作，换 Task、失效或卸载取消在途请求并丢弃旧响应。另存只在系统对话框选择目标，不在 Renderer 编辑或显示目标路径；对话框允许正常停留，取消或关闭由系统交互完成。复制后只按 Host 终态显示已保存、目标已变化、失败或清理未完成；发布提交点之后取消被拒绝时继续呈现实际结果。未取得保存终态的 transport 失败只能显示结果未确认并提示检查所选位置，不能断言目标未变化或操作已取消，也不自动重试。继续修改须先检查源文件，再在同一 Task 的 Composer 加入用户可编辑的文件引用并聚焦输入；保留已有文字和附件，不覆盖 Skill 或未完成的斜杠输入，也不自动发送。冲突、容量不足和陈旧 audience 在成果行解释，切换 Task 或断连后的旧结果不得填入新输入框。链接与结构化成果尚未开放。
 
 ### 12.3 Output 卡片
 
@@ -992,7 +990,6 @@ Account 状态在 Workbench 账号入口、Account 设置及新任务输入区�
 ```text
 General
 ├── Language
-└── Office documents
 
 Account
 ├── Account information（authenticated identity and balance; sign-in state when unauthenticated）
@@ -1018,8 +1015,6 @@ Providers（capability-gated）
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
 设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 的会话模式选择与当前值展示见[审批模式](#102-审批模式)。
-
-`General / 常规` 的 Office 文档分组说明三个基础 Skill 已内置，独立运行环境由用户主动安装。安装前展示 Host 提供的下载量与安装后占用；没有可信发布物或平台不支持时如实说明，不提供假下载入口。当前环境状态与在途操作分别呈现，更新失败不能把旧的可用环境显示为损坏。仅在 Host 给出总量时显示百分比，其余阶段显示文字；取消等待真实收口，不能点击后立即显示已取消。操作失败就地展示可恢复说明，超时只重新读取状态，不自动重发。
 
 安装、更新、重新安装、检查与清理由 Host action facts 决定是否可用，不因 Task 正在运行而整体禁用。移除使用危险动作和确认弹层，默认焦点为取消；说明新 Task 回到基础 Skill，仍被使用的资源待清理，必要时重启完成。清理与移除须提示本机其他 MetaWork 构建可能需要重新安装环境。环境就绪时说明新 Task 使用新资源、既有 Task 须在空闲时显式刷新 Skill，不宣称正在运行的 Session 已切换。该分组遵循现有设置行、错误、焦点、深浅主题及窄窗规则，不建立插件商店或通用拓展管理页面。
 

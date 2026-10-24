@@ -7,69 +7,27 @@ description: Create, read, edit, combine, split, and refine PowerPoint presentat
 
 ## Execution environment
 
-Skill resource directory: `${CLAUDE_SKILL_DIR}`
+This is a complete built-in Skill. Its private environment may not be prepared yet. Only Windows x64 automatic preparation is supported.
 
-This Skill is provided by the optional Windows Office component. Use its absolute entry `${CLAUDE_SKILL_DIR}/../../bin/office.exe`; do not look up Python, Node or an Office installation through PATH. If the component is unavailable, report that Office support must be enabled through the product. Do not install dependencies during document processing.
+Use the absolute resource entries `${CLAUDE_SKILL_DIR}/environment/prepare.cmd` and `${CLAUDE_SKILL_DIR}/environment/run.cmd` through the existing Shell, preserving Windows argument quoting. Never infer an executable from the parent of this resource directory.
 
-Keep attachment originals unchanged. Write scripts, fresh unpacked data directories and outputs in the Task workspace. Resolve helper paths from this Skill resource directory. Use the component's `python` command for Python scripts and `node` command for JavaScript scripts; these commands supply the component's libraries only for that invocation.
+First use `prepare.cmd python` or `prepare.cmd node` only to reuse an existing environment **after consent has already been obtained**, or use `run.cmd python ...` / `run.cmd node ...` to execute: run never downloads and reports a missing environment. Before first preparation, tell the user its purpose and `downloadTotals.python.totalBytes` or `downloadTotals.node.totalBytes` for the needed language from [environment inputs](environment/environment.json), then ask for agreement. Each total includes the interpreter and all locked library archives for a fresh preparation; index metadata, retries and transport overhead are extra, so describe it as an estimated network download. DOCX/PPTX creation and Python validation may need both environments; state the combined total when both are needed. Then call the fixed prepare entry for the needed language. No arbitrary URL, package list or version arguments are supported. Allow up to 30 minutes for interpreter download and 10 minutes for dependency installation; use the existing Shell background/output tools if its foreground limit is shorter. If preparation fails or is refused, explain the limitation and continue what is possible. Do not install globally or change user configuration. Consent is a conversation instruction; full_access has no additional product installation gate.
 
-The `text` command writes bounded structured JSON, including Word revision runs and tables, presentation slide order and notes, or worksheet cells with formulas and cached values. It does not perform OCR. Use the bounded unpack helper when you need selected raw XML parts. Before passing an existing OOXML file to a Python library, use `from office_archive import checked_copy` and pass the path yielded by that context; do not check one path and then load the original.
+The prepared directories are shared under the user's LocalAppData/MetaWork/OfficeDependencies. Do not automatically update, rename, delete or repair completed environments. If an existing environment fails validation, report it as unavailable and give the exact directory printed by `prepare.cmd`. Explain manual recovery: stop every Task and external script using that directory, exit MetaWork, and confirm no consuming processes remain. Only then may the user explicitly choose to remove that one directory, reopen MetaWork and consent to preparing it again. Never remove the parent OfficeDependencies directory, other environments, Skill resources or documents. A successful rename does not prove that no process uses the environment; if consumers cannot be confirmed stopped, leave it untouched. Private dependencies are not an execution sandbox. Write task scripts, working copies and outputs in the Task workspace. Use `from office_archive import checked_copy` and load only the private checked path inside its context when passing an existing Office file to a library. Never overwrite the attachment original.
 
-Conversions accept a new output path and never overwrite it. A nonzero exit, missing result, formula error or incomplete preview is a failure. Inspect results before reporting success.
+This edition cannot render documents, export PDF, accept revisions or recalculate formulas. Do not invent visual QA or calculation results. XLSX may request recalculation on open, but this does not calculate or populate caches now.
 
-Legacy binary Office formats, document macros and encrypted files are outside this Skill's supported workflow.
+## Read, check and deliver
 
-## Explicit file delivery
+For bounded structured text: `run.cmd python "${CLAUDE_SKILL_DIR}/environment/read.py" input.docx new-content.json` (also XLSX/PPTX). For XML work, run the scripts under `scripts/office/` with `run.cmd python`, using new output directories. Reopen and inspect changed content and validate supported structures before delivery. Report unsupported features and checks not performed.
 
-Validate and reopen the PPTX, verify slide order, notes and requested changes, and inspect the rendered slides for overflow and clipping. State any checks you could not perform. Host file verification does not establish document quality.
+Call the Host tool `DeliverFile` with the actual Task Workspace-relative output path, e.g. `{"path":"results/report.docx"}`. This is a tool call, not a Shell command or text to print. Deliver only finished files requested by the user, not temporary XML, scripts or check output.
 
-After checking the final file, call the Host tool `DeliverFile` with arguments `{"path":"results/presentation.pptx"}`, using the actual Task Workspace-relative path with forward slashes. This is a tool call, not a Shell command or text to print. Submit only the finished files requested by the user; keep unpacked XML, scripts, temporary files and preview images as working material unless explicitly requested.
+## Workflows
 
-Observe the actual tool result. `verified_for_delivery` confirms the Host checked the bytes and issued a receipt; the Task Outputs record determines registration. If the tool is unavailable or fails, report that delivery was not confirmed. A Markdown path or Shell output cannot register an Output. Describe the changes and any remaining limitations after the real result.
-
-Do not change a file after submitting it; finish further edits and checks before submitting the new result. A read-only analysis can end with a conversational answer and does not require a new file.
-
-## Quick Reference
-
-| Task | Guide |
-|------|-------|
-| Read/analyze content | Component `text` command |
-| Edit or create from template | Read [editing.md](editing.md) |
-| Create from scratch | Read [pptxgenjs.md](pptxgenjs.md) |
-
----
-
-## Reading Content
-
-```bash
-# Text extraction
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text presentation.pptx content.json
-
-# Visual overview
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render presentation.pptx preview-pages/
-
-# Raw XML
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" python "${CLAUDE_SKILL_DIR}/scripts/office/unpack.py" presentation.pptx unpacked/
-```
-
----
-
-## Editing Workflow
-
-**Read [editing.md](editing.md) for full details.**
-
-1. Analyze template with component page images and structured text
-2. Unpack → manipulate slides → edit content → clean → pack
-
----
-
-## Creating from Scratch
-
-**Read [pptxgenjs.md](pptxgenjs.md) for full details.**
-
-Use when no template or reference presentation is available.
-
----
+- Create with the fixed PptxGenJS library: read [pptxgenjs.md](pptxgenjs.md), save a script and execute `run.cmd node create.cjs`.
+- Read or edit an existing file: read [editing.md](editing.md), inspect structured text and checked XML, then make focused changes on a working copy.
+- Validate and reopen the finished file, checking slide order, text, notes, relationships and changed structures. Visual inspection and rendering are unavailable; say so explicitly.
 
 ## Design Ideas
 
@@ -161,81 +119,3 @@ Choose colors that match your topic — don't default to generic blue. Use these
 
 ---
 
-## QA (Required)
-
-**Assume there are problems. Your job is to find them.**
-
-Your first render is almost never correct. Approach QA as a bug hunt, not a confirmation step. If you found zero issues on first inspection, you weren't looking hard enough.
-
-### Content QA
-
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" text output.pptx content.json
-```
-
-Check for missing content, typos, wrong order.
-
-**When using templates, check for leftover placeholder text:**
-
-```bash
-rg -i "xxxx|lorem|ipsum|this.*(page|slide).*layout" content.json
-```
-
-If grep returns results, fix them before declaring success.
-
-### Visual QA
-
-Inspect the rendered slide images with the available image-reading tool. Use an independent reviewer when one is available and authorized; visual verification must also work without delegation.
-
-Convert slides to images (see [Converting to Images](#converting-to-images)), then use this prompt:
-
-```
-Visually inspect these slides. Assume there are issues — find them.
-
-Look for:
-- Overlapping elements (text through shapes, lines through words, stacked elements)
-- Text overflow or cut off at edges/box boundaries
-- Decorative lines positioned for single-line text but title wrapped to two lines
-- Source citations or footers colliding with content above
-- Elements too close (< 0.3" gaps) or cards/sections nearly touching
-- Uneven gaps (large empty area in one place, cramped in another)
-- Insufficient margin from slide edges (< 0.5")
-- Columns or similar elements not aligned consistently
-- Low-contrast text (e.g., light gray text on cream-colored background)
-- Low-contrast icons (e.g., dark icons on dark backgrounds without a contrasting circle)
-- Text boxes too narrow causing excessive wrapping
-- Leftover placeholder content
-
-For each slide, list issues or areas of concern, even if minor.
-
-Read and analyze these images:
-1. /path/to/slide-01.jpg (Expected: [brief description])
-2. /path/to/slide-02.jpg (Expected: [brief description])
-
-Report ALL issues found, including minor ones.
-```
-
-### Verification Loop
-
-1. Generate slides → Convert to images → Inspect
-2. **List issues found** (if none found, look again more critically)
-3. Fix issues
-4. **Re-verify affected slides** — one fix often creates another problem
-5. Repeat until a full pass reveals no new issues
-
-Report success only after content and visual checks pass. When a check finds an issue, fix it and re-verify the affected slides.
-
----
-
-## Converting to Images
-
-```bash
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" render output.pptx preview-pages/
-"${CLAUDE_SKILL_DIR}/../../bin/office.exe" pdf output.pptx exported.pdf
-```
-
-Read `preview-pages/pages.json` and inspect every listed page image. The component prepares the document once per operation and exports explicit page objects; it verifies the page count, image dimensions and byte budgets. Render again into a new directory after edits. A successful process exit alone is not visual QA.
-
-## Authoring runtime
-
-Use the component's packaged PptxGenJS: save the JavaScript as `create.cjs`, then run `"${CLAUDE_SKILL_DIR}/../../bin/office.exe" node create.cjs`. The component contains the Python libraries required by the XML helpers. Do not install global tools or change the Task-wide environment.

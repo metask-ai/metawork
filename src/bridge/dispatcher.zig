@@ -17,10 +17,9 @@ const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
-const document_preview = @import("document_preview.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 13;
+const async_product_handler_count = 10;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -168,12 +167,6 @@ pub const ModelsHost = struct {
     }
 };
 
-pub const OfficeHost = struct {
-    context: *anyopaque,
-    begin_fn: *const fn (*anyopaque, product_control.OfficeKind, u64) product_control.OfficeAdmission,
-    cancel_fn: *const fn (*anyopaque, u64) product_control.OfficeAdmission,
-};
-
 /// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
@@ -256,14 +249,12 @@ pub const Dispatcher = struct {
     };
 
     control: ?*product_control.Runtime,
-    documents: document_preview.Controller,
     account_commands: account_contract.AccountCommandSink,
     custom_provider_commands: models_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
     models_host: ?ModelsHost = null,
-    office_host: ?OfficeHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -306,7 +297,6 @@ pub const Dispatcher = struct {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
             .control = control,
-            .documents = .{ .allocator = allocator, .control = control, .platform = .{ .context = platform.context, .random_fn = platform.random_fn, .emit_fn = platform.emit_fn, .start_timer_fn = platform.start_timer_fn, .cancel_timer_fn = platform.cancel_timer_fn } },
             .account_commands = account_commands,
             .custom_provider_commands = custom_provider_commands,
             .platform = platform,
@@ -319,7 +309,6 @@ pub const Dispatcher = struct {
     pub fn deinit(self: *Dispatcher) void {
         self.callbacks.stopIngress();
         self.callbacks.assertQuiescent();
-        self.documents.settle();
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
@@ -333,10 +322,6 @@ pub const Dispatcher = struct {
 
     pub fn setModelsHost(self: *Dispatcher, host: ?ModelsHost) void {
         self.models_host = host;
-    }
-
-    pub fn setOfficeHost(self: *Dispatcher, host: ?OfficeHost) void {
-        self.office_host = host;
     }
 
     /// Registers the complete product command table. Automation may change
@@ -358,8 +343,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
-            .{ .name = commands.read_document_chunk, .function = readDocumentChunk },
-            .{ .name = commands.release_document_read, .function = releaseDocumentRead },
             .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
@@ -401,12 +384,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_summary, .function = accountRefreshSummary },
             .{ .name = commands.account_open_recharge, .function = accountOpenRecharge },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
-            .{ .name = commands.office_install, .function = officeInstall },
-            .{ .name = commands.office_repair, .function = officeRepair },
-            .{ .name = commands.office_remove, .function = officeRemove },
-            .{ .name = commands.office_retry, .function = officeRetry },
-            .{ .name = commands.office_cleanup, .function = officeCleanup },
-            .{ .name = commands.office_cancel, .function = officeCancel },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
@@ -482,9 +459,6 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
         self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
-        self.registered_async_handlers[10] = .{ .name = commands.open_document, .context = self, .invoke_fn = openDocument };
-        self.registered_async_handlers[11] = .{ .name = commands.read_document, .context = self, .invoke_fn = readDocument };
-        self.registered_async_handlers[12] = .{ .name = commands.close_document, .context = self, .invoke_fn = closeDocument };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -510,7 +484,6 @@ pub const Dispatcher = struct {
     pub fn detachProductControl(self: *Dispatcher) void {
         if (self.control) |control| control.cancelSnapshot();
         self.mcp_management_host = null;
-        self.documents.control = null;
         self.control = null;
     }
 
@@ -524,7 +497,6 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
-        self.documents.disconnect();
         self.cancelOutputConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
@@ -571,10 +543,6 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
-        if (timer_id == document_preview.timer_id) {
-            self.drainDocumentPreviews();
-            return true;
-        }
         if (timer_id == output_timer_id) {
             if (self.control) |control| control.drainOutputChecks(self.outputCheckSink());
             self.updateOutputTimer();
@@ -699,7 +667,6 @@ pub const Dispatcher = struct {
         if (self.control) |control| control.cancelSnapshot();
         self.cancelPreviewConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
-        self.documents.connect(.{ .generation = generation, .window_id = invocation.source.window_id });
         self.preview_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
@@ -1100,87 +1067,6 @@ pub const Dispatcher = struct {
             entry.* = null;
             respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
         };
-    }
-
-    pub fn documentPreviewSink(self: *Dispatcher) product_control.DocumentPreviewSink {
-        return self.documents.sink();
-    }
-    pub fn drainDocumentPreviews(self: *Dispatcher) void {
-        self.documents.drain();
-        if (self.documents.transport_failed) {
-            self.documents.transport_failed = false;
-            self.breakConnection();
-        }
-    }
-    pub fn settleDocumentPreviewsForShutdown(self: *Dispatcher) void {
-        self.documents.settle();
-    }
-    fn documentConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64) !document_preview.Connection {
-        try self.requireWindow(invocation.source.window_id);
-        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
-        if (generation == 0) return error.InvalidBridgeId;
-        try self.delivery.validateConnection(generation, invocation.source.window_id);
-        return .{ .generation = generation, .window_id = invocation.source.window_id };
-    }
-    fn openDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.openDocumentChecked(invocation, responder) catch {
-            document_preview.respondState(responder, invocation.request.id, .failed);
-        };
-    }
-    fn openDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.DocumentOpen, invocation.request.payload);
-        defer parsed.deinit();
-        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
-        try self.documents.open(connection, parsed.value, responder, invocation.request.id);
-    }
-    fn readDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.readDocumentChecked(invocation, responder) catch {
-            document_preview.respondState(responder, invocation.request.id, .failed);
-        };
-    }
-    fn readDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.DocumentRead, invocation.request.payload);
-        defer parsed.deinit();
-        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
-        try self.documents.read(connection, parsed.value, responder, invocation.request.id);
-    }
-    fn closeDocument(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.closeDocumentChecked(invocation, responder) catch {
-            document_preview.respondState(responder, invocation.request.id, .failed);
-        };
-    }
-    fn closeDocumentChecked(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.DocumentKey, invocation.request.payload);
-        defer parsed.deinit();
-        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
-        try self.documents.close(connection, parsed.value, responder, invocation.request.id);
-    }
-    fn readDocumentChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.DocumentChunk, invocation.request.payload);
-        defer parsed.deinit();
-        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
-        return self.documents.chunk(connection, parsed.value, output);
-    }
-    fn releaseDocumentRead(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) ![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.DocumentReadKey, invocation.request.payload);
-        defer parsed.deinit();
-        const connection = try self.documentConnection(invocation, parsed.value.generation.value);
-        return self.documents.releaseRead(connection, parsed.value, output);
     }
 
     fn requirePreviewKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, preview_text: []const u8) !struct { generation: u64, preview_id: u64 } {
@@ -2595,59 +2481,6 @@ pub const Dispatcher = struct {
         const host = self.models_host orelse
             return encodeExecutionResult(output, .rejected(.catalog_unavailable));
         return encodeExecutionResult(output, host.refreshCatalog());
-    }
-
-    fn officeInstall(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        return officeBegin(context, invocation, output, .install);
-    }
-    fn officeRepair(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        return officeBegin(context, invocation, output, .repair);
-    }
-    fn officeRemove(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        return officeBegin(context, invocation, output, .remove);
-    }
-    fn officeRetry(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        return officeBegin(context, invocation, output, .check);
-    }
-    fn officeCleanup(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        return officeBegin(context, invocation, output, .cleanup);
-    }
-
-    fn officeBegin(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8, kind: product_control.OfficeKind) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.OfficeOperation, invocation.request.payload);
-        defer parsed.deinit();
-        const generation = try officeId(parsed.value.expectedGeneration);
-        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.begin_fn(host.context, kind, generation) else .{ .reason = .unavailable };
-        return self.encodeOffice(output, result);
-    }
-
-    fn officeCancel(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.OfficeCancel, invocation.request.payload);
-        defer parsed.deinit();
-        const id = try officeId(parsed.value.operationId);
-        const result: product_control.OfficeAdmission = if (self.office_host) |host| host.cancel_fn(host.context, id) else .{ .reason = .unavailable };
-        return self.encodeOffice(output, result);
-    }
-
-    fn officeId(value: []const u8) !u64 {
-        const id = try handlers.parseWireId(value);
-        if (id == 0) return error.InvalidBridgePayload;
-        return id;
-    }
-
-    fn encodeOffice(self: *Dispatcher, output: []u8, result: product_control.OfficeAdmission) ![]const u8 {
-        const control = self.control orelse return error.DispatcherUnavailable;
-        var writer = std.Io.Writer.fixed(output);
-        try std.json.Stringify.value(product_control.OfficeWire.Result.from(result, control.officeComponentView().generation), .{}, &writer);
-        return writer.buffered();
     }
 
     fn modelsResetStore(
@@ -6967,9 +6800,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         wake_calls: usize = 0,
         account_calls: usize = 0,
         models_calls: usize = 0,
-        office_calls: usize = 0,
-        office_generation: u64 = 0,
-        office_kind: product_control.OfficeKind = .check,
         chrome_connect_calls: usize = 0,
         chrome_refresh_calls: usize = 0,
         chrome_control_calls: usize = 0,
@@ -7103,19 +6933,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .rejected(.invalid_provider);
         }
 
-        fn beginOffice(context: *anyopaque, kind: product_control.OfficeKind, generation: u64) product_control.OfficeAdmission {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.office_calls += 1;
-            self.office_generation = generation;
-            self.office_kind = kind;
-            return .{ .accepted = true, .operation_id = 117 };
-        }
-        fn cancelOffice(context: *anyopaque, id: u64) product_control.OfficeAdmission {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.office_calls += 1;
-            return .{ .accepted = true, .operation_id = id };
-        }
-
         fn refreshModels(context: *anyopaque) models_contract.CommandResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.models_calls += 1;
@@ -7183,7 +7000,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .refresh_catalog_fn = Harness.refreshModels,
         .reset_store_fn = Harness.resetModels,
     });
-    dispatcher.setOfficeHost(.{ .context = &harness, .begin_fn = Harness.beginOffice, .cancel_fn = Harness.cancelOffice });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -7364,42 +7180,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    const office_cases = [_]struct { name: []const u8, kind: product_control.OfficeKind }{
-        .{ .name = commands.office_install, .kind = .install }, .{ .name = commands.office_repair, .kind = .repair },
-        .{ .name = commands.office_remove, .kind = .remove },   .{ .name = commands.office_retry, .kind = .check },
-        .{ .name = commands.office_cleanup, .kind = .cleanup },
-    };
-    for (office_cases) |case| {
-        const handler = native_dispatcher.registry.find(case.name).?;
-        const invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "office", .command = case.name, .payload = "{\"expectedGeneration\":\"9\"}" } };
-        var foreign = invocation;
-        foreign.source.window_id += 1;
-        const before = harness.office_calls;
-        if (handler.invoke_fn(handler.context, foreign, &response)) |_| return error.ForeignOfficeCommandAllowed else |_| {}
-        try std.testing.expectEqual(before, harness.office_calls);
-        for ([_][]const u8{ "{}", "{\"expectedGeneration\":0}", "{\"expectedGeneration\":\"0\"}", "{\"expectedGeneration\":\"01\"}", "{\"expectedGeneration\":\"18446744073709551616\"}", "{\"expectedGeneration\":\"9\",\"url\":\"https://example.invalid/\"}" }) |payload| {
-            var invalid_office = invocation;
-            invalid_office.request.payload = payload;
-            if (handler.invoke_fn(handler.context, invalid_office, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
-            try std.testing.expectEqual(before, harness.office_calls);
-        }
-        _ = try handler.invoke_fn(handler.context, invocation, &response);
-        try std.testing.expectEqual(before + 1, harness.office_calls);
-        try std.testing.expectEqual(@as(u64, 9), harness.office_generation);
-        try std.testing.expectEqual(case.kind, harness.office_kind);
-    }
-    const cancel_office = native_dispatcher.registry.find(commands.office_cancel).?;
-    const cancel_invocation: native_sdk.bridge.Invocation = .{ .source = source, .request = .{ .id = "cancel-office", .command = commands.office_cancel, .payload = "{\"operationId\":\"117\"}" } };
-    _ = try cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &response);
-    const before_loss = harness.office_calls;
-    var tiny_office: [1]u8 = undefined;
-    try std.testing.expectError(error.WriteFailed, cancel_office.invoke_fn(cancel_office.context, cancel_invocation, &tiny_office));
-    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
-    var redundant = cancel_invocation;
-    redundant.request.payload = "{\"operationId\":\"117\",\"expectedGeneration\":\"9\"}";
-    if (cancel_office.invoke_fn(cancel_office.context, redundant, &response)) |_| return error.InvalidOfficeCommandAllowed else |_| {}
-    try std.testing.expectEqual(before_loss + 1, harness.office_calls);
-
     for ([_][]const u8{
         "{\"id\":\"open-https\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com/a?q=1#result\"}}",
         "{\"id\":\"open-http\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"http://localhost:3000/\"}}",
@@ -8370,75 +8150,4 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());
-}
-
-test "registered document commands use the connection and native deadline lane" {
-    const Host = struct {
-        starts: usize = 0,
-        invalidations: usize = 0,
-        fn wake(_: ?*anyopaque) !void {}
-        fn emit(context: ?*anyopaque, _: u64, name: []const u8, _: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (std.mem.eql(u8, name, document_preview.event_name)) self.invalidations += 1;
-        }
-        fn timer(context: ?*anyopaque, id: u64, _: u64, _: bool) !void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (id == document_preview.timer_id) self.starts += 1;
-        }
-        fn cancel(_: ?*anyopaque, _: u64) !void {}
-        fn main(_: ?*anyopaque) bool {
-            return true;
-        }
-        fn now(_: ?*anyopaque) u64 {
-            return 1;
-        }
-        fn random(_: ?*anyopaque, bytes: []u8) bool {
-            @memset(bytes, 7);
-            return true;
-        }
-    };
-    const Capture = struct {
-        calls: usize = 0,
-        bytes: ?[]u8 = null,
-        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (self.bytes) |old| std.testing.allocator.free(old);
-            self.bytes = try std.testing.allocator.dupe(u8, bytes);
-            self.calls += 1;
-        }
-        fn deinit(self: *@This()) void {
-            if (self.bytes) |bytes| std.testing.allocator.free(bytes);
-        }
-    };
-    var effect: product_control.TestSupport.DocumentEffect = .{ .main_thread = std.Thread.getCurrentId(), .text = "safe body" };
-    var control = try product_control.TestSupport.documentPreviewFixture(&effect);
-    defer control.deinit();
-    var host: Host = .{};
-    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = &host, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .random_fn = Host.random, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
-    defer boundary.deinit();
-    const native = boundary.register(@import("policy.zig").product(.release));
-    var response: [1024]u8 = undefined;
-    _ = try native.registry.find(commands.connect).?.invoke_fn(&boundary, .{ .request = .{ .id = "connect-doc", .command = commands.connect, .payload = "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &response);
-    var capture: Capture = .{};
-    defer capture.deinit();
-    const responder: native_sdk.bridge.AsyncResponder = .{ .context = &capture, .source = .{ .origin = "zero://app", .window_id = 3 }, .respond_fn = Capture.receive };
-    const payload = "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"target\":{\"kind\":\"output\",\"id\":\"03030303030303030303030303030303\"}}";
-    try native.async_registry.find(commands.open_document).?.invoke_fn(&boundary, .{ .request = .{ .id = "doc", .command = commands.open_document, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, responder);
-    for (0..5000) |_| {
-        try std.testing.expect(boundary.onTimer(document_preview.timer_id));
-        if (capture.calls != 0) break;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    }
-    try std.testing.expectEqual(1, capture.calls);
-    try std.testing.expect(std.mem.indexOf(u8, capture.bytes.?, "\"sourceVersion\"") != null);
-    try std.testing.expectEqual(1, host.starts);
-    product_control.TestSupport.expireDocumentPreview(&control);
-    for (0..5000) |_| {
-        _ = boundary.onTimer(document_preview.timer_id);
-        if (effect.releases != 0) break;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    }
-    try std.testing.expectEqual(1, effect.releases);
-    try std.testing.expectEqual(1, host.invalidations);
-    try std.testing.expect(!control.documentPreviewNeedsWake());
 }

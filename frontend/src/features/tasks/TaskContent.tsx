@@ -15,7 +15,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-
 import type {
   FileReferenceView,
   OutputActionHandler,
@@ -39,12 +38,7 @@ import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
-import {
-  RunOutputs,
-  type OutputEditHandler,
-  type OutputPreviewHandler,
-  type OutputPreviewRenderer,
-} from "./RunOutputs.tsx";
+import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
 import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
@@ -60,13 +54,14 @@ import {
   latestCopyableResponseId,
   responseCopyEligible,
 } from "./response-copy.ts";
-
 type ReadingState = {
   scrollTop: number;
   followingLatest: boolean;
-  anchor?: { runId: string; offset: number };
+  anchor?: {
+    runId: string;
+    offset: number;
+  };
 };
-
 function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
   const bounds = viewport.getBoundingClientRect();
   for (const run of viewport.querySelectorAll<HTMLElement>("[data-run-id]")) {
@@ -76,7 +71,6 @@ function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
   }
   return undefined;
 }
-
 function restoreReadingAnchor(viewport: HTMLDivElement, saved: ReadingState) {
   const anchor = saved.anchor;
   if (!anchor) return false;
@@ -100,7 +94,10 @@ export function createTaskReadingMemory() {
     ...memory,
     prune(
       taskIds: ReadonlySet<string>,
-      manifest?: { taskId: string; runIds: ReadonlySet<string> },
+      manifest?: {
+        taskId: string;
+        runIds: ReadonlySet<string>;
+      },
     ) {
       for (const taskId of memory.reading.keys())
         if (!taskIds.has(taskId)) memory.reading.delete(taskId);
@@ -117,11 +114,8 @@ export function createTaskReadingMemory() {
     },
   };
 }
-
 export type TaskReadingMemory = ReturnType<typeof createTaskReadingMemory>;
-
 const emptyToolDisclosure: ReadonlySet<string> = new Set();
-
 function formatAttachmentSize(value: string) {
   const bytes = Number(value);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) return value;
@@ -129,7 +123,6 @@ function formatAttachmentSize(value: string) {
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-
 function outcomeMessage(outcome: RunOutcome): MessageId {
   switch (outcome) {
     case "completed":
@@ -144,13 +137,11 @@ function outcomeMessage(outcome: RunOutcome): MessageId {
       return "run.terminal.failed";
   }
 }
-
 function retryable(outcome: RunOutcome): boolean {
   return ["failed", "interrupted", "dependency_contract_failure"].includes(
     outcome,
   );
 }
-
 function terminalMessage(
   responseKind: RunView["output"]["responseKind"],
   outcome: RunOutcome,
@@ -169,7 +160,6 @@ function terminalMessage(
       return "run.terminal.partial_failed";
   }
 }
-
 function outcomeState(
   outcome: RunOutcome,
 ): "completed" | "stopped" | "failed" | "interrupted" {
@@ -186,7 +176,6 @@ function outcomeState(
       return "failed";
   }
 }
-
 function TaskInput({ input }: { input: RunInputView }) {
   const { t } = useI18n();
   const content =
@@ -235,7 +224,6 @@ function TaskInput({ input }: { input: RunInputView }) {
         </div>
       </div>
     );
-
   return (
     <>
       {content}
@@ -245,7 +233,6 @@ function TaskInput({ input }: { input: RunInputView }) {
     </>
   );
 }
-
 export function TaskContent({
   task,
   snapshotReceivedAt,
@@ -259,8 +246,6 @@ export function TaskContent({
   outputsEnabled,
   onOutputAction,
   onPrepareOutputEdit,
-  onPreviewOutput,
-  renderOutputPreview,
   webLink,
   onPrepareRetry,
   onPreviewFile,
@@ -274,7 +259,11 @@ export function TaskContent({
 }: {
   task: TaskView | null;
   memory?: TaskReadingMemory;
-  history?: { available: boolean; loading: boolean; onLoad: () => void };
+  history?: {
+    available: boolean;
+    loading: boolean;
+    onLoad: () => void;
+  };
   localSubmissions?: ReactNode;
   snapshotReceivedAt: number | null;
   synchronized: boolean;
@@ -287,8 +276,6 @@ export function TaskContent({
   outputsEnabled: boolean;
   onOutputAction?: OutputActionHandler;
   onPrepareOutputEdit?: OutputEditHandler;
-  onPreviewOutput?: OutputPreviewHandler;
-  renderOutputPreview?: OutputPreviewRenderer;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   loadFilePreview?: FilePreviewLoader;
@@ -415,14 +402,12 @@ export function TaskContent({
     task?.compacts.some(
       (compact) => compact.conversationCoverage === "excluded",
     ) || false;
-
   useEffect(() => {
     if (!hasRunTimes) return;
     setNowUnixMs(Date.now());
-    const interval = window.setInterval(() => setNowUnixMs(Date.now()), 60_000);
+    const interval = window.setInterval(() => setNowUnixMs(Date.now()), 60000);
     return () => window.clearInterval(interval);
   }, [hasRunTimes, task?.id]);
-
   useLayoutEffect(() => {
     const node = viewport.current;
     if (!node) return;
@@ -491,7 +476,6 @@ export function TaskContent({
       setShowJumpLatest(false);
     }
   }, [task?.id, task?.runs, revision, history?.loading]);
-
   function updateReadingState() {
     const node = viewport.current;
     if (!node || !task || restoringTask.current !== null) return;
@@ -504,7 +488,6 @@ export function TaskContent({
     });
     setShowJumpLatest(!followingLatest);
   }
-
   function jumpToLatest() {
     const node = viewport.current;
     if (!node || !task) return;
@@ -515,7 +498,6 @@ export function TaskContent({
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     setShowJumpLatest(false);
   }
-
   const followDeferredOutput = useCallback(() => {
     const node = viewport.current;
     const taskId = task?.id;
@@ -529,7 +511,6 @@ export function TaskContent({
     });
     setShowJumpLatest(false);
   }, [task?.id]);
-
   return (
     <Conversation
       aria-label={task?.title}
@@ -604,7 +585,6 @@ export function TaskContent({
         processDisclosure.set(disclosureKey, disclosure);
         const expandedToolIds =
           toolDisclosure.get(disclosureKey) ?? emptyToolDisclosure;
-
         function setProcessExpanded(expanded: boolean) {
           processDisclosure.set(
             disclosureKey,
@@ -612,7 +592,6 @@ export function TaskContent({
           );
           setDisclosureRevision((value) => value + 1);
         }
-
         function setToolExpanded(toolId: string, expanded: boolean) {
           const next = new Set(toolDisclosure.get(disclosureKey) ?? []);
           if (expanded) next.add(toolId);
@@ -620,7 +599,6 @@ export function TaskContent({
           toolDisclosure.set(disclosureKey, next);
           setDisclosureRevision((value) => value + 1);
         }
-
         return (
           <section
             className="ai-exchange"
@@ -805,8 +783,6 @@ export function TaskContent({
                 disabled={responseDisabled || !synchronized}
                 onAction={onOutputAction}
                 onPrepareEdit={onPrepareOutputEdit}
-                onPreview={onPreviewOutput}
-                renderPreview={renderOutputPreview}
               />
             )}
             {fileChangesEnabled && run.fileChanges && (

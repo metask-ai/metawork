@@ -1,11 +1,5 @@
-import { DocumentPreviewLoader } from "./document-preview.ts";
 import { PreviewImagePool } from "./preview-image-pool.ts";
-import {
-  documentInvalidatedEvent,
-  type DocumentTarget,
-} from "./document-contract.ts";
 import { FilePreviewLoader } from "./file-preview.ts";
-import { decodeOfficeComponentResult } from "./generated-wire.ts";
 import { object } from "./wire-codec.ts";
 import {
   decodeOutputActionResult,
@@ -95,20 +89,15 @@ import { RendererBridgeContractError } from "./contract-error.ts";
 import { ViewCache } from "./snapshot/view-cache.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
 import { AttachmentAddOperation } from "./attachment-receive.ts";
-
 export {
   RendererBridgeContractError,
   type RendererBridgeContractErrorCode,
 } from "./contract-error.ts";
-
 export type NativeBridge = NonNullable<typeof window.zero>;
-
-const defaultCommandTimeoutMs = 10_000;
-
+const defaultCommandTimeoutMs = 10000;
 export class BridgeCommandTimeoutError extends Error {
   readonly command: string;
   readonly timeoutMs: number;
-
   constructor(command: string, timeoutMs: number) {
     super(`Native Host command timed out after ${timeoutMs} ms: ${command}`);
     this.name = "BridgeCommandTimeoutError";
@@ -116,12 +105,10 @@ export class BridgeCommandTimeoutError extends Error {
     this.timeoutMs = timeoutMs;
   }
 }
-
 export type BridgeClientOptions = {
   bridge?: NativeBridge;
   commandTimeoutMs?: number;
 };
-
 export class BridgeClient {
   private readonly viewCache = new ViewCache();
   private readonly bridgeOverride?: NativeBridge;
@@ -136,29 +123,20 @@ export class BridgeClient {
   private nextReceiveBatch = 1n;
   private nextOutputOperation = 1n;
   private readonly previewImages = new PreviewImagePool();
-  private stopDocumentEvents: (() => void) | undefined;
-  private readonly documents = new DocumentPreviewLoader(
-    (command, payload, timeout) => this.invoke(command, payload, timeout),
-    () => this.attachmentConnection?.generation,
-    this.previewImages,
-  );
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
     () => this.attachmentConnection?.generation,
     this.previewImages,
   );
-
   constructor(options: BridgeClientOptions = {}) {
     this.bridgeOverride = options.bridge;
     this.commandTimeoutMs = options.commandTimeoutMs ?? defaultCommandTimeoutMs;
   }
-
   private bridge() {
     const bridge = this.bridgeOverride ?? window.zero;
     if (!bridge) throw new Error("Native Host bridge is unavailable");
     return bridge;
   }
-
   private invoke(
     command: string,
     payload: NativeSdkJson,
@@ -166,7 +144,6 @@ export class BridgeClient {
   ) {
     const pending = this.bridge().invoke(command, payload);
     if (timeoutMs <= 0) return pending;
-
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -178,24 +155,19 @@ export class BridgeClient {
       if (timer !== undefined) clearTimeout(timer);
     });
   }
-
   available() {
     return this.bridgeOverride !== undefined || window.zero !== undefined;
   }
-
   onShortcut(consume: (shortcut: NativeSdkShortcutDetail) => void) {
     return this.bridge().on("shortcut", consume);
   }
-
   onFileDrop(consume: (paths: string[]) => void) {
     if (this.attachmentConnection?.mode !== "native_paths") return () => {};
     return this.bridge().on("drop:files", ({ paths }) => consume(paths));
   }
-
   get attachmentInputMode() {
     return this.attachmentConnection?.mode;
   }
-
   onWorkbenchRevision(
     consume: (revision: string, securityEpoch: string) => void,
     reject: (error: unknown) => void,
@@ -207,14 +179,12 @@ export class BridgeClient {
           return;
         this.viewCache.observeSecurityEpoch(notification.securityEpoch);
         this.previews.observeSecurityEpoch(notification.securityEpoch);
-        this.documents.observeSecurityEpoch(notification.securityEpoch);
         consume(notification.revision, notification.securityEpoch);
       } catch (error) {
         reject(error);
       }
     });
   }
-
   onHostSignal(
     consume: (signal: HostSignal) => void,
     reject: (error: unknown) => void,
@@ -227,11 +197,7 @@ export class BridgeClient {
       }
     });
   }
-
   async connect() {
-    this.documents.reset();
-    this.stopDocumentEvents?.();
-    this.stopDocumentEvents = undefined;
     this.previews.reset();
     this.viewCache.clear();
     const value = await this.invoke(commands.connect, {
@@ -264,27 +230,13 @@ export class BridgeClient {
       generation: result.generation,
       ...result.attachmentInput,
     };
-    this.stopDocumentEvents = this.bridge().on<unknown>(
-      documentInvalidatedEvent,
-      (value) => {
-        try {
-          this.documents.invalidated(value);
-        } catch {
-          this.documents.rejectEvents();
-        }
-      },
-    );
     this.nextReceiveBatch = 1n;
     this.nextOutputOperation = 1n;
     return result.generation;
   }
-
   async disconnect(generation: string) {
     this.viewCache.clear();
     if (this.attachmentConnection?.generation === generation) {
-      this.documents.reset();
-      this.stopDocumentEvents?.();
-      this.stopDocumentEvents = undefined;
       this.previews.reset();
       this.attachmentConnection = undefined;
     }
@@ -293,7 +245,6 @@ export class BridgeClient {
       generation,
     );
   }
-
   fetchSnapshot(scope: ViewScope) {
     return fetchWorkbenchSnapshot(
       (command, payload) => this.invoke(command, payload),
@@ -301,13 +252,11 @@ export class BridgeClient {
       this.viewCache,
     );
   }
-
   async openExternalLink(url: string) {
     return decodeExternalLinkOpenResult(
       await this.invoke(commands.openExternalLink, { url }),
     );
   }
-
   async outputAction(
     taskId: string,
     runId: string,
@@ -353,7 +302,7 @@ export class BridgeClient {
           { ...key, taskId, runId, outputId, action },
           action === "save" || this.commandTimeoutMs <= 0
             ? 0
-            : Math.max(35_000, this.commandTimeoutMs),
+            : Math.max(35000, this.commandTimeoutMs),
         ),
       );
       matches(result);
@@ -384,16 +333,6 @@ export class BridgeClient {
       signal.removeEventListener("abort", cancel);
     }
   }
-
-  previewDocument(
-    taskId: string,
-    runId: string,
-    target: DocumentTarget,
-    signal?: AbortSignal,
-  ) {
-    return this.documents.open(taskId, runId, target, signal);
-  }
-
   previewFile(
     taskId: string,
     runId: string,
@@ -402,7 +341,6 @@ export class BridgeClient {
   ): Promise<FilePreview> {
     return this.previews.load(taskId, runId, fileReferenceId, options);
   }
-
   async fileChangeDiff(
     taskId: string,
     runId: string,
@@ -416,7 +354,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async ping() {
     return decodePingResponse(
       await this.invoke(commands.ping, {
@@ -424,14 +361,12 @@ export class BridgeClient {
       }),
     );
   }
-
   async acknowledgeSignal(sequence: number) {
     assertSignalAcknowledged(
       await this.invoke(commands.pingAck, { sequence }),
       sequence,
     );
   }
-
   async chooseWorkspace(): Promise<WorkspaceChoice> {
     // Native file dialogs are user-controlled modal interactions, not bounded
     // Host work. Their lifetime must not be confused with a wedged command.
@@ -439,7 +374,6 @@ export class BridgeClient {
       await this.bridge().invoke(commands.chooseWorkspace, {}),
     );
   }
-
   async chooseAutomaticWorkspaceRoot(expectedGeneration: string) {
     // Native directory pickers are user-controlled modal interactions, so
     // their lifetime must not be mistaken for a wedged Host command.
@@ -449,7 +383,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async resetAutomaticWorkspaceRoot(expectedGeneration: string) {
     return decodeAutomaticWorkspaceRootMutationResult(
       await this.invoke(commands.resetAutomaticWorkspaceRoot, {
@@ -457,7 +390,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async retryAutomaticWorkspaceRoot(expectedGeneration: string) {
     return decodeAutomaticWorkspaceRootMutationResult(
       await this.invoke(commands.retryAutomaticWorkspaceRoot, {
@@ -465,42 +397,22 @@ export class BridgeClient {
       }),
     );
   }
-
-  async manageOffice(
-    action: "install" | "repair" | "remove" | "retry" | "cleanup",
-    expectedGeneration: string,
-  ) {
-    const names = {
-      install: commands.officeInstall,
-      repair: commands.officeRepair,
-      remove: commands.officeRemove,
-      retry: commands.officeRetry,
-      cleanup: commands.officeCleanup,
-    };
-    return decodeOfficeComponentResult(
-      await this.invoke(names[action], { expectedGeneration }),
-      "$",
-    );
-  }
-
-  async cancelOffice(operationId: string) {
-    return decodeOfficeComponentResult(
-      await this.invoke(commands.officeCancel, { operationId }),
-      "$",
-    );
-  }
-
   async chooseSkillImport(kind: "package" | "directory") {
     return decodeSkillImportPreview(
       await this.bridge().invoke(commands.chooseSkillImport, { kind }),
     );
   }
-
   async installSkill(
     previewId: string,
     scope:
-      | { kind: "personal" }
-      | { kind: "project"; workspaceId: string; workspaceEpoch: string },
+      | {
+          kind: "personal";
+        }
+      | {
+          kind: "project";
+          workspaceId: string;
+          workspaceEpoch: string;
+        },
     allowReplace: boolean,
   ) {
     return decodeSkillMutationResult(
@@ -514,40 +426,36 @@ export class BridgeClient {
       }),
     );
   }
-
   async reimportSkill(installId: string, previewId: string) {
     return decodeSkillMutationResult(
       await this.invoke(commands.reimportSkill, { installId, previewId }),
     );
   }
-
   async uninstallSkill(installId: string) {
     return decodeSkillMutationResult(
       await this.invoke(commands.uninstallSkill, { installId }),
     );
   }
-
   async retrySkillVerification(installId: string) {
     return decodeSkillMutationResult(
       await this.invoke(commands.retrySkill, { installId }),
     );
   }
-
   async exportSkill(installId: string) {
     return decodeSkillExportResult(
       await this.bridge().invoke(commands.exportSkill, { installId }),
     );
   }
-
   async skillDetail(installId: string) {
     return decodeSkillDetailResult(
       await this.invoke(commands.skillDetail, { installId }),
     );
   }
-
   async setSkillEnabled(
     target:
-      | { scope: "personal" }
+      | {
+          scope: "personal";
+        }
       | {
           scope: "project";
           workspaceId: string;
@@ -571,7 +479,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async setSkillSourceEnabled(
     sourceId: SkillSourceBrand,
     enabled: boolean,
@@ -585,7 +492,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async recoverSkillSourceSettings(
     action: "reread" | "reset",
     expectedRecoveryToken: string,
@@ -597,7 +503,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async createMcpStdioServer(
     expectedDesiredGeneration: string,
     input: McpStdioConnectionInput,
@@ -609,7 +514,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async createMcpHttpServer(
     expectedDesiredGeneration: string,
     input: McpHttpConnectionInput,
@@ -621,7 +525,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async updateMcpStdioConnection(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -635,7 +538,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async updateMcpHttpConnection(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -649,7 +551,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async renameMcpServer(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -663,7 +564,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async setMcpServerEnabled(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -677,7 +577,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async approveMcpConnection(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -689,7 +588,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async captureMcpSecret(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -705,7 +603,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async authorizeMcpOAuth(expectedDesiredGeneration: string, serverId: string) {
     return decodeMcpAuthorizationResult(
       await this.invoke(commands.mcpAuthorizeOAuth, {
@@ -714,13 +611,11 @@ export class BridgeClient {
       }),
     );
   }
-
   async cancelMcpAuthorization(operationId: string) {
     return decodeMcpAuthorizationCancelResult(
       await this.invoke(commands.mcpCancelAuthorization, { operationId }),
     );
   }
-
   async setMcpAllowedTools(
     expectedDesiredGeneration: string,
     serverId: string,
@@ -734,7 +629,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async removeMcpServer(expectedDesiredGeneration: string, serverId: string) {
     return decodeMcpMutationResult(
       await this.invoke(commands.mcpRemoveServer, {
@@ -743,19 +637,16 @@ export class BridgeClient {
       }),
     );
   }
-
   async refreshMcpCatalog() {
     return decodeMcpRefreshResult(
       await this.invoke(commands.mcpRefreshCatalog, {}),
     );
   }
-
   async applyMcpConfiguration() {
     return decodeMcpConfigurationApplyResult(
       await this.invoke(commands.mcpApplyConfiguration, {}),
     );
   }
-
   async testMcpConnection(expectedDesiredGeneration: string, serverId: string) {
     return decodeMcpConnectionTestResult(
       await this.invoke(commands.mcpTestConnection, {
@@ -764,49 +655,41 @@ export class BridgeClient {
       }),
     );
   }
-
   async beginLogin() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountBeginLogin, {}),
     );
   }
-
   async cancelAccountOperation() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountCancelOperation, {}),
     );
   }
-
   async retryAccountRefresh() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountRetryRefresh, {}),
     );
   }
-
   async refreshAccountSummary() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountRefreshSummary, {}),
     );
   }
-
   async openAccountRecharge() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountOpenRecharge, {}),
     );
   }
-
   async refreshModelsCatalog() {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelsRefreshCatalog, {}),
     );
   }
-
   async resetModelsStore(expectedRevision: string) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelsResetStore, { expectedRevision }),
     );
   }
-
   async configureMetaskSelection(input: {
     sourceId: string;
     modelId: string;
@@ -817,7 +700,6 @@ export class BridgeClient {
       await this.invoke(commands.configureMetaskSelection, input),
     );
   }
-
   async selectModelsDefault(input: {
     sourceId: string;
     modelId: string;
@@ -829,7 +711,6 @@ export class BridgeClient {
       await this.invoke(commands.selectModelsDefault, input),
     );
   }
-
   async createCustomProvider(input: {
     displayName: string;
     protocol: Protocol;
@@ -845,7 +726,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async createBuiltinProvider(input: {
     providerId: string;
     baseUrl: string;
@@ -855,7 +735,6 @@ export class BridgeClient {
       await this.invoke(commands.builtinProviderCreate, input),
     );
   }
-
   async updateBuiltinProviderBaseUrl(input: {
     providerId: string;
     expectedProviderRevision: string;
@@ -865,7 +744,6 @@ export class BridgeClient {
       await this.invoke(commands.builtinProviderUpdateBaseUrl, input),
     );
   }
-
   async updateCustomProvider(input: {
     providerId: string;
     expectedProviderRevision: string;
@@ -877,7 +755,6 @@ export class BridgeClient {
       await this.invoke(commands.customProviderUpdate, input),
     );
   }
-
   async replaceCustomProviderCredential(
     providerId: string,
     expectedProviderRevision: string,
@@ -891,7 +768,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async removeCustomProvider(
     providerId: string,
     expectedProviderRevision: string,
@@ -903,7 +779,6 @@ export class BridgeClient {
       }),
     );
   }
-
   async testCustomModel(
     sourceId: string,
     expectedProviderRevision: string,
@@ -920,31 +795,42 @@ export class BridgeClient {
       }),
     );
   }
-
   async addCustomModel(input: {
     providerId: string;
     expectedProviderRevision: string;
     expectedCatalogGeneration: string;
-    model: { id: string; displayName?: string; metadata?: ModelMetadata };
+    model: {
+      id: string;
+      displayName?: string;
+      metadata?: ModelMetadata;
+    };
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.customModelAdd, input),
     );
   }
-
   async replaceCustomModel(input: {
-    selection: { sourceId: string; modelId: string };
+    selection: {
+      sourceId: string;
+      modelId: string;
+    };
     expectedProviderRevision: string;
     expectedCatalogGeneration: string;
-    replacement: { id: string; displayName?: string; metadata?: ModelMetadata };
+    replacement: {
+      id: string;
+      displayName?: string;
+      metadata?: ModelMetadata;
+    };
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.customModelReplace, input),
     );
   }
-
   async removeCustomModel(input: {
-    selection: { sourceId: string; modelId: string };
+    selection: {
+      sourceId: string;
+      modelId: string;
+    };
     expectedProviderRevision: string;
     expectedCatalogGeneration: string;
   }) {
@@ -952,13 +838,11 @@ export class BridgeClient {
       await this.invoke(commands.customModelRemove, input),
     );
   }
-
   async logout() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountLogout, {}),
     );
   }
-
   async createTask(
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
@@ -980,14 +864,12 @@ export class BridgeClient {
       }),
     );
   }
-
   async run(taskId: string, expectedBindingEpoch: string, input: TaskRunInput) {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
       taskId,
     );
   }
-
   async sendInput(operationId: string, taskId: string, input: TaskRunInput) {
     return decodeSendInputResult(
       await this.invoke(commands.sendInput, { operationId, taskId, input }),
@@ -995,7 +877,6 @@ export class BridgeClient {
       operationId,
     );
   }
-
   async stopTask(taskId: string) {
     const item = object(await this.invoke(commands.stop, { taskId }), "$", [
       "taskId",
@@ -1007,7 +888,6 @@ export class BridgeClient {
         "Invalid task stop result",
       );
   }
-
   createAttachmentAdd(recover: () => Promise<void>) {
     const connection = this.attachmentConnection;
     if (!connection) throw new Error("Attachment input is unavailable");
@@ -1054,13 +934,11 @@ export class BridgeClient {
       connection.maxChunkBytes,
     );
   }
-
   async releaseAttachment(token: string) {
     return decodeAttachmentReleaseResult(
       await this.invoke(commands.releaseAttachment, { token }),
     );
   }
-
   async setApprovalMode(
     taskId: string,
     targetMode: ApprovalMode,
@@ -1077,11 +955,13 @@ export class BridgeClient {
       taskId,
     );
   }
-
   async selectTaskModel(
     taskId: string,
     expectedSelectionRevision: string,
-    targetModelRef: { sourceId: string; modelId: string },
+    targetModelRef: {
+      sourceId: string;
+      modelId: string;
+    },
     expectedSourceGeneration: string,
     expectedCatalogGeneration: string,
   ) {
@@ -1096,21 +976,18 @@ export class BridgeClient {
       taskId,
     );
   }
-
   async compact(taskId: string, expectedBindingEpoch: string) {
     return decodeTaskCompactResult(
       await this.invoke(commands.compact, { taskId, expectedBindingEpoch }),
       taskId,
     );
   }
-
   async restoreTask(taskId: string, expectedBindingEpoch: string) {
     return decodeTaskRestoreResult(
       await this.invoke(commands.restoreTask, { taskId, expectedBindingEpoch }),
       taskId,
     );
   }
-
   async cancelCompact(taskId: string, operationId: string) {
     assertCompactCancelAccepted(
       await this.invoke(commands.cancelCompact, { taskId, operationId }),
@@ -1118,7 +995,6 @@ export class BridgeClient {
       operationId,
     );
   }
-
   async refreshWorkspaceSkillCatalog(
     workspaceId: string,
     expectedWorkspaceEpoch: string,
@@ -1132,13 +1008,11 @@ export class BridgeClient {
       workspaceId,
     );
   }
-
   async refreshSkillCatalog() {
     return decodeSkillCatalogRefreshResult(
       await this.invoke(commands.refreshSkillCatalog, {}),
     );
   }
-
   async refreshTaskSkillCatalog(taskId: string, expectedBindingEpoch: string) {
     return decodeCatalogRefreshResult(
       await this.invoke(commands.refreshTaskSkillCatalog, {
@@ -1149,7 +1023,6 @@ export class BridgeClient {
       taskId,
     );
   }
-
   async cancel(taskId: string, runId: string) {
     assertCancelAccepted(
       await this.invoke(commands.cancel, { taskId, runId }),
@@ -1157,7 +1030,6 @@ export class BridgeClient {
       runId,
     );
   }
-
   async respondUi(
     taskId: string,
     runId: string,
@@ -1176,7 +1048,6 @@ export class BridgeClient {
       requestId,
     );
   }
-
   async renameTask(taskId: string, title: string) {
     assertTaskFlag(
       await this.invoke(commands.renameTask, { taskId, title }),
@@ -1184,7 +1055,6 @@ export class BridgeClient {
       "renamed",
     );
   }
-
   async setTaskArchived(taskId: string, archived: boolean) {
     assertTaskArchived(
       await this.invoke(commands.archiveTask, {
@@ -1195,7 +1065,6 @@ export class BridgeClient {
       archived,
     );
   }
-
   async markTaskCompletionSeen(taskId: string, runId: string) {
     return decodeTaskCompletionSeenResult(
       await this.invoke(commands.markTaskCompletionSeen, { taskId, runId }),
@@ -1203,7 +1072,6 @@ export class BridgeClient {
       runId,
     );
   }
-
   async deleteTask(taskId: string) {
     assertTaskFlag(
       await this.invoke(commands.deleteTask, { taskId }),
@@ -1211,19 +1079,16 @@ export class BridgeClient {
       "deleting",
     );
   }
-
   async recoverTaskHistory(expectedRevision: string) {
     return decodePersistenceRecoveryResult(
       await this.invoke(commands.recoverTaskHistory, { expectedRevision }),
     );
   }
-
   async createScheduledTask(input: ScheduledTaskMutation) {
     return decodeScheduledTaskMutationResult(
       await this.invoke(commands.createScheduledTask, input),
     );
   }
-
   async updateScheduledTask(
     scheduledTaskId: string,
     expectedEpoch: string,
@@ -1238,7 +1103,6 @@ export class BridgeClient {
       scheduledTaskId,
     );
   }
-
   async setScheduledTaskEnabled(
     scheduledTaskId: string,
     expectedEpoch: string,
@@ -1254,7 +1118,6 @@ export class BridgeClient {
       enabled,
     );
   }
-
   async runScheduledTaskNow(scheduledTaskId: string, expectedEpoch: string) {
     return decodeScheduledTaskRunResult(
       await this.invoke(commands.runScheduledTaskNow, {
@@ -1264,7 +1127,6 @@ export class BridgeClient {
       scheduledTaskId,
     );
   }
-
   async deleteScheduledTask(scheduledTaskId: string, expectedEpoch: string) {
     assertScheduledTaskDeleted(
       await this.invoke(commands.deleteScheduledTask, {
@@ -1274,7 +1136,6 @@ export class BridgeClient {
       scheduledTaskId,
     );
   }
-
   async recoverScheduledTaskStore(expectedRevision: string) {
     return decodePersistenceRecoveryResult(
       await this.invoke(commands.recoverScheduledTaskStore, {
