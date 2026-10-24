@@ -186,7 +186,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVAL_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；复用完整入口的隔离 profile、Product/Bridge、模式切换、checkpoint 和重启检查。首次启动与重启须先观察 Renderer 审批控件已就绪，再进行 Host 验证轮询；菜单交互前重新加载隔离 Renderer，避免两个读取方争用冻结 snapshot。菜单、授权和恢复断言全部保留。该范围不运行 Composer 焦点、成果复制等其他桌面手势，不得宣称完整 desktop vertical 通过；完整入口保持原有检查。
 
-该入口随后运行真实审批卡 WebView 矩阵；仅检查卡片可设置 `METAWORK_APPROVAL_READABILITY_ONLY=1` 后运行同一 Windows 入口。矩阵通过实际设置菜单切换中英文，在明暗主题、桌面和约 390px 的 WebView 中验证命令默认可见、来源区分、键盘展开与参数滚动、焦点恢复、按钮可达性、文本对比度和文件 Session 选择。超长命令与工作区外文件使用测试自有临时目录中的合成请求并拒绝执行，不能通过此测试声称真实模型判断正确。截图与当前运行状态报告由入口保存，失败不得沿用上轮通过报告。
+该入口随后运行真实审批卡 WebView 矩阵；仅检查卡片可设置 `METAWORK_APPROVAL_READABILITY_ONLY=1` 后运行同一 Windows 入口。矩阵通过实际设置菜单切换中英文，在明暗主题、桌面和约 390px 的 WebView 中验证命令默认可见、来源区分、键盘展开与参数滚动、焦点恢复、按钮可达性、文本对比度和文件 Session 选择；模型需要人工、HTTP 调用失败与手动模式必须显示各自来源。审批链同时观察前 Run 用户消息进入实际独立 Completion，旧工具输出不得变成授权证据。超长命令与工作区外文件使用测试自有临时目录中的合成请求并拒绝执行，不能通过此测试声称真实模型判断正确。截图与当前运行状态报告由入口保存，失败不得沿用上轮通过报告。
 
 真实模型质量使用可选入口 `zig build eval-permission-review`，编译检查为 `zig build check-permission-review-eval`。前者要求显式测试配置环境变量 `METAWORK_REVIEW_EVAL_PROTOCOL`、`METAWORK_REVIEW_EVAL_BASE_URL`、`METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_API_KEY` 和 `METAWORK_REVIEW_EVAL_REVISION`，重复次数 `METAWORK_REVIEW_EVAL_REPEATS` 默认为 3，范围 1–5；缺配置明确失败。密钥由本地测试环境注入，不写入仓库、命令参数或报告。该入口复用生产 Completion、HTTP 和当前评审策略，只提交合成请求，不执行被评审工具。
 

@@ -3684,6 +3684,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let reviewRequests = 0;
   let inputReviewRequests = 0;
   let readabilityReviewRequests = 0;
+  let technicalReviewRequests = 0;
 
   let releaseReview = null;
   let providerError = null;
@@ -3722,6 +3723,18 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             "请检查审批请求，确认这条命令的用途。";
           assert.equal(review.host.delegation, "current_request_only");
           assert.equal(review.evidence.request.tool_name, "Bash");
+          if (
+            review.evidence.user_intent === "请检查这条命令的审批服务故障提示。"
+          ) {
+            technicalReviewRequests++;
+            assert.equal(technicalReviewRequests, 1);
+            response.writeHead(503, {
+              "content-type": "text/plain",
+              connection: "close",
+            });
+            response.end("synthetic service unavailable");
+            return;
+          }
           if (review.evidence.user_intent === "input-review-constraint") {
             inputReviewRequests++;
             assert.equal(
@@ -3736,6 +3749,21 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             assert.equal(
               review.evidence.user_intent,
               "mode-review-current-request",
+            );
+            assert.equal(review.evidence.earlier_user_instructions.length, 1);
+            assert.deepEqual(
+              review.evidence.earlier_user_instructions[0].messages,
+              ["mode-grant-seed"],
+            );
+            assert.match(
+              review.evidence.earlier_user_instructions[0].run_id,
+              /^[1-9][0-9]*$/,
+            );
+            assert.equal(review.evidence.omitted_earlier_user_messages, 0);
+            assert.equal(
+              JSON.stringify(review.evidence).includes("MODE_GRANT"),
+              false,
+              "prior tool output cannot become user authorization evidence",
             );
             reviewRequests++;
             assert.equal(
@@ -3881,6 +3909,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     get readabilityReviewRequests() {
       return readabilityReviewRequests;
+    },
+    get technicalReviewRequests() {
+      return technicalReviewRequests;
     },
     get reviewRequests() {
       return reviewRequests;

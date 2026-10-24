@@ -176,6 +176,23 @@ export async function runApprovalReadabilityVertical({
   );
   const readTask = async () =>
     (await snapshot()).tasks.find((task) => task.id === taskId);
+  const setMode = async (targetMode) => {
+    const before = await readTask();
+    accepted(
+      await invoke("metawork.tasks.setApprovalMode", {
+        taskId,
+        targetMode,
+        expectedBindingEpoch: before.binding.epoch,
+        expectedApprovalRevision: before.approvalRevision,
+      }),
+    );
+    return wait(async () => {
+      const current = await readTask();
+      return current.approvalMode === targetMode && !current.approvalChange
+        ? current
+        : null;
+    }, `readability mode ${targetMode}`);
+  };
   const start = async (input, tool, args, userText = input) => {
     provider.enqueue(
       toolSse(input, `${input}-tool`, tool, args),
@@ -288,7 +305,9 @@ export async function runApprovalReadabilityVertical({
           locale,
           expected.manual
             ? "approval.manual_mode"
-            : "approval.handoff.reviewer_concern",
+            : expected.technical
+              ? "approval.handoff.call_failed"
+              : "approval.handoff.reviewer_concern",
         ),
       ),
     );
@@ -318,9 +337,10 @@ export async function runApprovalReadabilityVertical({
     }
     assert.equal(
       view.text.includes(translate(locale, "approval.reviewer_note")),
-      !expected.manual,
+      !expected.manual && !expected.technical,
     );
-    if (!expected.manual) assert.ok(view.text.includes(reason));
+    if (!expected.manual && !expected.technical)
+      assert.ok(view.text.includes(reason));
     if (!expected.fallback) {
       await webview.evaluate(
         `document.querySelector(${JSON.stringify(selector + " details summary")}).focus()`,
@@ -474,20 +494,7 @@ export async function runApprovalReadabilityVertical({
             theme,
             { command },
           );
-    accepted(
-      await invoke("metawork.tasks.setApprovalMode", {
-        taskId,
-        targetMode: "manual",
-        expectedBindingEpoch: task.binding.epoch,
-        expectedApprovalRevision: task.approvalRevision,
-      }),
-    );
-    task = await wait(async () => {
-      const current = await readTask();
-      return current.approvalMode === "manual" && !current.approvalChange
-        ? current
-        : null;
-    }, "readability manual mode");
+    task = await setMode("manual");
     assert.equal(task.permissionReviewExplanation, null);
     await show(task.pendingUi.requestId);
     await capture(task, "manual-zh-CN-1320-light", "zh-CN", 1320, "light", {
@@ -536,6 +543,30 @@ export async function runApprovalReadabilityVertical({
       );
     await deny(task);
     await expectMissing(target);
+    await setMode("auto_review");
+    task = await start(
+      "approval-readable-service-failure",
+      "Bash",
+      { command, description: purpose },
+      "请检查这条命令的审批服务故障提示。",
+    );
+    assert.equal(task.permissionReviewExplanation.cause, "call_failed");
+    assert.equal(task.permissionReviewExplanation.reason, null);
+    assert.equal(provider.technicalReviewRequests, 1);
+    await show(task.pendingUi.requestId);
+    for (const [locale, width, theme] of [
+      ["zh-CN", 390, "light"],
+      ["en-US", 1320, "dark"],
+    ])
+      await capture(
+        task,
+        `service-failure-${locale}-${width}-${theme}`,
+        locale,
+        width,
+        theme,
+        { technical: true, command },
+      );
+    await deny(task);
     await writeFile(
       report,
       JSON.stringify(
