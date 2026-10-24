@@ -17,6 +17,7 @@ pub fn main(init: std.process.Init) !void {
     const workspace = init.environ_map.get("METAWORK_OFFICE_CORE_WORKSPACE") orelse return error.MissingFixtureWorkspace;
     const root = init.environ_map.get("METAWORK_OFFICE_CORE_SKILLS") orelse return error.MissingFixtureSkills;
     const name = init.environ_map.get("METAWORK_OFFICE_CORE_SKILL") orelse return error.MissingFixtureSkill;
+    const home = init.environ_map.get("METAWORK_OFFICE_CORE_HOME") orelse workspace;
     const tools = [_]wire.BytesViewV1{core.bytesView("Bash")};
     var diagnostic: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
     defer api.bufferRelease()(&diagnostic);
@@ -35,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     var query = std.mem.zeroes(wire.SkillCatalogQueryV1);
     query.struct_size = @sizeOf(wire.SkillCatalogQueryV1);
     query.workspace_root = core.bytesView(workspace);
-    query.workspace_home = core.bytesView(workspace);
+    query.workspace_home = core.bytesView(home);
     query.workspace_epoch = core.bytesView("1");
     query.additional_sources = @ptrCast(&source);
     query.additional_source_count = 1;
@@ -65,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     host.api_key = core.bytesView("office-local-fixture");
     host.base_url = core.bytesView(init.environ_map.get("METAWORK_OFFICE_CORE_URL") orelse return error.MissingFixtureUrl);
     host.workspace_root = core.bytesView(workspace);
-    host.workspace_home = core.bytesView(workspace);
+    host.workspace_home = core.bytesView(home);
     host.allowed_tools = &tools;
     host.allowed_tool_count = tools.len;
     host.skill_catalog = catalog;

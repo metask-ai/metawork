@@ -58,6 +58,14 @@ Windows 私有环境的显式联网入口为 `python -X utf8 scripts/check-offic
 
 这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
 
+### E-MAC-OFFICE-INPUTS-20261024
+
+2026-10-24，macOS 27.0.1 arm64、Zig 0.16.0，跨平台实施分支在 `914c5a98` 基础上进行输入资格检查。官方固定发行包与所选 wheel 已实际下载并核验摘要、大小和布局；Windows ARM64 的 CPython、Node PE machine 均为 `0xaa64`，NuGet 携带 VC runtime。macOS standalone Python 的 pip、ssl、ctypes 及锁定的 lxml、Pillow、openpyxl、defusedxml 实际加载成功；搬移到含中文、空格和单引号的目录后新进程仍能加载。Python 发行包及 arm64 wheel 的 53 个原生 image 的加载依赖未发现构建机器绝对路径。Node 固定库经私有 npm 安装及搬移后加载成功。具体接受输入由 Office 机器 manifest/lock 拥有，缓存中的候选不自动成为产品输入。
+
+Node 24 Darwin 候选的 Mach-O 最低系统为 13.5，高于 canonical Core 与应用的 13.0 基线，故拒绝接纳。固定 Node 22 候选的两个 Darwin 二进制最低系统为 11.0，且现有 `registerHooks` API 可用；仅调整 macOS 候选，Windows x64 的版本、锁和身份保持。此检查不等于最低系统的实际运行验收。
+
+`zig build build-office-skill-shell --prefix .zig-cache/office-core-qualification` 后，`python3 scripts/check-office-skill-shell.py --home-probe` 通过 canonical staged Core、loopback Provider 与真实 Bash，在两个独立 Task 工作区验证 Shell HOME 等于传入的 canonical user home，未随工作区改变。该模式不准备依赖、不证明三格式或桌面链路。输入、布局、原生依赖及 HOME 探针缓存位于 `.zig-cache/office-input-p0/`；macOS Intel、Windows ARM64 原生执行、最低系统与正式安装产物仍待验收。
+
 ### E-WIN-OFFICE-SIMPLE-20261024
 
 2026-10-24，Windows x64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24。依赖实现绑定 `d6bb19bf`；完整资源 SHA-256 为 `28087e876351a6e4dff2dfa5053fe4810bc1ded6e82bb5324daa823a72a486be`，受测 automation Debug executable SHA-256 为 `f9ad9a15680eb53b91cd9e28cf2e302fc4e1da4a4d0b0db8231d2abcba199364`。

@@ -1,6 +1,6 @@
 # Office Skill 跨平台适配最终方案
 
-> 状态：方案定稿，待实施。2026-10-24。本文不是 decision record，也不替代领域真源；方案定稿不表示产品能力已经开放、实现已经验收或生效合同已经变更。
+> 状态：方案定稿，实施中。2026-10-24。本文不是 decision record，也不替代领域真源；方案定稿不表示产品能力已经开放、实现已经验收或生效合同已经变更。
 
 实施采用现有 AgentCore Skill、Shell/权限与成果交付链路，补齐 macOS 和 Windows arm64 的固定私有运行时，以及 macOS 资源发布。macOS Python 采用锁定的 standalone 发行包，Windows Python 沿用官方 NuGet 路线；Node 采用官方对应目标发行包。两平台共用身份构造与文档脚本。macOS 首次准备 Node 前先准备 Python，以完成排他原子发布；发布成功必须通过最终路径的新进程检查。
 
@@ -51,6 +51,8 @@
 ### 3.1 固定私有发行包
 
 Windows x64 保留现有 CPython NuGet 和官方 Node ZIP；Windows arm64 使用官方 `pythonarm64` NuGet 与 Node Windows arm64 ZIP，独立锁定全部输入。macOS Python 采用 Astral `python-build-standalone` 的标准 GIL、`install_only` 类固定发行 artifact；Node 采用官方 Darwin 压缩包，分别锁定 arm64 与 x64。运行时不查询 latest、不使用可变下载入口，也不安装 uv 或另一个通用环境管理器。
+
+P0 实测修正：现有 Node 24 的 Darwin 二进制最低系统为 macOS 13.5，高于应用的 13.0 基线，不接纳该候选。macOS 改用具备现有 `registerHooks` API、二进制最低系统为 11.0 的固定 Node 22 发行包；具体版本与摘要由机器输入拥有。Windows 两目标继续采用原定 Node 24 路线。此调整不提高应用基线，也不建立运行时版本 fallback。
 
 Python 优先匹配当前 Windows 的版本与依赖版本集合；精确发行日期、文件名、摘要、大小、最低系统版本和 wheel 集合必须在 P0 实际取得并验证，才能写入 canonical 输入。若目标版本没有合适的 standalone artifact 或 wheel，P0 明确失败并提出具体版本调整；不得无声更换版本、源码编译或顺带升级 Windows。
 

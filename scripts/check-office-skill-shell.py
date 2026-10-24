@@ -11,20 +11,27 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import sys
 import subprocess
 import tempfile
 import threading
 
 REPO = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--profile", type=Path, required=True)
+parser.add_argument("--profile", type=Path)
+parser.add_argument("--home-probe", action="store_true", help="Check actual Core Bash HOME in two independent workspaces; no private environment needed")
 args = parser.parse_args()
-profile = args.profile.resolve(strict=True)
+if not args.home_probe and args.profile is None:
+    parser.error("--profile is required for document qualification")
+profile = args.profile.resolve(strict=True) if args.profile else Path.home().resolve()
+if sys.platform != "win32" and not args.home_probe:
+    parser.error("Document qualification currently requires Windows")
 scratch = Path(tempfile.mkdtemp(prefix="office-core shell ", dir=REPO / ".zig-cache"))
 skills = scratch / "skills"
 skills.mkdir()
-subprocess.run(["tar.exe", "-xf", str(REPO / "src/app/office-skills.tar.gz"), "-C", str(skills)], check=True)
-probe = REPO / ".zig-cache/office-core-qualification/bin/office-skill-shell.exe"
+subprocess.run(["tar.exe" if sys.platform == "win32" else "/usr/bin/tar", "-xf", str(REPO / "src/app/office-skills.tar.gz"), "-C", str(skills)], check=True)
+probe = REPO / (".zig-cache/office-core-qualification/bin/office-skill-shell" + (".exe" if sys.platform == "win32" else ""))
 
 
 def texts(value):
@@ -56,7 +63,7 @@ def sse(tool_input=None):
     return "".join("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n" for e in events).encode()
 
 
-for kind in ("docx", "xlsx", "pptx"):
+for kind in (("docx", "xlsx") if args.home_probe else ("docx", "xlsx", "pptx")):
     work = scratch / kind
     work.mkdir()
     output = work / ("created." + kind)
@@ -100,7 +107,12 @@ with checked_copy(source) as checked,zipfile.ZipFile(checked) as original,zipfil
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 (work / ("request-" + str(state["calls"]) + ".json")).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
                 state["calls"] += 1
-                if state["calls"] == 1:
+                if state["calls"] == 1 and args.home_probe:
+                    if sys.platform == "win32":
+                        raise RuntimeError("HOME probe currently exercises POSIX Bash")
+                    command = '/usr/bin/printf %s "$HOME" > ' + shlex.quote(str(work / "home.txt")) + ' && /usr/bin/printf %s ' + shlex.quote(marker)
+                    response = sse({"command": command, "timeout": 10000})
+                elif state["calls"] == 1:
                     content = "\n".join(texts(payload))
                     candidates = re.findall(r"[A-Za-z]:[\\/][^`\"\r\n<>]+?[\\/]environment[\\/]run\.cmd", content)
                     existing = [Path(p) for p in candidates if Path(p).is_file()]
@@ -137,12 +149,18 @@ with checked_copy(source) as checked,zipfile.ZipFile(checked) as original,zipfil
     thread.start()
     try:
         env = dict(os.environ, LOCALAPPDATA=str(profile), METAWORK_OFFICE_CORE_WORKSPACE=str(work),
+                   METAWORK_OFFICE_CORE_HOME=str(Path.home().resolve()) if args.home_probe else str(work),
                    METAWORK_OFFICE_CORE_SKILLS=str(skills), METAWORK_OFFICE_CORE_SKILL=kind,
                    METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages")
         result = subprocess.run([str(probe)], env=env, capture_output=True, timeout=180)
         if result.returncode or state["error"]:
             raise RuntimeError(str(scratch) + "\n" + str(state["error"]) + "\n" + result.stderr.decode("utf-8", errors="replace"))
         assert state["calls"] == 2
+        if args.home_probe:
+            actual = (work / "home.txt").read_text(encoding="utf-8")
+            assert actual == str(Path.home().resolve()), (actual, Path.home())
+            print(json.dumps({"workspace": str(work), "shell_home": actual, "canonical_home": str(Path.home().resolve()), "actual_core_bash": True}), flush=True)
+            continue
         parsed = json.loads((work / "read.json").read_text(encoding="utf-8"))
         assert parsed["format"] == kind and "中文 edited" in json.dumps(parsed, ensure_ascii=False)
         assert output.read_bytes() != edited.read_bytes()
@@ -152,4 +170,4 @@ with checked_copy(source) as checked,zipfile.ZipFile(checked) as original,zipfil
         server.shutdown()
         server.server_close()
         thread.join()
-print("Office Core shell qualification passed: " + str(scratch))
+print(("Office Core HOME probe passed: " if args.home_probe else "Office Core shell qualification passed: ") + str(scratch))
