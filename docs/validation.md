@@ -97,6 +97,12 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 | Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查 | 原生环境/Core/桌面、ARM64 installer 分发 |
 | Windows x64 | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留 | 本次变更的原生回归与安装产物；跨主机 archive 字节比对 |
 
+### E-MAC-OFFICE-CANCELLATION-20261024
+
+继续复核发现 `Popen` 在子进程已启动、但 handle 尚未返回的窗口被取消时，不能删除 stage 的未静止标记。真实子进程加构造边界故障注入证明：异常返回后子进程仍在，标记必须保留；测试清理方取得其自有 handle 并确认退出后才删除 fixture。准备入口的摘要检查也纳入同一 owned-child 等待链。Darwin 发布/取消回归 4/4、真实固定入口的摘要拒绝/正常准备/精确恢复、资源 suite 6/6、Host 资源发布定向测试与架构 guard 均通过；不扩大 Windows x64 行为。日志为 `.zig-cache/office-cancel-failures.log` 和 `.zig-cache/office-cancel-architecture.log`。该修复只收口既有取消合同，不新增恢复状态或用户选项。
+
+公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
+
 ### E-WIN-OFFICE-SIMPLE-20261024
 
 2026-10-24，Windows x64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24。依赖实现绑定 `d6bb19bf`；完整资源 SHA-256 为 `28087e876351a6e4dff2dfa5053fe4810bc1ded6e82bb5324daa823a72a486be`，受测 automation Debug executable SHA-256 为 `f9ad9a15680eb53b91cd9e28cf2e302fc4e1da4a4d0b0db8231d2abcba199364`。

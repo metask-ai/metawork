@@ -63,10 +63,11 @@ run_owned() {
     return "$RESULT"
 }
 run_owned /usr/bin/curl --fail --silent --show-error --location --proto =https --proto-redir =https --connect-timeout 30 --speed-limit 1024 --speed-time 90 --max-time 1800 --output "$STAGE/download.tar.gz" "$URL"
-ACTUAL=$(/usr/bin/shasum -a 256 "$STAGE/download.tar.gz")
-[ "${ACTUAL%% *}" = "$SHA" ] || { echo 'Office runtime SHA-256 mismatch' >&2; exit 1; }
+run_owned /usr/bin/shasum -a 256 "$STAGE/download.tar.gz" > "$STAGE/download.sha256"
+IFS=' ' read -r ACTUAL REST < "$STAGE/download.sha256"
+[ "$ACTUAL" = "$SHA" ] || { echo 'Office runtime SHA-256 mismatch' >&2; exit 1; }
 run_owned /usr/bin/tar -xf "$STAGE/download.tar.gz" -C "$STAGE"
-/bin/rm "$STAGE/download.tar.gz"
+/bin/rm "$STAGE/download.tar.gz" "$STAGE/download.sha256"
 if [ "$KIND" = python ]; then
     if run_owned "$STAGE/$PYTHON_EXE" -I -B "$RESOURCES/finish.py" "$STAGE" "$FINAL" "$RESOURCES"; then :; else
         if [ -e "$FINAL" ] || [ -L "$FINAL" ]; then unavailable; fi

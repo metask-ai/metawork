@@ -25,7 +25,9 @@ def run(command, stage, timeout=600):
     try:
         child = subprocess.Popen(command, start_new_session=True)
     except BaseException:
-        marker.unlink()
+        # Popen can be interrupted after fork/exec but before returning its
+        # handle. Without that handle we cannot prove the child was joined.
+        # Keep the marker so the shell preserves this invocation's stage.
         raise
     try:
         status = child.wait(timeout=timeout)

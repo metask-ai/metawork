@@ -145,7 +145,7 @@ pip/npm 沿用用户网络、代理、镜像和证书机制，关键 CLI 参数�
 | 主包 Office Skill 资源 | Application 调用一个已登记的 macOS 窄能力，仅处理本次自有资源 root 内的 stage 与内容目标 |
 | Python/Node 私有环境   | Agent 经固定准备脚本执行，Python 标准库调用 Darwin 排他改名；不新增 Host 产品协议        |
 
-macOS 采用 `renameatx_np(RENAME_EXCL)` 的同卷排他发布。Host 侧先审计 canonical Native SDK public API；若没有语义等价能力，按高层架构登记 Application-owned 的 `office-resource-publish.macos` seam，明确调用者、同步启动线程、目录所有权、errno、无悬挂资源及替换条件。不得修改 node_modules、升级成通用 OS facade 或弱化现有 allowlist。若 guard 不允许该 seam，在获得相应政策变化前该阶段明确阻塞。
+macOS 采用 `renameatx_np(RENAME_EXCL)` 的同卷排他发布。Host 侧先审计 canonical Native SDK public API；若没有语义等价能力，按高层架构登记 Application-owned 的 `office_resource_publish.macos` seam，明确调用者、同步启动线程、目录所有权、errno、无悬挂资源及替换条件。不得修改 node_modules、升级成通用 OS facade 或弱化现有 allowlist。若 guard 不允许该 seam，在获得相应政策变化前该阶段明确阻塞。
 
 环境侧只接受准备器计算出的当前根、随机 stage 和精确最终身份；不暴露通用任意路径改名命令。首次 Python 发布可由暂存 Python 执行；Node 发布由已经验证的正式 Python 执行。模块仅封装这一具体操作和错误映射，不建立通用 FFI/安装框架。
 

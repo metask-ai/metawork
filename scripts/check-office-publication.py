@@ -8,12 +8,14 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 if sys.platform != "darwin":
     raise SystemExit("This regression requires native macOS")
 RESOURCES = Path(__file__).resolve().parents[1] / "src/product/skill/office_environment"
 sys.path.insert(0, str(RESOURCES))
 from darwin_publish import publish
+import managed_process
 
 
 class Publication(unittest.TestCase):
@@ -92,6 +94,28 @@ run([sys.executable,"-c","import os,time,sys;from pathlib import Path;Path(sys.a
             if child.poll() is None:
                 child.kill()
                 child.wait()
+
+    def test_interrupted_spawn_preserves_stage_uncertainty(self):
+        stage = self.root / "stage"
+        stage.mkdir()
+        spawn = subprocess.Popen
+        children = []
+
+        def interrupted_spawn(*args, **kwargs):
+            children.append(spawn(*args, **kwargs))
+            raise KeyboardInterrupt("cancelled before Popen returned its handle")
+
+        try:
+            with patch.object(managed_process.subprocess, "Popen", interrupted_spawn):
+                with self.assertRaises(KeyboardInterrupt):
+                    managed_process.run([sys.executable, "-B", "-c", "import time;time.sleep(120)"], stage)
+            self.assertEqual(len(children), 1)
+            self.assertIsNone(children[0].poll())
+            self.assertTrue((stage / ".process-not-stopped").is_file())
+        finally:
+            for child in children:
+                child.terminate()
+                child.wait(timeout=10)
 
 
 if __name__ == "__main__":
