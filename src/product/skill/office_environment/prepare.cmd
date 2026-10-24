@@ -2,9 +2,9 @@
 setlocal EnableExtensions DisableDelayedExpansion
 set "NODE_OPTIONS="
 set "NODE_PATH="
-if /i not "%PROCESSOR_ARCHITECTURE%"=="AMD64" exit /b 2
 if "%LOCALAPPDATA%"=="" exit /b 2
 call "%~dp0environment.cmd"
+if errorlevel 1 exit /b 2
 if "%~1"=="python" goto python
 if "%~1"=="node" goto node
 echo Usage: prepare.cmd python ^| node
@@ -21,7 +21,7 @@ set "IDENTITY=%NODE_ID%"
 set "URL=%NODE_URL%"
 set "SHA=%NODE_SHA%"
 :prepare
-set "BASE=%LOCALAPPDATA%\MetaWork\OfficeDependencies"
+set "BASE=%LOCALAPPDATA%\%OFFICE_NAMESPACE:/=\%"
 set "FINAL=%BASE%\%KIND%-%IDENTITY%"
 if exist "%FINAL%" goto check
 if not exist "%BASE%" mkdir "%BASE%"

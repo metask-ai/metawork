@@ -19,6 +19,7 @@ const read = (name) => readFileSync(path.join(root, name));
 function constants(t) {
   return {
     OFFICE_NAMESPACE: sources.namespace,
+    METAWORK_OFFICE_TARGET: t.target,
     PYTHON_ID: t.pythonId,
     PYTHON_URL: t.python.url,
     PYTHON_SHA: t.python.sha256,
@@ -36,6 +37,7 @@ function safe(value) {
   return value;
 }
 const commands = [
+  '@if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" goto office_arm64',
   '@if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" goto office_arm64',
   '@if /i not "%PROCESSOR_ARCHITECTURE%"=="AMD64" exit /b 2',
   ...Object.entries(constants(sources.targets["windows-x86_64"])).map(
@@ -63,6 +65,7 @@ const shell = [
   ]),
   '*) echo "Unsupported Office target" >&2; exit 2 ;;',
   "esac",
+  "export METAWORK_OFFICE_TARGET",
   "",
 ].join("\n");
 const files = [];

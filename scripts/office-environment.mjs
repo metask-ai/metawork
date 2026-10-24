@@ -77,7 +77,7 @@ export function environment(root) {
     if (versions && versions !== selectedVersions)
       throw Error("Office dependency versions differ across targets");
     versions = selectedVersions;
-    const result = { ...t };
+    const result = { ...t, target: key };
     for (const [language, lock] of [
       ["python", requirements],
       ["node", readFileSync(path.join(common, "package-lock.json"))],

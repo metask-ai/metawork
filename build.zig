@@ -64,6 +64,11 @@ pub fn build(b: *std.Build) void {
         wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)
     else
         modules;
+    const office_publish_tests = b.addTest(.{
+        .name = "metawork-office-resource-publish",
+        .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
+    });
+    artifacts.tests.step.dependOn(&b.addRunArtifact(office_publish_tests).step);
     if (test_modules.app.resolved_target.?.result.os.tag == .macos) {
         if (b.sysroot) |sysroot| test_modules.app.addFrameworkPath(.{
             .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),
@@ -1044,6 +1049,12 @@ fn wireAgentCore(
     });
     if (target.result.os.tag == .macos)
         app_single_instance_compat.linkFramework("CoreFoundation", .{});
+    const office_resource_publish_compat = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/office_resource_publish.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
     const storage_sql = b.createModule(.{
         .root_source_file = b.path("src/storage/sql.zig"),
         .target = target,
@@ -2151,6 +2162,7 @@ fn wireAgentCore(
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);
     app.addImport("metawork_product_identity", product_identity);
+    app.addImport("metawork_office_resource_publish_compat", office_resource_publish_compat);
     app.addImport(
         "metawork_app_single_instance_compat",
         app_single_instance_compat,

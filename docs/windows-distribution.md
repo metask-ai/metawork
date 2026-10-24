@@ -66,6 +66,6 @@ signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选�
 
 Office 能力与用户授权由[产品需求](requirements.md#53-task)拥有，准备与执行生命周期由 [Product Skill 合同](product-architecture.md#内置-office-skill)拥有。主包仅携带完整 Skill、固定准备/调用脚本及锁定输入，不携带解释器或第三方文档库，不运行组件 producer 或系统安装器。
 
-首版自动准备只支持 Windows x64：Python 使用固定官方 CPython NuGet 分发，Node 使用固定官方 Windows ZIP；所有发行包在解包或执行前必须完整匹配主包输入的摘要。Python requirements 固定全部直接/传递依赖和 wheel 哈希，拒绝源码编译；Node 使用独立最小 package-lock 的完整性身份并禁用安装脚本。具体版本、来源、摘要和依赖集合由唯一机器输入拥有，不在本文镜像。
+Windows x64 的既有发行、库锁和环境身份保持；Windows ARM64 采用独立的官方 `pythonarm64` NuGet 与 Node Windows ARM64 ZIP 输入，不能借 x64 仿真或 wheel 代替原生接受。两目标均保持 Python/Node 独立准备。所有发行包在解包或执行前必须完整匹配主包输入的摘要。Python requirements 按目标固定全部直接/传递依赖和 wheel 哈希，拒绝源码编译；Node 使用独立最小 package-lock 的完整性身份并禁用安装脚本。具体版本、来源、摘要和依赖集合由唯一机器输入拥有，不在本文镜像。各目标运行及安装产物验收独立记录于[验证规范](validation.md#office-skill-与私有环境验证)，输入存在不表示 ARM64 已通过执行验收。
 
 引导不得依赖尚未下载的解释器；使用公司策略允许且经过真实 AgentCore Shell 验证的既有系统能力，不绕过企业策略、不预建多套静默 fallback。已知发行包完整摘要通过后可使用成熟解包工具；这不降低用户附件 ZIP helper 的有界安全规则。镜像/代理/证书兼容必须实际验证，既有直接 URL 不被当作自动支持镜像，不输出认证配置或凭据。准备及调用不修改全局 PATH、文件关联或用户包管理器配置，不提权；每个环境由独立临时目录验证后原子发布，不能覆盖或修改正在使用的目录。
