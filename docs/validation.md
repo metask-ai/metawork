@@ -96,12 +96,12 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 
 正式 arm64 打包通过既有生产 CSP、automation isolation、Developer ID 签名与 DMG 创建；只为该调用设置 `DEVELOPER_DIR` 选择已有 Xcode 27，未更改全局工具链。应用和 DMG 的严格 codesign 复核通过。最终 DMG 为 10,317,498 bytes，SHA-256 `9cb81de648a7d50bf79edb04c53fb7ef3678d01370fdf21a8ef04dbd482685f3`；Apple `notarytool submit` 返回 `HTTPClientError.connectTimeout`，打包入口明确失败，未执行公证通过后的 Gatekeeper/DMG 内运行验收。因此正式分发仍未通过，不能把已生成产物当作可发布结果。日志及产物身份见 `.zig-cache/office-package-macos.log`、`.zig-cache/office-package-identity.json`。
 
-| 目标          | 当前证据边界                                                            | 尚缺证据                                                          |
-| ------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| macOS arm64   | 当前系统私有环境、三格式、真实 Core、桌面 catalog 与成果回执/冷历史通过 | 最低系统、真实模型 smoke、成果按钮手势；公证及实际正式 DMG 下运行 |
-| macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                          | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
-| Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                       | 原生环境/Core/桌面、ARM64 installer 分发                          |
-| Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                    | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
+| 目标          | 当前证据边界                                                                                       | 尚缺证据                                                          |
+| ------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| macOS arm64   | 当前系统私有环境、三格式、真实 Core、桌面成果回执/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、真实模型 smoke、成果按钮手势；正式 DMG 的 Office 执行链 |
+| macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                                                     | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
+| Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                                                  | 原生环境/Core/桌面、ARM64 installer 分发                          |
+| Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                                               | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
 
 ### E-MAC-OFFICE-CANCELLATION-20261024
 
@@ -110,6 +110,12 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
 
 在 `47a947d1` 上追加的隔离桌面探针到达 Office 成果回执后，因原生窗口工具无法绑定 automation bundle ID 而未取得 Renderer 手势证据；等待观察超时，测试明确失败并退出其自有进程。没有对普通用户窗口执行操作，也不把该工具绑定失败归因于产品按钮。探针源码和日志保存在 `.zig-cache/office-cua-probe-source.mjs`、`.zig-cache/office-cua-probe.log`；成果检查/继续修改草稿仍未验收。用户确认目前没有其他原生机器或 CI 入口，因此上表的 macOS Intel、Windows ARM64、Windows x64 本次回归及最低系统缺口继续保留。
+
+### E-MAC-OFFICE-DMG-20261024
+
+用户明确授权上传后，`4ba05c36` 的 `package-macos.mjs arm64` 正式入口以 exit 0 完成。Apple submission `b6cd09ca-3e6c-4061-aeb4-3295be5537c0` 为 `Accepted`，审查日志无 issues；staple/validate、Gatekeeper assessment、DMG 校验及只读挂载后的应用签名、executable integrity 和系统基线声明复核通过。上传文件 SHA-256 为 `998dea9c119f561fb4499343dea06cb2a66066210dcfd4bd5ae8507a044a3c6c`；staple 后最终 DMG 为 10,319,472 bytes，SHA-256 `e4081cadd71b6cedfa71114843f9f1b7985fbeed921b8fb92e8097cf5d92c712`。它是取消修复后的独立产物，不使用旧 submission 替代验收。身份、公证日志和完整入口日志见 `.zig-cache/office-package-current-identity.json`、`.zig-cache/office-notary-current-{info,log}.json` 和 `.zig-cache/office-package-current.log`。
+
+从该 DMG 只读挂载启动真实正式 App，使用独立 HOME；通过精确 `.app` 路径绑定原生窗口，设置页的自动工作区路径与隔离 HOME 一致，技能页实际显示 docx/pptx/xlsx 三项。应用自行发布的资源根摘要与当前 canonical archive 一致，未自动准备私有环境。记录见 `.zig-cache/office-dmg-ui-observation.json` 和 `.zig-cache/office-distribution-state.json`。后续 loopback Provider 的合成凭据保存被自动审批拒绝，未取得明确保存授权；隔离 metadata 中没有已保存 Provider，测试进程已清理。当前结果只证明正式包启动及 catalog，不证明正式 App 的 Office 解释器执行、成果按钮或完整分发矩阵。
 
 ### E-WIN-OFFICE-SIMPLE-20261024
 
