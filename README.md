@@ -8,6 +8,10 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以�
 
 当前仍是同进程 prototype，不宣称具备 AgentCore 进程隔离、crash recovery、跨进程 in-flight Run 恢复、strict Workspace security 或自动更新。精确产品范围见[产品需求](docs/requirements.md)，系统边界见[高层架构](docs/architecture.md)，平台证据和未验证能力见[验证规范](docs/validation.md)。
 
+## 参与贡献
+
+遇到使用问题或有功能建议，欢迎通过 GitHub Issues 反馈。具体说明见[贡献指南](CONTRIBUTING.md)。
+
 ## 快速开始
 
 需要 Node.js 24+、Zig 0.16.0，以及与仓库 lock 精确匹配的 target-specific AgentCore bundle。
