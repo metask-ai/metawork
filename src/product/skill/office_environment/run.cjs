@@ -22,4 +22,5 @@ registerHooks({
 });
 process.argv = [process.execPath, ...process.argv.slice(3)];
 if (!process.argv[1]) throw new Error("A JavaScript script is required");
+process.argv[1] = path.resolve(process.argv[1]);
 require("node:module").runMain();

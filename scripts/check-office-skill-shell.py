@@ -103,7 +103,8 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         script.write_text('from openpyxl import Workbook\nimport sys\nw=Workbook();w.active["A1"]="Office 中文";w.active["B1"]="=1+2";w.save(sys.argv[1])\n', encoding="utf-8")
     else:
         language = "node"
-        script = work / "create.cjs"
+        script = work / "scripts" / "create.cjs"
+        script.parent.mkdir()
         code = ('const fs=require("node:fs"),{Document,Packer,Paragraph}=require("docx");'
                 'Packer.toBuffer(new Document({sections:[{children:[new Paragraph("Office 中文")]}]})).then(b=>fs.writeFileSync(process.argv[2],b));') if kind == "docx" else (
                 'const P=require("pptxgenjs");const p=new P();p.addSlide().addText("Office 中文",{x:1,y:1,w:8,h:2});p.writeFile({fileName:process.argv[2]});')
@@ -137,14 +138,14 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                     if sys.platform == "win32":
                         def quote(value):
                             return "'" + str(value).replace("'", "''") + "'"
-                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script) + " " + quote(output)
+                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(output)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'create failed' }; & " + quote(entry) + " python " + quote(edit_script) + " " + quote(output) + " " + quote(edited)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'edit failed' }; & " + quote(entry) + " python " + quote(entry.parent / "read.py") + " " + quote(edited) + " " + quote(work / "read.json")
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }; Write-Output '" + marker + "'"
                         encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
                         response = sse({"command": "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded, "timeout": 120000})
                     else:
-                        calls = [["/bin/sh", entry, language, script, output],
+                        calls = [["/bin/sh", entry, language, script.relative_to(work), output],
                                  ["/bin/sh", entry, "python", edit_script, output, edited],
                                  ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]]
                         command = " && ".join(" ".join(shlex.quote(str(a)) for a in call) for call in calls)
