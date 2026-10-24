@@ -159,7 +159,7 @@ Workspace
 
 - 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
 - 左栏：默认 320 px；常规桌面可通过分界线在 240–480 px 内调整并保存偏好，键盘聚焦分界线后可用方向键调整；窄窗 overlay 保持固定宽度；
-- 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
+- 左栏品牌区使用紧凑单行的 MetaWork 字标，不显示字标左侧的独立标志，不把品牌区表现成第二层标题栏，也不额外重复产品名称、首字母图标、产品说明或宣传副标题；
 - 横向工作区：`app-window` 继续用 Grid 管理命令栏与工作区两行，并作为可用宽度的唯一 owner；工作区内部使用受父级约束的 Flex，子栏及其内容不得反向撑宽父级或成为自身宽度计算的测量源。左栏占固定的偏好宽度；扣除左栏后的空间默认按中央 Task stage 2 份、Task Panel 1 份分配。中央 Task stage 与 Task Panel 都只设置 360 px 硬下限，不设置固定最大宽度或固定比例范围；最小宽度约束优先于保存比例，保存比例优先于默认 2:1；
 - Task Panel：停靠态保存其在剩余工作区中的比例，默认 `1/3`；分界线仅在停靠态出现，拖拽和键盘调整以 16 px 为步进显示实际宽度，再换算为比例保存。其动态可调范围为 360 px 至“剩余工作区减去中央 360 px”，不另设上限。停靠栏开合使用约 160–180 ms 的 `flex-basis` 过渡，拖拽调整直接跟手且不使用过渡；扣除左栏后的空间少于 720 px 时改用右侧非模态 overlay，默认 400 px 且不允许拉伸，overlay 使用不参与工作区布局的 `transform` 过渡。空间恢复后沿用保存比例。入口、显隐和比例属于应用布局，用户可独立开合或通过具体对象入口展开；无 Task、无内容时也允许打开空栏，不触发普通 Run 或审批状态驱动的自动开合；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
@@ -1139,8 +1139,8 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 
 ### 16.2 品牌资产
 
-- `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何资产；不同用途不得直接修改该文件，而应在独立画布中处理安全区、背景、视觉居中和必要的小尺寸适配；
-- `assets/icons/app-icon.svg` 是通用 PNG 与 macOS 应用图标用途母版，使用纯白背景；标志按画布中心缩放至约 88%，使可见主体约占画布宽度 70%。`assets/icons/app-icon.png` 与 `assets/icons/MetaWork.icon` 从该视觉母版派生，不增加非设计渐变、shadow、specular 或 translucency；
+- `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何资产，使用批准的紫色双环标志与原稿颜色 `#684096`；`assets/brand/logo-wordmark.svg` 保存批准的 MetaWork 字形轮廓。左栏只使用字标，根连接失败工具栏使用横版品牌组合，保持原稿比例、间距与轮廓；字标使用当前主题正文色，独立标志保留原稿色，不改变 UI 交互 token。不同用途不得直接修改基础几何，而应在独立画布中处理安全区、背景、视觉居中和必要的小尺寸适配；
+- `assets/icons/app-icon.svg` 是通用 PNG 与 macOS 应用图标用途母版，使用纯白背景；可见标志居中并约占画布宽度 70%。`assets/icons/app-icon.png` 与 `assets/icons/MetaWork.icon` 从该视觉母版派生，不增加非设计渐变、shadow、specular 或 translucency；
 - Windows 的 `assets/icons/app-icon.ico` 直接从品牌标志派生，使用透明背景，可见主体约占画布宽度 88%，各尺寸保留透明通道与平滑边缘；开发窗口、任务栏及安装快捷方式使用同一 ICO，不叠加白色底板；
 - `assets/icons/tray-icon.svg` 使用透明背景，主体约占画布宽度 88%；macOS 作为 template image 使用，Windows 保留品牌色；
 - favicon 或其他用途资产只有出现真实 consumer 时才新增。用途资产可以调整内容占比、视觉居中、背景和小尺寸细节，但不得重新设计基础几何；
