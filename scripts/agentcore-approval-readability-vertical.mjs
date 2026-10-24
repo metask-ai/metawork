@@ -266,6 +266,8 @@ export async function runApprovalReadabilityVertical({
         .filter(item => item.textContent.trim() && item.getClientRects().length)
         .map(item => ({label:item.textContent.slice(0,80),foreground:color(getComputedStyle(item).color),background:background(item)}));
       return { title: card.querySelector('h3').textContent, text: card.textContent,
+        fields:[...card.querySelectorAll('.detail-field-label')].map(label=>label.textContent),
+        detailsAfterScope:!details || Boolean([...card.querySelectorAll('.detail-field-label')].at(-1)?.parentElement.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING),
         visibleCode: command?.textContent ?? null, collapsed: details ? !details.open : null,
         width: innerWidth, pageWidth: document.documentElement.scrollWidth,
         buttons: actions.map(button => {const r=button.getBoundingClientRect(); return {label:button.getAttribute('aria-label') || button.textContent.trim(),left:r.left,right:r.right,height:r.height};}),
@@ -287,6 +289,24 @@ export async function runApprovalReadabilityVertical({
     assert.equal(view.theme, theme);
     assert.equal(view.pageWidth, width);
     assert.equal(view.reducedMotion, true);
+    const fieldIds = [
+      expected.tool === "Write"
+        ? "approval.target_file"
+        : "approval.agent_purpose",
+      "approval.confirmation_reason",
+      ...(!expected.manual && !expected.technical
+        ? ["approval.reviewer_note"]
+        : []),
+      ...(expected.tool === "Write"
+        ? []
+        : [expected.fallback ? "approval.arguments" : "approval.command"]),
+      "approval.scope",
+    ];
+    assert.deepEqual(
+      view.fields,
+      fieldIds.map((id) => translate(locale, id)),
+    );
+    assert.equal(view.detailsAfterScope, true);
     for (const item of view.appearance) {
       item.contrast = textContrast(item.foreground, item.background);
       assert.ok(item.contrast >= 4.5, JSON.stringify(item));

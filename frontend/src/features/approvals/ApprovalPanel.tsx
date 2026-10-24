@@ -103,6 +103,24 @@ export function ApprovalPanel({
           {t("privacy.sensitive_hidden")}
         </p>
       )}
+      {target !== null && (
+        <DetailField
+          label={t(
+            presentation?.kind === "web_fetch"
+              ? "approval.target_url"
+              : "approval.target_file",
+          )}
+        >
+          <p className="approval-scope-value">{target}</p>
+        </DetailField>
+      )}
+      {isCommand && (
+        <DetailField label={t("approval.agent_purpose")}>
+          <p className="approval-scope-value">
+            {description || t("approval.purpose_unavailable")}
+          </p>
+        </DetailField>
+      )}
       <DetailField label={t("approval.confirmation_reason")}>
         <p
           className="approval-scope-value"
@@ -133,24 +151,6 @@ export function ApprovalPanel({
           <p className="approval-scope-value">{explanation.reason}</p>
         </DetailField>
       )}
-      {isCommand && (
-        <DetailField label={t("approval.agent_purpose")}>
-          <p className="approval-scope-value">
-            {description || t("approval.purpose_unavailable")}
-          </p>
-        </DetailField>
-      )}
-      {target !== null && (
-        <DetailField
-          label={t(
-            presentation?.kind === "web_fetch"
-              ? "approval.target_url"
-              : "approval.target_file",
-          )}
-        >
-          <p className="approval-scope-value">{target}</p>
-        </DetailField>
-      )}
       {command ? (
         <DetailField label={t("approval.command")}>
           <CodeBlock value={command} />
@@ -173,12 +173,6 @@ export function ApprovalPanel({
           )}
         </DetailField>
       ) : null}
-      {presentation && (!isCommand || command) && (
-        <details className="approval-request-details">
-          <summary>{t("approval.full_request")}</summary>
-          <CodeBlock value={pending.args} />
-        </details>
-      )}
       <DetailField label={t("approval.scope")}>
         <p className="approval-scope-value">
           {sessionChoiceAvailable
@@ -196,6 +190,12 @@ export function ApprovalPanel({
           </p>
         )}
       </DetailField>
+      {presentation && (!isCommand || command) && (
+        <details className="approval-request-details">
+          <summary>{t("approval.full_request")}</summary>
+          <CodeBlock value={pending.args} />
+        </details>
+      )}
       {diagnostic && (
         <aside className="approval-diagnostic" role="note">
           <strong>{t("approval.why_again")}</strong>
