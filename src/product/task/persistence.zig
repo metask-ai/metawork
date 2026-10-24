@@ -5419,7 +5419,7 @@ test "presentation format distinguishes legacy from missing anchors and preserve
     task.presentation_format = 1;
     try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
     task.next_presentation_order = 4;
-    run.submission = .{ .operation_id = "message", .presentation_state = "anchored", .presentation_order = 3, .after_output_count = 257 };
+    run.submission = .{ .operation_id = "message", .presentation_state = "anchored", .presentation_order = 3, .after_output_count = @intCast(testLimits().max_commentary_segments_per_run + 1) };
     runs[0] = run;
     try validatePresentation(task, testLimits());
     const restored = try restoreSubmission(run.submission.?);
