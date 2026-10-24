@@ -475,9 +475,8 @@ pub const ScheduleNotifier = product_schedule.Notifier;
 
 const json_string_expansion: usize = 6;
 // A pending request's raw JSON already contains the escaped arguments string.
-// The snapshot publishes a strict subset of that request; fixed identity and
-// choice fields are covered by pending_ui_snapshot_overhead below.
-const pending_ui_reencode_expansion: usize = 1;
+// The snapshot retains arguments. Its bounded readable presentation shares the
+// fixed overhead allowance; oversized summaries use the visible-args fallback.
 const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
@@ -537,6 +536,10 @@ const file_change_min_id_capacity: usize =
 const file_change_next_id_capacity: usize =
     3 * two_digit_positive_values * one_digit_positive_values * one_digit_positive_values;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
+comptime {
+    if (product_task.max_permission_presentation_bytes > pending_ui_snapshot_overhead / 2)
+        @compileError("readable permission presentation exceeds its snapshot allowance");
+}
 const ui_record_detail_capacity = if (builtin.is_test) task_test_state.ui_record_detail_capacity else 0;
 const ui_record_snapshot_overhead: usize = 1024;
 const tool_route_digest_bytes = if (builtin.is_test) task_test_state.tool_route_digest_bytes else 0;
@@ -11444,6 +11447,10 @@ fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
     return std.math.add(usize, total, skill_source_settings_snapshot_bytes) catch return null;
 }
 
+fn pendingUiSnapshotBytes(limits: Limits) ?usize {
+    return std.math.add(usize, limits.max_pending_ui_json_bytes, pending_ui_snapshot_overhead) catch null;
+}
+
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     // The 6x bound also covers raw + readable Bash text: readable fields are
     // emitted only from valid JSON. Its raw re-encoding and selected decoded
@@ -11611,16 +11618,7 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, tools, tool_snapshot_overhead) catch return null,
     ) catch return null;
-    const pending_ui_payload = std.math.mul(
-        usize,
-        limits.max_pending_ui_json_bytes,
-        pending_ui_reencode_expansion,
-    ) catch return null;
-    const pending_ui = std.math.add(
-        usize,
-        pending_ui_payload,
-        pending_ui_snapshot_overhead,
-    ) catch return null;
+    const pending_ui = pendingUiSnapshotBytes(limits) orelse return null;
     total = std.math.add(
         usize,
         total,
@@ -17656,7 +17654,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
         limits.max_tasks * limits.max_runs_per_task *
             file_change_collection_snapshot_overhead);
     try std.testing.expect(worst_case >= file_change_budget);
-    const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    const single_pending_budget = pendingUiSnapshotBytes(limits).?;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
     var control = try testRuntime();
@@ -18033,7 +18031,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len <= limits.max_pending_ui_json_bytes);
 
-    const allowance = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    const allowance = pendingUiSnapshotBytes(limits).?;
     const storage = try std.testing.allocator.alloc(u8, allowance);
     defer std.testing.allocator.free(storage);
     var writer = std.Io.Writer.fixed(storage);
@@ -18080,6 +18078,56 @@ test "Product view permission presentation preserves deferred string positions a
         }
         try std.testing.expectEqualStrings(expected.buffered(), output[0..offset]);
     }
+}
+
+test "permission presentation keeps large file targets readable and bounds a legal large command" {
+    const limits = testLimits();
+    const command = try std.testing.allocator.alloc(u8, 56 * 1024);
+    defer std.testing.allocator.free(command);
+    @memset(command, 'x');
+    var control = try testRuntime();
+    defer control.deinit();
+    for ([_]bool{ false, true }) |file| {
+        const arguments = if (file)
+            try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .file_path = "C:/work/output.txt", .content = command }, .{})
+        else
+            try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
+        defer std.testing.allocator.free(arguments);
+        const request = testPermissionRequest(if (file) "Write" else "Bash", arguments);
+        const raw = try std.json.Stringify.valueAlloc(std.testing.allocator, request, .{});
+        defer std.testing.allocator.free(raw);
+        try std.testing.expect(raw.len <= limits.max_pending_ui_json_bytes);
+        const allowance = pendingUiSnapshotBytes(limits).?;
+        const storage = try std.testing.allocator.alloc(u8, allowance);
+        defer std.testing.allocator.free(storage);
+        var writer = std.Io.Writer.fixed(storage);
+        try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        try std.testing.expect(writer.end <= allowance);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const presentation = parsed.value.object.get("presentation").?;
+        if (file) {
+            try std.testing.expectEqualStrings("write", presentation.object.get("kind").?.string);
+            try std.testing.expectEqualStrings("C:/work/output.txt", presentation.object.get("target").?.string);
+        } else try std.testing.expect(presentation == .null);
+        try std.testing.expectEqualStrings(arguments, parsed.value.object.get("args").?.string);
+    }
+}
+
+test "permission oversized presentation still hides an escaped credential in raw arguments" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const prefix: [8 * 1024]u8 = @splat('x');
+    const arguments = try std.fmt.allocPrint(std.testing.allocator, "{{\"command\":\"{s} \\u0053ECRET-KEY\"}}", .{prefix});
+    defer std.testing.allocator.free(arguments);
+    var storage: [32 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, testPermissionRequest("Bash", arguments));
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("presentation").? == .null);
+    try std.testing.expect(parsed.value.object.get("redacted").?.bool);
+    try std.testing.expectEqualStrings("***", parsed.value.object.get("args").?.string);
 }
 
 test "permission pending presentation stays bound to built-in arguments and hides decoded credentials" {

@@ -1034,7 +1034,7 @@ export const enUS = {
   "approval.command_effects":
     "The system has not verified the command’s full effects.",
   "approval.command_unavailable":
-    "The command could not be extracted. Check the request arguments below.",
+    "A command summary is unavailable. Check the request arguments below.",
   "approval.full_request": "View full arguments",
   "approval.handoff.unavailable":
     "Automatic review could not complete. This operation has not run.",

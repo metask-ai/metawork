@@ -910,7 +910,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.target_file": "目标文件",
   "approval.command": "将执行的命令",
   "approval.command_effects": "系统未验证这条命令的完整影响。",
-  "approval.command_unavailable": "无法提取命令，请检查下面的请求参数。",
+  "approval.command_unavailable": "无法提供命令摘要，请检查下面的请求参数。",
   "approval.full_request": "查看完整参数",
   "approval.handoff.unavailable": "自动审核未能完成，本次操作尚未执行。",
   "approval.handoff.reviewer_concern":

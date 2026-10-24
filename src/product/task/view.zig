@@ -16,6 +16,9 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidUiResponse,
 };
 
+const max_permission_presentation_input_bytes: usize = 128 * 1024;
+pub const max_permission_presentation_bytes: usize = 4 * 1024;
+
 // Borrowed parser scratch with the same FixedBufferAllocator behavior. Keep
 // the high-water mark across free, shrink and reset so every formerly owned
 // byte is scrubbed, without touching the unused part of each 128 KiB buffer.
@@ -526,14 +529,18 @@ pub fn writePendingUi(
     const candidate_target = if (permission.candidate) |candidate| candidate.target else null;
     const target_sensitive = if (candidate_target) |target| text.containsSensitive(target) else false;
     const visible_candidate = if (target_sensitive) null else permission.candidate;
-    var presentation_scratch: [128 * 1024]u8 = undefined;
+    var presentation_scratch: [max_permission_presentation_input_bytes]u8 = undefined;
     var presentation_allocator = JsonScratch.init(&presentation_scratch);
     defer presentation_allocator.clear();
-    const presentation = permissionPresentation(permission, presentation_allocator.allocator());
-    const presentation_redacted = if (presentation) |value|
+    const parsed_presentation = permissionPresentation(permission, presentation_allocator.allocator());
+    const presentation_redacted = if (parsed_presentation) |value|
         text.containsSensitive(value.target) or (if (value.description) |description| text.containsSensitive(description) else false)
     else
         false;
+    const presentation = if (parsed_presentation) |value|
+        if (permissionPresentationFits(value)) parsed_presentation else null
+    else
+        null;
     writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
         request_id,
         run_id,
@@ -958,7 +965,7 @@ const PermissionPresentation = struct {
 
 fn permissionPresentation(permission: agent.PermissionRequest, allocator: std.mem.Allocator) ?PermissionPresentation {
     const kind = std.meta.stringToEnum(enum { Bash, Read, Write, Edit, WebFetch }, permission.tool.name);
-    if (permission.tool.namespace != .builtin or kind == null or permission.arguments_json.len > 128 * 1024) {
+    if (permission.tool.namespace != .builtin or kind == null or permission.arguments_json.len > max_permission_presentation_input_bytes) {
         return null;
     }
     const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed, .duplicate_field_behavior = .@"error" };
@@ -991,6 +998,17 @@ fn writePermissionPresentation(writer: *std.Io.Writer, text: TextProjection, pre
         try writeOptionalProjectedValue(writer, text, value.description);
     }
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn permissionPresentationFits(value: PermissionPresentation) bool {
+    // A size preflight must use the standard encoder directly. Calling the
+    // deferred text projector with a temporary writer corrupts string offsets.
+    // Reserve the fixed kind/key spelling; redaction can only shorten strings.
+    var storage: [max_permission_presentation_bytes - 128]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    var writer = std.Io.Writer.fixed(&storage);
+    std.json.Stringify.value(.{ .target = value.target, .description = value.description }, .{}, &writer) catch return false;
+    return true;
 }
 
 fn writeOptionalProjectedValue(writer: *std.Io.Writer, text: TextProjection, value: ?[]const u8) Error!void {
