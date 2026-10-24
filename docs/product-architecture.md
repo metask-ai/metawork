@@ -175,7 +175,7 @@ Task 在调用前预留有界 identity、安全消息投影及独立的原文 ow
 
 自动评审的转人工原因归 Task 的当前请求运行时状态所有，第一次有效结算同时保存原因及已投影的有界理由，后续 worker 清理不得覆盖；身份失效时清理，迟到结果不得创建人工提醒。Control 只报告它实际观察的容量、支持边界、启动或调用失败，不把技术故障当作模型存疑；watchdog 使用取消令牌结束调用仍须保留其 timeout 事实，取消后的模型建议不得生效。原因不新增持久化字段、审计 occurrence 或日志系统；wire shape 由 [Renderer Bridge 合同](renderer-bridge-contract.md) 定义。
 
-自动审批使用根输入及该 request 创建时 Agent 已确认采纳的完整前缀；不得截断约束后批准。prepare 与接纳 allow_once 时均检查 Task 等待输入、该 Run 的已接受未采纳输入和正在进行的 submit 调用，存在任一项则结束自动审核并交给人工，不等待输入、不重复审核；有效 deny 保留原语义。插话不能作为权限授权或替代 UI 回答。Stop 沿用独立 abort 入口；Agent 关闭提交窗口并等待已登记调用返回后，才能导出 checkpoint、发起其他 Core 调用或销毁 Session。worker 的退出清理及通知对象仍须保持到最后 lease 释放和全部 worker join；shutdown 关闭所有新 admission。
+自动审批必须完整保留当前 Run 根输入及该 request 创建时 Agent 已确认采纳的追加输入前缀，不得截断当前约束后批准。历史仅收集同 Task 的根输入和 `adopted` 追加输入，排除 `pending/unadopted/unknown/transferred`；按真实采纳顺序构成完整 Run 组，从最近历史向前选连续组，首个放不下即停止，再按时间顺序提供。当前请求与当前 Run 优先占用预算，历史在 Host 最后一次脱敏后依据实际 JSON 编码预算保留最近连续后缀，明确给出省略消息数量。省略本身不使请求转人工，不能补猜被省略的授权；历史窗口不能保证包含窗口外的早期限制。当前 commentary 只是既有不可信背景，不加入历史 Tool 输出、自动摘要或 Agent 自选证据。prepare 与接纳 allow_once 时均检查 Task 等待输入、该 Run 的已接受未采纳输入和正在进行的 submit 调用，存在任一项则结束自动审核并交给人工，不等待输入、不重复审核；有效 deny 保留原语义。插话不能作为权限授权或替代 UI 回答。Stop 沿用独立 abort 入口；Agent 关闭提交窗口并等待已登记调用返回后，才能导出 checkpoint、发起其他 Core 调用或销毁 Session。worker 的退出清理及通知对象仍须保持到最后 lease 释放和全部 worker join；shutdown 关闭所有新 admission。
 
 Task 只在来源 Run 正常 completed、完整事件排空后计数整体可信、Session reusable 且无输出投影故障时，为确定未采纳且原文完整的消息建立运行时接续预留；已采纳和未知消息不带走。停止、失败、中断、预算或轮数停止均不接续。确认采纳的原文立即清零释放，其余原文在取消、失败或目标取得输入所有权后释放。批次按提交 identity 合并全部未采纳原文，以两个换行分隔，分隔符计入普通输入字节上限；超限整批结束，不截断、不拆分。每个来源至多尝试一次，恢复或重复 lifecycle wake 不重新激活。
 

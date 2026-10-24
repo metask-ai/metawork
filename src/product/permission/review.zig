@@ -22,6 +22,10 @@ pub const Input = struct {
         authorization: []const u8,
     },
     user_intent: []const u8,
+    /// Host-projected complete earlier Run groups, oldest first. Selection of
+    /// the newest contiguous suffix happens after final credential scrubbing.
+    user_history_json: []const u8 = "",
+    omitted_user_messages: usize = 0,
     request: struct {
         tool_name: []const u8,
         arguments_json: []const u8,
@@ -117,6 +121,7 @@ fn encodeInput(allocator: std.mem.Allocator, input: Input) EncodeError!EncodedIn
         if (total > max_input_bytes) return error.InputLimit;
         if (!std.unicode.utf8ValidateSlice(field)) return error.InvalidInput;
     }
+    if (input.user_history_json.len > max_input_bytes or !std.unicode.utf8ValidateSlice(input.user_history_json)) return error.InputLimit;
     // Bound nesting before Value parsing/stringification can recurse. Use the
     // standard Scanner, not a second JSON grammar or tool-specific parser.
     var scanner = std.json.Scanner.initCompleteInput(allocator, input.request.arguments_json);
@@ -132,11 +137,52 @@ fn encodeInput(allocator: std.mem.Allocator, input: Input) EncodeError!EncodedIn
     }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidInput;
     defer arguments.deinit();
     if (arguments.value != .object) return error.InvalidInput;
+    const history_json = if (input.user_history_json.len == 0) "[]" else input.user_history_json;
+    var history_scanner = std.json.Scanner.initCompleteInput(allocator, history_json);
+    defer history_scanner.deinit();
+    while (true) {
+        const token = history_scanner.next() catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidInput;
+        if (history_scanner.stackHeight() > max_arguments_depth) return error.InputLimit;
+        if (token == .end_of_document) break;
+    }
+    var history = std.json.parseFromSlice(std.json.Value, allocator, history_json, .{
+        .duplicate_field_behavior = .@"error",
+        .max_value_len = max_input_bytes,
+    }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidInput;
+    defer history.deinit();
+    if (history.value != .array) return error.InvalidInput;
+    const groups = history.value.array.items;
+    var omitted = input.omitted_user_messages;
+    for (groups) |group| omitted = std.math.add(usize, omitted, try historyMessageCount(group)) catch return error.InvalidInput;
     const bytes = try allocator.alloc(u8, max_input_bytes);
     errdefer {
         std.crypto.secureZero(u8, bytes);
         allocator.free(bytes);
     }
+    // Mandatory current-Run evidence must fit on its own. History overflow is
+    // ordinary window selection, never a reason to turn a valid request manual.
+    _ = try writeEncodedInput(bytes, input, arguments.value, &.{}, omitted);
+    var start = groups.len;
+    while (start > 0) {
+        const count = try historyMessageCount(groups[start - 1]);
+        _ = writeEncodedInput(bytes, input, arguments.value, groups[start - 1 ..], omitted - count) catch break;
+        start -= 1;
+        omitted -= count;
+    }
+    const len = try writeEncodedInput(bytes, input, arguments.value, groups[start..], omitted);
+    return .{ .allocator = allocator, .bytes = bytes, .len = len };
+}
+
+fn historyMessageCount(group: std.json.Value) error{InvalidInput}!usize {
+    if (group != .object or group.object.count() != 2) return error.InvalidInput;
+    const run_id = group.object.get("run_id") orelse return error.InvalidInput;
+    const messages = group.object.get("messages") orelse return error.InvalidInput;
+    if (run_id != .string or messages != .array or messages.array.items.len == 0) return error.InvalidInput;
+    for (messages.array.items) |message| if (message != .string) return error.InvalidInput;
+    return messages.array.items.len;
+}
+
+fn writeEncodedInput(bytes: []u8, input: Input, arguments: std.json.Value, history: []const std.json.Value, omitted: usize) error{InputLimit}!usize {
     var writer = std.Io.Writer.fixed(bytes);
     std.json.Stringify.value(.{
         .host = .{
@@ -146,15 +192,17 @@ fn encodeInput(allocator: std.mem.Allocator, input: Input) EncodeError!EncodedIn
         },
         .evidence = .{
             .user_intent = input.user_intent,
+            .earlier_user_instructions = history,
+            .omitted_earlier_user_messages = omitted,
             .request = .{
                 .tool_name = input.request.tool_name,
-                .arguments = arguments.value,
+                .arguments = arguments,
                 .working_directory = input.request.working_directory,
             },
             .context = input.context,
         },
     }, .{}, &writer) catch return error.InputLimit;
-    return .{ .allocator = allocator, .bytes = bytes, .len = writer.end };
+    return writer.end;
 }
 
 const DecodeError = error{ InvalidOutput, OutputLimit, OutOfMemory };
@@ -386,6 +434,54 @@ test "input keeps Host authority distinct from escaped untrusted evidence" {
     try std.testing.expectEqualStrings("current_request_only", root.get("host").?.object.get("delegation").?.string);
     try std.testing.expectEqualStrings(input.user_intent, root.get("evidence").?.object.get("user_intent").?.string);
     try std.testing.expectEqualStrings("node --check app.js", root.get("evidence").?.object.get("request").?.object.get("arguments").?.object.get("command").?.string);
+}
+
+test "history window uses encoded budget without making a valid current request manual" {
+    var input = test_input;
+    const large = [_]u8{'\n'} ** 9000;
+    const argument = [_]u8{'x'} ** 16000;
+    const arguments = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = &argument }, .{});
+    defer std.testing.allocator.free(arguments);
+    const history = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
+        .{ .run_id = "1", .messages = [_][]const u8{&large} },
+        .{ .run_id = "2", .messages = [_][]const u8{ "Install the selected package", "Keep the existing files" } },
+    }, .{});
+    defer std.testing.allocator.free(history);
+    input.user_history_json = history;
+    input.omitted_user_messages = 3;
+    input.request.arguments_json = arguments;
+    var encoded = try encodeInput(std.testing.allocator, input);
+    defer encoded.deinit();
+    try std.testing.expect(encoded.len <= max_input_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded.bytes[0..encoded.len], .{});
+    defer parsed.deinit();
+    const evidence = parsed.value.object.get("evidence").?.object;
+    const selected = evidence.get("earlier_user_instructions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqualStrings("2", selected[0].object.get("run_id").?.string);
+    try std.testing.expectEqual(@as(i64, 4), evidence.get("omitted_earlier_user_messages").?.integer);
+    try std.testing.expectEqualStrings(input.user_intent, evidence.get("user_intent").?.string);
+    var mandatory = [_]u8{'\n'} ** 17000;
+    mandatory[0] = 'A';
+    input.user_intent = &mandatory;
+    input.request.arguments_json = "{}";
+    try std.testing.expectError(error.InputLimit, encodeInput(std.testing.allocator, input));
+}
+
+test "history evidence rejects malformed groups and preserves chronological messages" {
+    var input = test_input;
+    for ([_][]const u8{ "{}", "[{\"run_id\":\"1\",\"messages\":[]}]", "[{\"run_id\":\"1\",\"messages\":[1]}]" }) |invalid| {
+        input.user_history_json = invalid;
+        try std.testing.expectError(error.InvalidInput, encodeInput(std.testing.allocator, input));
+    }
+    input.user_history_json = "[{\"run_id\":\"1\",\"messages\":[\"Do not upload files\"]},{\"run_id\":\"2\",\"messages\":[\"Install the package\"]}]";
+    var encoded = try encodeInput(std.testing.allocator, input);
+    defer encoded.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded.bytes[0..encoded.len], .{});
+    defer parsed.deinit();
+    const selected = parsed.value.object.get("evidence").?.object.get("earlier_user_instructions").?.array.items;
+    try std.testing.expectEqualStrings("1", selected[0].object.get("run_id").?.string);
+    try std.testing.expectEqualStrings("2", selected[1].object.get("run_id").?.string);
 }
 
 test "input rejects missing delegation invalid arguments and both source and encoded limits" {

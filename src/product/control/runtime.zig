@@ -5856,14 +5856,25 @@ pub const Runtime = struct {
             parsed.deinit();
         }
         try self.scrubPermissionArguments(&parsed.value);
-        const arguments = try self.allocator.alloc(u8, 16 * 1024);
+        const arguments = try self.allocator.alloc(u8, 32 * 1024);
         errdefer {
             std.crypto.secureZero(u8, arguments);
             self.allocator.free(arguments);
         }
-        var writer = std.Io.Writer.fixed(arguments);
+        var writer = std.Io.Writer.fixed(arguments[0 .. 16 * 1024]);
         try std.json.Stringify.value(parsed.value, .{}, &writer);
         prepared.input.request.arguments_json = writer.buffered();
+        if (prepared.input.user_history_json.len > 0) {
+            var history = try std.json.parseFromSlice(std.json.Value, self.allocator, prepared.input.user_history_json, .{ .duplicate_field_behavior = .@"error" });
+            defer {
+                clearPermissionArguments(&history.value);
+                history.deinit();
+            }
+            try self.scrubPermissionArguments(&history.value);
+            var history_writer = std.Io.Writer.fixed(arguments[writer.end..]);
+            try std.json.Stringify.value(history.value, .{}, &history_writer);
+            prepared.input.user_history_json = history_writer.buffered();
+        }
         const config = prepared.execution.input();
         const owner = try self.completion_factory.create(self.allocator, .{
             .target = .{ .provider_id = config.target.provider_id, .protocol = agent_protocol.toAgent(config.target.protocol), .base_url = config.target.base_url, .model = config.target.model },

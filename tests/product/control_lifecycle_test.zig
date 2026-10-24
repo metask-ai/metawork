@@ -727,6 +727,26 @@ test "Task permission review prepares detached owned data using the Run model an
     try std.testing.expectEqual(@as(usize, 0), commit.calls);
 }
 
+test "Task permission review carries earlier user authorization into a continuation without Tool output" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const previous_id = task.runtime.active_run_id;
+    try scenario.control.respondUi(scenario.task_id, previous_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+    fake_core.releaseControlled();
+    try waitControlSnapshot(&scenario.control, "\"terminal\":{\"outcome\":\"completed\"");
+    fake_core.setNextPlan(.ui_wait);
+    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "Start installing" });
+    try waitControlSnapshot(&scenario.control, "\"currentRunPhase\":\"waiting_ui\"");
+    var prepared = try scenario.prepare();
+    defer prepared.deinit();
+    try std.testing.expectEqualStrings("Start installing", prepared.input.user_intent);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.input.user_history_json, "bounded operation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prepared.input.user_history_json, "fixture-secret") == null);
+    try std.testing.expectEqual(@as(usize, 0), prepared.input.omitted_user_messages);
+    try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+}
+
 test "Task permission review submits only once decisions and sanitizes reviewer attribution" {
     for ([_]bool{ false, true }) |denied| {
         const scenario = try ReviewScenario.init();
