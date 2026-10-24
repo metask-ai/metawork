@@ -224,6 +224,7 @@ function renderCompletedSurface(
 ) {
   const task = {
     id: "3",
+    inputSubmissions: [],
     runs: [
       {
         id: "9",
@@ -933,6 +934,7 @@ test("Task list shows tasks from different workspaces without workspace controls
     currentRunPhase: null,
     activeOperation: null,
     recentOrder,
+    inputSubmissions: [],
     runs: [],
     compacts: [],
     pendingUi: null,
@@ -971,6 +973,7 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     currentRunPhase: null,
     activeOperation: null,
     recentOrder: id,
+    inputSubmissions: [],
     runs: [],
     compacts: [],
     pendingUi: null,
@@ -998,6 +1001,7 @@ test("Manual projects repeat their tasks while automatic tasks stay global", () 
     currentRunPhase: null,
     activeOperation: null,
     recentOrder: id,
+    inputSubmissions: [],
     runs: [],
     compacts: [],
     ...overrides,
@@ -1199,6 +1203,7 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
     currentRunPhase: null,
     activeOperation: null,
     recentOrder: "1",
+    inputSubmissions: [],
     runs: [
       {
         id: "9",

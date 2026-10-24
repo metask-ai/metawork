@@ -384,6 +384,14 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 
 ### 4.2 Durable history 与 runtime attachment
 
+#### 展示位置事实
+
+Task 主线程独占用户消息接收与可信生成图片引用接纳的单调展示序号。消息 submission 保存原 Run/输出槽位锚点及可空展示序号；生成图片引用保存可空 `{ after_output_count, presentation_order }`。消息在接收时、图片在首次安全投影接纳时取号，提交前验证完整候选并一起安装引用与位置。采纳、转入、重复投影、预览重试及相同引用刷新保留位置，新结果使用独立 identity。展示序号不复用工具活动 order，不证明执行或回复因果。
+
+高水位随 Task 保存，裁剪不降低；序号允许空洞，已提交记录的序号不回用，溢出或非法关系明确失败。图片引用、锚点和高水位进入同一历史快照；保存失败沿用既有健康及 outcome_unknown，不扩展执行幂等保证。锚点按容量校验，允许撤回后超过现存输出数。
+
+canonical Task record 的 `presentation_format=1` 明确启用位置编码：`next_presentation_order` 必填；submission 及生成图片引用的 `presentation_state` 必须为 `anchored | legacy`。anchored 必须含合法位置，legacy 必须显式为空且仅表示受控读取的旧事实；新接收/生成记录只能写 anchored。旧 Task 无 format 时只按既有 canonical 旧字段受控读取为位置未知，下一次写回显式保留 legacy；新版缺字段或非法状态不得退作旧历史。保持原 framed store、损坏隔离、原 payload 保护与恢复机制，不伪造旧数据顺序。Renderer 展示规则由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制) 唯一拥有。
+
 插话 `transferred` 只表示输入已交给同一 Task 内真实存在且顺序更后的目标 Run，不表示原轮采纳或目标执行成功；必须保留 receipt，且不能携带原轮采纳活动锚点。其他状态不得关联转入目标。旧记录缺少可空转入关联时仅解释为没有转入事实，不推测目标；等待接续、失败原因和原文均为运行时事实，不由恢复重新激活。
 
 追加消息的安全文本、identity、receipt sequence、采纳状态、真实采纳活动锚点及提交时的输出槽位锚点随所属 Run 持久化；不持久化可执行 payload。输出槽位锚点只数已闭合 commentary 及已分类回答或可安全投影的临时尾部（含脱敏占位），不把尚未提交的敏感后缀计入；它在同步提交前预留，接受或未知时保留，拒绝时释放，不随采纳状态变化。临时尾部可能被丢弃，因此锚点允许超过剩余输出段数，不能按当前正文长度拒绝。旧历史缺少消息数组解释为空；有追加消息的记录必须包含合法锚点，不兼容未部署的缺锚点记录，不引入迁移或位置推测。恢复将仍为 pending 的消息降为 unknown，仅供阅读，不提交给新 Session。Task 安全接收记录及 Run 输入保留逐条 operation 关联，用于响应丢失对账；不发布单槽结果，也不建立持久 ACK 或跨重启 exactly-once 承诺。重载、断连和导航不撤销 Core 已接受的输入，也不触发重发。

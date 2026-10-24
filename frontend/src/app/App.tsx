@@ -1,3 +1,8 @@
+import {
+  localReadingAnchor,
+  type LocalReadingInput,
+} from "../features/tasks/assistant-output.ts";
+import { UserInputMessage } from "../features/tasks/UserInputMessage.tsx";
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
 import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import {
@@ -280,6 +285,7 @@ function orderedFileChanges(changes: FileChangeView[]): FileChangeView[] {
   });
 }
 type LocalTaskSubmission = {
+  anchor: LocalReadingInput["anchor"];
   operationId: string;
   taskId: string | null;
   scope: string;
@@ -415,9 +421,157 @@ export default function App() {
   const composer = useRef<HTMLTextAreaElement>(null);
   const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
   const newTaskSubmissionInstance = useRef(0);
+  const localSubmissionSequence = useRef(0);
   const [localSubmissions, setLocalSubmissions] = useState<
     LocalTaskSubmission[]
   >([]);
+  const localSubmissionsRef = useRef(localSubmissions);
+  localSubmissionsRef.current = localSubmissions;
+  const submissionReconciliation = useRef<{
+    running: boolean;
+    pending: { snapshot: WorkbenchSnapshot; generation: string } | null;
+    attempted: Map<string, string>;
+  }>({ running: false, pending: null, attempted: new Map() });
+  function reconcileSubmissionProjection(
+    next: WorkbenchSnapshot,
+    generation: string,
+  ) {
+    const queue = submissionReconciliation.current;
+    queue.pending = { snapshot: next, generation };
+    if (queue.running) return;
+    queue.running = true;
+    void (async () => {
+      try {
+        while (queue.pending) {
+          const request = queue.pending;
+          queue.pending = null;
+          const pending = localSubmissionsRef.current;
+          const ids = new Set(
+            pending.flatMap((entry) =>
+              entry.taskId &&
+              !taskHasSubmission(
+                request.snapshot.tasks.find((task) => task.id === entry.taskId),
+                entry.operationId,
+              ) &&
+              request.snapshot.receipts.some(
+                (r) =>
+                  r.observed &&
+                  r.taskId === entry.taskId &&
+                  r.operationId === entry.operationId,
+              )
+                ? [entry.taskId]
+                : [],
+            ),
+          );
+          for (const id of queue.attempted.keys())
+            if (!pending.some((entry) => entry.taskId === id))
+              queue.attempted.delete(id);
+          for (const taskId of ids) {
+            const key = `${request.generation}:${request.snapshot.securityEpoch}:${request.snapshot.revision}`;
+            if (queue.attempted.get(taskId) === key) continue;
+            queue.attempted.set(taskId, key);
+            let beforeRunId: string | null = null;
+            const matched = new Set<string>();
+            let oldestMatchedRun: string | null = null;
+            try {
+              // One read at a time, at most four bounded pages per Task/revision.
+              for (let page = 0; page < 4; page++) {
+                if (bridgeGenerationRef.current !== request.generation) break;
+                const canonical = await client.fetchSnapshot({
+                  taskId,
+                  beforeRunId,
+                  runLimit: 4,
+                  management: "none",
+                  search: false,
+                  receipts: [],
+                });
+                if (
+                  bridgeGenerationRef.current !== request.generation ||
+                  canonical.securityEpoch !== request.snapshot.securityEpoch ||
+                  canonical.securityEpoch !==
+                    latestSnapshotRef.current?.securityEpoch ||
+                  canonical.historyEpoch !== request.snapshot.historyEpoch ||
+                  canonical.historyEpoch !==
+                    latestSnapshotRef.current?.historyEpoch
+                )
+                  break;
+                const task = canonical.tasks.find((item) => item.id === taskId);
+                if (!task) break;
+                const visible = {
+                  ...task,
+                  runs: [...(canonical.historyPage?.runs ?? []), ...task.runs],
+                };
+                for (const entry of pending)
+                  if (
+                    entry.taskId === taskId &&
+                    taskHasSubmission(visible, entry.operationId)
+                  ) {
+                    matched.add(entry.operationId);
+                    const source = visible.runs.find(
+                      (run) =>
+                        run.submission?.operationId === entry.operationId ||
+                        run.additionalInputs.some(
+                          (input) => input.operationId === entry.operationId,
+                        ),
+                    );
+                    if (
+                      source &&
+                      (!oldestMatchedRun ||
+                        BigInt(source.id) < BigInt(oldestMatchedRun))
+                    )
+                      oldestMatchedRun = source.id;
+                  }
+                if (
+                  pending
+                    .filter((entry) => entry.taskId === taskId)
+                    .every((entry) => matched.has(entry.operationId))
+                )
+                  break;
+                const cursor =
+                  canonical.historyPage?.nextBeforeRunId ??
+                  canonical.taskPage?.nextBeforeRunId ??
+                  null;
+                if (!cursor || cursor === beforeRunId) break;
+                beforeRunId = cursor;
+              }
+              if (
+                matched.size &&
+                bridgeGenerationRef.current === request.generation &&
+                latestSnapshotRef.current?.securityEpoch ===
+                  request.snapshot.securityEpoch &&
+                latestSnapshotRef.current?.historyEpoch ===
+                  request.snapshot.historyEpoch
+              ) {
+                if (activeTaskIdRef.current === taskId) {
+                  if (oldestMatchedRun)
+                    retainTaskHistory(taskId, oldestMatchedRun);
+                  void refreshSnapshot().catch(() => undefined);
+                }
+                setLocalSubmissions((entries) =>
+                  entries.filter(
+                    (entry) =>
+                      entry.taskId !== taskId ||
+                      !matched.has(entry.operationId) ||
+                      (activeTaskIdRef.current === taskId &&
+                        !taskHasSubmission(
+                          latestSnapshotRef.current?.tasks.find(
+                            (task) => task.id === taskId,
+                          ),
+                          entry.operationId,
+                        )),
+                  ),
+                );
+              }
+            } catch {
+              // A failed adjunct read leaves the only display copy intact.
+            }
+          }
+        }
+      } finally {
+        queue.running = false;
+      }
+    })();
+  }
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
   }
@@ -438,7 +592,7 @@ export default function App() {
         : undefined,
     );
   }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
-  function retainHistoryForPanel(taskId: string, runId: string) {
+  function retainTaskHistory(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];
       return previous && BigInt(previous.oldestRunId) <= BigInt(runId)
@@ -489,7 +643,7 @@ export default function App() {
     const tab = createTaskPanelPreviewTab(taskId, runId, selected);
     setRightPanelOpen(true);
     taskPanelOpeners.current.set(tab.tabId, opener);
-    retainHistoryForPanel(taskId, runId);
+    retainTaskHistory(taskId, runId);
     taskPanel.openPreview(taskId, runId, selected);
     filePreviewTabs.open(taskId, runId, selected);
     focusTaskPanelTab(tab.tabId);
@@ -636,7 +790,7 @@ export default function App() {
       (tab) => tab.kind === "review",
     );
     if (existingReview?.runId !== runId) taskPanelViews.reset(tab.tabId);
-    retainHistoryForPanel(taskId, runId);
+    retainTaskHistory(taskId, runId);
     taskPanel.openReview(taskId, runId);
     if (focus)
       taskPanelViews.setFileExpanded(tab.tabId, focus.displayPath, true);
@@ -1256,20 +1410,33 @@ export default function App() {
           );
           setApprovalRequests(approvalRequestsRef.current.view());
           setLocalSubmissions((entries) =>
-            entries.filter(
-              (entry) =>
-                !next.receipts.some(
-                  (receipt) =>
-                    receipt.taskId === entry.taskId &&
-                    receipt.operationId === entry.operationId &&
-                    receipt.observed,
-                ) &&
-                !taskHasSubmission(
+            entries.flatMap((entry) => {
+              if (
+                taskHasSubmission(
                   next.tasks.find((task) => task.id === entry.taskId),
                   entry.operationId,
-                ),
-            ),
+                )
+              )
+                return [];
+              const observed = next.receipts.some(
+                (receipt) =>
+                  receipt.taskId === entry.taskId &&
+                  receipt.operationId === entry.operationId &&
+                  receipt.observed,
+              );
+              return [
+                {
+                  ...entry,
+                  state:
+                    observed &&
+                    (entry.state === "unknown" || entry.state === "submitting")
+                      ? ("accepted" as const)
+                      : entry.state,
+                },
+              ];
+            }),
           );
+          reconcileSubmissionProjection(next, generation);
           const projectedTaskIds = next.taskIndex.map((task) => task.id);
           setHistoryRequests((goals) => {
             if (Object.keys(goals).every((id) => projectedTaskIds.includes(id)))
@@ -2128,6 +2295,11 @@ export default function App() {
     if (draftId) newTaskDrafts.clearDraft(draftId);
     else if (taskId) taskDrafts.clearDraft(taskId);
     composerDraftRef.current = emptyComposerDraft();
+    const anchor = localReadingAnchor(
+      latestSnapshotRef.current?.tasks.find((task) => task.id === taskId) ??
+        null,
+      ++localSubmissionSequence.current,
+    );
     setLocalSubmissions((entries) => [
       ...entries.filter(
         (entry) =>
@@ -2142,6 +2314,7 @@ export default function App() {
         scope,
         generation,
         draft: submitted,
+        anchor,
         state: "submitting",
       },
     ]);
@@ -3112,26 +3285,16 @@ export default function App() {
         : entry.taskId === workbench.activeTaskId) &&
       !taskHasSubmission(activeTask ?? undefined, entry.operationId),
   );
-  const pendingMessages =
-    visibleSubmissions.length > 0 ? (
-      <div className="local-input-submissions" aria-live="polite">
-        {visibleSubmissions.map((entry) => (
-          <div
-            className="additional-input"
-            key={entry.operationId}
-            data-operation-id={entry.operationId}
-          >
-            <Message role="user">
-              <div className="task-input-copy">
-                {entry.draft.kind === "skill"
-                  ? `/${entry.draft.invocationName} ${entry.draft.argumentValues.join(" ")}`
-                  : entry.draft.text}
-              </div>
-              {entry.draft.kind === "multimodal" &&
-                entry.draft.attachments.map((attachment) => (
-                  <p key={attachment.token}>{attachment.displayName}</p>
-                ))}
-            </Message>
+  const localReadingInputs = visibleSubmissions.map((entry) => ({
+    operationId: entry.operationId,
+    anchor: entry.anchor,
+    content: (
+      <UserInputMessage
+        className="local-input-submissions"
+        operationId={entry.operationId}
+        key={entry.operationId}
+        notice={
+          <>
             <p className="projection-note">
               {t(
                 entry.state === "submitting"
@@ -3173,10 +3336,24 @@ export default function App() {
                 {t("run.prepare_retry")}
               </Button>
             )}
-          </div>
-        ))}
-      </div>
-    ) : null;
+          </>
+        }
+      >
+        <div className="task-input-copy">
+          {entry.draft.kind === "skill"
+            ? `/${entry.draft.invocationName} ${entry.draft.argumentValues.join(" ")}`
+            : entry.draft.text}
+        </div>
+        {entry.draft.kind === "multimodal" &&
+          entry.draft.attachments.map((attachment) => (
+            <p key={attachment.token}>{attachment.displayName}</p>
+          ))}
+      </UserInputMessage>
+    ),
+  }));
+  const pendingMessages = localReadingInputs.length ? (
+    <>{localReadingInputs.map((item) => item.content)}</>
+  ) : null;
   const composerFooter = (
     <>
       {activeTask && (
@@ -4198,7 +4375,7 @@ export default function App() {
                     }
                   },
                 }}
-                localSubmissions={pendingMessages}
+                localSubmissions={localReadingInputs}
                 webLink={markdownWebLink}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
                 synchronized={!bridgeUnavailable}

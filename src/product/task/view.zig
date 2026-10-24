@@ -654,7 +654,9 @@ fn writeSubmission(writer: *std.Io.Writer, text: TextProjection, submission: ?ta
     try writeInputId(writer, record.received_at_unix_ms);
     writer.writeAll(",\"anchorRunId\":") catch return error.SnapshotTooLarge;
     try writeInputId(writer, record.anchor_run_id);
-    writer.print(",\"afterOutputCount\":{d}}}", .{record.after_output_count}) catch return error.SnapshotTooLarge;
+    writer.print(",\"afterOutputCount\":{d},\"presentationOrder\":", .{record.after_output_count}) catch return error.SnapshotTooLarge;
+    try writeInputId(writer, record.presentation_order);
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
 pub fn writeSendInputResult(writer: *std.Io.Writer, text: TextProjection, result: task_state.SendInputResult) Error!void {
@@ -848,7 +850,12 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
                 try text_projection.writeJson(writer, reference.title);
                 writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
                 try text_projection.writeJson(writer, reference.display_path);
-                if (reference.generated_image) writer.writeAll(",\"generatedImage\":true") catch return error.SnapshotTooLarge;
+                if (reference.generated_image) {
+                    writer.writeAll(",\"generatedImage\":true,\"presentationAnchor\":") catch return error.SnapshotTooLarge;
+                    if (reference.presentation_anchor) |anchor| {
+                        writer.print("{{\"afterOutputCount\":{d},\"presentationOrder\":\"{d}\"}}", .{ anchor.after_output_count, anchor.presentation_order }) catch return error.SnapshotTooLarge;
+                    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+                }
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             };
             writer.writeAll("]}") catch return error.SnapshotTooLarge;

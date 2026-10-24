@@ -1971,6 +1971,21 @@ function decodeNewTaskAdmission(
     state,
   };
 }
+function decodePresentationAnchor(value: unknown, path: string) {
+  const item = object(value, path, ["afterOutputCount", "presentationOrder"]);
+  const afterOutputCount = nonNegativeNumber(
+    item.afterOutputCount,
+    `${path}.afterOutputCount`,
+  );
+  if (afterOutputCount > 257) fail(path, "anchor exceeds output capacity");
+  return {
+    afterOutputCount,
+    presentationOrder: positiveU64WireId(
+      item.presentationOrder,
+      `${path}.presentationOrder`,
+    ),
+  };
+}
 function decodeFileReference(value: unknown, path: string): FileReferenceView {
   const raw = record(value, path);
   const generated = Object.hasOwn(raw, "generatedImage");
@@ -1978,12 +1993,23 @@ function decodeFileReference(value: unknown, path: string): FileReferenceView {
     "id",
     "title",
     "displayPath",
-    ...(generated ? ["generatedImage"] : []),
+    ...(generated ? ["generatedImage", "presentationAnchor"] : []),
   ]);
   if (generated && item.generatedImage !== true)
     fail(path, "invalid generated image attestation");
   return {
-    ...(generated ? { generatedImage: true as const } : {}),
+    ...(generated
+      ? {
+          generatedImage: true as const,
+          presentationAnchor:
+            item.presentationAnchor === null
+              ? null
+              : decodePresentationAnchor(
+                  item.presentationAnchor,
+                  `${path}.presentationAnchor`,
+                ),
+        }
+      : {}),
     id: stringValue(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
     displayPath: stringValue(item.displayPath, `${path}.displayPath`),
@@ -6791,6 +6817,7 @@ function decodeInputSubmission(value: unknown, path: string): InputSubmission {
     "receivedAtUnixMs",
     "anchorRunId",
     "afterOutputCount",
+    "presentationOrder",
   ]);
   const afterOutputCount = nonNegativeNumber(
     item.afterOutputCount,
@@ -6804,6 +6831,13 @@ function decodeInputSubmission(value: unknown, path: string): InputSubmission {
   if (receivedAtUnixMs !== null && BigInt(receivedAtUnixMs) > 8640000000000000n)
     fail(path, "expected displayable reception timestamp");
   return {
+    presentationOrder:
+      item.presentationOrder === null
+        ? null
+        : positiveU64WireId(
+            item.presentationOrder,
+            `${path}.presentationOrder`,
+          ),
     operationId: inputOperationId(item.operationId, `${path}.operationId`),
     receivedAtUnixMs,
     anchorRunId:

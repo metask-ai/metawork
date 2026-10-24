@@ -161,7 +161,7 @@ Host 原图生命周期合计最多 2 份 / 20 MiB，每次请求总期限 30 �
 
 Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给实际 `<img>` 解码；实际 `decode()` 完成前保持 loading。安全代次变化清除已交付资源；传输中的 `stale_security` 只在观察到更新的 canonical epoch 并重新授权后最多重试一次。关闭、跨 Task、引用/连接失效、内联预览离开保留区域都会取消并释放；打开的标签允许保留 bytes，刷新和关闭后重开重新读取，不建立跨 Task、跨连接或磁盘缓存。模型图片输入准备不属于此协议，继续保持原有策略。
 
-Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true`。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
+Snapshot `tools[].fileRefs[]` 普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true` 及必填 nullable `presentationAnchor: { afterOutputCount, presentationOrder } | null`。afterOutputCount 为不超过输出槽位容量的非负整数，presentationOrder 为非零 canonical u64 string；null 只表示旧历史位置未知。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
 ## File changes diff command
 
@@ -269,11 +269,11 @@ operationId 为 1–64 字节可打印 ASCII identity，只关联单次提交，
 
 Task Snapshot 必填 `inputReady`、`inputAcceptance:{ available, reason }` 和 `inputSubmissions`。inputReady 只展示当前 Run readiness；inputAcceptance 只表达真实接收资格，available 当且仅当 reason=null。等待记录精确为 `{ submission, input, state, reason }`，state=`waiting | failed | cancelled | interrupted`；waiting 和 interrupted 的 reason=null。具体失败原因只在进程内发布，不写历史；重启后安全等待记录显示 interrupted，不恢复原文或执行。数量由 Product Limits 配置且最多 64，使用有界共享原文/文件及安全投影预算，不建立 durable outbox。
 
-`submission` 精确为 `{ operationId, receivedAtUnixMs, anchorRunId, afterOutputCount }`。时间和 anchor 为 nullable canonical u64 string，anchor 非零；afterOutputCount 为不超过输出槽位上限的非负整数。它记录原接收时间和展示位置；尚无 Run 的后继等待消息在首个根输入正式准入时，将空 anchor 解析为该 Run 的首个输出前位置，保持点击顺序。每个 Run 根输入和 additional input 都有必填 nullable submission，旧历史允许 null。消息转入执行记录时保持同一 submission，并从等待投影移除；同一 operation 不能同时发布为等待记录和执行输入，不重复生成气泡。Task 级单槽 sendInputResult 不再发布。
+`submission` 精确为 `{ operationId, receivedAtUnixMs, anchorRunId, afterOutputCount, presentationOrder }`。时间和 anchor 为 nullable canonical u64 string，anchor 非零；afterOutputCount 为不超过输出槽位上限的非负整数。presentationOrder 为必填 nullable 非零 canonical u64 string，null 只表示旧历史；新消息接收时取 Task 范围展示序号，与可信图片接纳共用顺序，采纳及转入不改写。它记录原接收时间和展示位置；尚无 Run 的后继等待消息在首个根输入正式准入时，将空 anchor 解析为该 Run 的首个输出前位置，保持点击顺序。每个 Run 根输入和 additional input 都有必填 nullable submission，旧历史允许 null。消息转入执行记录时保持同一 submission，并从等待投影移除；同一 operation 不能同时发布为等待记录和执行输入，不重复生成气泡。Task 级单槽 sendInputResult 不再发布。
 
 每个 Run 的 `additionalInputs` 最多 64 项，精确为 `{ id, afterOutputCount, operationId, submission, text, redacted, sequence, adoptedTurn, order, state, transferredToRunId, continuationReason }`。id 为 Run 内递增 u64；afterOutputCount 表示投递时前方 canonical 输出槽位数，不从采纳事件补造。sequence 为 nullable 1–64 integer；state=`pending | adopted | unadopted | unknown | continuing | transferred`，adopted/unadopted/continuing/transferred 必有 sequence。adoptedTurn 与 order 同空或同非空，非空仅允许 adopted，分别为非零 u32 和 u64。transferredToRunId 非空当且仅当 transferred，须指向同 Task 更后的真实 Run；continuing/transferred 只属于正常 completed 来源。continuationReason 仅 unadopted 可非空，且只在内存展示。安全历史不能成为执行来源。
 
-同一来源窗口和 connection generation 内，Bridge 按 Renderer 发起顺序进入 Host 主线程接收事务。Renderer 可在 A 响应前发起 B、C；响应完成顺序不影响 A、B、C 的接收顺序。该保证不扩大到跨窗口或跨连接；真实注册 Dispatcher 接收路径与桌面 transport 共同验证。Renderer 按 operationId 对账所有等待/Run 输入，查不到记录不证明未接收；回执未知只刷新，不自动重发、转投或跨重连补发。每次点击立即将本次提交与当前草稿分离，旧响应不能清除较新草稿。首次创建期间有界保留明确点击的提交，共享一个 create 请求，取得身份后按点击顺序交付，不等上一发送回执。创建失败或未知不自动重建，旧 generation 不产生新效果。
+同一来源窗口和 connection generation 内，Bridge 按 Renderer 发起顺序进入 Host 主线程接收事务。Renderer 可在 A 响应前发起 B、C；响应完成顺序不影响 A、B、C 的接收顺序。该保证不扩大到跨窗口或跨连接；真实注册 Dispatcher 接收路径与桌面 transport 共同验证。Renderer 按 operationId 对账所有等待/Run 输入，receipt observed 只证明接收，不证明当前范围有可展示记录；只有安全 canonical 正文与展示位置接管后才能释放唯一消息展示项，范围不足由有界读取补齐。查不到记录不证明未接收；回执未知只刷新，不自动重发、转投或跨重连补发。每次点击立即将本次提交与当前草稿分离，旧响应不能清除较新草稿。首次创建期间有界保留明确点击的提交，共享一个 create 请求，取得身份后按点击顺序交付，不等上一发送回执。创建失败或未知不自动重建，旧 generation 不产生新效果。
 
 `tasks.run` 精确返回 `{ accepted, taskId, runId, reason }`，保留显式新 Run 准入语义；待处理消息或 continuing 预留阻止其抢先。正常未采纳后缀仍由 Task 复用原有一次接续，compact/restore 与实际 Run 继续遵守 Session/worker/checkpoint 门禁。
 

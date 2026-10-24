@@ -677,6 +677,7 @@ function task(overrides = {}) {
     currentRunId: "0",
     currentRunPhase: null,
     context: { pressure: null, lastAutoCompact: null },
+    inputSubmissions: [],
     runs: [],
     compacts: [],
     pendingUi: null,
@@ -7313,4 +7314,225 @@ test("same Task history refill restores the visible Run anchor despite changed e
   } finally {
     HTMLElement.prototype.getBoundingClientRect = original;
   }
+});
+
+test("previous execution details precede the next anchored Run instruction", () => {
+  const first = run({ tools: [technicalTool()] });
+  const next = run({
+    id: "10",
+    input: { kind: "text", text: "CONTINUE", redacted: false },
+    submission: {
+      operationId: "continue",
+      receivedAtUnixMs: null,
+      anchorRunId: "9",
+      afterOutputCount: 1,
+      presentationOrder: "1",
+    },
+    phase: "running",
+    terminal: null,
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const view = render(
+    taskContentElement(task({ runs: [first, next], currentRunId: "10" })),
+  );
+  const details = view.container.querySelector(
+    '[data-run-id="9"] .run-process',
+  );
+  const message = view.container.querySelector(
+    '[data-operation-id="continue"]',
+  );
+  assert.ok(
+    details.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.equal(
+    view.container.querySelector(
+      '[data-run-id="10"] .ai-message[data-role="user"]',
+    ),
+    null,
+  );
+  assert.equal(screen.getAllByText("CONTINUE").length, 1);
+});
+
+test("history anchor refill keeps the visible operation offset when its bubble changes Run parent", () => {
+  const next = run({
+    id: "10",
+    input: { kind: "text", text: "VISIBLE CONTINUE", redacted: false },
+    submission: {
+      operationId: "continue",
+      receivedAtUnixMs: null,
+      anchorRunId: "9",
+      afterOutputCount: 1,
+      presentationOrder: "1",
+    },
+  });
+  const memory = createTaskReadingMemory();
+  let full = false;
+  const previous = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains("ai-conversation-viewport"))
+      return {
+        top: 0,
+        bottom: 200,
+        height: 200,
+        left: 0,
+        right: 600,
+        width: 600,
+      };
+    const viewport = this.closest(".ai-conversation-viewport");
+    if (this.dataset.readingId === "submission:continue") {
+      const top = (full ? 90 : 40) - (viewport?.scrollTop ?? 0);
+      return {
+        top,
+        bottom: top + 20,
+        height: 20,
+        left: 0,
+        right: 600,
+        width: 600,
+      };
+    }
+    return previous.call(this);
+  };
+  try {
+    const value = task({ runs: [next] });
+    const view = render(taskContentElement(value, "1", { memory }));
+    const viewport = view.container.querySelector(".ai-conversation-viewport");
+    Object.defineProperties(viewport, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    assert.equal(
+      memory.reading.get(value.id).anchor.entryId,
+      "submission:continue",
+    );
+    full = true;
+    view.rerender(
+      taskContentElement({ ...value, runs: [run(), next] }, "2", { memory }),
+    );
+    assert.equal(viewport.scrollTop, 50);
+    assert.equal(screen.getAllByText("VISIBLE CONTINUE").length, 1);
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = previous;
+  }
+});
+
+test("Assistant image stays mounted before a pending interjection through later output and terminal", async () => {
+  const reference = {
+    id: "stable-picture",
+    title: "",
+    displayPath: "ocean.png",
+    generatedImage: true,
+    presentationAnchor: { afterOutputCount: 1, presentationOrder: "1" },
+  };
+  const input = {
+    id: "1",
+    operationId: "make-blue",
+    text: "Make it blue",
+    redacted: false,
+    sequence: 1,
+    adoptedTurn: null,
+    order: null,
+    state: "pending",
+    afterOutputCount: 1,
+    submission: {
+      operationId: "make-blue",
+      receivedAtUnixMs: null,
+      anchorRunId: "9",
+      afterOutputCount: 1,
+      presentationOrder: "2",
+    },
+  };
+  let loads = 0;
+  const loadFilePreview = async () => {
+    loads++;
+    return {
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image: previewImageFixture(generatedPng),
+    };
+  };
+  const active = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    tools: [technicalTool({ fileRefs: [reference] })],
+    additionalInputs: [input],
+    output: {
+      commentary: ["Original image"],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const value = task({ runs: [active], currentRunId: "9" });
+  const options = { synchronized: true, loadFilePreview };
+  const view = render(taskContentElement(value, "1", options));
+  await waitFor(() => assert.equal(loads, 1));
+  const figure = view.container.querySelector(".generated-image-preview");
+  const user = view.container.querySelector('[data-operation-id="make-blue"]');
+  assert.equal(figure.closest(".ai-message").dataset.role, "assistant");
+  assert.ok(
+    figure.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  view.rerender(
+    taskContentElement(
+      {
+        ...value,
+        runs: [
+          {
+            ...active,
+            output: { ...active.output, provisional: "Adjusting the image" },
+          },
+        ],
+      },
+      "2",
+      options,
+    ),
+  );
+  assert.equal(
+    view.container.querySelector(".generated-image-preview"),
+    figure,
+  );
+  assert.ok(
+    figure.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  view.rerender(
+    taskContentElement(
+      {
+        ...value,
+        runs: [
+          {
+            ...active,
+            phase: "completed",
+            terminal: terminal(),
+            activity: null,
+            output: {
+              ...active.output,
+              response: "Adjusted",
+              responseKind: "final",
+            },
+          },
+        ],
+      },
+      "3",
+      options,
+    ),
+  );
+  assert.equal(
+    view.container.querySelector(".generated-image-preview"),
+    figure,
+  );
+  assert.equal(loads, 1);
 });

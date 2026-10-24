@@ -3415,6 +3415,7 @@ test("Task waiting input and reception metadata are strict safe projections", ()
   const metadata = {
     operationId: "queued",
     receivedAtUnixMs: "1792390000000",
+    presentationOrder: null,
     anchorRunId: task.runs[0].id,
     afterOutputCount: 0,
   };
@@ -3595,4 +3596,59 @@ test("disabled MCP management rejects a nonbaseline redaction state", () => {
     () => decodeWorkbenchSnapshot(value),
     /disabled MCP management must use the unavailable view/,
   );
+});
+
+test("presentation anchors are strict and lossless for both messages and generated images", () => {
+  const value = clone(fixture);
+  const run = value.tasks[0].runs[0];
+  run.submission = {
+    operationId: "presentation",
+    receivedAtUnixMs: null,
+    anchorRunId: null,
+    afterOutputCount: 1,
+    presentationOrder: "18446744073709551614",
+  };
+  const tool = {
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    bash: null,
+    presentation: null,
+    errorDetail: null,
+    input: "{}",
+    progress: "",
+    content: "ok",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+  };
+  tool.fileRefs = [
+    {
+      id: "image",
+      title: "",
+      displayPath: "image.png",
+      generatedImage: true,
+      presentationAnchor: {
+        afterOutputCount: 1,
+        presentationOrder: "18446744073709551613",
+      },
+    },
+  ];
+  run.tools = [tool];
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+  for (const order of ["0", "18446744073709551616", 1, "01"]) {
+    const candidate = clone(value);
+    candidate.tasks[0].runs[0].tools[0].fileRefs[0].presentationAnchor.presentationOrder =
+      order;
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+  const missing = clone(value);
+  delete missing.tasks[0].runs[0].submission.presentationOrder;
+  assert.throws(() => decodeWorkbenchSnapshot(missing), /presentationOrder/);
+  delete value.tasks[0].runs[0].tools[0].fileRefs[0].presentationAnchor;
+  assert.throws(() => decodeWorkbenchSnapshot(value), /presentationAnchor/);
 });

@@ -582,6 +582,8 @@ pub const WorkspaceWire = struct {
 };
 
 pub const TaskWire = struct {
+    presentation_format: ?u8 = null,
+    next_presentation_order: ?u64 = null,
     id: u64,
     recent_order: u64,
     completion_seen_run_id: ?u64 = null,
@@ -767,6 +769,8 @@ fn validateOutputs(outputs: []const OutputWire) error{Invalid}!void {
 }
 
 pub const SubmissionWire = struct {
+    presentation_state: ?[]const u8 = null,
+    presentation_order: ?u64 = null,
     operation_id: []const u8,
     received_at_unix_ms: ?u64 = null,
     anchor_run_id: ?u64 = null,
@@ -841,6 +845,8 @@ pub const FileReferenceRangeWire = struct {
 };
 
 pub const FileReferenceWire = struct {
+    presentation_state: ?[]const u8 = null,
+    presentation_anchor: ?task_state.PresentationAnchor = null,
     generated_image: bool = false,
     id: []const u8,
     title: []const u8,
@@ -1107,6 +1113,8 @@ pub fn projectTask(
 
     return .{
         .id = task.durable.id,
+        .presentation_format = 1,
+        .next_presentation_order = task.durable.next_presentation_order,
         .recent_order = task.durable.recent_order,
         .completion_seen_run_id = task.durable.completion_seen_run_id,
         .workspace_id = task.durable.workspace_id,
@@ -1230,7 +1238,7 @@ fn freeInputWire(allocator: std.mem.Allocator, input: RunInputWire) void {
 }
 
 fn submissionWire(record: *const task_state.Submission) SubmissionWire {
-    return .{ .operation_id = record.operationId(), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
+    return .{ .presentation_state = if (record.presentation_order != null) "anchored" else "legacy", .presentation_order = record.presentation_order, .operation_id = record.operationId(), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
 }
 
 fn restoreSubmission(record: SubmissionWire) RestoreError!task_state.Submission {
@@ -1238,7 +1246,7 @@ fn restoreSubmission(record: SubmissionWire) RestoreError!task_state.Submission 
     for (record.operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.TaskStoreCorrupt;
     if (record.received_at_unix_ms) |time| if (time == 0 or time > task_state.max_displayable_unix_ms) return error.TaskStoreCorrupt;
     if (record.anchor_run_id) |id| if (id == 0) return error.TaskStoreCorrupt;
-    var result: task_state.Submission = .{ .operation_id_len = @intCast(record.operation_id.len), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
+    var result: task_state.Submission = .{ .presentation_order = record.presentation_order, .operation_id_len = @intCast(record.operation_id.len), .received_at_unix_ms = record.received_at_unix_ms, .anchor_run_id = record.anchor_run_id, .after_output_count = record.after_output_count };
     @memcpy(result.operation_id[0..record.operation_id.len], record.operation_id);
     return result;
 }
@@ -1293,6 +1301,8 @@ fn projectRun(
                 const reference = reference_entry orelse continue;
                 references[file_ref_index] = .{
                     .generated_image = reference.generated_image,
+                    .presentation_state = if (reference.presentation_anchor != null) "anchored" else "legacy",
+                    .presentation_anchor = reference.presentation_anchor,
                     .id = reference.id,
                     .title = reference.title,
                     .display_path = reference.display_path,
@@ -1525,6 +1535,7 @@ pub fn restoreTask(
     projection: RestoreProjection,
     wire: TaskWire,
 ) RestoreError!task_state.Task {
+    validatePresentation(wire, projection.limits) catch return error.TaskStoreCorrupt;
     const checkpoint_anchor = parseEnum(task_state.CheckpointAnchor, wire.checkpoint_anchor) orelse
         return error.TaskStoreCorrupt;
     const checkpoint_attempt = parseEnum(task_state.CheckpointAttempt, wire.checkpoint_attempt) orelse
@@ -1657,6 +1668,7 @@ pub fn restoreTask(
     return .{
         .durable = .{
             .id = wire.id,
+            .next_presentation_order = wire.next_presentation_order orelse 1,
             .recent_order = wire.recent_order,
             .completion_seen_run_id = completion_seen_run_id,
             .execution_generation = wire.binding.execution_generation,
@@ -2124,6 +2136,7 @@ fn restoreFileReference(
         return error.TaskStoreCorrupt;
     var reference = task_state.FileReferenceView{
         .generated_image = wire.generated_image,
+        .presentation_anchor = wire.presentation_anchor,
         .id = undefined,
         .title = undefined,
         .display_path = undefined,
@@ -3164,7 +3177,50 @@ fn validate(state: *const StateWire, limits: Limits) !void {
     }
 }
 
+fn validatePresentation(task: TaskWire, limits: Limits) !void {
+    if (task.presentation_format) |format| {
+        if (format != 1 or task.next_presentation_order == null or task.next_presentation_order.? == 0) return error.Invalid;
+    } else if (task.next_presentation_order != null) return error.Invalid;
+    var seen: std.AutoHashMap(u64, void) = .init(std.heap.page_allocator);
+    defer seen.deinit();
+    for (task.input_submissions) |record| try validatePresentationItem(task, record.submission.presentation_state, record.submission.presentation_order, record.submission.after_output_count, limits, &seen);
+    for (task.runs) |run| {
+        if (run.submission) |record| try validatePresentationItem(task, record.presentation_state, record.presentation_order, record.after_output_count, limits, &seen);
+        for (run.additional_inputs) |input| {
+            if (input.submission) |record| try validatePresentationItem(task, record.presentation_state, record.presentation_order, record.after_output_count, limits, &seen);
+        }
+        for (run.tools) |tool| if (tool.file_refs) |refs| {
+            for (refs) |ref| {
+                if (!ref.generated_image) {
+                    if (ref.presentation_anchor != null) return error.Invalid;
+                    continue;
+                }
+                try validatePresentationItem(task, ref.presentation_state, if (ref.presentation_anchor) |a| a.presentation_order else null, if (ref.presentation_anchor) |a| a.after_output_count else 0, limits, &seen);
+            }
+        };
+    }
+}
+
+fn validatePresentationItem(task: TaskWire, state: ?[]const u8, order: ?u64, count: u32, limits: Limits, seen: *std.AutoHashMap(u64, void)) !void {
+    if (count > limits.max_commentary_segments_per_run + 1) return error.Invalid;
+    if (task.presentation_format == null) {
+        if (state != null or order != null) return error.Invalid;
+        return;
+    }
+    const tag = state orelse return error.Invalid;
+    if (std.mem.eql(u8, tag, "legacy")) {
+        if (order != null) return error.Invalid;
+        return;
+    }
+    if (!std.mem.eql(u8, tag, "anchored")) return error.Invalid;
+    const value = order orelse return error.Invalid;
+    if (value == 0 or value >= task.next_presentation_order.?) return error.Invalid;
+    const entry = try seen.getOrPut(value);
+    if (entry.found_existing) return error.Invalid;
+}
+
 fn validateTask(task: TaskWire, limits: Limits) !void {
+    try validatePresentation(task, limits);
     if (task.input_submissions.len > limits.max_pending_inputs_per_task) return error.Invalid;
     for (task.input_submissions, 0..) |record, index| {
         _ = restoreSubmission(record.submission) catch return error.Invalid;
@@ -5352,4 +5408,34 @@ test "Run history without Outputs retains its original fields and restores an em
     task.next_run_generation = 1;
     task.runs = @constCast(&[_]RunWire{parsed.value});
     try validateTask(task, testLimits());
+}
+
+test "presentation format distinguishes legacy from missing anchors and preserves high water" {
+    var task = reviewTestTask();
+    var run = reviewTestRun();
+    var runs = [_]RunWire{run};
+    task.runs = &runs;
+    try validatePresentation(task, testLimits());
+    task.presentation_format = 1;
+    try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
+    task.next_presentation_order = 4;
+    run.submission = .{ .operation_id = "message", .presentation_state = "anchored", .presentation_order = 3, .after_output_count = @intCast(testLimits().max_commentary_segments_per_run + 1) };
+    runs[0] = run;
+    try validatePresentation(task, testLimits());
+    const restored = try restoreSubmission(run.submission.?);
+    try std.testing.expectEqual(@as(?u64, 3), restored.presentation_order);
+    const projected = submissionWire(&restored);
+    try std.testing.expectEqualStrings("anchored", projected.presentation_state.?);
+    task.next_presentation_order = 3;
+    try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
+    task.next_presentation_order = 4;
+    run.submission.?.presentation_order = null;
+    runs[0] = run;
+    try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
+    run.submission.?.presentation_state = "legacy";
+    runs[0] = run;
+    try validatePresentation(task, testLimits());
+    run.submission.?.presentation_state = null;
+    runs[0] = run;
+    try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
 }

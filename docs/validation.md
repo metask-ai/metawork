@@ -226,6 +226,8 @@ detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：
 
 ## 变更验证 Gate
 
+对话呈现锚点的验证按 owner 分层：Task runtime、history codec 与 SQL round trip 固定展示序号高水位、图片引用与锚点原子安装、重复引用稳定、旧记录识别及新格式严格拒绝；Bridge fixture 与 Renderer suite 固定同一身份的消息接管、输出回退、终态收尾、分页完整性和图片先后。Windows 的 `node scripts/test-conversation-webview-windows.mjs` 使用正式 automation artifact、真实 WebView2 和隔离的组件夹具，验证图片解码及节点稳定、文本选择与焦点、分页补载后的内容阅读锚点、终态详情顺序、安全失效，以及桌面/390px 的深浅主题。该组件夹具不替代真实 Host 生图、账户授权、完整桌面生命周期或系统键盘手势证据；这些验收的失败须分别保留，不能用组件通过覆盖。
+
 当前 AgentCore 系统时钟异常路径尚未完整满足“读取失败时明确报告日期未知”：POSIX 时钟读取失败可能以零 Unix time 继续生成日期。该上游缺口暂不阻塞 Core 日期上下文消费，不通过 Host 时钟、日期 fallback 或平行注入补齐；修复与异常路径回归归 AgentCore 发布方，正常请求、恢复和 Host 传参验证仍必须通过。
 
 Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。New task 模型 override 还必须覆盖默认 null、不修改 global default、同源非默认模型被写入新 Task 与 owned ExecutionConfig、source/catalog generation 漂移或 membership 失效时拒绝且不回退；Renderer、Bridge 和 Product Control 必须各自固定这条 payload/authority 链路。

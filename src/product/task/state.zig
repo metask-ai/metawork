@@ -263,7 +263,13 @@ pub const FileReferenceRangeView = struct {
 
 pub const FileReferenceLocatorKind = enum { workspace_path, absolute_path, uri };
 
+pub const PresentationAnchor = struct {
+    after_output_count: u32,
+    presentation_order: u64,
+};
+
 pub const FileReferenceView = struct {
+    presentation_anchor: ?PresentationAnchor = null,
     generated_image: bool = false,
     id: []u8,
     title: []u8,
@@ -438,6 +444,7 @@ pub const RunInput = union(enum) {
 };
 
 pub const Submission = struct {
+    presentation_order: ?u64 = null,
     operation_id: [64]u8 = @splat(0),
     operation_id_len: u8,
     received_at_unix_ms: ?u64 = null,
@@ -1010,6 +1017,8 @@ test "Task model intent owns independent bounded identity and revision" {
 }
 
 pub const DurableTaskRecord = struct {
+    next_presentation_order: u64 = 1,
+
     id: u64,
     recent_order: u64,
     completion_seen_run_id: u64 = 0,
@@ -1038,6 +1047,12 @@ pub const DurableTaskRecord = struct {
     checkpoint: ?checkpoint_record.Record = null,
     checkpoint_anchor: CheckpointAnchor = .none,
     checkpoint_attempt: CheckpointAttempt = .none,
+    pub fn takePresentationOrder(self: *DurableTaskRecord) error{ProjectionCapacity}!u64 {
+        if (self.next_presentation_order == 0 or self.next_presentation_order == std.math.maxInt(u64)) return error.ProjectionCapacity;
+        const order = self.next_presentation_order;
+        self.next_presentation_order += 1;
+        return order;
+    }
 };
 
 pub const RuntimeAttachment = task_attachment.State;

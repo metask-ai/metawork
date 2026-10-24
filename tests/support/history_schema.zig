@@ -401,6 +401,8 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
     const approval = if (v.checkpoint) |cp| std.mem.eql(u8, cp.anchor.terminal.kind, "approval") else false;
     const checkpoint = if (approval) null else v.checkpoint;
     try batch.add("tasks", .{
+        .presentation_format = try oi(if (v.presentation_format) |format| @as(u64, format) else null),
+        .next_presentation_order = try batch.ou(v.next_presentation_order),
         .ordinal = try integer(ordinal),
         .id = try batch.u(v.id),
         .recent_order = try batch.u(v.recent_order),
@@ -450,6 +452,8 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
 fn readTask(row: Record) !wire.TaskWire {
     try row.optionalGroup(.{ "active_operation_kind", "active_operation_id" });
     var v: wire.TaskWire = undefined;
+    v.presentation_format = if (try row.oi("presentation_format")) |format| std.math.cast(u8, format) orelse return error.Invalid else null;
+    v.next_presentation_order = try row.ou("next_presentation_order");
     v.id = try row.u("id");
     v.recent_order = try row.u("recent_order");
     v.completion_seen_run_id = try row.ou("completion_seen_run_id");
@@ -681,7 +685,7 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 24) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 26) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // outputs are deliberately unsupported above; production retains them in MWTF.
     if (std.meta.fields(wire.RunWire).len != 32) @compileError("Review every history SQL field mapping after RunWire changes");
@@ -703,7 +707,7 @@ comptime {
     if (std.meta.fields(wire.FileReferencePositionWire).len != 2) @compileError("Review history fixture coverage after FileReferencePositionWire changes");
     if (std.meta.fields(wire.FileReferenceRangeWire).len != 2) @compileError("Review history fixture coverage after FileReferenceRangeWire changes");
     // generated_image is preserved inside file_refs_json; history_schema_test covers absent/false/true.
-    if (std.meta.fields(wire.FileReferenceWire).len != 8) @compileError("Review history fixture coverage after FileReferenceWire changes");
+    if (std.meta.fields(wire.FileReferenceWire).len != 10) @compileError("Review history fixture coverage after FileReferenceWire changes");
     if (std.meta.fields(wire.FileChangeArtifactWire).len != 4) @compileError("Review history fixture coverage after FileChangeArtifactWire changes");
     if (std.meta.fields(wire.UsageWire).len != 4) @compileError("Review history fixture coverage after UsageWire changes");
     if (std.meta.fields(wire.PermissionSummaryWire).len != 11) @compileError("Review history fixture coverage after PermissionSummaryWire changes");
