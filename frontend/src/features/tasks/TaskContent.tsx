@@ -3,6 +3,7 @@ import {
   type FilePreviewLoader,
 } from "./GeneratedImagePreview.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
+import { UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
 import { MessageInfoBar } from "./MessageInfoBar.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
@@ -39,7 +40,11 @@ import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
-import { deriveRunReadingFlow } from "./assistant-output.ts";
+import {
+  deriveTaskReadingPlan,
+  type LocalReadingInput,
+  type RunReadingEntry,
+} from "./assistant-output.ts";
 import {
   deriveRunPresentation,
   formatRunTimestamp,
@@ -60,10 +65,32 @@ type ReadingState = {
   anchor?: {
     runId: string;
     offset: number;
+    entryId?: string;
+    neighbors?: { id: string; offset: number }[];
   };
 };
 function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
   const bounds = viewport.getBoundingClientRect();
+  const entries = [
+    ...viewport.querySelectorAll<HTMLElement>("[data-reading-id]"),
+  ];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!;
+    const rect = entry.getBoundingClientRect();
+    if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+    return {
+      runId: entry.closest<HTMLElement>("[data-run-id]")?.dataset.runId ?? "",
+      entryId: entry.dataset.readingId!,
+      offset: rect.top - bounds.top,
+      neighbors: entries
+        .slice(Math.max(0, index - 1), index + 3)
+        .filter((item) => item !== entry)
+        .map((item) => ({
+          id: item.dataset.readingId!,
+          offset: item.getBoundingClientRect().top - bounds.top,
+        })),
+    };
+  }
   for (const run of viewport.querySelectorAll<HTMLElement>("[data-run-id]")) {
     const rect = run.getBoundingClientRect();
     if (rect.bottom > bounds.top && rect.top < bounds.bottom)
@@ -74,6 +101,25 @@ function readingAnchor(viewport: HTMLDivElement): ReadingState["anchor"] {
 function restoreReadingAnchor(viewport: HTMLDivElement, saved: ReadingState) {
   const anchor = saved.anchor;
   if (!anchor) return false;
+  const entries = [
+    ...viewport.querySelectorAll<HTMLElement>("[data-reading-id]"),
+  ];
+  for (const candidate of [
+    { id: anchor.entryId, offset: anchor.offset },
+    ...(anchor.neighbors ?? []),
+  ]) {
+    if (!candidate.id) continue;
+    const entry = entries.find(
+      (item) => item.dataset.readingId === candidate.id,
+    );
+    if (entry) {
+      viewport.scrollTop +=
+        entry.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top -
+        candidate.offset;
+      return true;
+    }
+  }
   const run = Array.from(
     viewport.querySelectorAll<HTMLElement>("[data-run-id]"),
   ).find((node) => node.dataset.runId === anchor.runId);
@@ -264,7 +310,7 @@ export function TaskContent({
     loading: boolean;
     onLoad: () => void;
   };
-  localSubmissions?: ReactNode;
+  localSubmissions?: readonly (LocalReadingInput & { content: ReactNode })[];
   snapshotReceivedAt: number | null;
   synchronized: boolean;
   requestingStop: boolean;
@@ -323,22 +369,19 @@ export function TaskContent({
       task.runs.at(-1) ??
       null)
     : null;
-  const submissions: WaitingInputView[] = [
-    ...(task?.inputSubmissions ?? []),
-    ...(task?.runs.flatMap((run) =>
-      run.submission?.anchorRunId
-        ? [
-            {
-              submission: run.submission,
-              input: run.input,
-              state: "interrupted" as const,
-              reason: null,
-              executed: true,
-            },
-          ]
-        : [],
-    ) ?? []),
-  ];
+  const plan = task ? deriveTaskReadingPlan(task, localSubmissions) : null;
+  const localNodes = new Map(
+    localSubmissions?.map((item) => [item.operationId, item.content]),
+  );
+  function renderOutside(entry: RunReadingEntry) {
+    return entry.kind === "submission" ? (
+      renderSubmission(entry.input)
+    ) : entry.kind === "local" ? (
+      <Fragment key={entry.identity}>
+        {localNodes.get(entry.operationId)}
+      </Fragment>
+    ) : null;
+  }
   function renderSubmission(record: WaitingInputView) {
     const time = formatRunTimestamp(
       locale,
@@ -349,36 +392,39 @@ export function TaskContent({
       (run) => run.submission?.operationId === record.submission.operationId,
     );
     return (
-      <div
-        className="additional-input"
+      <UserInputMessage
         key={record.submission.operationId}
-        data-operation-id={record.submission.operationId}
-      >
-        <Message role="user" tabIndex={-1} className="focus-ring">
-          <TaskInput input={record.input} />
-        </Message>
-        <MessageInfoBar
-          role="user"
-          time={time}
-          onCopy={() => copyRunInput(record.input)}
-        />
-        {!executed && (
-          <p className="projection-note">
-            {t(
-              record.state === "waiting"
-                ? "input.waiting"
-                : record.state === "cancelled"
-                  ? "input.cancelled"
-                  : "input.unexecuted",
+        operationId={record.submission.operationId}
+        footer={
+          <MessageInfoBar
+            role="user"
+            time={time}
+            onCopy={() => copyRunInput(record.input)}
+          />
+        }
+        notice={
+          <>
+            {!executed && (
+              <p className="projection-note">
+                {t(
+                  record.state === "waiting"
+                    ? "input.waiting"
+                    : record.state === "cancelled"
+                      ? "input.cancelled"
+                      : "input.unexecuted",
+                )}
+              </p>
             )}
-          </p>
-        )}
-        {record.reason && record.state === "failed" && (
-          <p className="projection-note">
-            {t(`mutation.reason.${record.reason}` as MessageId)}
-          </p>
-        )}
-      </div>
+            {record.reason && record.state === "failed" && (
+              <p className="projection-note">
+                {t(`mutation.reason.${record.reason}` as MessageId)}
+              </p>
+            )}
+          </>
+        }
+      >
+        <TaskInput input={record.input} />
+      </UserInputMessage>
     );
   }
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
@@ -511,6 +557,20 @@ export function TaskContent({
     });
     setShowJumpLatest(false);
   }, [task?.id]);
+  useEffect(() => {
+    const node = viewport.current;
+    const content = node?.firstElementChild;
+    if (!node || !content || !task || typeof ResizeObserver === "undefined")
+      return;
+    const observer = new ResizeObserver(() => {
+      const saved = reading.get(task.id);
+      if (restoringTask.current !== null) return;
+      if (!saved || saved.followingLatest) node.scrollTop = node.scrollHeight;
+      else restoreReadingAnchor(node, saved);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [task?.id, reading]);
   return (
     <Conversation
       aria-label={task?.title}
@@ -542,363 +602,389 @@ export function TaskContent({
           {t("task.conversation_history_excluded")}
         </p>
       )}
-      {submissions
-        .filter((record) => record.submission.anchorRunId === null)
-        .map(renderSubmission)}
-      {task?.runs.map((run) => {
-        const isCurrent = run.id === currentRun?.id;
-        const terminal = run.terminal;
-        const presentation = deriveRunPresentation(run);
-        const readingFlow = deriveRunReadingFlow(
-          run.id,
-          run.output,
-          run.additionalInputs,
-          submissions.filter(
-            (record) => record.submission.anchorRunId === run.id,
-          ),
-        );
-        const responseCopyable = responseCopyEligible(run);
-        const submittedTime = formatRunTimestamp(
-          locale,
-          run.submission?.receivedAtUnixMs ?? run.submittedAtUnixMs,
-          nowUnixMs,
-        );
-        const finishedTime = formatRunTimestamp(
-          locale,
-          run.finishedAtUnixMs,
-          nowUnixMs,
-        );
-        const references = new Map(
-          [...runFileReferenceLinks(run)].map(([text, reference]) => [
-            text,
-            {
-              label: t("file_preview.open", { path: reference.displayPath }),
-              onOpen: (opener: HTMLButtonElement) =>
-                onPreviewFile(task.id, run.id, reference, opener),
-            },
-          ]),
-        );
-        const disclosureKey = `${task.id}:${run.id}`;
-        const disclosure = observeRunProcessDisclosure(
-          processDisclosure.get(disclosureKey),
-        );
-        processDisclosure.set(disclosureKey, disclosure);
-        const expandedToolIds =
-          toolDisclosure.get(disclosureKey) ?? emptyToolDisclosure;
-        function setProcessExpanded(expanded: boolean) {
-          processDisclosure.set(
-            disclosureKey,
-            toggleRunProcessDisclosure(expanded),
+      {plan?.before.map(renderOutside)}
+      {plan?.runs.map(
+        ({ run, presentation, entries: readingFlow, showRoot }) => {
+          const task = plan.task;
+          const isCurrent = run.id === currentRun?.id;
+          const terminal = run.terminal;
+          const responseCopyable = responseCopyEligible(run);
+          const submittedTime = formatRunTimestamp(
+            locale,
+            run.submission?.receivedAtUnixMs ?? run.submittedAtUnixMs,
+            nowUnixMs,
           );
-          setDisclosureRevision((value) => value + 1);
-        }
-        function setToolExpanded(toolId: string, expanded: boolean) {
-          const next = new Set(toolDisclosure.get(disclosureKey) ?? []);
-          if (expanded) next.add(toolId);
-          else next.delete(toolId);
-          toolDisclosure.set(disclosureKey, next);
-          setDisclosureRevision((value) => value + 1);
-        }
-        return (
-          <section
-            className="ai-exchange"
-            data-run-id={run.id}
-            key={`${task.id}:${run.id}`}
-          >
-            {!transferredRunIds.has(run.id) && !run.submission?.anchorRunId && (
-              <>
-                <Message role="user" tabIndex={-1} className="focus-ring">
-                  <TaskInput input={run.input} />
-                </Message>
-                <MessageInfoBar
-                  role="user"
-                  time={submittedTime}
-                  latest={
-                    run.id === latestInputId &&
-                    run.additionalInputs.length === 0
+          const finishedTime = formatRunTimestamp(
+            locale,
+            run.finishedAtUnixMs,
+            nowUnixMs,
+          );
+          const references = new Map(
+            [...runFileReferenceLinks(run)].map(([text, reference]) => [
+              text,
+              {
+                label: t("file_preview.open", { path: reference.displayPath }),
+                onOpen: (opener: HTMLButtonElement) =>
+                  onPreviewFile(task.id, run.id, reference, opener),
+              },
+            ]),
+          );
+          const disclosureKey = `${task.id}:${run.id}`;
+          const disclosure = observeRunProcessDisclosure(
+            processDisclosure.get(disclosureKey),
+          );
+          processDisclosure.set(disclosureKey, disclosure);
+          const expandedToolIds =
+            toolDisclosure.get(disclosureKey) ?? emptyToolDisclosure;
+          function setProcessExpanded(expanded: boolean) {
+            processDisclosure.set(
+              disclosureKey,
+              toggleRunProcessDisclosure(expanded),
+            );
+            setDisclosureRevision((value) => value + 1);
+          }
+          function setToolExpanded(toolId: string, expanded: boolean) {
+            const next = new Set(toolDisclosure.get(disclosureKey) ?? []);
+            if (expanded) next.add(toolId);
+            else next.delete(toolId);
+            toolDisclosure.set(disclosureKey, next);
+            setDisclosureRevision((value) => value + 1);
+          }
+          const supplement = (
+            <>
+              {presentation.active && (
+                <RunProcess
+                  presentation={presentation}
+                  reviewingPermission={
+                    isCurrent && task.permissionReviewState === "reviewing"
                   }
-                  onCopy={() => copyRunInput(run.input)}
+                  fileChanges={fileChangesEnabled ? run.fileChanges : null}
+                  elapsedMs={run.elapsedMs}
+                  snapshotReceivedAt={snapshotReceivedAt}
+                  synchronized={synchronized}
+                  requestingStop={requestingStop}
+                  expanded={disclosure.expanded}
+                  onExpandedChange={setProcessExpanded}
+                  expandedToolIds={expandedToolIds}
+                  onToolExpandedChange={setToolExpanded}
+                  onReviewFileChanges={(displayPath, opener) =>
+                    onReviewFileChanges(task.id, run.id, opener, displayPath)
+                  }
                 />
-              </>
-            )}
-            <div className="run-reading-flow">
-              {readingFlow.map((entry) =>
-                entry.kind === "submission" ? (
-                  renderSubmission(entry.input)
-                ) : entry.kind === "input" ? (
-                  <AdditionalInput
-                    key={entry.identity}
-                    input={entry.input}
-                    submittedTime={formatRunTimestamp(
-                      locale,
-                      entry.input.submission?.receivedAtUnixMs ?? null,
-                      nowUnixMs,
-                    )}
-                    latest={
-                      run.id === latestInputId &&
-                      entry.input.id === run.additionalInputs.at(-1)?.id
-                    }
-                  />
-                ) : entry.parts.some((part) => part.content) ||
-                  entry.redacted ? (
-                  <Fragment key={entry.identity}>
-                    <Message role="assistant" className="run-assistant-output">
-                      {entry.parts
-                        .filter((part) => part.content)
-                        .map((part) => {
-                          const streaming = part.disposition === "provisional";
-                          const response =
-                            part.disposition === "final" ||
-                            part.disposition === "partial";
-                          return (
-                            <Markdown
-                              className={`assistant-output-part ${
-                                response
-                                  ? "agent-response"
-                                  : "run-commentary-item"
-                              }`}
-                              data-output-identity={part.identity}
-                              data-output-disposition={part.disposition}
-                              key={part.identity}
-                              references={streaming ? undefined : references}
-                              interactive={!streaming}
-                              webLink={streaming ? undefined : webLink}
-                              streaming={streaming}
-                              onStreamingCommit={followDeferredOutput}
-                              codeCopy={
-                                response && responseCopyable
-                                  ? {
-                                      label: t("copy.code"),
-                                      copiedLabel: t("copy.copied"),
-                                      failedLabel: t("copy.failed"),
-                                      onCopy: copyCodeText,
-                                    }
-                                  : undefined
-                              }
-                            >
-                              {part.content}
-                            </Markdown>
-                          );
-                        })}
-                      {entry.redacted && (
-                        <p className="projection-note">
-                          {t("privacy.sensitive_hidden")}
-                        </p>
-                      )}
-                      {responseCopyable &&
-                        entry.parts.some(
-                          (part) =>
-                            part.disposition === "final" ||
-                            part.disposition === "partial",
-                        ) && (
-                          <MessageInfoBar
-                            role="assistant"
-                            time={finishedTime}
-                            model={run.execution.model}
-                            latest={run.id === latestCopyableId}
-                            onCopy={() =>
-                              copyResponseMarkdown(run.output.response)
-                            }
-                          />
-                        )}
-                    </Message>
-                  </Fragment>
-                ) : null,
               )}
-            </div>
-            {run.tools
-              .flatMap((tool) => tool.fileRefs)
-              .filter((reference) => reference.generatedImage)
-              .map((reference) => (
-                <GeneratedImagePreview
-                  key={`${task.id}:${run.id}:${reference.id}`}
+              {isCurrent &&
+                task.pendingUi &&
+                task.permissionReviewState !== "reviewing" && (
+                  <div className="ai-exchange-intervention">
+                    {renderPendingUi({
+                      taskId: task.id,
+                      task,
+                      pending: task.pendingUi,
+                      busy: responseDisabled,
+                      respond: onRespond,
+                    })}
+                  </div>
+                )}
+              {task.uiHistory
+                .filter(
+                  (record) =>
+                    record.runId === run.id && record.answeredBy === "reviewer",
+                )
+                .map((record) => (
+                  <details
+                    className="projection-note"
+                    key={`review-${record.requestId}`}
+                  >
+                    <summary>
+                      {t("approval.answered_by_reviewer")}
+                      {record.permission?.toolName && (
+                        <> · {record.permission.toolName}</>
+                      )}{" "}
+                      · {t(`ui.state.${record.state}`)}
+                    </summary>
+                    <p>{record.reviewReason}</p>
+                  </details>
+                ))}
+              {outputsEnabled && (
+                <RunOutputs
+                  outputs={run.outputs}
                   taskId={task.id}
                   runId={run.id}
-                  reference={reference}
-                  enabled={Boolean(synchronized && !responseDisabled)}
-                  load={loadFilePreview}
-                  onOpen={(opener) =>
-                    onPreviewFile(task.id, run.id, reference, opener)
+                  disabled={responseDisabled || !synchronized}
+                  onAction={onOutputAction}
+                  onPrepareEdit={onPrepareOutputEdit}
+                />
+              )}
+              {fileChangesEnabled && run.fileChanges && (
+                <RunFileChangesSummary
+                  fileChanges={run.fileChanges}
+                  onReview={(opener) =>
+                    onReviewFileChanges(task.id, run.id, opener)
                   }
                 />
-              ))}
-            {presentation.active && (
-              <RunProcess
-                presentation={presentation}
-                reviewingPermission={
-                  isCurrent && task.permissionReviewState === "reviewing"
-                }
-                fileChanges={fileChangesEnabled ? run.fileChanges : null}
-                elapsedMs={run.elapsedMs}
-                snapshotReceivedAt={snapshotReceivedAt}
-                synchronized={synchronized}
-                requestingStop={requestingStop}
-                expanded={disclosure.expanded}
-                onExpandedChange={setProcessExpanded}
-                expandedToolIds={expandedToolIds}
-                onToolExpandedChange={setToolExpanded}
-                onReviewFileChanges={(displayPath, opener) =>
-                  onReviewFileChanges(task.id, run.id, opener, displayPath)
-                }
-              />
-            )}
-            {isCurrent &&
-              task.pendingUi &&
-              task.permissionReviewState !== "reviewing" && (
-                <div className="ai-exchange-intervention">
-                  {renderPendingUi({
-                    taskId: task.id,
-                    task,
-                    pending: task.pendingUi,
-                    busy: responseDisabled,
-                    respond: onRespond,
-                  })}
-                </div>
               )}
-            {task.uiHistory
-              .filter(
-                (record) =>
-                  record.runId === run.id && record.answeredBy === "reviewer",
-              )
-              .map((record) => (
-                <details
-                  className="projection-note"
-                  key={`review-${record.requestId}`}
-                >
-                  <summary>
-                    {t("approval.answered_by_reviewer")}
-                    {record.permission?.toolName && (
-                      <> · {record.permission.toolName}</>
-                    )}{" "}
-                    · {t(`ui.state.${record.state}`)}
-                  </summary>
-                  <p>{record.reviewReason}</p>
-                </details>
-              ))}
-            {outputsEnabled && (
-              <RunOutputs
-                outputs={run.outputs}
-                taskId={task.id}
-                runId={run.id}
-                disabled={responseDisabled || !synchronized}
-                onAction={onOutputAction}
-                onPrepareEdit={onPrepareOutputEdit}
-              />
-            )}
-            {fileChangesEnabled && run.fileChanges && (
-              <RunFileChangesSummary
-                fileChanges={run.fileChanges}
-                onReview={(opener) =>
-                  onReviewFileChanges(task.id, run.id, opener)
-                }
-              />
-            )}
-            {!presentation.active && presentation.processVisible && (
-              <RunProcess
-                presentation={presentation}
-                reviewingPermission={false}
-                fileChanges={fileChangesEnabled ? run.fileChanges : null}
-                elapsedMs={run.elapsedMs}
-                synchronized={synchronized}
-                expanded={disclosure.expanded}
-                onExpandedChange={setProcessExpanded}
-                expandedToolIds={expandedToolIds}
-                onToolExpandedChange={setToolExpanded}
-                onReviewFileChanges={(displayPath, opener) =>
-                  onReviewFileChanges(task.id, run.id, opener, displayPath)
-                }
-              />
-            )}
-            {presentation.showTerminalNotice && terminal && (
-              <Activity
-                className={
-                  terminal.cause === "provider_failure"
-                    ? "run-terminal-activity"
-                    : undefined
-                }
-                state={outcomeState(terminal.outcome)}
-                label={t(
-                  terminal.cause === "provider_failure"
-                    ? "run.provider_failure.title"
-                    : terminalMessage(
-                        run.output.responseKind,
-                        terminal.outcome,
-                      ),
-                )}
-                detail={
-                  terminal.cause === "provider_failure" ? (
-                    <span className="run-terminal-detail">
-                      <span>
-                        {t(
-                          run.output.responseKind === "partial"
-                            ? "run.provider_failure.partial_impact"
-                            : "run.provider_failure.no_response_impact",
+              {!presentation.active && presentation.processVisible && (
+                <RunProcess
+                  presentation={presentation}
+                  reviewingPermission={false}
+                  fileChanges={fileChangesEnabled ? run.fileChanges : null}
+                  elapsedMs={run.elapsedMs}
+                  synchronized={synchronized}
+                  expanded={disclosure.expanded}
+                  onExpandedChange={setProcessExpanded}
+                  expandedToolIds={expandedToolIds}
+                  onToolExpandedChange={setToolExpanded}
+                  onReviewFileChanges={(displayPath, opener) =>
+                    onReviewFileChanges(task.id, run.id, opener, displayPath)
+                  }
+                />
+              )}
+              {presentation.showTerminalNotice && terminal && (
+                <Activity
+                  className={
+                    terminal.cause === "provider_failure"
+                      ? "run-terminal-activity"
+                      : undefined
+                  }
+                  state={outcomeState(terminal.outcome)}
+                  label={t(
+                    terminal.cause === "provider_failure"
+                      ? "run.provider_failure.title"
+                      : terminalMessage(
+                          run.output.responseKind,
+                          terminal.outcome,
+                        ),
+                  )}
+                  detail={
+                    terminal.cause === "provider_failure" ? (
+                      <span className="run-terminal-detail">
+                        <span>
+                          {t(
+                            run.output.responseKind === "partial"
+                              ? "run.provider_failure.partial_impact"
+                              : "run.provider_failure.no_response_impact",
+                          )}
+                        </span>
+                        {run.tools.length > 0 && (
+                          <span>
+                            {t("run.provider_failure.review_tool_effects")}
+                          </span>
                         )}
                       </span>
-                      {run.tools.length > 0 && (
-                        <span>
-                          {t("run.provider_failure.review_tool_effects")}
-                        </span>
+                    ) : terminal.cause ? (
+                      t(`cause.${terminal.cause}`)
+                    ) : terminal.outcome === "completed" &&
+                      run.output.responseKind !== "partial" ? (
+                      t("run.no_final_response")
+                    ) : undefined
+                  }
+                  announce={isCurrent}
+                  action={
+                    (isCurrent &&
+                      retryAvailable &&
+                      retryable(terminal.outcome)) ||
+                    terminal.cause === "provider_failure" ? (
+                      <div className="run-terminal-actions">
+                        {isCurrent &&
+                          retryAvailable &&
+                          retryable(terminal.outcome) && (
+                            <button
+                              className="ai-activity-retry focus-ring"
+                              title={
+                                composerHasDraft
+                                  ? t("run.review_draft_help")
+                                  : t("run.retry_help")
+                              }
+                              onClick={() => onPrepareRetry(run.input)}
+                            >
+                              {composerHasDraft
+                                ? t("run.review_draft")
+                                : t("run.prepare_retry")}
+                            </button>
+                          )}
+                        <RunDiagnostics run={run} />
+                      </div>
+                    ) : undefined
+                  }
+                />
+              )}
+              {run.conversationCoverage === "excluded" && (
+                <p
+                  className="projection-notice run-conversation-coverage-notice"
+                  role="note"
+                >
+                  {t("run.conversation_history_excluded")}
+                </p>
+              )}
+            </>
+          );
+          return (
+            <section
+              className="ai-exchange"
+              data-run-id={run.id}
+              key={`${task.id}:${run.id}`}
+            >
+              {showRoot && (
+                <>
+                  <Message role="user"
+                    tabIndex={-1}
+                    className="focus-ring"
+                    data-reading-id={
+                      run.submission
+                        ? `submission:${run.submission.operationId}`
+                        : `${run.id}:root`
+                    }
+                  >
+                    <TaskInput input={run.input} />
+                  </Message>
+                  <MessageInfoBar
+                    role="user"
+                    time={submittedTime}
+                    latest={
+                      run.id === latestInputId &&
+                      run.additionalInputs.length === 0
+                    }
+                    onCopy={() => copyRunInput(run.input)}
+                  />
+                </>
+              )}
+              <div className="run-reading-flow">
+                {readingFlow.map((entry) =>
+                  entry.kind === "submission" ? (
+                    renderSubmission(entry.input)
+                  ) : entry.kind === "input" ? (
+                    <AdditionalInput
+                      key={entry.identity}
+                      input={entry.input}
+                      submittedTime={formatRunTimestamp(
+                        locale,
+                        entry.input.submission?.receivedAtUnixMs ?? null,
+                        nowUnixMs,
                       )}
-                    </span>
-                  ) : terminal.cause ? (
-                    t(`cause.${terminal.cause}`)
-                  ) : terminal.outcome === "completed" &&
-                    run.output.responseKind !== "partial" ? (
-                    t("run.no_final_response")
-                  ) : undefined
-                }
-                announce={isCurrent}
-                action={
-                  (isCurrent &&
-                    retryAvailable &&
-                    retryable(terminal.outcome)) ||
-                  terminal.cause === "provider_failure" ? (
-                    <div className="run-terminal-actions">
-                      {isCurrent &&
-                        retryAvailable &&
-                        retryable(terminal.outcome) && (
-                          <button
-                            className="ai-activity-retry focus-ring"
-                            title={
-                              composerHasDraft
-                                ? t("run.review_draft_help")
-                                : t("run.retry_help")
-                            }
-                            onClick={() => onPrepareRetry(run.input)}
-                          >
-                            {composerHasDraft
-                              ? t("run.review_draft")
-                              : t("run.prepare_retry")}
-                          </button>
+                      latest={
+                        run.id === latestInputId &&
+                        entry.input.id === run.additionalInputs.at(-1)?.id
+                      }
+                    />
+                  ) : entry.kind === "local" ? (
+                    <Fragment key={entry.identity}>
+                      {localNodes.get(entry.operationId)}
+                    </Fragment>
+                  ) : entry.kind === "image" ? (
+                    <Message role="assistant"
+                      key={entry.identity}
+                      data-reading-id={entry.identity}
+                    >
+                      <GeneratedImagePreview
+                        taskId={task.id}
+                        runId={run.id}
+                        reference={entry.reference}
+                        enabled={Boolean(synchronized && !responseDisabled)}
+                        load={loadFilePreview}
+                        onOpen={(opener) =>
+                          onPreviewFile(
+                            task.id,
+                            run.id,
+                            entry.reference,
+                            opener,
+                          )
+                        }
+                      />
+                    </Message>
+                  ) : entry.kind === "supplement" ? (
+                    <Fragment key={entry.identity}>{supplement}</Fragment>
+                  ) : entry.parts.some((part) => part.content) ||
+                    entry.redacted ? (
+                    <Fragment key={entry.identity}>
+                      <Message role="assistant"
+                        className="run-assistant-output"
+                      >
+                        {entry.parts
+                          .filter((part) => part.content)
+                          .map((part) => {
+                            const streaming =
+                              part.disposition === "provisional";
+                            const response =
+                              part.disposition === "final" ||
+                              part.disposition === "partial";
+                            return (
+                              <Markdown
+                                className={`assistant-output-part ${
+                                  response
+                                    ? "agent-response"
+                                    : "run-commentary-item"
+                                }`}
+                                data-reading-id={part.identity}
+                                data-output-identity={part.identity}
+                                data-output-disposition={part.disposition}
+                                key={part.identity}
+                                references={streaming ? undefined : references}
+                                interactive={!streaming}
+                                webLink={streaming ? undefined : webLink}
+                                streaming={streaming}
+                                onStreamingCommit={followDeferredOutput}
+                                codeCopy={
+                                  response && responseCopyable
+                                    ? {
+                                        label: t("copy.code"),
+                                        copiedLabel: t("copy.copied"),
+                                        failedLabel: t("copy.failed"),
+                                        onCopy: copyCodeText,
+                                      }
+                                    : undefined
+                                }
+                              >
+                                {part.content}
+                              </Markdown>
+                            );
+                          })}
+                        {entry.redacted && (
+                          <p className="projection-note">
+                            {t("privacy.sensitive_hidden")}
+                          </p>
                         )}
-                      <RunDiagnostics run={run} />
-                    </div>
-                  ) : undefined
-                }
-              />
-            )}
-            {run.conversationCoverage === "excluded" && (
-              <p
-                className="projection-notice run-conversation-coverage-notice"
-                role="note"
-              >
-                {t("run.conversation_history_excluded")}
-              </p>
-            )}
-          </section>
-        );
-      })}
+                        {responseCopyable &&
+                          entry.parts.some(
+                            (part) =>
+                              part.disposition === "final" ||
+                              part.disposition === "partial",
+                          ) && (
+                            <MessageInfoBar
+                              role="assistant"
+                              time={finishedTime}
+                              model={run.execution.model}
+                              latest={run.id === latestCopyableId}
+                              onCopy={() =>
+                                copyResponseMarkdown(run.output.response)
+                              }
+                            />
+                          )}
+                      </Message>
+                    </Fragment>
+                  ) : null,
+                )}
+              </div>
+            </section>
+          );
+        },
+      )}
       {task &&
         task.runs.length === 0 &&
-        submissions.length === 0 &&
-        !localSubmissions && (
+        (plan?.before.length ?? 0) === 0 &&
+        (plan?.after.length ?? 0) === 0 &&
+        !localSubmissions?.length && (
           <div className="ai-conversation-empty">
             <h2>{t("task.empty_title")}</h2>
             <p>{t("task.created_empty_body")}</p>
           </div>
         )}
-      {localSubmissions}
+      {plan?.after.map(renderOutside)}
+      {!task &&
+        localSubmissions?.map((entry) => (
+          <Fragment key={`submission:${entry.operationId}`}>
+            {entry.content}
+          </Fragment>
+        ))}
     </Conversation>
   );
 }

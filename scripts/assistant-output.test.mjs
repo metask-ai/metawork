@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   deriveAssistantOutputParts,
   deriveRunReadingFlow,
+  deriveTaskReadingPlan,
+  localReadingAnchor,
 } from "../frontend/src/features/tasks/assistant-output.ts";
 
 function input(id, afterOutputCount) {
@@ -195,4 +197,153 @@ test("an empty classified response retains the canonical output ordinal", () => 
     content: "",
     disposition: "partial",
   });
+});
+
+function positionedInput(id, anchor, order) {
+  const value = input(id, anchor);
+  value.submission = {
+    operationId: value.operationId,
+    receivedAtUnixMs: null,
+    anchorRunId: "7",
+    afterOutputCount: anchor,
+    presentationOrder: order,
+  };
+  return value;
+}
+function image(id, anchor, order) {
+  return {
+    id,
+    title: "",
+    displayPath: `${id}.png`,
+    generatedImage: true,
+    presentationAnchor: { afterOutputCount: anchor, presentationOrder: order },
+  };
+}
+function flowLabels(flow) {
+  return flow.map((entry) =>
+    entry.kind === "assistant"
+      ? entry.parts.map((part) => part.ordinal)
+      : entry.kind === "image"
+        ? `image:${entry.reference.id}`
+        : entry.kind === "input"
+          ? `user:${entry.input.id}`
+          : entry.kind,
+  );
+}
+function projectedRun(id, overrides = {}) {
+  return {
+    id,
+    submission: null,
+    phase: "completed",
+    terminal: { outcome: "completed" },
+    activity: null,
+    tools: [],
+    additionalInputs: [],
+    input: { kind: "text", text: `root ${id}`, redacted: false },
+    output: output({ response: "done", responseKind: "final" }),
+    ...overrides,
+  };
+}
+
+test("an accepted image stays before the interjection when later output arrives, without adoption order", () => {
+  const user = positionedInput("1", 1, "2");
+  const oldImage = image("old", 1, "1");
+  const initial = output({ commentary: ["original"] });
+  assert.deepEqual(
+    flowLabels(deriveRunReadingFlow("7", initial, [user], [], [oldImage])),
+    [[0], "image:old", "user:1"],
+  );
+  const later = { ...initial, provisional: "adjusting" };
+  assert.deepEqual(
+    flowLabels(deriveRunReadingFlow("7", later, [user], [], [oldImage])),
+    [[0], "image:old", "user:1", [1]],
+  );
+  assert.deepEqual(
+    flowLabels(
+      deriveRunReadingFlow(
+        "7",
+        later,
+        [{ ...user, state: "adopted", order: "100" }],
+        [],
+        [oldImage],
+      ),
+    ),
+    [[0], "image:old", "user:1", [1]],
+  );
+  const newImage = image("new", 2, "3");
+  assert.deepEqual(
+    flowLabels(
+      deriveRunReadingFlow("7", later, [user], [], [newImage, oldImage]),
+    ),
+    [[0], "image:old", "user:1", [1], "image:new"],
+  );
+});
+
+test("image and message prefix anchors survive discard followed by slot reuse", () => {
+  const user = positionedInput("1", 1, "2");
+  const old = image("old", 3, "1");
+  assert.deepEqual(
+    flowLabels(deriveRunReadingFlow("7", output(), [user], [], [old])),
+    ["image:old", "user:1"],
+  );
+  assert.deepEqual(
+    flowLabels(
+      deriveRunReadingFlow(
+        "7",
+        output({ commentary: ["a", "b"], provisional: "retry" }),
+        [user],
+        [],
+        [old],
+      ),
+    ),
+    [[0, 1, 2], "image:old", "user:1"],
+  );
+});
+
+test("local confirmation keeps its logical position and operation identity beside images", () => {
+  const ref = image("old", 1, "10");
+  const run = projectedRun("7", {
+    phase: "running",
+    terminal: null,
+    output: output({ commentary: ["original"] }),
+    tools: [{ fileRefs: [ref] }],
+  });
+  const task = { runs: [run], inputSubmissions: [] };
+  const local = { operationId: "send-1", anchor: localReadingAnchor(task, 0) };
+  const before = deriveRunReadingFlow("7", run.output, [], [], [ref], [local]);
+  const after = deriveRunReadingFlow(
+    "7",
+    run.output,
+    [positionedInput("1", 1, "11")],
+    [],
+    [ref],
+  );
+  assert.deepEqual(
+    before.map((entry) => entry.identity),
+    after.map((entry) => entry.identity),
+  );
+});
+
+test("terminal supplements precede trailing messages and missing anchor pages cannot hide roots", () => {
+  const next = projectedRun("8", {
+    submission: {
+      operationId: "continue",
+      anchorRunId: "7",
+      afterOutputCount: 1,
+      presentationOrder: "1",
+      receivedAtUnixMs: null,
+    },
+  });
+  const paged = deriveTaskReadingPlan({ runs: [next], inputSubmissions: [] });
+  assert.equal(paged.runs[0].showRoot, true);
+  const full = deriveTaskReadingPlan({
+    runs: [projectedRun("7"), next],
+    inputSubmissions: [],
+  });
+  assert.equal(full.runs[1].showRoot, false);
+  assert.deepEqual(
+    full.runs[0].entries.map((entry) => entry.kind),
+    ["assistant", "supplement", "submission"],
+  );
+  assert.equal(full.runs[0].entries.at(-1).identity, "submission:continue");
 });
