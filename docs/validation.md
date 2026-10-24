@@ -58,11 +58,11 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 `python -X utf8 scripts/check-office-preparation-failures.py --download` 采用相同目标规则，覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理；Windows 保留原生负退出码用例，macOS 追加缺 Python 前置条件、空目录/普通文件/符号链接拒绝。还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。准备的外层预算覆盖生产下载、安装、发布后检查和有界收尾，文档执行仍保留独立短预算。`python3 scripts/check-office-publication.py` 在 macOS 覆盖 ctypes 排他发布的占位保留、并发唯一赢家及取消后子进程 join；Host seam 的对应回归接入正式 Native graph。
 
-真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、新建、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串和空缓存，不请求远端模型。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
+真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串和空缓存，不请求远端模型。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
 
 同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
 
-桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 的检查/继续修改草稿手势保持未验收。
+桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。
 
 这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
 
@@ -98,7 +98,7 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 
 | 目标          | 当前证据边界                                                                                       | 尚缺证据                                                          |
 | ------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| macOS arm64   | 当前系统私有环境、三格式、真实 Core、桌面成果回执/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、真实模型 smoke、成果按钮手势；正式 DMG 的 Office 执行链 |
+| macOS arm64   | 当前系统私有环境、三格式、真实 Core、开发版模型辅助续跑/成果手势/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、无干预模型 smoke；正式 DMG 的 Office 执行链 |
 | macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                                                     | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
 | Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                                                  | 原生环境/Core/桌面、ARM64 installer 分发                          |
 | Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                                               | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
@@ -110,6 +110,16 @@ macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24
 公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
 
 在 `47a947d1` 上追加的隔离桌面探针到达 Office 成果回执后，因原生窗口工具无法绑定 automation bundle ID 而未取得 Renderer 手势证据；等待观察超时，测试明确失败并退出其自有进程。没有对普通用户窗口执行操作，也不把该工具绑定失败归因于产品按钮。探针源码和日志保存在 `.zig-cache/office-cua-probe-source.mjs`、`.zig-cache/office-cua-probe.log`；成果检查/继续修改草稿仍未验收。用户确认目前没有其他原生机器或 CI 入口，因此上表的 macOS Intel、Windows ARM64、Windows x64 本次回归及最低系统缺口继续保留。
+
+### E-MAC-OFFICE-DEV-20261024
+
+用户将本轮范围收敛到 `npm run dev` 的功能验收，停止追加分发验收。macOS arm64 使用现有 Metask `glm-5.3-flash`；没有新增 Provider 或凭据。开发入口实际构建并启动；为了绑定原生窗口，canonical SDK 本地 packager 给同一 Debug 可执行文件增加 `.app` 外壳，签名前核对可执行文件相同，按开发入口签名后复核 file-backed sections 未变。此包装不构建 Release、不上传；身份见 `.zig-cache/office-dev-ui-identity.json`。
+
+实际模型的准备阶段发现目标键与下载量指引不够直接，`8ee13fa2` 从唯一 manifest 自动生成摘要。随后真实 Shell 暴露 Node 入口把 `work/script.cjs` 当包名的问题；`02f9f51d` 将脚本入口解析为绝对路径，保留其余参数。现有 Core qualification 改用嵌套相对 Node 脚本与相对 Python 脚本：旧资源明确失败 `Cannot find module scripts/create.cjs`，修复后三格式创建、工作副本修改、读取、原稿与环境内容不变通过。资源 suite 6/6、Host 资源发布 1/1 通过；日志为 `.zig-cache/office-relative-{before-fix,after-fix,resources,native}.log`。该结果仍不替代其他架构的原生回归。
+
+开发版 UI 受测 `8ee13fa2`、Task 21、现有 Metask 模型，按锁定入口真实准备私有环境并创建三份 original。模型误用了未安装的 Python PPT 库；首轮随后出现活动传递失败，第二轮停止，经两次普通续跑指令指导使用现有 XML helper 后完成，不能视为无干预 smoke。最终 Word/PPT 的 pack、validate、read 通过，Excel 标题已修改、公式 `=1+2` 保留且缓存为空。三份 original 摘要与 7,523 个环境文件内容均不变。PPT 首次交付返回 `capacity`，串行重试取得可信回执；三份实际 `DeliverFile` 的路径、大小与摘要均匹配独立文件核验。
+
+实际点击三项“检查文件”均显示检查时与交付一致；依次点击“继续修改”将引用加入同 Task Composer，保留已有草稿且不自动发送。正常退出同一开发版后冷启动，三项成果恢复相同 delivery ID、大小和摘要，重新检查仍一致；重启后的 Composer 为空，此证据不声明草稿跨重启持久化。精确身份与观察见 `.zig-cache/office-dev-{ui-identity,ui-observation,file-verification}.json`；原稿与环境基线分别为 `.zig-cache/office-dev-original-baseline.json`、`.zig-cache/office-dev-environment-before.json`。本轮不继续正式分发验收，其他原生架构、最低系统及无干预模型执行缺口保留。
 
 ### E-MAC-OFFICE-DMG-20261024
 
