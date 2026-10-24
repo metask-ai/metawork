@@ -7,6 +7,7 @@ const account = @import("metawork_account");
 const agent = @import("metawork_agent");
 const identity = @import("metawork_product_identity");
 const catalog_api = @import("product_models_metask");
+const models_contract = @import("metawork_product_models_contract");
 const protocol_adapter = @import("product_agent_protocol_adapter");
 const evaluation = @import("permission_review_evaluation");
 const Coordinator = @import("account_coordinator.zig").Coordinator;
@@ -153,6 +154,22 @@ const Host = struct {
         var candidate = try catalog.prepareSourceCandidate(self.model, 1);
         defer candidate.deinit();
         const input = candidate.input();
+        var model_views: [models_contract.Limits.model_entries]models_contract.ModelView = undefined;
+        for (catalog.writeModelViews(&model_views)) |model| {
+            if (!std.mem.eql(u8, model.id, self.model)) continue;
+            try line(self.init, .{
+                .kind = "catalog_model_declaration",
+                .model = self.model,
+                .protocol = input.target.protocol,
+                .max_input_tokens = model.metadata.max_input_tokens,
+                .max_output_tokens = model.metadata.max_output_tokens,
+                .structured_outputs = model.metadata.capabilities.structured_outputs,
+                .thinking = model.metadata.capabilities.thinking,
+                .provenance = model.metadata_provenance,
+                .interpretation = "Provider declaration, not verified support for a request format on the frozen endpoint",
+            });
+            break;
+        }
         var backend = CompletionHttp{ .allocator = self.init.gpa, .io = self.init.io };
         const protocol = protocol_adapter.toAgent(input.target.protocol);
         var observed = evaluation.ObservedTransport{ .inner = backend.transport() };
