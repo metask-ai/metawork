@@ -68,7 +68,7 @@ MetaWork 不调用 Goal 或 Team：Runtime 的 `enable_teams` 为零，Session c
 
 MetaWork 对全部 Run 显式设置 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零，Host `context_blocks` 为 null、count 为零。AgentCore 在普通文本与多模态 Run 开始时生成官方 `currentDate` block，使用 Core 进程的系统时区；Skill Run 按官方语义不增加日期 block。MetaWork 不采样、格式化、补写或建立另一条日期注入路径；恢复历史中的旧日期上下文交由 Core 原样消费。
 
-revision 21 的 Host model-capability declarations 当前保持空，不改变 Models 与 Session 的既有能力消费边界。官方 `describe.image_input` observation 由 SDK 完整验证，不进入产品投影。模型图片能力未确定时的 `image_input_capability_unknown`，按下述图片 admission 拒绝规则消费。
+revision 21 的 Host model-capability declarations 由 Host 在 Session create 与 restore 时填入 `SessionHostConfigV1.model_capabilities`；声明来源、冻结与恢复规则见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。官方 `describe.image_input` observation 由 SDK 完整验证，不进入产品投影。模型图片能力未确定时的 `image_input_capability_unknown`，按下述图片 admission 拒绝规则消费。
 
 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 使用官方 layout，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传入 Agent-owned 固定产品身份 profile（见 [集成契约](agentcore-integration.md#session-产品身份)）。日期上下文进入 Core 的本轮用户记录，Conversation/checkpoint 保留遵循官方语义，不修改 Session 产品身份 profile。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
 
