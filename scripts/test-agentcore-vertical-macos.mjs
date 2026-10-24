@@ -3568,6 +3568,24 @@ async function probeWindowsWebViewFocusWithColdProfileRetry() {
 }
 
 async function waitForBridge() {
+  if (approvalOnly) {
+    const webview = await connectTestWebView(chromeProbePort);
+    try {
+      // Bootstrap must finish before the verification collector starts its
+      // competing frozen reads. These controls are disabled until the real
+      // Renderer connection has accepted and confirmed its initial snapshot.
+      await poll(
+        () =>
+          webview.evaluate(
+            `(() => [...document.querySelectorAll('.task-approval-trigger')].some(control => !control.disabled))()`,
+          ),
+        commandTimeoutMs,
+        "approval Renderer bootstrap ready",
+      );
+    } finally {
+      webview.close();
+    }
+  }
   return poll(
     async () => {
       try {
