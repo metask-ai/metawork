@@ -348,6 +348,8 @@ pub fn build(b: *std.Build) void {
         .name = "metawork-product-permission-review-focused",
         .root_module = test_modules.product_permission_review,
     });
+    b.step("test-app-paths", "Verify Application canonical path allocation and artifact isolation")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.app, .filters = &.{ "Application canonical paths test roots", "canonical user home", "product and automation data roots" } })).step);
     b.step("test-permission-review", "Run the independent permission reviewer tests")
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
     const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
