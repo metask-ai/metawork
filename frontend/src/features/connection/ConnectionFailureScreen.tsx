@@ -1,4 +1,5 @@
 import { Button } from "../../components/ui/button.tsx";
+import { BrandLogo } from "../../components/ui/BrandLogo.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { WindowControls } from "../../components/ui/WindowControls.tsx";
@@ -32,10 +33,7 @@ export function ConnectionFailureScreen({
         className="connection-failure-toolbar"
       >
         <div className="connection-failure-brand" aria-label={t("app.name")}>
-          <span className="brand-mark" aria-hidden="true">
-            M
-          </span>
-          <span>{t("app.name")}</span>
+          <BrandLogo label={t("app.name")} />
         </div>
         <div
           className="connection-failure-toolbar-actions"

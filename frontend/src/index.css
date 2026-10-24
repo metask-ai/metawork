@@ -136,11 +136,6 @@ summary::-webkit-details-marker {
   letter-spacing: -0.01em;
 }
 
-.connection-failure-brand .brand-mark {
-  width: 28px;
-  height: 28px;
-}
-
 .connection-failure-stage {
   display: grid;
   width: 100%;
@@ -6672,19 +6667,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   }
 }
 
-.brand-mark {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border-radius: 9px 9px 9px 3px;
-  color: white;
-  background: var(--ui-action-primary);
-  box-shadow: 0 7px 18px
-    color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
-  font-size: var(--text-body);
-  font-weight: 750;
-  letter-spacing: -0.03em;
+.brand-logo {
+  display: inline-flex;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  gap: 5.3px;
+  color: var(--ui-content-primary);
+}
+
+.brand-logo > img {
+  display: block;
+  width: 28.06px;
+  height: 24px;
+}
+
+.brand-logo-wordmark {
+  width: 111.19px;
+  height: 24px;
+  background: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
 }
 
 .brand-name {

@@ -1,4 +1,5 @@
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
+import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -3580,7 +3581,9 @@ export default function App() {
       left={
         <div className="sidebar-frame">
           <div className="sidebar-primary">
-            <p className="brand-name">{t("app.name")}</p>
+            <p className="brand-name">
+              <BrandLogo label={t("app.name")} showMark={false} />
+            </p>
             <nav
               className="sidebar-capabilities"
               aria-label={t("skills.navigation_label")}
