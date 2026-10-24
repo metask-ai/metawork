@@ -274,7 +274,12 @@ export type ExecutionCommandResult = {
   errorCode: ExecutionCommandErrorCode;
   attemptId: null;
 };
+export type PresentationAnchor = {
+  afterOutputCount: number;
+  presentationOrder: string;
+};
 export type FileReferenceView = {
+  presentationAnchor?: PresentationAnchor | null;
   generatedImage?: true;
   id: string;
   title: string;
@@ -1001,6 +1006,7 @@ export type SendInputResult = {
     }
 );
 export type InputSubmission = {
+  presentationOrder: string | null;
   operationId: string;
   receivedAtUnixMs: string | null;
   anchorRunId: string | null;

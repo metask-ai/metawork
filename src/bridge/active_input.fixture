@@ -29,7 +29,8 @@
       "operationId": "input-1",
       "receivedAtUnixMs": null,
       "anchorRunId": "1",
-      "afterOutputCount": 0
+      "afterOutputCount": 0,
+      "presentationOrder": null
     }
   },
   "accepted": {

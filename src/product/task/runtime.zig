@@ -1847,7 +1847,7 @@ pub const Runtime = struct {
         errdefer deinitRunInput(self, effects.release, &safe);
         try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
         errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
-        var submission: Submission = .{ .operation_id_len = @intCast(operation_id.len), .received_at_unix_ms = effects.run_clock.nowUnixMs() };
+        var submission: Submission = .{ .operation_id_len = @intCast(operation_id.len), .received_at_unix_ms = effects.run_clock.nowUnixMs(), .presentation_order = try task.durable.takePresentationOrder() };
         @memcpy(submission.operation_id[0..operation_id.len], operation_id);
         for (task.durable.runs) |entry| if (entry) |run| {
             if (run.id > (submission.anchor_run_id orelse 0)) {
@@ -6472,20 +6472,24 @@ fn replaceEventFileReferences(
         result.file_refs
     else
         null;
-    clearEventFileReferences(context, tool);
+    var candidate = tool.*;
+    candidate.file_refs = null;
+    errdefer {
+        clearEventFileReferences(context, &candidate);
+        if (candidate.file_refs) |allocated| context.runtime.allocator.free(allocated);
+    }
     const CoreFileReference = std.meta.Child(@TypeOf(refs.?));
     const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = envelope.generated_image_path orelse "" }, .title = "", .kind = "image" }};
-    const values = if (envelope.generated_image_path != null) &generated else refs orelse return;
+    const values = if (envelope.generated_image_path != null) &generated else refs orelse &.{};
     if (values.len > context.effects.max_file_refs_per_tool)
         return error.ToolCapacity;
-    if (tool.file_refs == null) {
-        tool.file_refs = try context.runtime.allocator.alloc(
+    if (candidate.file_refs == null) {
+        candidate.file_refs = try context.runtime.allocator.alloc(
             ?task_state.FileReferenceView,
             context.effects.max_file_refs_per_tool,
         );
-        @memset(tool.file_refs.?, null);
+        @memset(candidate.file_refs.?, null);
     }
-    errdefer clearEventFileReferences(context, tool);
     for (values, 0..) |reference, index| {
         const locator_kind: task_state.FileReferenceLocatorKind = switch (reference.locator) {
             .workspace_path => .workspace_path,
@@ -6573,15 +6577,35 @@ fn replaceEventFileReferences(
             0,
         )).value;
         locator_live = true;
-        tool.file_refs.?[index] = owned;
+        if (owned.generated_image) {
+            if (tool.file_refs) |previous| for (previous) |entry| {
+                const old = entry orelse continue;
+                if (old.generated_image and std.mem.eql(u8, old.id, owned.id) and std.mem.eql(u8, old.locator, owned.locator)) {
+                    owned.presentation_anchor = old.presentation_anchor;
+                    break;
+                }
+            };
+            if (owned.presentation_anchor == null) {
+                const task = context.runtime.find(task_id) orelse return error.ToolCapacity;
+                const source = for (task.durable.runs) |*entry| {
+                    if (entry.*) |*run| if (run.generation == run_generation) break run;
+                } else return error.ToolCapacity;
+                owned.presentation_anchor = .{ .after_output_count = source.outputPartCount(), .presentation_order = task.durable.takePresentationOrder() catch return error.ToolCapacity };
+            }
+        }
+        candidate.file_refs.?[index] = owned;
         id_live = false;
         title_live = false;
         display_live = false;
         kind_live = false;
         locator_live = false;
-        tool.redacted = tool.redacted or title.redacted or
+        candidate.redacted = candidate.redacted or title.redacted or
             display.redacted or kind.redacted;
     }
+    clearEventFileReferences(context, tool);
+    if (tool.file_refs) |previous| context.runtime.allocator.free(previous);
+    tool.file_refs = candidate.file_refs;
+    tool.redacted = candidate.redacted;
 }
 
 fn clearEventFileReferences(context: *EventContext, tool: *task_state.ToolView) void {
@@ -8849,6 +8873,10 @@ test "Task receives ordered owned messages during maintenance and stop only canc
     @memset(&first, 'x');
     task.runtime.active_operation = .{ .restore = .{ .id = 8 } };
     _ = try runtime.receiveInput(1, "B", .{ .text = "message B" }, effects);
+    try std.testing.expectEqual(@as(?u64, 1), task.input_submissions.items[0].submission.presentation_order);
+    try std.testing.expectEqual(@as(?u64, 2), task.input_submissions.items[1].submission.presentation_order);
+    try std.testing.expectEqual(@as(?u64, 1), task.input_submissions.items[0].submission.presentation_order);
+    try std.testing.expectEqual(@as(?u64, 2), task.input_submissions.items[1].submission.presentation_order);
     try std.testing.expectEqualStrings("message A", task.input_submissions.items[0].payload.?.input.text);
     try std.testing.expectEqualStrings("message A", task.input_submissions.items[0].input.text.value);
     try std.testing.expectEqual(@as(?u64, 1000), task.input_submissions.items[0].submission.received_at_unix_ms);
@@ -8998,4 +9026,34 @@ test "image Run incremental projection keeps a credential prefix private across 
     try std.testing.expect(redactTrackedTextSecrets(&text, &.{ "dialogue-secret", "image-token" }));
     try std.testing.expectEqualStrings("prefix *** suffix", text.list.items);
     try std.testing.expectEqual(text.list.items.len, text.committed_len);
+}
+
+test "generated image acceptance shares submission order and refresh preserves its anchor" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    var runs = [_]?task_state.RunRecord{.{ .id = 1, .generation = 1, .execution_generation = 1, .execution_protocol = .anthropic_messages, .execution_model = "m", .permission_profile = .approval_required, .permission_interaction = .interactive, .input = .{ .text = .{ .value = &.{} } }, .commentary_ends = &.{}, .tools = &.{}, .terminal_diagnostic = &.{} }};
+    const task = runtime.find(1).?;
+    task.durable.runs = &runs;
+    const before = try runtime.receiveInput(1, "before", .{ .text = "first" }, projection.effects());
+    var context: EventContext = .{ .runtime = &runtime, .effects = .{ .text = projection.effects().text, .file_change_diff = undefined, .max_assistant_message_bytes = 1024, .max_commentary_segments_per_run = 256, .max_tool_field_bytes = 1024, .max_file_refs_per_tool = 2, .max_file_ref_field_bytes = 1024 } };
+    var tool: task_state.ToolView = .{ .route_digest = @splat(0), .id = @constCast("tool"), .order = 100, .name = @constCast("image"), .input = &.{}, .progress = &.{}, .content = &.{}, .state = .completed, .file_refs = null };
+    defer {
+        clearEventFileReferences(&context, &tool);
+        if (tool.file_refs) |refs| runtime.allocator.free(refs);
+    }
+    const envelope: agent.OwnedCoreEvent = .{ .session_id = 1, .run_id = 1, .encoded_bytes = 0, .json = &.{}, .allocator = std.testing.allocator, .generated_image_path = @constCast("image.png"), .event = .{ .arena = undefined, .value = .{ .known = .{ .tool_result = .{ .id = "t", .name = "image", .input = "", .content = "", .is_error = false } } } } };
+    try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
+    const original = tool.file_refs.?[0].?.presentation_anchor.?;
+    const after = try runtime.receiveInput(1, "after", .{ .text = "make blue" }, projection.effects());
+    try std.testing.expect(before.presentation_order.? < original.presentation_order);
+    try std.testing.expect(original.presentation_order < after.presentation_order.?);
+    runs[0].?.commentary_count = 2;
+    try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
+    try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
+    context.effects.max_file_ref_field_bytes = 1;
+    try std.testing.expectError(error.ToolCapacity, replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1));
+    try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
 }

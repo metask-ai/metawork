@@ -1047,6 +1047,7 @@ test("App resolves a late canonical input receipt without erasing a newer draft 
       submission: {
         operationId: fixture.operationIds[0],
         receivedAtUnixMs: null,
+        presentationOrder: null,
         anchorRunId: fixture.task.currentRunId,
         afterOutputCount: 0,
       },
@@ -1294,6 +1295,7 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
       submission: {
         operationId: fixture.operationIds[0],
         receivedAtUnixMs: null,
+        presentationOrder: null,
         anchorRunId: null,
         afterOutputCount: 0,
       },

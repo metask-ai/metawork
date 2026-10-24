@@ -30,6 +30,10 @@ pub const migrations: []const sql.Migration = &.{ .{
     .version = 7,
     .name = "task_input_submissions",
     .sql = @embedFile("migrations/0007_task_input_submissions.sql"),
+}, .{
+    .version = 8,
+    .name = "presentation_anchors",
+    .sql = @embedFile("migrations/0008_presentation_anchors.sql"),
 } };
 
 comptime {
