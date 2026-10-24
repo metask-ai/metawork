@@ -168,7 +168,7 @@ const Host = struct {
         const self: *Host = @ptrCast(@alignCast(context));
         self.stop_requested.store(true, .release);
         if (self.worker) |worker| {
-            worker.join(); // Current production review deadline is 30 seconds.
+            worker.join(); // Each sample has a bounded production/diagnostic deadline.
             self.worker = null;
             if (self.failure == null) self.failure = error.Cancelled;
         }
