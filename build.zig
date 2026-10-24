@@ -350,6 +350,22 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-permission-review", "Run the independent permission reviewer tests")
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
+    const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
+    review_http_backend.addImport("metawork_agent", modules.agent);
+    const review_eval_module = b.createModule(.{
+        .root_source_file = b.path("tests/permission_review_eval.zig"),
+        .target = modules.agent.resolved_target,
+        .optimize = modules.agent.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    review_eval_module.addImport("metawork_agent", modules.agent);
+    review_eval_module.addImport("permission_review", modules.product_permission_review);
+    review_eval_module.addImport("completion_http_backend", review_http_backend);
+    const review_eval = b.addExecutable(.{ .name = "permission-review-eval", .root_module = review_eval_module });
+    b.step("check-permission-review-eval", "Compile the opt-in live-model permission evaluation")
+        .dependOn(&review_eval.step);
+    b.step("eval-permission-review", "Run opt-in live-model permission evaluation (requires explicit test credentials)")
+        .dependOn(&b.addRunArtifact(review_eval).step);
     const task_permission_step = b.step("test-task-permission", "Run Task permission state, history and approval tests");
     for ([_]*std.Build.Module{
         test_modules.product_task_attachment,

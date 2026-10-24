@@ -1,6 +1,6 @@
 # MetaWork 权限评审策略
 
-<!-- lifecycle: draft；尚未接入运行时，不改变现有权限行为。 -->
+<!-- 由 permission/review.zig 消费；评审意见不拥有权限决定权。 -->
 
 <!-- review-policy:start -->
 

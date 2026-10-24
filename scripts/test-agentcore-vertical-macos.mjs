@@ -411,6 +411,11 @@ let app;
 let exited;
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
+const approvalOnly = process.env.METAWORK_APPROVAL_ONLY === "1";
+if (approvalOnly && process.platform !== "win32")
+  throw new Error("The approval-mode desktop audit currently requires Windows");
+if (approvalOnly && (activeInputOnly || outputOnly || builtinOfficeOnly))
+  throw new Error("Approval-only verification cannot combine other scopes");
 startApplication();
 
 desktopVertical: try {
@@ -420,7 +425,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly) {
+  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly && !approvalOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -864,6 +869,13 @@ desktopVertical: try {
     assert.equal(restoredWorkspace.epoch, expectedWorkspaceEpoch);
     assert.equal(restoredWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
+    if (approvalOnly) {
+      await stopApplication("approval-mode verification complete");
+      process.stdout.write(
+        "AgentCore approval-only desktop vertical passed: real Product/Bridge/Core grants, review, mode changes, cancellation, stale responses, checkpoint and restart. Fixture model replies do not measure real-model quality; other desktop gestures were not run.\n",
+      );
+      break desktopVertical;
+    }
     await probeWindowsWebViewFocus();
     const refreshedCatalog = await invokeBridge(
       "metawork.workspaces.refreshSkillCatalog",
@@ -2910,6 +2922,10 @@ async function probeWindowsClipboard({
 async function selectRenderedMode(taskId, targetMode) {
   const webview = await connectTestWebView(chromeProbePort);
   try {
+    // The verification-only Host collector and Renderer share one frozen-read
+    // slot. Start a fresh Renderer read after polling stops; retain every UI
+    // assertion and exercise reload while the real permission request waits.
+    if (approvalOnly) await webview.send("Page.reload");
     await poll(
       async () =>
         webview.evaluate(`(() => {
