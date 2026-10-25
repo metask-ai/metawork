@@ -182,6 +182,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 ### 自动审批质量与可读性
 
+`zig build test-permission-review-http` 使用生产 HTTP、Completion 与评审器配合本地合成服务，验证超时后的连接关闭、后续请求隔离、503 分类、非法 JSON 拒绝及合法分块文本；该回归也纳入标准 Native graph，不替代真实模型质量证据。
+
 自动审批的原因分类、当前 Run 完整输入、历史用户消息组选择、脱敏、失效结果拒绝及分块投影由对应 Product/Completion 确定性测试负责；Renderer 验证可信动作、Agent 用途、评审意见和技术回退的来源区分、真实可选授权范围、手动模式与参数提取失败。Bash 只确认“运行命令”，不要求系统推断命令效果；命令默认可见，用户须能区分系统事实与 Agent/评审器的判断。真实窗口仍需验证中英文、明暗主题、窄窗、键盘与焦点。
 
 Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVAL_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；复用完整入口的隔离 profile、Product/Bridge、模式切换、checkpoint 和重启检查。首次启动与重启须先观察 Renderer 审批控件已就绪，再进行 Host 验证轮询；菜单交互前重新加载隔离 Renderer，避免两个读取方争用冻结 snapshot。菜单、授权和恢复断言全部保留。该范围不运行 Composer 焦点、成果复制等其他桌面手势，不得宣称完整 desktop vertical 通过；完整入口保持原有检查。

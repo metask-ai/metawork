@@ -354,6 +354,17 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
     const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     review_http_backend.addImport("metawork_agent", modules.agent);
+    const review_http_options = b.addOptions();
+    review_http_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for review HTTP fixture"));
+    review_http_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/permission_review_http.mjs"));
+    const review_http_cases = b.createModule(.{ .root_source_file = b.path("tests/permission_review_http.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    review_http_cases.addImport("metawork_agent", modules.agent);
+    review_http_cases.addImport("permission_review", modules.product_permission_review);
+    review_http_cases.addImport("completion_http_backend", review_http_backend);
+    review_http_cases.addOptions("review_http_fixture_options", review_http_options);
+    const review_http_run = b.addRunArtifact(b.addTest(.{ .root_module = review_http_cases }));
+    b.step("test-permission-review-http", "Verify real HTTP permission review cancellation and response isolation").dependOn(&review_http_run.step);
+    artifacts.tests.step.dependOn(&review_http_run.step);
     const review_eval_module = b.createModule(.{
         .root_source_file = b.path("tests/permission_review_eval.zig"),
         .target = modules.agent.resolved_target,
