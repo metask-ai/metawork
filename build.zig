@@ -384,14 +384,18 @@ pub fn build(b: *std.Build) void {
     modules.app.addImport("permission_schema_probe", schema_probe);
     b.step("test-permission-schema-probe", "Verify the Account-only format capability probe")
         .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = schema_probe })).step);
-    b.step("test-permission-review-evaluation", "Verify the live evaluation's safe observations")
-        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = review_eval_module })).step);
+    const review_eval_test_step = b.step("test-permission-review-evaluation", "Verify the live evaluation's safe observations and failure stop");
+    review_eval_test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = review_eval_module })).step);
     const account_review_eval = b.option(bool, "permission-review-account-eval", "Build an opt-in Account-owned live permission evaluation instead of the desktop entry") orelse false;
     if (account_review_eval) {
         if (artifact != .development) @panic("Account evaluation requires the development credential owner; automation credentials remain isolated");
         artifacts.exe.root_module.root_source_file = b.path("tests/permission_review_account_main.zig");
     }
     const review_eval = b.addExecutable(.{ .name = "permission-review-eval", .root_module = review_eval_main });
+    const review_eval_failure_check = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for evaluation regression"), b.pathFromRoot("tests/permission_review_eval_failfast.mjs") });
+    review_eval_failure_check.addArtifactArg(review_eval);
+    review_eval_test_step.dependOn(&review_eval_failure_check.step);
+    artifacts.tests.step.dependOn(&review_eval_failure_check.step);
     b.step("check-permission-review-eval", "Compile the opt-in live-model permission evaluation")
         .dependOn(&review_eval.step);
     b.step("eval-permission-review", "Run opt-in live-model permission evaluation (requires explicit test credentials)")

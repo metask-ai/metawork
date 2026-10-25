@@ -18,7 +18,8 @@ const server = createServer(async (request, response) => {
       body.model !== "fixture-review" ||
       body.max_tokens !== 2048 ||
       body.tools !== undefined
-    ) throw Error("unexpected request");
+    )
+      throw Error("unexpected request");
     const mode = JSON.parse(body.messages[0].content).evidence.user_intent;
     state.calls++;
     state.active++;
@@ -33,14 +34,27 @@ const server = createServer(async (request, response) => {
       return;
     }
     const text = '{"decision":"allow_once","reason":"synthetic local request"}';
-    const content = mode === "split-json"
-      ? [{ type: "text", text: text.slice(0, 17) }, { type: "text", text: text.slice(17) }]
-      : [{ type: "text", text: mode === "invalid-json" ? text.slice(0, -1) : text }];
+    const content =
+      mode === "split-json"
+        ? [
+            { type: "text", text: text.slice(0, 17) },
+            { type: "text", text: text.slice(17) },
+          ]
+        : [
+            {
+              type: "text",
+              text: mode === "invalid-json" ? text.slice(0, -1) : text,
+            },
+          ];
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      type: "message", content, stop_reason: "end_turn",
-      usage: { input_tokens: 3, output_tokens: 8 },
-    }));
+    response.end(
+      JSON.stringify({
+        type: "message",
+        content,
+        stop_reason: "end_turn",
+        usage: { input_tokens: 3, output_tokens: 8 },
+      }),
+    );
   } catch {
     response.writeHead(400);
     response.end();

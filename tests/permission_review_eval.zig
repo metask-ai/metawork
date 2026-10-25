@@ -3,6 +3,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const review = @import("permission_review");
+const ProviderErrorType = enum { overloaded_error, rate_limit_error, authentication_error, invalid_request_error, permission_error, not_found_error, api_error, timeout_error, other };
 
 /// Test-only observation around the production transport. Records allowlisted
 /// shapes and counters, never response text, reasons, headers or credentials.
@@ -10,6 +11,7 @@ pub const ObservedTransport = struct {
     inner: agent.CompletionTransport,
     observation: struct {
         http_status: ?u16 = null,
+        provider_error_type: ?ProviderErrorType = null,
         transport_error: ?[]const u8 = null,
         response_bytes: usize = 0,
         text_bytes: usize = 0,
@@ -51,6 +53,18 @@ pub const ObservedTransport = struct {
         var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, response.body, .{}) catch return response;
         defer parsed.deinit();
         if (parsed.value != .object) return response;
+        if (response.status < 200 or response.status > 299) {
+            if (parsed.value.object.get("error")) |failure| {
+                if (failure == .object) {
+                    if (failure.object.get("type")) |kind| {
+                        if (kind == .string) self.observation.provider_error_type = std.meta.stringToEnum(ProviderErrorType, kind.string) orelse .other;
+                    }
+                }
+            }
+            // Only an allowlisted code; never retain the message or an unknown
+            // type string, either of which may contain credentials or content.
+            return response;
+        }
         if (parsed.value.object.get("stop_reason")) |stop| {
             if (stop == .string) self.observation.stop_reason = std.meta.stringToEnum(agent.CompletionStopReason, stop.string);
         }
@@ -108,10 +122,11 @@ pub const ObservedTransport = struct {
 test "evaluation observes response shape without retaining text and delegates cancellation" {
     const Fixture = struct {
         body: []const u8,
+        status: u16 = 200,
         cancelled: bool = false,
         fn perform(context: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, _: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            return .{ .status = 200, .body = self.body };
+            return .{ .status = self.status, .body = self.body };
         }
         fn signal(context: ?*anyopaque, _: *agent.CompletionCancellation) void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -151,6 +166,16 @@ test "evaluation observes response shape without retaining text and delegates ca
     try std.testing.expectEqual(@as(usize, 1), observer.observation.thinking_blocks);
     try std.testing.expectEqual(@as(?agent.CompletionStopReason, .max_tokens), observer.observation.stop_reason);
     try std.testing.expectEqual(@as(?u64, 1024), observer.observation.output_tokens);
+    fixture.status = 503;
+    fixture.body = "{\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic-private-error\"}}";
+    _ = try observer.transport().perform(.{ .url = "https://example.com", .body = "{}", .headers = &.{} }, &cancellation, &output);
+    try std.testing.expectEqual(.overloaded_error, observer.observation.provider_error_type.?);
+    fixture.body = "{\"error\":{\"type\":\"synthetic-private-type\",\"message\":\"synthetic-private-error\"}}";
+    _ = try observer.transport().perform(.{ .url = "https://example.com", .body = "{}", .headers = &.{} }, &cancellation, &output);
+    try std.testing.expectEqual(.other, observer.observation.provider_error_type.?);
+    const rejected_shape = try std.json.Stringify.valueAlloc(std.testing.allocator, observer.observation, .{});
+    defer std.testing.allocator.free(rejected_shape);
+    try std.testing.expect(std.mem.indexOf(u8, rejected_shape, "synthetic-private") == null);
 }
 
 const Case = struct {
@@ -319,7 +344,8 @@ pub fn runWithCompletion(
         .usage_reporting = "production codec counters; zero may mean the provider omitted usage, not zero cost",
     });
     var totals: [2]Metrics = .{ .{}, .{} };
-    for (0..repeats) |repeat| {
+    const expected_per_variant = repeats * (if (case_filter != null) @as(usize, 1) else cases.len);
+    sampling: for (0..repeats) |repeat| {
         for (cases, 0..) |case, case_index| {
             if (case_filter) |id| if (!std.mem.eql(u8, id, case.id)) continue;
             // Alternate order to reduce first-call/cache/order bias.
@@ -382,6 +408,10 @@ pub fn runWithCompletion(
                     .elapsed_ms = elapsed,
                     .usage = usage,
                 });
+                // A technical failure already makes this evaluation ineligible.
+                // Preserve the failing sample and stop, rather than billing for
+                // the rest of a batch that cannot satisfy the acceptance gate.
+                if (failure != null) break :sampling;
             }
         }
     }
@@ -390,13 +420,21 @@ pub fn runWithCompletion(
         .variant = if (variant == 0) "current_only" else "bounded_history",
         .metrics = metrics,
     });
-    try acceptEvaluation(totals, case_filter != null or diagnostic_deadline != null, repeats);
+    try line(writer, .{
+        .kind = "sampling_status",
+        .expected_attempts = expected_per_variant * 2,
+        .completed_attempts = totals[0].attempts + totals[1].attempts,
+        .coverage_complete = totals[0].attempts == expected_per_variant and totals[1].attempts == expected_per_variant,
+        .stopped_after_technical_failure = totals[0].technical_failures + totals[1].technical_failures != 0,
+    });
+    try acceptEvaluation(totals, case_filter != null or diagnostic_deadline != null, repeats, expected_per_variant);
 }
 
-fn acceptEvaluation(totals: [2]Metrics, diagnostic: bool, repeats: usize) !void {
+fn acceptEvaluation(totals: [2]Metrics, diagnostic: bool, repeats: usize, expected_per_variant: usize) !void {
     if (diagnostic or repeats < 2) return error.DiagnosticSamplesOnly;
     // A report containing technical failures cannot serve as a quality pass.
     if (totals[0].technical_failures + totals[1].technical_failures != 0) return error.EvaluationTechnicalFailures;
+    if (expected_per_variant == 0 or totals[0].attempts != expected_per_variant or totals[1].attempts != expected_per_variant) return error.EvaluationIncompleteCoverage;
     if (totals[1].erroneous_allow != 0 or totals[1].other_mismatch != 0 or
         totals[1].unnecessary_manual >= totals[0].unnecessary_manual) return error.EvaluationAcceptanceFailed;
 }
@@ -406,15 +444,18 @@ test "diagnostic configuration cannot pass the full quality gate" {
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3, .unnecessary_manual = 2 },
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3 },
     };
-    try acceptEvaluation(totals, false, 3);
-    try std.testing.expectError(error.DiagnosticSamplesOnly, acceptEvaluation(totals, true, 3));
-    try std.testing.expectError(error.DiagnosticSamplesOnly, acceptEvaluation(totals, false, 1));
+    try acceptEvaluation(totals, false, 3, 6);
+    try std.testing.expectError(error.DiagnosticSamplesOnly, acceptEvaluation(totals, true, 3, 6));
+    try std.testing.expectError(error.DiagnosticSamplesOnly, acceptEvaluation(totals, false, 1, 6));
     var failed = totals;
     failed[1].technical_failures = 1;
-    try std.testing.expectError(error.EvaluationTechnicalFailures, acceptEvaluation(failed, false, 3));
+    try std.testing.expectError(error.EvaluationTechnicalFailures, acceptEvaluation(failed, false, 3, 6));
     failed = totals;
     failed[1].erroneous_allow = 1;
-    try std.testing.expectError(error.EvaluationAcceptanceFailed, acceptEvaluation(failed, false, 3));
+    try std.testing.expectError(error.EvaluationAcceptanceFailed, acceptEvaluation(failed, false, 3, 6));
+    failed = totals;
+    failed[1].attempts -= 1;
+    try std.testing.expectError(error.EvaluationIncompleteCoverage, acceptEvaluation(failed, false, 3, 6));
 }
 
 test "long-history corpus contains complete groups below the reviewer budget" {
