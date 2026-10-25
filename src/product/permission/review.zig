@@ -10,9 +10,11 @@ pub const max_arguments_depth: usize = 64;
 pub const max_result_bytes: usize = 2048;
 pub const max_reason_characters: usize = 120;
 pub const max_reason_bytes: usize = max_reason_characters * 4;
-// Reasoning models may spend this budget before producing the short JSON.
-// Keep the final text/reason bounds and the caller's deadline independent.
-pub const max_output_tokens: u64 = 2048;
+// A real thinking-only response exhausted 2048 tokens before final text. Bound
+// the single call's reasoning budget and its default lifetime together; final
+// JSON/reason limits remain independent and no retry is added.
+pub const max_output_tokens: u64 = 4096;
+pub const timeout_ms: u64 = 60_000;
 
 /// Borrowed until review returns. The caller must remove credentials and other
 /// prohibited secrets before admission; this module is not a DLP classifier.

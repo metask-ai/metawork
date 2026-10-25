@@ -186,6 +186,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 评测首次技术失败须保留失败样本并停止后续请求，明确报告预计与实际覆盖；覆盖不完整不能通过验收。`zig build test-permission-review-evaluation` 同时验证观测脱敏、严格验收及实际评测入口遇到 503 或非法 JSON 后只发送一次请求；服务错误只记录白名单类型，不保留自由文本错误消息。此回归纳入标准 Native graph。
 
+生产评审 Job 与真实模型评测默认消费同一 permission reviewer 生成预算和期限定义。思考预算耗尽须保留为输出受限，不能算作有效判断或批准；调整生成预算不扩大最终 JSON、理由、授权或历史窗口限制，也不建立自动重试。
+
 自动审批的原因分类、当前 Run 完整输入、历史用户消息组选择、脱敏、失效结果拒绝及分块投影由对应 Product/Completion 确定性测试负责；Renderer 验证可信动作、Agent 用途、评审意见和技术回退的来源区分、真实可选授权范围、手动模式与参数提取失败。Bash 只确认“运行命令”，不要求系统推断命令效果；命令默认可见，用户须能区分系统事实与 Agent/评审器的判断。真实窗口仍需验证中英文、明暗主题、窄窗、键盘与焦点。
 
 Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVAL_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；复用完整入口的隔离 profile、Product/Bridge、模式切换、checkpoint 和重启检查。首次启动与重启须先观察 Renderer 审批控件已就绪，再进行 Host 验证轮询；菜单交互前重新加载隔离 Renderer，避免两个读取方争用冻结 snapshot。菜单、授权和恢复断言全部保留。该范围不运行 Composer 焦点、成果复制等其他桌面手势，不得宣称完整 desktop vertical 通过；完整入口保持原有检查。

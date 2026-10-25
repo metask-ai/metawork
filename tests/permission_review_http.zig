@@ -10,8 +10,10 @@ const Fixture = struct {
     base: []u8,
 
     fn start() !Fixture {
+        var budget_buffer: [32]u8 = undefined;
+        const budget = try std.fmt.bufPrint(&budget_buffer, "{d}", .{review.max_output_tokens});
         var child = try std.process.spawn(std.testing.io, .{
-            .argv = &.{ options.node_path, options.fixture_path },
+            .argv = &.{ options.node_path, options.fixture_path, budget },
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .inherit,

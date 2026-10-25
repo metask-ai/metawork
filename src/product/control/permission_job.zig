@@ -5,7 +5,7 @@ const task = @import("metawork_product_task");
 const reviewer = @import("product_permission_review");
 
 pub const capacity = 8;
-pub const timeout_ms = 30_000;
+pub const timeout_ms = reviewer.timeout_ms;
 
 pub const Job = struct {
     allocator: std.mem.Allocator,

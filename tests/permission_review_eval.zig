@@ -313,7 +313,7 @@ pub fn runWithCompletion(
 ) !void {
     if (repeats < 1 or repeats > 5) return error.InvalidEvaluationRepeats;
     const diagnostic_deadline = init.environ_map.get("METAWORK_REVIEW_EVAL_DEADLINE_MS");
-    const deadline_ms = if (diagnostic_deadline) |value| try std.fmt.parseInt(u64, value, 10) else 30_000;
+    const deadline_ms = if (diagnostic_deadline) |value| try std.fmt.parseInt(u64, value, 10) else review.timeout_ms;
     if (deadline_ms < 1_000 or deadline_ms > 60_000) return error.InvalidDiagnosticDeadline;
     const case_filter = init.environ_map.get("METAWORK_REVIEW_EVAL_CASE");
     if (case_filter) |id| {

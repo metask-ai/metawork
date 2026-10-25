@@ -16,7 +16,7 @@ const server = createServer(async (request, response) => {
       request.method !== "POST" ||
       request.headers["x-api-key"] !== "synthetic-review-key" ||
       body.model !== "fixture-review" ||
-      body.max_tokens !== 2048 ||
+      body.max_tokens !== Number(process.argv[2]) ||
       body.tools !== undefined
     )
       throw Error("unexpected request");
