@@ -153,7 +153,10 @@ pub fn finishResult(
     usage: types.Usage,
     stop_reason: types.StopReason,
 ) Error!types.Result {
-    if (output.items.len == 0) return error.MalformedResponse;
+    // Reasoning can exhaust the generation budget before any final text. Keep
+    // that valid terminal fact for consumers to reject as incomplete; it is
+    // different from an empty response claiming successful completion.
+    if (output.items.len == 0 and stop_reason != .max_tokens) return error.MalformedResponse;
     return .{
         .allocator = allocator,
         .text = output.toOwnedSlice(allocator) catch return error.OutOfMemory,

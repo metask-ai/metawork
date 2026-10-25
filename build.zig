@@ -348,6 +348,8 @@ pub fn build(b: *std.Build) void {
         .name = "metawork-product-permission-review-focused",
         .root_module = test_modules.product_permission_review,
     });
+    b.step("test-completion", "Run Completion codecs and typed failure regressions")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.agent_completion })).step);
     b.step("test-app-paths", "Verify Application canonical path allocation and artifact isolation")
         .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.app, .filters = &.{ "Application canonical paths test roots", "canonical user home", "product and automation data roots" } })).step);
     b.step("test-permission-review", "Run the independent permission reviewer tests")

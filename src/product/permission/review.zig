@@ -318,6 +318,7 @@ pub fn review(
         .failure => |failure| return .{ .failure = .{ .completion = failure } },
         .result => |value| value,
     };
+    if (result.stop_reason == .max_tokens) return .{ .failure = .output_limit };
     if (result.stop_reason != .end_turn) return .{ .failure = .incomplete_output };
     const suggestion = decodeSuggestion(allocator, result.text, result.usage) catch |err| return .{ .failure = switch (err) {
         error.InvalidOutput => .invalid_output,
@@ -617,10 +618,11 @@ test "review preflight rejects cancellation expired deadline missing delegation 
 test "invalid model output and incomplete output are failures not deny or needs_user" {
     for ([_]struct { text: []const u8, stop: []const u8, failure: Failure }{
         .{ .text = "allow", .stop = "end_turn", .failure = .invalid_output },
+        .{ .text = "", .stop = "max_tokens", .failure = .output_limit },
         .{ .text = "{\"decision\":0,\"reason\":\"ok\"}", .stop = "end_turn", .failure = .invalid_output },
         .{ .text = "{\"decision\":\"0\",\"reason\":\"ok\"}", .stop = "end_turn", .failure = .invalid_output },
         .{ .text = "{\"decision\":\"allow_once\",\"reason\":[111,107]}", .stop = "end_turn", .failure = .invalid_output },
-        .{ .text = "{\"decision\":\"allow_once\",\"reason\":\"ok\"}", .stop = "max_tokens", .failure = .incomplete_output },
+        .{ .text = "{\"decision\":\"allow_once\",\"reason\":\"ok\"}", .stop = "max_tokens", .failure = .output_limit },
         .{ .text = "{\"decision\":\"deny\",\"reason\":\"ok\"}", .stop = "stop_sequence", .failure = .incomplete_output },
     }) |fixture| {
         const wire = try providerResponse(fixture.text, fixture.stop);

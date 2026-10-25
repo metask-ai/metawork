@@ -105,6 +105,8 @@ perform(http_request, cancellation, response_buffer)
 - `usage`；
 - `stop_reason`。
 
+`max_tokens` 表示生成预算耗尽，此时最终 `text` 可以为空；仅有 thinking 的合法截断响应也须保留该终止原因和 usage，不能误归为格式错误。消费者必须先检查 `stop_reason` 再接纳文本，截断结果不能成为标题、连通性成功或审批决定。声称 `end_turn` 却没有最终文本的响应仍拒绝。
+
 失败使用 MetaWork-owned typed union：
 
 - invalid config/request；
