@@ -4,6 +4,7 @@ const agent = @import("metawork_agent");
 const review = @import("permission_review");
 const http = @import("completion_http_backend");
 const options = @import("review_http_fixture_options");
+const evaluation = @import("permission_review_evaluation");
 
 const Fixture = struct {
     child: std.process.Child,
@@ -50,7 +51,8 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     const endpoint = try std.fmt.allocPrint(std.testing.allocator, "{s}/v1/messages", .{fixture.base});
     defer std.testing.allocator.free(endpoint);
     var backend = http.Backend{ .allocator = std.testing.allocator, .io = std.testing.io };
-    const owner = try agent.Completion.init(std.testing.allocator, backend.transport(), .{
+    var observed = evaluation.ObservedTransport{ .inner = backend.transport() };
+    const owner = try agent.Completion.init(std.testing.allocator, observed.transport(), .{
         .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = endpoint, .model = "fixture-review" },
         .credential = "synthetic-review-key",
     });
@@ -59,7 +61,14 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     const held = invoke(owner, "hold", 500);
     try std.testing.expect(held == .failure);
     try std.testing.expect(held.failure == .timeout);
+    try std.testing.expectEqual(@as(?usize, null), observed.observation.response_bytes);
+    try std.testing.expectEqual(@as(?bool, false), observed.observation.response_buffer_modified_on_failure);
     try std.testing.expect(started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() < 5_000);
+    const partial = invoke(owner, "partial-hold", 500);
+    try std.testing.expect(partial == .failure);
+    try std.testing.expect(partial.failure == .timeout);
+    try std.testing.expectEqual(@as(?usize, null), observed.observation.response_bytes);
+    try std.testing.expectEqual(@as(?bool, true), observed.observation.response_buffer_modified_on_failure);
     const rejected = invoke(owner, "reject-503", 5_000);
     try std.testing.expect(rejected == .failure);
     try std.testing.expect(rejected.failure == .completion);
@@ -85,7 +94,7 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     try std.testing.expectEqual(std.http.Status.ok, result.status);
     const state = try std.json.parseFromSlice(struct { calls: usize, active: usize, cancelled: usize }, std.testing.allocator, writer.buffered(), .{});
     defer state.deinit();
-    try std.testing.expectEqual(@as(usize, 5), state.value.calls);
+    try std.testing.expectEqual(@as(usize, 6), state.value.calls);
     try std.testing.expectEqual(@as(usize, 0), state.value.active);
-    try std.testing.expectEqual(@as(usize, 1), state.value.cancelled);
+    try std.testing.expectEqual(@as(usize, 2), state.value.cancelled);
 }

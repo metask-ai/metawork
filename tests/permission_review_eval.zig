@@ -13,7 +13,8 @@ pub const ObservedTransport = struct {
         http_status: ?u16 = null,
         provider_error_type: ?ProviderErrorType = null,
         transport_error: ?[]const u8 = null,
-        response_bytes: usize = 0,
+        response_bytes: ?usize = null,
+        response_buffer_modified_on_failure: ?bool = null,
         text_bytes: usize = 0,
         text_blocks: usize = 0,
         envelope: enum { empty, object, array, quoted, markdown, tag, other } = .empty,
@@ -42,8 +43,19 @@ pub const ObservedTransport = struct {
     fn perform(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, output: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
         const self: *ObservedTransport = @ptrCast(@alignCast(context.?));
         self.observation = .{};
+        // A failed buffered fetch has no complete response length. Observe only
+        // whether its owned output buffer changed; never inspect or retain the
+        // partial content. An unchanged buffer does not prove no network data.
+        @memset(output, 0);
         const response = self.inner.perform_fn(self.inner.context, request, cancellation, output) catch |err| {
             self.observation.transport_error = @errorName(err);
+            self.observation.response_buffer_modified_on_failure = false;
+            for (output) |byte| {
+                if (byte != 0) {
+                    self.observation.response_buffer_modified_on_failure = true;
+                    break;
+                }
+            }
             return err;
         };
         self.observation.http_status = response.status;
@@ -118,6 +130,31 @@ pub const ObservedTransport = struct {
         return response;
     }
 };
+
+test "failed transport reports unknown response size and observes partial buffer without content" {
+    const Partial = struct {
+        write_partial: bool = true,
+        fn perform(context: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, output: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.write_partial) @memcpy(output[0..7], "private");
+            return error.Cancelled;
+        }
+    };
+    var partial = Partial{};
+    var observer = ObservedTransport{ .inner = .{ .context = &partial, .perform_fn = Partial.perform } };
+    var cancellation = agent.CompletionCancellation.init(observer.transport());
+    var buffer: [32]u8 = undefined;
+    const request: agent.CompletionHttpRequest = .{ .url = "https://example.com", .body = "{}", .headers = &.{} };
+    try std.testing.expectError(error.Cancelled, observer.transport().perform(request, &cancellation, &buffer));
+    try std.testing.expectEqual(@as(?usize, null), observer.observation.response_bytes);
+    try std.testing.expectEqual(@as(?bool, true), observer.observation.response_buffer_modified_on_failure);
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, observer.observation, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "private") == null);
+    partial.write_partial = false;
+    try std.testing.expectError(error.Cancelled, observer.transport().perform(request, &cancellation, &buffer));
+    try std.testing.expectEqual(@as(?bool, false), observer.observation.response_buffer_modified_on_failure);
+}
 
 test "evaluation observes response shape without retaining text and delegates cancellation" {
     const Fixture = struct {

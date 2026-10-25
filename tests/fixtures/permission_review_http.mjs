@@ -25,9 +25,14 @@ const server = createServer(async (request, response) => {
     state.active++;
     response.once("close", () => {
       state.active--;
-      if (mode === "hold") state.cancelled++;
+      if (mode === "hold" || mode === "partial-hold") state.cancelled++;
     });
     if (mode === "hold") return;
+    if (mode === "partial-hold") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"type":"message","content":[');
+      return;
+    }
     if (mode === "reject-503") {
       response.writeHead(503, { "content-type": "application/json" });
       response.end('{"error":{"type":"overloaded_error"}}');

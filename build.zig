@@ -375,6 +375,7 @@ pub fn build(b: *std.Build) void {
     });
     review_eval_module.addImport("metawork_agent", modules.agent);
     review_eval_module.addImport("permission_review", modules.product_permission_review);
+    review_http_cases.addImport("permission_review_evaluation", review_eval_module);
     const review_eval_main = b.createModule(.{ .root_source_file = b.path("tests/permission_review_eval_main.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
     review_eval_main.addImport("metawork_agent", modules.agent);
     review_eval_main.addImport("completion_http_backend", review_http_backend);
