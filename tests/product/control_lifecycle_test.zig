@@ -10847,3 +10847,83 @@ test "file delivery Run authority survives preparation changes until worker and 
     try std.testing.expect(run.file_delivery == null);
     try std.testing.expectEqual(@as(usize, 1), probe.released);
 }
+
+test "Session pressure never cancels busy work or automatically retries a failed close" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    const storage = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    var history = TaskPersistenceProbe{ .storage = storage };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 2 }, configuration);
+    defer control.deinit();
+    defer fake_core.releaseControlled();
+    try installControlExecution(&control);
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    fake_core.setNextPlan(.controlled);
+    const id = try control.createTask(input);
+    try waitInitialTaskCatalog(&control, id);
+    const run_id = try control.runTask(id, .{ .text = "Keep this accepted work running." });
+    try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+    const task = control.task_runtime.find(id).?;
+    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expect(!task.runtime.cancel_requested);
+    try std.testing.expectEqual(run_id, task.runtime.active_operation.run);
+    fake_core.releaseControlled();
+    try waitCheckpointRecord(&control, &history);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.durable.runs[0].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    // Terminal work still cannot be released while an artifact or continuation owns it.
+    task.durable.runs[0].?.pending_file_change_artifacts = 1;
+    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    task.durable.runs[0].?.pending_file_change_artifacts = 0;
+    task.durable.runs[0].?.input_continuation_pending = true;
+    try std.testing.expect(control.task_runtime.idleSessionRoute(null) == null);
+    task.durable.runs[0].?.input_continuation_pending = false;
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
+    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.close_failed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(task.runtime.hasClosingSession());
+    try std.testing.expect(task.runtime.parked_capabilities != null);
+    const destroyed = fake_core.session_destroyed;
+    for (0..8) |_| {
+        try std.testing.expectError(error.TaskBusy, control.createTask(input));
+        control.syncLifecycle();
+    }
+    try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
+    try std.testing.expect(task.runtime.close_thread == null);
+    try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, id));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    _ = try control.createTask(input);
+    try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
+}

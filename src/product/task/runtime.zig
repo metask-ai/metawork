@@ -2935,6 +2935,48 @@ pub const Runtime = struct {
         return prepared;
     }
 
+    pub fn idleSessionRoute(self: *const Runtime, except_task_id: ?u64) ?u64 {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (except_task_id != task.durable.id and idleSessionReleasable(task)) return task.runtime.routeId();
+        }
+        return null;
+    }
+
+    /// Pressure release uses the ordinary close owner, but never cancels work.
+    /// The caller retries admission after completion; no operation is replayed.
+    pub fn releaseIdleSession(self: *Runtime, except_task_id: ?u64, notifier: task_execution.Notifier) (agent.Error || std.mem.Allocator.Error || std.Thread.SpawnError)!bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_thread != null or task.runtime.close_requested) return true;
+        };
+        var candidate: ?*task_state.Task = null;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (except_task_id == task.durable.id or !idleSessionReleasable(task)) continue;
+            if (candidate == null or task.durable.recent_order < candidate.?.durable.recent_order)
+                candidate = task;
+        }
+        const task = candidate orelse return false;
+        var access = try task.runtime.acquireAccess();
+        const capabilities = access.captureRestoreInputs() catch |err| {
+            access.deinit();
+            return err;
+        };
+        access.deinit();
+        task.runtime.parked_capabilities = capabilities;
+        const attached = task.runtime.attached().?;
+        task.runtime.restore_catalog = attached.pinned_catalog;
+        attached.pinned_catalog = null;
+        startCloseWorker(task, notifier, false) catch |err| {
+            task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+            task.runtime.restore_catalog = null;
+            task.runtime.parked_capabilities.?.deinit() catch {};
+            task.runtime.parked_capabilities = null;
+            return err;
+        };
+        return true;
+    }
+
     pub fn beginDetach(
         self: *Runtime,
         task_id: u64,
@@ -5331,6 +5373,12 @@ pub const Runtime = struct {
                         .failed_closing => {},
                         else => unreachable,
                     }
+                    if (task.runtime.parked_capabilities != null and task.runtime.attached() != null) {
+                        task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+                        task.runtime.restore_catalog = null;
+                        task.runtime.parked_capabilities.?.deinit() catch {};
+                        task.runtime.parked_capabilities = null;
+                    }
                 },
                 .none, .running => unreachable,
             }
@@ -5400,11 +5448,11 @@ pub const Runtime = struct {
                 self.allocator.free(value);
                 rebind.projected_model = null;
             }
-            if (task.runtime.restore_catalog) |*snapshot| {
+            if (task.runtime.parked_capabilities == null) if (task.runtime.restore_catalog) |*snapshot| {
                 release.releaseProjectionBytes(snapshot.projected_bytes);
                 snapshot.deinit();
                 task.runtime.restore_catalog = null;
-            }
+            };
         }
         const continuation = job.continuation_source_id;
         const original_epoch = job.attempt.binding_epoch;
@@ -5833,6 +5881,10 @@ pub const Runtime = struct {
                         .execution = candidate.takeExecution(),
                         .pinned_catalog = pinned,
                     } };
+                    if (task.runtime.parked_capabilities) |*inputs| {
+                        inputs.deinit() catch {};
+                        task.runtime.parked_capabilities = null;
+                    }
                     task.conversation_observation = .{};
                     task.runtime.last_restore_failure = if (job.rebind) |rebind| if (rebind.phase == .restoring_original) rebind.failure else null else null;
                 } else {
@@ -7797,6 +7849,25 @@ fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
 }
 
+fn idleSessionReleasable(task: *const task_state.Task) bool {
+    const attached = task.runtime.attachedConst() orelse return false;
+    if (attached.health != .available or !closeReady(task) or
+        task.runtime.close_failed or task.runtime.close_requested or task.runtime.close_thread != null or
+        task.runtime.restore_job != null or task.runtime.restore_catalog != null or
+        task.runtime.parked_capabilities != null or task.runtime.pending_ui_request_id != 0 or
+        task.model_intent_prepared or task.approval_change != null or task.deletion != .idle or
+        task.read_only_history != null or task.durable.model_intent == null or
+        task.initial_catalog_preparation == .loading) return false;
+    if (task.durable.checkpoint) |record| {
+        if (!task_policy.checkpointMatchesCurrentHistory(task, record)) return false;
+    } else if (!freshConversationAllowed(task)) return false;
+    for (task.durable.runs) |entry| if (entry) |run| {
+        if (run.input_continuation_pending or run.pending_file_change_artifacts != 0 or
+            run.checkpoint.lease != null or run.execution != null) return false;
+    };
+    return true;
+}
+
 fn closeReady(task: *const task_state.Task) bool {
     if (task.runtime.active_operation != .none or
         task_state.hasUnfinalizedTerminalEvents(task) or
@@ -8443,7 +8514,15 @@ fn deinitTask(
 ) void {
     std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
-    std.debug.assert(task.runtime.restore_catalog == null);
+    if (task.runtime.parked_capabilities) |*inputs| {
+        inputs.deinit() catch {};
+        task.runtime.parked_capabilities = null;
+    }
+    if (task.runtime.restore_catalog) |*snapshot| {
+        effects.releaseProjectionBytes(snapshot.projected_bytes);
+        snapshot.deinit();
+        task.runtime.restore_catalog = null;
+    }
     for (task.input_submissions.items) |*record| {
         self.releaseSubmissionPayload(record);
         deinitRunInput(self, effects, &record.input);

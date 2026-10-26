@@ -1855,3 +1855,83 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
     try std.testing.expectEqualSlices(u8, &digest, &recovered.outputs[0].?.sha256);
     try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
 }
+
+test "Session pressure canonical Product preserves checkpoint history with one live Session" {
+    var h: Harness = undefined;
+    try h.init("delivery", .{});
+    defer h.deinit();
+    try h.runtime.shutdown();
+    h.runtime.deinit();
+    h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    const file = try h.tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    try file.writeStreamingAll(std.testing.io, "session pressure receipt");
+    file.close(std.testing.io);
+    var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
+    defer history.deinit();
+    var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
+    defer checkpoints.deinit();
+    var configuration = image_product.fixture_api.productControlConfiguration();
+    configuration.task_persistence = image_product.History.port(&history);
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    configuration.directories.canonical_user_home = h.root;
+    var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
+    defer {
+        control.stopCustomProviders();
+        control.deinit();
+    }
+    var effects: image_product.Effects = .{ .network = &h.network, .endpoint = h.fixture.endpoint, .trace_dir = h.tmp.dir };
+    try control.startCustomProviders(h.root, effects.vault());
+    try image_product.configureDialogue(&control, h.fixture.provider_endpoint, false);
+    var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
+    control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
+    const input: image_product.control_api.TaskCreateInput = .{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual };
+    const first = try control.createTask(input);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (control.task_runtime.catalogProjection(first).?.availability != .loading) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    const run_id = try control.runTask(first, .{ .text = "Deliver the finished file before releasing this Session." });
+    try image_product.finish(&control, first, run_id, null);
+    const task = control.task_runtime.find(first).?;
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.durable.runs[0].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    const receipt = task.durable.runs[0].?.outputs[0].?.id;
+    const old_epoch = task.durable.binding_epoch;
+    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(task.runtime.parked_capabilities != null);
+    const second = try control.createTask(input);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (control.task_runtime.catalogProjection(second).?.availability != .loading) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectError(error.TaskBusy, control.restoreTaskConversation(first, old_epoch));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (control.task_runtime.find(second).?.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    _ = try control.restoreTaskConversation(first, old_epoch);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.restore_job == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expect(task.runtime.last_restore_failure == null);
+    try std.testing.expect(task.runtime.parked_capabilities == null);
+    try std.testing.expect(task.runtime.last_restore_report != null);
+    try std.testing.expectEqualSlices(u8, &receipt, &task.durable.runs[0].?.outputs[0].?.id);
+    try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
+    try std.testing.expect(control.task_runtime.find(second) != null);
+    try std.testing.expect(task.durable.checkpoint != null);
+}

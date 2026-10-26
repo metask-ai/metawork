@@ -164,6 +164,9 @@ pub const State = struct {
     /// Main-thread projection retained across the old Session's close and a
     /// possible original restore. Workers receive only Agent-owned inputs.
     restore_catalog: ?catalog_snapshot.Snapshot = null,
+    /// Same-process capability ceiling retained while an idle Session is released.
+    /// Contains no execution credential or SDK Session handle.
+    parked_capabilities: ?agent.SessionRestoreInputs = null,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,

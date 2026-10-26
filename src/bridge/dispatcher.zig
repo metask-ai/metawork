@@ -5294,6 +5294,7 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.ModelSelectionChanged => "model_selection_changed",
         error.StaleCatalog => "stale_catalog",
         error.TaskCapacity, error.ProjectionCapacity => "capacity_reached",
+        error.TaskBusy => "execution_unavailable",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
@@ -5375,7 +5376,7 @@ fn taskRestoreRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.BindingEpochMismatch => "binding_changed",
         error.UnknownTask => "task_unavailable",
-        error.RecoveryUnavailable => "recovery_unavailable",
+        error.RecoveryUnavailable, error.TaskBusy => "recovery_unavailable",
         error.RestoreAttemptExhausted,
         error.QueueFull,
         error.ProjectionCapacity,

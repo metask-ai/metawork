@@ -4266,7 +4266,11 @@ pub const Runtime = struct {
             .release = self.taskRuntimeReleaseEffects(),
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
-            error.SessionCapacity => return error.TaskCapacity,
+            error.SessionCapacity => {
+                _ = try self.releaseIdleTaskSession(null);
+                self.bumpRevision();
+                return error.TaskBusy;
+            },
             error.McpNotRefreshed => retry: {
                 self.recoverExpiredMcpCatalogNoFail();
                 mcp_selection = null;
@@ -4274,7 +4278,11 @@ pub const Runtime = struct {
                 task_input.mcp_selection = mcp_selection;
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
-                    error.SessionCapacity => return error.TaskCapacity,
+                    error.SessionCapacity => {
+                        _ = try self.releaseIdleTaskSession(null);
+                        self.bumpRevision();
+                        return error.TaskBusy;
+                    },
                     else => return retry_err,
                 };
             },
@@ -4388,6 +4396,12 @@ pub const Runtime = struct {
         };
     }
 
+    fn releaseIdleTaskSession(self: *Runtime, except_task_id: ?u64) Error!bool {
+        if (!self.task_persistence_health.operational() or self.checkpoint_store == null or
+            self.checkpoint_store_health.load(.acquire) != .ready) return false;
+        return self.task_runtime.releaseIdleSession(except_task_id, self.taskRuntimeOperationEffects().worker.notifier);
+    }
+
     fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!struct { skill: ?*lifecycle.SkillRestoreInputs, mcp: ?*lifecycle.McpSelection, mcp_catalog_generation: ?u64 } {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         var skill: ?*lifecycle.SkillRestoreInputs = null;
@@ -4488,6 +4502,17 @@ pub const Runtime = struct {
             const filters = try self.prepareTaskRestoreFilters(task_id, &original);
             capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
             original_owned = false;
+        } else if (task.runtime.parked_capabilities) |parked| {
+            var original = parked;
+            original.skill = null;
+            original.mcp = null;
+            var original_owned = true;
+            defer if (original_owned) original.deinit() catch {};
+            if (parked.skill) |skill| original.skill = try skill.clone();
+            if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
+            const filters = try self.prepareTaskRestoreFilters(task_id, &original);
+            capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
+            original_owned = false;
         }
         const execution = target.input();
         // A cold restore may reuse an already resolved immutable connection.
@@ -4524,7 +4549,7 @@ pub const Runtime = struct {
             .checkpoint_limits = checkpoint_export_limits,
             .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
-            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (attached) &capabilities else null, .text = self.taskRuntimeTextProjection() },
+            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
         });
         self.bumpRevision();
         return attempt;
@@ -4543,6 +4568,13 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.task_runtime.findConst(task_id)) |task| {
             if (task.runtime.active_operation != .none) return error.RecoveryUnavailable;
+            if (task.runtime.attachment == .detached) {
+                _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
+                if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
+                    if (try self.releaseIdleTaskSession(task_id)) self.bumpRevision();
+                    return error.TaskBusy;
+                }
+            }
             var target = try self.resolveTaskRunModel(task_id);
             defer if (target) |*value| value.deinit();
             if (target) |*value| if (task.runtime.attachment == .detached or
@@ -7978,7 +8010,8 @@ pub const Runtime = struct {
             .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
-            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id))
+            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id) or
+                (if (self.task_runtime.idleSessionRoute(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
                 .available
             else
                 .unavailable,
