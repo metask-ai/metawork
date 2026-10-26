@@ -3616,7 +3616,10 @@ test("visible Tasks allow failed deletion without archiving and reject deleting 
   });
   scoped.taskPage.task.deletionStatus = "failed";
   scoped.taskIndex[0].deletionStatus = "failed";
-  assert.equal(decodeScopedSnapshot(scoped).taskPage.task.deletionStatus, "failed");
+  assert.equal(
+    decodeScopedSnapshot(scoped).taskPage.task.deletionStatus,
+    "failed",
+  );
   scoped.taskPage.task.deletionStatus = "deleting";
   assert.throws(
     () => decodeScopedSnapshot(scoped),
