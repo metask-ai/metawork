@@ -3790,7 +3790,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
                   text: JSON.stringify({
                     decision: readability ? "needs_user" : "allow_once",
                     reason: readability
-                      ? "请确认该命令是否符合你要求的操作。"
+                      ? "用途说明与实际命令不一致，需要你确认是否执行。"
                       : "bounded fixture command",
                   }),
                 },

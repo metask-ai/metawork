@@ -1013,33 +1013,30 @@ export const enUS = {
   "task_panel.hide": "Hide side panel",
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
-  "approval.response_required": "Your confirmation",
   "approval.answered_by_reviewer": "Automatic review",
-  "approval.action.command": "Allow running a command on your computer?",
-  "approval.action.read": "Allow reading this file?",
-  "approval.action.write": "Allow writing this file?",
-  "approval.action.edit": "Allow changing this file?",
+  "approval.action.command": "Allow this command to run?",
+  "approval.action.read": "Allow reading “{target}”?",
+  "approval.action.write": "Allow writing “{target}”?",
+  "approval.action.edit": "Allow changing “{target}”?",
   "approval.action.web_fetch": "Allow requesting this URL?",
-  "approval.confirmation_reason": "Why confirmation is needed",
   "approval.manual_mode":
     "This task uses manual approval. Please confirm this operation.",
   "approval.confirm_request":
     "Please decide whether to proceed with this operation.",
-  "approval.reviewer_note": "Review model’s note",
-  "approval.agent_purpose": "Purpose stated by the Agent",
-  "approval.purpose_unavailable": "No purpose description is available.",
-  "approval.target_url": "Requested URL",
-  "approval.target_file": "Target file",
+  "approval.reviewer_note": "Reviewer’s note:",
+  "approval.agent_purpose": "Agent’s description:",
+  "approval.purpose_unavailable": "No purpose was provided.",
   "approval.command": "Command to run",
   "approval.command_effects":
     "The system has not verified the command’s full effects.",
   "approval.command_unavailable":
-    "A command summary is unavailable. Check the request arguments below.",
-  "approval.full_request": "View full arguments",
+    "The command is unavailable. View operation details.",
+  "approval.full_request": "View operation details",
+  "approval.hide_request": "Hide operation details",
   "approval.handoff.unavailable":
     "Automatic review could not complete. This operation has not run.",
   "approval.handoff.reviewer_concern":
-    "Automatic review needs your confirmation. See the review model’s note.",
+    "Automatic review raised a concern that needs your confirmation.",
   "approval.handoff.context_incomplete":
     "Automatic review lacked usable context for a decision.",
   "approval.handoff.timeout":
@@ -1064,15 +1061,13 @@ export const enUS = {
     "Allow this tool on this file for this session",
   "approval.deny_session_file": "Deny this tool on this file for this session",
   "approval.scope_file_session":
-    "Once, or {tool} on the same file for this session, including different content.",
+    "Session approval covers only {tool} on the same file, including different content.",
   "approval.allow_session": "Allow same arguments for this session",
   "approval.deny_session": "Deny same arguments for this session",
   "approval.more_allow_options": "More approval options",
-  "approval.more_deny_options": "More denial options",
-  "approval.scope": "Approval scope",
   "approval.scope_once": "Only this operation",
   "approval.scope_session_available":
-    "The main button allows this operation once. More options can allow identical arguments for this session.",
+    "Session approval covers only requests with identical arguments.",
   "approval.session_expiry":
     "Session choices end with this task session and do not carry into a new task.",
   "approval.why_again": "Why MetaWork is asking again",
