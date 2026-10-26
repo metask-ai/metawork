@@ -373,7 +373,9 @@ pub fn runWithCompletion(
     if (repeats < 1 or repeats > 5) return error.InvalidEvaluationRepeats;
     const diagnostic_deadline = init.environ_map.get("METAWORK_REVIEW_EVAL_DEADLINE_MS");
     const deadline_ms = if (diagnostic_deadline) |value| try std.fmt.parseInt(u64, value, 10) else review.timeout_ms;
-    if (deadline_ms < 1_000 or deadline_ms > 60_000) return error.InvalidDiagnosticDeadline;
+    // A diagnostic can observe whether a response arrives after the production
+    // deadline. The production default is unchanged and overrides never qualify.
+    if (deadline_ms < 1_000 or deadline_ms > 120_000) return error.InvalidDiagnosticDeadline;
     const case_filter = init.environ_map.get("METAWORK_REVIEW_EVAL_CASE");
     if (case_filter) |id| {
         var found = false;
@@ -383,6 +385,10 @@ pub fn runWithCompletion(
         };
         if (!found) return error.UnknownEvaluationCase;
     }
+    const diagnostic_limit = init.environ_map.get("METAWORK_REVIEW_EVAL_MAX_SAMPLES");
+    const max_samples = if (diagnostic_limit) |value| try std.fmt.parseInt(usize, value, 10) else null;
+    const expected_per_variant = repeats * (if (case_filter != null) @as(usize, 1) else cases.len);
+    if (max_samples) |limit| if (limit == 0 or limit > @min(cases.len * 2, expected_per_variant * 2)) return error.InvalidDiagnosticSampleLimit;
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const writer = &output.interface;
@@ -393,17 +399,19 @@ pub fn runWithCompletion(
         .model = model,
         .repeats = repeats,
         .case_count = cases.len,
-        .quality_eligible = case_filter == null and diagnostic_deadline == null and repeats > 1,
+        .quality_eligible = case_filter == null and diagnostic_deadline == null and diagnostic_limit == null and repeats > 1,
         .review_max_output_tokens = review.max_output_tokens,
         .diagnostic_case = case_filter,
         .deadline_ms = deadline_ms,
         .diagnostic_deadline_override = diagnostic_deadline != null,
+        .diagnostic_max_samples = max_samples,
+        .stop_after_production_deadline = diagnostic_deadline != null and deadline_ms > review.timeout_ms,
         .comparison = "same current policy/model; current-only input versus bounded-history input, not a previous-release comparison",
         .billing = "token usage only when available; monetary cost requires provider billing",
         .usage_reporting = "production codec counters; zero may mean the provider omitted usage, not zero cost",
     });
     var totals: [2]Metrics = .{ .{}, .{} };
-    const expected_per_variant = repeats * (if (case_filter != null) @as(usize, 1) else cases.len);
+    var stopped_past_production_deadline = false;
     sampling: for (0..repeats) |repeat| {
         for (cases, 0..) |case, case_index| {
             if (case_filter) |id| if (!std.mem.eql(u8, id, case.id)) continue;
@@ -474,6 +482,11 @@ pub fn runWithCompletion(
                 // Preserve the failing sample and stop, rather than billing for
                 // the rest of a batch that cannot satisfy the acceptance gate.
                 if (failure != null) break :sampling;
+                if (pastProductionDeadline(diagnostic_deadline != null, deadline_ms, elapsed)) {
+                    stopped_past_production_deadline = true;
+                    break :sampling;
+                }
+                if (max_samples) |limit| if (totals[0].attempts + totals[1].attempts >= limit) break :sampling;
             }
         }
     }
@@ -488,8 +501,14 @@ pub fn runWithCompletion(
         .completed_attempts = totals[0].attempts + totals[1].attempts,
         .coverage_complete = totals[0].attempts == expected_per_variant and totals[1].attempts == expected_per_variant,
         .stopped_after_technical_failure = totals[0].technical_failures + totals[1].technical_failures != 0,
+        .stopped_after_diagnostic_limit = if (max_samples) |limit| totals[0].attempts + totals[1].attempts >= limit else false,
+        .stopped_after_production_deadline = stopped_past_production_deadline,
     });
-    try acceptEvaluation(totals, case_filter != null or diagnostic_deadline != null, repeats, expected_per_variant);
+    try acceptEvaluation(totals, case_filter != null or diagnostic_deadline != null or diagnostic_limit != null, repeats, expected_per_variant);
+}
+
+fn pastProductionDeadline(overridden: bool, deadline_ms: u64, elapsed_ms: i128) bool {
+    return overridden and deadline_ms > review.timeout_ms and elapsed_ms >= review.timeout_ms;
 }
 
 fn acceptEvaluation(totals: [2]Metrics, diagnostic: bool, repeats: usize, expected_per_variant: usize) !void {
@@ -502,6 +521,10 @@ fn acceptEvaluation(totals: [2]Metrics, diagnostic: bool, repeats: usize, expect
 }
 
 test "diagnostic configuration cannot pass the full quality gate" {
+    try std.testing.expect(pastProductionDeadline(true, 120_000, 60_001));
+    try std.testing.expect(!pastProductionDeadline(true, 120_000, 59_999));
+    try std.testing.expect(!pastProductionDeadline(false, 120_000, 60_001));
+    try std.testing.expect(!pastProductionDeadline(true, 60_000, 60_001));
     const totals: [2]Metrics = .{
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3, .unnecessary_manual = 2 },
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3 },
