@@ -128,6 +128,7 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
   });
   snapshot.workspaces[0].signals.running = 0;
   const requests = [];
+  const renames = [];
   let onRevision;
   let shortcut;
   const deletions = [];
@@ -151,6 +152,16 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
     disconnect: async () => {},
     ping: async () => {},
     fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
+    renameTask: async (taskId, title) => {
+      const result = await new Promise((resolve) =>
+        renames.push({ taskId, title, resolve }),
+      );
+      if (result.committed || !result.error) {
+        snapshot.tasks.find((entry) => entry.id === taskId).title = title;
+        snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      }
+      if (result.error) throw result.error;
+    },
     setTaskArchived: async (taskId, archived) => {
       const result = await new Promise((resolve) =>
         requests.push({ taskId, archived, resolve }),
@@ -182,7 +193,25 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
   return {
     user,
     requests,
+    renames,
     deletions,
+    async openRename(taskId = "3", select = true) {
+      const row = taskRows(taskId)[0];
+      if (select) await user.click(row);
+      fireEvent.contextMenu(row);
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Rename", exact: true }),
+      );
+      const dialog = await screen.findByRole("dialog", { name: "Rename task" });
+      const input = within(dialog).getByRole("textbox", { name: "Task name" });
+      await waitFor(() => assert.ok(document.activeElement === input));
+      assert.equal(input.selectionStart, 0);
+      assert.equal(input.selectionEnd, input.value.length);
+      return input;
+    },
+    async settleRename(result = {}) {
+      await act(async () => renames.at(-1).resolve(result));
+    },
     async openArchives() {
       await act(async () => shortcut({ id: "settings.open" }));
       await user.click(
@@ -207,8 +236,15 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
     async settle(result) {
       await act(async () => requests.at(-1).resolve(result));
     },
-    async publishArchive(taskId, archived) {
-      snapshot.tasks.find((entry) => entry.id === taskId).archived = archived;
+    async publishTask(taskId, patch) {
+      if (patch === null) {
+        snapshot.tasks = snapshot.tasks.filter((task) => task.id !== taskId);
+      } else {
+        Object.assign(
+          snapshot.tasks.find((task) => task.id === taskId),
+          patch,
+        );
+      }
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       await act(async () =>
         onRevision(snapshot.revision, snapshot.securityEpoch ?? "1"),
@@ -216,6 +252,268 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
     },
   };
 }
+
+for (const activation of [
+  "mouse click",
+  "button Enter",
+  "button Space",
+  "input Enter",
+]) {
+  test(`rename via ${activation} submits once and updates the header and navigation after confirmation`, async (ctx) => {
+    const app = await renderApp(ctx);
+    const input = await app.openRename();
+    const title = "P1 QA 7429 代码读取与修复";
+    await app.user.clear(input);
+    await app.user.type(input, `  ${title}  `);
+    const save = screen.getByRole("button", { name: "Save", exact: true });
+    if (activation === "mouse click") {
+      await app.user.click(save);
+    } else if (activation === "input Enter") {
+      await app.user.keyboard("{Enter}");
+    } else {
+      await app.user.tab();
+      assert.ok(
+        document.activeElement ===
+          screen.getByRole("button", { name: "Cancel" }),
+      );
+      await app.user.tab();
+      assert.ok(document.activeElement === save);
+      await app.user.keyboard(activation === "button Enter" ? "{Enter}" : " ");
+    }
+    await waitFor(() => assert.equal(app.renames.length, 1));
+    assert.equal(app.renames[0].taskId, "3");
+    assert.equal(app.renames[0].title, title);
+    assert.ok(screen.getByRole("textbox", { name: "Task name" }) === input);
+    assert.equal(save.disabled, true);
+    for (const row of taskRows("3"))
+      assert.equal(row.textContent, "Archive target");
+
+    await app.settleRename();
+    await waitFor(() => {
+      assert.ok(screen.queryByRole("textbox", { name: "Task name" }) === null);
+      assert.equal(
+        document.querySelector(".commandbar-task").textContent,
+        title,
+      );
+      assert.equal(taskRows("3").length, 2);
+      for (const row of taskRows("3")) assert.equal(row.textContent, title);
+    });
+    assert.equal(app.renames.length, 1);
+    assert.equal(app.requests.length, 0);
+    assert.equal(app.deletions.length, 0);
+  });
+}
+
+for (const dismissal of ["Cancel", "Escape", "backdrop"]) {
+  test(`rename ${dismissal} discards the draft without submitting`, async (ctx) => {
+    const app = await renderApp(ctx);
+    const input = await app.openRename();
+    await app.user.clear(input);
+    await app.user.type(input, "Discard this draft");
+    if (dismissal === "Cancel") {
+      await app.user.click(screen.getByRole("button", { name: "Cancel" }));
+    } else if (dismissal === "backdrop") {
+      await app.user.click(
+        screen
+          .getAllByRole("presentation", { hidden: true })
+          .find((element) => element.hasAttribute("data-open")),
+      );
+    } else {
+      await app.user.keyboard("{Escape}");
+    }
+    await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+    assert.equal(app.renames.length, 0);
+    assert.equal((await app.openRename()).value, "Archive target");
+  });
+}
+
+test("rename rejects a blank draft through both Save and input Enter", async (ctx) => {
+  const app = await renderApp(ctx);
+  const input = await app.openRename();
+  await app.user.clear(input);
+  await app.user.type(input, "   ");
+  const save = screen.getByRole("button", { name: "Save", exact: true });
+  assert.equal(save.disabled, true);
+  await app.user.click(save);
+  await app.user.click(input);
+  await app.user.keyboard("{Enter}");
+  assert.equal(app.renames.length, 0);
+  assert.ok(screen.getByRole("textbox", { name: "Task name" }) === input);
+});
+
+test("rename rejection preserves the draft and permits an explicit retry", async (ctx) => {
+  const app = await renderApp(ctx);
+  const input = await app.openRename();
+  await app.user.clear(input);
+  await app.user.type(input, "Retry this title");
+  await app.user.click(
+    screen.getByRole("button", { name: "Save", exact: true }),
+  );
+  await waitFor(() => assert.equal(app.renames.length, 1));
+  await app.settleRename({ error: new Error("Host rejected rename") });
+  const error = await within(screen.getByRole("dialog")).findByRole("alert");
+  assert.equal(error.textContent, "The task could not be renamed. Try again.");
+  assert.equal(
+    screen.getByRole("textbox", { name: "Task name" }).value,
+    "Retry this title",
+  );
+  const save = screen.getByRole("button", { name: "Save", exact: true });
+  assert.equal(save.disabled, false);
+  assert.equal(app.renames.length, 1);
+  await app.user.click(save);
+  await waitFor(() => assert.equal(app.renames.length, 2));
+  assert.equal(app.renames[1].taskId, "3");
+  assert.equal(app.renames[1].title, "Retry this title");
+  await app.settleRename();
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("textbox", { name: "Task name" }) === null),
+  );
+});
+
+test("rename Dialog traps focus and leaves the task title as display text", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.openRename();
+  assert.equal(
+    document.querySelector(".commandbar-task").textContent,
+    "Archive target",
+  );
+  assert.equal(document.querySelector(".commandbar-context input"), null);
+  assert.ok(
+    screen.getByRole("dialog").closest("[data-native-window-drag-exclude]"),
+  );
+  await app.user.tab({ shift: true });
+  const dialog = screen.getByRole("dialog");
+  await waitFor(() =>
+    assert.ok(
+      dialog.contains(document.activeElement),
+      document.activeElement.outerHTML.slice(0, 300),
+    ),
+  );
+  for (let index = 0; index < 4; index++) {
+    await app.user.tab();
+    await waitFor(() =>
+      assert.ok(
+        dialog.contains(document.activeElement),
+        document.activeElement.outerHTML.slice(0, 300),
+      ),
+    );
+  }
+});
+
+test("rename IME confirmation does not submit or dismiss the Dialog", async (ctx) => {
+  const app = await renderApp(ctx);
+  const input = await app.openRename();
+  fireEvent.compositionStart(input);
+  fireEvent.change(input, { target: { value: "中文任务名称" } });
+  await app.user.keyboard("{Enter}{Escape}");
+  assert.ok(screen.getByRole("dialog"));
+  assert.equal(app.renames.length, 0);
+  fireEvent.compositionEnd(input);
+  await app.user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(app.renames.length, 1));
+  assert.equal(app.renames[0].title, "中文任务名称");
+  await app.settleRename();
+});
+
+test("pending rename cannot be edited, dismissed or submitted again", async (ctx) => {
+  const app = await renderApp(ctx);
+  const input = await app.openRename();
+  await app.user.type(input, "Pending title");
+  await app.user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(app.renames.length, 1));
+  assert.equal(input.disabled, true);
+  const saving = screen.getByRole("button", { name: "Saving…" });
+  assert.equal(saving.disabled, true);
+  await app.user.keyboard("{Enter}{Escape}");
+  await app.user.click(screen.getByRole("button", { name: "Cancel" }));
+  await app.user.click(
+    screen
+      .getAllByRole("presentation", { hidden: true })
+      .find((element) => element.hasAttribute("data-open")),
+  );
+  await app.user.click(saving);
+  assert.ok(screen.getByRole("dialog"));
+  assert.equal(app.renames.length, 1);
+  await app.settleRename();
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+});
+
+for (const committed of [true, false]) {
+  test(`rename timeout reads back committed=${committed} without resending`, async (ctx) => {
+    const app = await renderApp(ctx);
+    const input = await app.openRename();
+    await app.user.clear(input);
+    await app.user.type(input, "Uncertain rename");
+    await app.user.keyboard("{Enter}");
+    await waitFor(() => assert.equal(app.renames.length, 1));
+    await app.settleRename({
+      committed,
+      error: new BridgeCommandTimeoutError("metawork.tasks.rename", 10000),
+    });
+    if (committed) {
+      await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+      assert.equal(
+        document.querySelector(".commandbar-task").textContent,
+        "Uncertain rename",
+      );
+    } else {
+      await screen.findByRole("alert");
+      assert.equal(
+        screen.getByRole("textbox", { name: "Task name" }).value,
+        "Uncertain rename",
+      );
+      assert.equal(
+        screen.getByRole("button", { name: "Save" }).disabled,
+        false,
+      );
+      await app.user.keyboard("{Escape}");
+      await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+    }
+    assert.equal(app.renames.length, 1);
+  });
+}
+
+for (const patch of [
+  null,
+  { archived: true },
+  {
+    continuationUnavailableReason: "history_read_only",
+    continuationAvailable: false,
+  },
+  { lifecycle: "closing", deletionStatus: "deleting" },
+]) {
+  test(`rename closes when target becomes ${JSON.stringify(patch)}`, async (ctx) => {
+    const app = await renderApp(ctx);
+    await app.openRename();
+    await app.publishTask("3", patch);
+    await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+    assert.equal(app.renames.length, 0);
+  });
+}
+
+test("a late rename result does not clear another Task's Dialog", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.publishTask("4", { archived: false });
+  const input = await app.openRename();
+  await app.user.type(input, "First rename");
+  await app.user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(app.renames.length, 1));
+  await app.publishTask("3", { archived: true });
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
+  const nextInput = await app.openRename("4", false);
+  await app.user.clear(nextInput);
+  await app.user.type(nextInput, "Second draft");
+  await app.settleRename();
+  assert.equal(
+    screen.getByRole("textbox", { name: "Task name" }).value,
+    "Second draft",
+  );
+  await app.user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(app.renames.length, 2));
+  assert.equal(app.renames[1].taskId, "4");
+  assert.equal(app.renames[1].title, "Second draft");
+  await app.settleRename();
+});
 
 test("archive hides Task from Recent and Projects and settings manages the same history", async (ctx) => {
   const app = await renderApp(ctx);

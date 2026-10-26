@@ -48,6 +48,8 @@ import { Icon } from "../components/ui/Icon.tsx";
 import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
+import { Dialog } from "../components/ui/dialog.tsx";
+import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
@@ -342,8 +344,13 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
   const [mcpQuery, setMcpQuery] = useState("");
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
+  const [renameEditor, setRenameEditor] = useState<{
+    taskId: string;
+    draft: string;
+    message: MessageId | null;
+  } | null>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renameComposing = useRef(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const confirmDelete = deleteTargetId !== null;
   const [fileChanges, setFileChanges] = useState<FileChangesUiState>({
@@ -1135,6 +1142,24 @@ export default function App() {
       (activeTask.approvalChange || approvalRequests[activeTask.id]),
     );
   const taskMutationDisabled = workbenchMutationDisabled || taskMutationPending;
+  const renameTarget = renameEditor
+    ? snapshot.taskIndex.find((task) => task.id === renameEditor.taskId)
+    : null;
+  const renamePending = renameEditor
+    ? `task:${renameEditor.taskId}` in taskPending
+    : false;
+  useEffect(() => {
+    if (
+      renameEditor &&
+      (!renameTarget ||
+        renameTarget.archived ||
+        renameTarget.historyReadOnly ||
+        renameTarget.deletionStatus === "deleting" ||
+        settingsOpen ||
+        route !== "workbench")
+    )
+      setRenameEditor(null);
+  }, [renameEditor, renameTarget, settingsOpen, route]);
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
     return current
@@ -1528,6 +1553,7 @@ export default function App() {
       },
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
+        setRenameEditor(null);
         latestSnapshotRef.current = null;
         setHistoryRequests({});
         taskReadingMemory.reading.clear();
@@ -1631,7 +1657,7 @@ export default function App() {
       const key = event.key.toLowerCase();
       if (key !== "k" && key !== "n") return;
       event.preventDefault();
-      if (bridgeUnavailable || modelSetupOpen) return;
+      if (bridgeUnavailable || modelSetupOpen || renameEditor) return;
       if (key === "k") {
         setSearchOpen(true);
       } else {
@@ -1641,17 +1667,16 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [bridgeUnavailable, modelSetupOpen]);
+  }, [bridgeUnavailable, modelSetupOpen, renameEditor]);
   useEffect(() => {
     if (!client.available()) return;
     return client.onShortcut((detail) => {
       if (detail.id !== "settings.open") return;
-      if (bridgeUnavailable) return;
+      if (bridgeUnavailable || renameEditor) return;
       openSettings();
     });
-  }, [bridgeUnavailable, client]);
+  }, [bridgeUnavailable, client, renameEditor]);
   useEffect(() => {
-    setEditingTitle(false);
     taskPanelOpeners.current.clear();
   }, [workbench.activeTaskId]);
   useEffect(() => {
@@ -2911,12 +2936,31 @@ export default function App() {
         return;
     }
   }
-  async function renameTask(task = activeTask) {
+  function closeRenameDialog() {
     if (
+      renameEditor &&
+      !taskPendingScopes.current.has(`task:${renameEditor.taskId}`)
+    ) {
+      setRenameEditor(null);
+    }
+  }
+  async function renameTask() {
+    const editor = renameEditor;
+    const task = editor
+      ? latestSnapshotRef.current?.taskIndex.find(
+          (task) => task.id === editor.taskId,
+        )
+      : null;
+    if (
+      !editor ||
       !task ||
+      task.archived ||
+      task.historyReadOnly ||
+      task.deletionStatus === "deleting" ||
       workbenchMutationDisabled ||
       `task:${task.id}` in taskPending ||
-      !titleDraft.trim()
+      renameComposing.current ||
+      !editor.draft.trim()
     )
       return;
     const taskId = task.id;
@@ -2924,26 +2968,36 @@ export default function App() {
     if (!beginTaskPendingOperation(scope, "rename")) return;
     try {
       try {
-        await client.renameTask(task.id, titleDraft.trim());
+        await client.renameTask(taskId, editor.draft.trim());
       } catch (error) {
         if (
           await reconcileCommandTimeout(error, "operation.task_rename", {
             scope: "task",
             taskId,
           })
-        )
+        ) {
+          const confirmed =
+            latestSnapshotRef.current?.taskIndex.find(
+              (entry) => entry.id === taskId,
+            )?.title === editor.draft.trim();
+          setRenameEditor((current) =>
+            current !== editor
+              ? current
+              : confirmed
+                ? null
+                : { ...editor, message: "task.rename_unconfirmed" },
+          );
           return;
+        }
         await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
-            "task.rename_failed",
-            { scope: "task", taskId },
-            { diagnostic: errorText(error) },
-          ),
+        setRenameEditor((current) =>
+          current === editor
+            ? { ...editor, message: "task.rename_failed" }
+            : current,
         );
         return;
       }
-      setEditingTitle(false);
+      setRenameEditor((current) => (current === editor ? null : current));
       await refreshAfterCommit("task.renamed", "operation.task_rename", {
         scope: "task",
         taskId,
@@ -3082,9 +3136,9 @@ export default function App() {
   }
   function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
     if (action === "rename") {
+      renameComposing.current = false;
       openTask(task.id);
-      setTitleDraft(task.title);
-      window.requestAnimationFrame(() => setEditingTitle(true));
+      setRenameEditor({ taskId: task.id, draft: task.title, message: null });
       return;
     }
     if (action === "archive") {
@@ -3733,46 +3787,6 @@ export default function App() {
       }
       contextVisible={
         !settingsOpen && route === "workbench" && activeTask !== null
-      }
-      contextContent={
-        !settingsOpen && route === "workbench" && activeTask && editingTitle ? (
-          <form
-            className="commandbar-task-editor"
-            data-native-window-drag-exclude=""
-            onSubmit={(event) => {
-              event.preventDefault();
-              void renameTask();
-            }}
-          >
-            <input
-              autoFocus
-              maxLength={120}
-              value={titleDraft}
-              aria-label={t("task.rename")}
-              placeholder={t("task.item", { id: activeTask.id })}
-              onChange={(event) => setTitleDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                setEditingTitle(false);
-              }}
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={!titleDraft.trim() || taskMutationDisabled}
-            >
-              {t("common.save")}
-            </Button>
-            <button
-              type="button"
-              className="text-button focus-ring"
-              onClick={() => setEditingTitle(false)}
-            >
-              {t("common.cancel")}
-            </button>
-          </form>
-        ) : undefined
       }
       headerActions={
         !settingsOpen && route === "workbench" ? (
@@ -4577,6 +4591,96 @@ export default function App() {
           }}
         />
       )}
+      <Dialog.Root
+        open={renameEditor !== null}
+        onOpenChange={(open) => !open && closeRenameDialog()}
+      >
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup
+            initialFocus={() => {
+              renameInput.current?.select();
+              return renameInput.current ?? false;
+            }}
+          >
+            <Dialog.Title>{t("task.rename_title")}</Dialog.Title>
+            <form
+              className="grid gap-4"
+              aria-busy={renamePending}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void renameTask();
+              }}
+            >
+              <div className="grid gap-2">
+                <label htmlFor="task-rename-name" className="text-sm">
+                  {t("task.rename_name")}
+                </label>
+                <Input
+                  id="task-rename-name"
+                  ref={renameInput}
+                  maxLength={120}
+                  value={renameEditor?.draft ?? ""}
+                  disabled={renamePending}
+                  aria-describedby={
+                    renameEditor?.message ? "task-rename-error" : undefined
+                  }
+                  onChange={(event) => {
+                    const draft = event.target.value;
+                    setRenameEditor((current) =>
+                      current ? { ...current, draft, message: null } : current,
+                    );
+                  }}
+                  onCompositionStart={() => {
+                    renameComposing.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    renameComposing.current = false;
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      (event.key === "Enter" || event.key === "Escape") &&
+                      (renameComposing.current || event.nativeEvent.isComposing)
+                    ) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }
+                  }}
+                />
+              </div>
+              {renameEditor?.message && (
+                <p
+                  id="task-rename-error"
+                  role="alert"
+                  className="text-sm text-(--ui-content-error)"
+                >
+                  {t(renameEditor.message)}
+                </p>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={renamePending}
+                  onClick={closeRenameDialog}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    renamePending ||
+                    workbenchMutationDisabled ||
+                    !renameEditor?.draft.trim()
+                  }
+                >
+                  {t(renamePending ? "common.saving" : "common.save")}
+                </Button>
+              </div>
+            </form>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
       {deleteTarget && (
         <AlertDialog.Root
           open={confirmDelete}

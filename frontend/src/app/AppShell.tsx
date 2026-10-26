@@ -149,7 +149,6 @@ function initialPanel(key: string, minimumWidth: number) {
 export function AppShell({
   taskTitle,
   contextVisible,
-  contextContent,
   headerActions,
   attentionNotice,
   attentionContent,
@@ -167,7 +166,6 @@ export function AppShell({
 }: {
   taskTitle: string;
   contextVisible: boolean;
-  contextContent?: ReactNode;
   headerActions?: ReactNode;
   attentionNotice: string | null;
   attentionContent?: ReactNode;
@@ -397,10 +395,9 @@ export function AppShell({
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}
           >
-            {contextVisible &&
-              (contextContent ?? (
-                <span className="commandbar-task">{taskTitle}</span>
-              ))}
+            {contextVisible && (
+              <span className="commandbar-task">{taskTitle}</span>
+            )}
           </div>
         </div>
         <div

@@ -6918,26 +6918,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.6;
 }
 
-.commandbar-task-editor {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.commandbar-task-editor input {
-  width: min(260px, 38vw);
-  min-height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--ui-action-primary);
-  border-radius: 7px;
-  outline: 3px solid
-    color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-canvas);
-  font-size: var(--text-body);
-  font-weight: 650;
-}
-
 .task-menu-popover {
   display: grid;
   width: 180px;
@@ -9765,10 +9745,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .workbench-commandbar {
     grid-template-columns: 72px minmax(0, 1fr) auto auto;
-  }
-
-  .commandbar-task-editor input {
-    width: min(180px, 42vw);
   }
 
   .delete-confirmation {
