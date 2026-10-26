@@ -638,6 +638,10 @@ export const enUS = {
   "task.signal.archived": "Archived",
   "task.actions": "Task actions",
   "task.rename": "Rename",
+  "task.rename_title": "Rename task",
+  "task.rename_name": "Task name",
+  "task.rename_unconfirmed":
+    "The rename result is unconfirmed. Check the current task name before saving again.",
   "task.archive": "Archive",
   "task.restore": "Restore",
   "task.delete": "Delete record",
