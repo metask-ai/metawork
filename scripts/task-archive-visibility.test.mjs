@@ -71,7 +71,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
   },
 });
 
-const { act, cleanup, fireEvent, render, screen, waitFor } =
+const { act, cleanup, fireEvent, render, screen, waitFor, within } =
   await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const vite = await createServer({
@@ -128,9 +128,19 @@ async function renderApp(ctx) {
   snapshot.workspaces[0].signals.running = 0;
   const requests = [];
   let onRevision;
+  let shortcut;
+  const deletions = [];
   for (const [name, fn] of Object.entries({
     available: () => true,
-    onShortcut: () => () => {},
+    onShortcut: (callback) => {
+      shortcut = callback;
+      return () => {};
+    },
+    deleteTask: async (taskId) => {
+      deletions.push(taskId);
+      snapshot.tasks = snapshot.tasks.filter((task) => task.id !== taskId);
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    },
     onHostSignal: () => () => {},
     onWorkbenchRevision: (callback) => {
       onRevision = callback;
@@ -166,14 +176,23 @@ async function renderApp(ctx) {
       createElement(App),
     ),
   );
-  await screen.findByRole("button", { name: "Show archived (1)" });
+  await screen.findAllByRole("button", { name: "Archive target" });
   const user = userEvent.setup({ document });
   return {
     user,
     requests,
+    deletions,
+    async openArchives() {
+      await act(async () => shortcut({ id: "settings.open" }));
+      await user.click(
+        await screen.findByRole("link", { name: "Archived tasks" }),
+      );
+      await screen.findByRole("heading", { name: "Archived tasks" });
+    },
     async invoke(id, action) {
       const row = taskRows(id)[0];
       assert.ok(row, "Task must be visible before opening its menu");
+      await user.click(row);
       fireEvent.contextMenu(row);
       await user.click(
         await screen.findByRole("menuitem", { name: action, exact: true }),
@@ -197,113 +216,98 @@ async function renderApp(ctx) {
   };
 }
 
-test("App archive preserves hidden archives in both Recent and Projects", async (ctx) => {
+test("archive hides Task from Recent and Projects and settings manages the same history", async (ctx) => {
   const app = await renderApp(ctx);
   assert.equal(taskRows("3").length, 2);
   assert.equal(taskRows("4").length, 0);
+  assert.equal(screen.queryByRole("button", { name: /Show archived/ }), null);
   await app.invoke("3", "Archive");
   await app.settle({ archived: true });
-  await screen.findByRole("button", { name: "Show archived (2)" });
-  assert.equal(taskRows("3").length, 0);
-  assert.equal(taskRows("4").length, 0);
-  assert.equal(screen.queryByRole("menu"), null);
-
-  await app.user.click(
-    screen.getByRole("button", { name: "Show archived (2)" }),
+  await waitFor(() => assert.equal(taskRows("3").length, 0));
+  await app.openArchives();
+  assert.ok(screen.getByRole("button", { name: "Archive target" }));
+  assert.ok(screen.getByRole("button", { name: "Earlier archive" }));
+  await app.user.type(
+    screen.getByRole("searchbox", { name: "Search archived tasks" }),
+    "Earlier",
   );
-  assert.equal(taskRows("3").length, 2);
+  assert.equal(screen.queryByRole("button", { name: "Archive target" }), null);
+  assert.ok(screen.getByRole("button", { name: "Earlier archive" }));
+});
+
+test("settings restore keeps its page and returns the same Task to navigation", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.openArchives();
+  await app.user.click(
+    within(screen.getByRole("list", { name: "Archived tasks" })).getByRole(
+      "button",
+      { name: "Restore", exact: true },
+    ),
+  );
+  await waitFor(() => assert.equal(app.requests.length, 1));
+  assert.deepEqual(
+    { taskId: app.requests[0].taskId, archived: app.requests[0].archived },
+    { taskId: "4", archived: false },
+  );
+  await app.settle({ archived: false });
+  await screen.findByText("Archived tasks will appear here.");
+  assert.ok(screen.getByRole("heading", { name: "Archived tasks" }));
   assert.equal(taskRows("4").length, 2);
-  assert.ok(taskRows("3")[0].querySelector('[aria-label="Archived"]'));
 });
 
-test("App archive preserves the choice to show archives", async (ctx) => {
+test("unarchived Task deletes directly after one fixed-target confirmation", async (ctx) => {
   const app = await renderApp(ctx);
+  fireEvent.contextMenu(taskRows("3")[0]);
   await app.user.click(
-    screen.getByRole("button", { name: "Show archived (1)" }),
+    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
   );
+  await screen.findByRole("alertdialog");
+  assert.ok(
+    screen.getByRole("heading", { name: "Delete task “Archive target”?" }),
+  );
+  assert.deepEqual(app.requests, []);
+  assert.deepEqual(app.deletions, []);
+  await app.user.click(
+    screen.getByRole("button", { name: "Delete record", exact: true }),
+  );
+  await waitFor(() => assert.deepEqual(app.deletions, ["3"]));
+  assert.equal(app.requests.length, 0);
+});
+
+test("settings deletes an archived Task without leaving settings or restoring it", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.openArchives();
+  await app.user.click(
+    screen.getByRole("button", { name: "Delete record", exact: true }),
+  );
+  await screen.findByRole("alertdialog");
+  await app.user.click(
+    screen.getByRole("button", { name: "Delete record", exact: true }),
+  );
+  await waitFor(() => assert.deepEqual(app.deletions, ["4"]));
+  await screen.findByText("Archived tasks will appear here.");
+  assert.equal(app.requests.length, 0);
+});
+
+test("archive failure preserves navigation and does not expose hidden archives", async (ctx) => {
+  const app = await renderApp(ctx);
   await app.invoke("3", "Archive");
-  await app.settle({ archived: true });
-  await screen.findByPlaceholderText("Restore this task to continue");
-  assert.ok(screen.getByRole("button", { name: "Hide archived" }));
+  await app.settle({ error: new Error("Host rejected archive") });
+  await screen.findAllByText("The task could not be archived. Try again.");
   assert.equal(taskRows("3").length, 2);
-  assert.ok(taskRows("3")[0].querySelector('[aria-label="Archived"]'));
-});
-
-test("App archive response does not overwrite a display choice made while pending", async (ctx) => {
-  const app = await renderApp(ctx);
-  await app.user.click(
-    screen.getByRole("button", { name: "Show archived (1)" }),
-  );
-  await app.invoke("3", "Archive");
-  await app.user.click(screen.getByRole("button", { name: "Hide archived" }));
-  await app.settle({ archived: true });
-  await screen.findByRole("button", { name: "Show archived (2)" });
-  assert.equal(taskRows("3").length, 0);
   assert.equal(taskRows("4").length, 0);
 });
-
-for (const shown of [false, true]) {
-  test(`App archive failure preserves ${shown ? "shown" : "hidden"} archives`, async (ctx) => {
-    const app = await renderApp(ctx);
-    if (shown)
-      await app.user.click(
-        screen.getByRole("button", { name: "Show archived (1)" }),
-      );
-    await app.invoke("3", "Archive");
-    await app.settle({ error: new Error("Host rejected archive") });
-    await screen.findAllByText("The task could not be archived. Try again.");
-    assert.ok(
-      screen.getByRole("button", {
-        name: shown ? "Hide archived" : "Show archived (1)",
-      }),
-    );
-    assert.equal(taskRows("3").length, 2);
-    assert.equal(taskRows("4").length, shown ? 2 : 0);
-  });
-}
 
 for (const archived of [false, true]) {
-  test(`App archive timeout reads back archived=${archived} without changing visibility or retrying`, async (ctx) => {
+  test(`archive timeout reads canonical archived=${archived} without retrying`, async (ctx) => {
     const app = await renderApp(ctx);
     await app.invoke("3", "Archive");
     await app.settle({
       archived,
       error: new BridgeCommandTimeoutError("metawork.tasks.archive", 10000),
     });
-    await screen.findByRole("button", {
-      name: `Show archived (${archived ? 2 : 1})`,
-    });
-    assert.equal(taskRows("3").length, archived ? 0 : 2);
+    await waitFor(() => assert.equal(taskRows("3").length, archived ? 0 : 2));
     assert.equal(taskRows("4").length, 0);
     assert.equal(app.requests.length, 1);
-  });
-}
-
-for (const hideWhilePending of [false, true]) {
-  test(`App restore preserves archives ${hideWhilePending ? "hidden while pending" : "shown"}`, async (ctx) => {
-    const app = await renderApp(ctx);
-    await app.user.click(
-      screen.getByRole("button", { name: "Show archived (1)" }),
-    );
-    await app.invoke("4", "Restore");
-    if (hideWhilePending)
-      await app.user.click(
-        screen.getByRole("button", { name: "Hide archived" }),
-      );
-    await app.settle({ archived: false });
-    await waitFor(() => assert.equal(taskRows("4").length, 2));
-    assert.equal(screen.queryByRole("button", { name: /archived/i }), null);
-    assert.equal(
-      taskRows("4")[0].querySelector('[aria-label="Archived"]'),
-      null,
-    );
-
-    // A new Host archive makes the toggle observable again, so its absence at
-    // zero archived Tasks cannot mask a reset of the user's display choice.
-    await app.publishArchive("3", true);
-    await screen.findByRole("button", {
-      name: hideWhilePending ? "Show archived (1)" : "Hide archived",
-    });
-    assert.equal(taskRows("3").length, hideWhilePending ? 0 : 2);
   });
 }

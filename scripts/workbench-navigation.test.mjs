@@ -144,7 +144,7 @@ test("Task list stays flat while ordering action before recency", () => {
     task({ id: "recent-new", recentOrder: "9007199254740994" }),
     task({ id: "archived", archived: true, recentOrder: "12" }),
   ];
-  const ordered = orderedTasks(tasks, true);
+  const ordered = orderedTasks(tasks);
 
   assert.deepEqual(
     ordered.map((item) => item.id),
@@ -155,12 +155,11 @@ test("Task list stays flat while ordering action before recency", () => {
       "queued",
       "recent-new",
       "recent-old",
-      "archived",
     ],
   );
   assert.deepEqual(
-    orderedTasks(tasks, false).map((item) => item.id),
-    ordered.slice(0, -1).map((item) => item.id),
+    orderedTasks(tasks).map((item) => item.id),
+    ordered.map((item) => item.id),
   );
 });
 
@@ -186,7 +185,7 @@ test("automatic review is processing until the current request needs a user", ()
   });
   assert.deepEqual(taskDisplayState(reviewing), { kind: "permission_review" });
   assert.deepEqual(
-    orderedTasks([reviewing, working, manual], false).map((item) => item.id),
+    orderedTasks([reviewing, working, manual]).map((item) => item.id),
     ["manual", "working", "reviewing"],
   );
   reviewing.permissionReviewState = "needs_user";
@@ -200,7 +199,7 @@ test("automatic review is processing until the current request needs a user", ()
     value: "waiting_ui",
   });
   assert.deepEqual(
-    orderedTasks([working, reviewing], false).map((item) => item.id),
+    orderedTasks([working, reviewing]).map((item) => item.id),
     ["reviewing", "working"],
   );
 });
@@ -321,7 +320,7 @@ test("manual Compact participates in Task action ordering without becoming a Run
     kind: "compact_phase",
     value: "compacting",
   });
-  assert.deepEqual(orderedTasks([compacting], false), [compacting]);
+  assert.deepEqual(orderedTasks([compacting]), [compacting]);
   assert.equal(taskSignals(compacting).running, true);
 });
 
@@ -334,7 +333,7 @@ test("Conversation recovery remains visible as Task work without becoming a Run"
   });
   assert.equal(isRunInFlight(restoring), false);
   assert.deepEqual(taskDisplayState(restoring), { kind: "recovery" });
-  assert.deepEqual(orderedTasks([restoring], false), [restoring]);
+  assert.deepEqual(orderedTasks([restoring]), [restoring]);
   assert.equal(taskSignals(restoring).running, true);
 });
 

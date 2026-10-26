@@ -9980,3 +9980,47 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline: 2px solid var(--ui-focus-ring);
   outline-offset: 2px;
 }
+
+.archived-task-search {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--settings-line);
+  border-radius: 7px;
+  background: var(--settings-paper);
+  color: var(--settings-ink);
+}
+.archived-task-count {
+  margin: 16px 0 8px;
+  color: var(--settings-muted);
+}
+.archived-task-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.archived-task-list:empty {
+  display: none;
+}
+.archived-task-row + .archived-task-row {
+  border-top: 1px solid var(--settings-line);
+}
+.archived-task-copy {
+  min-width: 0;
+}
+.archived-task-title {
+  padding: 2px 0;
+  text-align: left;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.archived-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 620px) {
+  .archived-task-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+}

@@ -55,17 +55,13 @@ function permissionReviewInProgress(task: TaskNavigation): boolean {
   );
 }
 
-export function orderedTasks<T extends TaskNavigation>(
-  tasks: T[],
-  showArchived: boolean,
-): T[] {
+export function orderedTasks<T extends TaskNavigation>(tasks: T[]): T[] {
   const byRecent = (left: T, right: T) => {
     const leftOrder = BigInt(left.recentOrder);
     const rightOrder = BigInt(right.recentOrder);
     return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
   };
   const priority = (task: T) => {
-    if (task.archived) return 4;
     if (
       task.currentRunPhase === "waiting_ui" &&
       !permissionReviewInProgress(task)
@@ -87,7 +83,7 @@ export function orderedTasks<T extends TaskNavigation>(
   };
 
   return tasks
-    .filter((task) => showArchived || !task.archived)
+    .filter((task) => !task.archived)
     .sort(
       (left, right) =>
         priority(left) - priority(right) || byRecent(left, right),
