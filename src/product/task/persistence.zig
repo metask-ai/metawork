@@ -1262,7 +1262,7 @@ fn projectRun(
     const additional_inputs = try allocator.alloc(AdditionalInputWire, additional_count);
     errdefer allocator.free(additional_inputs);
     var additional_index: usize = 0;
-    for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+    for (run.additional_inputs) |*entry| if (entry.*) |*record| {
         additional_inputs[additional_index] = .{
             .id = record.id,
             .after_output_count = record.after_output_count,
@@ -1758,8 +1758,10 @@ fn restoreCheckpointRecord(
 }
 
 fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
-    if (wire.additional_inputs.len > agent.max_submitted_inputs) return error.TaskStoreCorrupt;
-    var additional: [agent.max_submitted_inputs]?task_state.AdditionalInput = @splat(null);
+    if (wire.additional_inputs.len > agent.max_submitted_inputs or wire.tools.len > projection.limits.max_tools_per_run) return error.TaskStoreCorrupt;
+    const additional = try projection.allocator.alloc(?task_state.AdditionalInput, wire.additional_inputs.len);
+    errdefer projection.allocator.free(additional);
+    @memset(additional, null);
     var restored_additional: usize = 0;
     errdefer for (additional[0..restored_additional]) |entry| {
         projection.free(entry.?.text);
@@ -1825,17 +1827,22 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         return error.TaskStoreCorrupt;
     const commentary_ends = try projection.allocator.alloc(
         u64,
-        projection.limits.max_commentary_segments_per_run,
+        wire.commentary_ends.len,
     );
     errdefer projection.allocator.free(commentary_ends);
     @memcpy(commentary_ends[0..wire.commentary_ends.len], wire.commentary_ends);
     const interrupted = !persistedTerminalRunPhase(wire.phase);
-    const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
+    if (wire.diagnostic.len > projection.limits.max_terminal_diagnostic_bytes) return error.TaskStoreCorrupt;
+    const diagnostic = try projection.alloc(wire.diagnostic.len);
     errdefer projection.free(diagnostic);
     @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
+    var completed_tools: usize = 0;
+    for (wire.tools) |tool| {
+        if (!std.mem.eql(u8, tool.state, "running")) completed_tools += 1;
+    }
     const tools = try projection.allocator.alloc(
         ?task_state.ToolView,
-        projection.limits.max_tools_per_run,
+        completed_tools,
     );
     errdefer projection.allocator.free(tools);
     @memset(tools, null);
@@ -1849,9 +1856,11 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         tools[restored_tools] = try restoreTool(projection, tool);
         restored_tools += 1;
     }
+    const file_change_count = if (wire.file_changes) |changes| changes.len else 0;
+    if (file_change_count > projection.limits.max_file_changes_per_run) return error.TaskStoreCorrupt;
     const file_changes = try projection.allocator.alloc(
         ?task_state.FileChangeView,
-        projection.limits.max_file_changes_per_run,
+        file_change_count,
     );
     errdefer projection.allocator.free(file_changes);
     @memset(file_changes, null);
@@ -1863,8 +1872,6 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
     if ((wire.file_change_observation == null) != (wire.file_changes == null))
         return error.TaskStoreCorrupt;
     if (wire.file_changes) |changes| {
-        if (changes.len > projection.limits.max_file_changes_per_run)
-            return error.TaskStoreCorrupt;
         for (changes) |change| {
             file_changes[restored_file_changes] = try restoreFileChange(
                 projection,
@@ -2225,7 +2232,8 @@ fn restoreCompact(
         wire.coverage,
     ) orelse return error.TaskStoreCorrupt;
     const interrupted = !persistedTerminalCompactPhase(wire.phase);
-    const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
+    if (wire.diagnostic.len > projection.limits.max_terminal_diagnostic_bytes) return error.TaskStoreCorrupt;
+    const diagnostic = try projection.alloc(wire.diagnostic.len);
     errdefer projection.free(diagnostic);
     @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
     return .{
@@ -2396,7 +2404,7 @@ fn deinitRestoredRunInput(
 }
 
 fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) void {
-    std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
+    std.debug.assert(run.execution == null);
     for (run.tools) |*entry| {
         const tool = &(entry.* orelse continue);
         deinitRestoredTool(projection, tool);
@@ -2414,6 +2422,7 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
         projection.free(record.text);
         projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
     };
+    projection.allocator.free(run.additional_inputs);
     if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
     if (run.execution_model_owned)
         projection.free(@constCast(run.execution_model));
@@ -5438,4 +5447,67 @@ test "presentation format distinguishes legacy from missing anchors and preserve
     run.submission.?.presentation_state = null;
     runs[0] = run;
     try std.testing.expectError(error.Invalid, validatePresentation(task, testLimits()));
+}
+
+// Exercises the real restoration owner with allocation failure injection.
+const RestoreTestMemory = struct {
+    allocator: std.mem.Allocator,
+    fn from(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+    fn copy(context: *anyopaque, value: []const u8, max: usize) ProjectionError![]u8 {
+        if (value.len > max) return error.ProjectionCapacity;
+        return from(context).allocator.dupe(u8, value);
+    }
+    fn alloc(context: *anyopaque, size: usize) ProjectionError![]u8 {
+        return from(context).allocator.alloc(u8, size);
+    }
+    fn append(context: *anyopaque, target: *task_state.TrackedText, value: []const u8, max: usize) ProjectionError!void {
+        if (value.len > max -| target.list.items.len) return error.ProjectionCapacity;
+        try target.list.appendSlice(from(context).allocator, value);
+    }
+    fn free(context: *anyopaque, value: []u8) void {
+        from(context).allocator.free(value);
+    }
+    fn freeText(context: *anyopaque, value: *task_state.TrackedText) void {
+        value.list.deinit(from(context).allocator);
+        value.* = .{};
+    }
+    fn reserve(_: *anyopaque, _: usize) error{ProjectionCapacity}!void {}
+    fn release(_: *anyopaque, _: usize) void {}
+    fn projection(self: *@This()) RestoreProjection {
+        return .{ .context = self, .allocator = self.allocator, .limits = testLimits(), .copy_fn = copy, .alloc_fn = alloc, .append_text_fn = append, .free_fn = free, .free_text_fn = freeText, .reserve_bytes_fn = reserve, .release_bytes_fn = release };
+    }
+};
+
+fn restoreHistoryAllocationCase(allocator: std.mem.Allocator) !void {
+    var memory: RestoreTestMemory = .{ .allocator = allocator };
+    const projection = memory.projection();
+    var wire = reviewTestRun();
+    wire.diagnostic = "safe diagnostic";
+    var inputs = [_]AdditionalInputWire{.{ .id = 1, .after_output_count = 0, .operation_id = "input-1", .text = "constraint", .redacted = false, .sequence = null, .adopted_turn = null, .order = null, .state = "unknown" }};
+    wire.additional_inputs = &inputs;
+    var restored = try restoreRun(projection, wire);
+    defer deinitRestoredRun(projection, &restored);
+    try std.testing.expect(restored.execution == null);
+    try std.testing.expectEqual(@as(usize, 1), restored.additional_inputs.len);
+    try std.testing.expectEqual(@as(usize, 0), restored.tools.len);
+    try std.testing.expectEqual(@as(usize, 0), restored.file_changes.len);
+    try std.testing.expectEqual(@as(usize, 0), restored.commentary_ends.len);
+    try std.testing.expectEqual(wire.diagnostic.len, restored.terminal_diagnostic.len);
+    try std.testing.expectEqualStrings("constraint", restored.additional_inputs[0].?.text);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const projected = try projectRun(arena.allocator(), &restored);
+    const before = try std.json.Stringify.valueAlloc(allocator, wire, .{});
+    defer allocator.free(before);
+    const after = try std.json.Stringify.valueAlloc(allocator, projected, .{});
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+}
+
+test "restored history allocates actual contents without Run execution and preserves wire facts under OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, restoreHistoryAllocationCase, .{});
+    // This is a history record memory bound, independent of the input capacity.
+    try std.testing.expect(@sizeOf(task_state.RunRecord) < 4096);
 }

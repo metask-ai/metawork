@@ -278,6 +278,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
             b.step("test-product-skill-policy", "Run Product Skill authority policy tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_persistence)
+            b.step("test-product-task-persistence", "Run Product Task history codec and restore tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)

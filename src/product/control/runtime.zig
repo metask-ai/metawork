@@ -9611,7 +9611,7 @@ pub const Runtime = struct {
 
         const task = &control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
-        run.automatic_title.state.store(.ready, .release);
+        run.execution.?.automatic_title.state.store(.ready, .release);
         const sync = control.task_runtime.syncAutomaticTitles(
             control.limits.max_task_title_bytes,
             control.taskRuntimeTextProjection(),
@@ -9631,14 +9631,14 @@ pub const Runtime = struct {
             "Provisional title",
             control.limits.max_task_title_bytes,
         );
-        run.automatic_title.provisional_applied = true;
-        run.automatic_title.state.store(.pending, .release);
+        run.execution.?.automatic_title.provisional_applied = true;
+        run.execution.?.automatic_title.state.store(.pending, .release);
         try control.renameTask(task.durable.id, "User title");
         const generated = "Generated title";
-        @memcpy(run.automatic_title.result[0..generated.len], generated);
-        run.automatic_title.result_len = generated.len;
-        run.automatic_title.generated = true;
-        run.automatic_title.state.store(.ready, .release);
+        @memcpy(run.execution.?.automatic_title.result[0..generated.len], generated);
+        run.execution.?.automatic_title.result_len = generated.len;
+        run.execution.?.automatic_title.generated = true;
+        run.execution.?.automatic_title.state.store(.ready, .release);
 
         const sync = control.task_runtime.syncAutomaticTitles(
             control.limits.max_task_title_bytes,
@@ -9646,10 +9646,10 @@ pub const Runtime = struct {
         );
         try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("User title", task.durable.title);
-        try std.testing.expect(run.automatic_title.user_overrode);
+        try std.testing.expect(run.execution.?.automatic_title.user_overrode);
         try std.testing.expectEqual(
             AutomaticTitleState.settled,
-            run.automatic_title.state.load(.acquire),
+            run.execution.?.automatic_title.state.load(.acquire),
         );
     }
 
@@ -10828,7 +10828,7 @@ fn requestRunTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse return .already_finishing;
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
     return switch (lease.requestTermination(pendingTerminationSignal(run))) {
@@ -11077,7 +11077,8 @@ test "approval checkpoint restores before the first Run independently of the Tas
 fn cancelTaskAutomaticTitles(task: *TestTask) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        run.automatic_title.cancel_requested.store(true, .release);
+        const execution = run.execution orelse continue;
+        execution.automatic_title.cancel_requested.store(true, .release);
         publishAutomaticTitleFallback(run);
     }
 }
@@ -11880,7 +11881,13 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         u64,
         control.limits.max_commentary_segments_per_run,
     );
+    const run_execution = try control.allocator.create(task_test_state.RunExecution);
+    run_execution.* = .{};
+    const additional_inputs = try control.allocator.alloc(?task_test_state.AdditionalInput, lifecycle.max_submitted_inputs);
+    @memset(additional_inputs, null);
     runs[0] = .{
+        .execution = run_execution,
+        .additional_inputs = additional_inputs,
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
@@ -16200,13 +16207,13 @@ test "released Task credential is permanently scrubbed from every product projec
         .after_bytes = 2,
         .diff_complete = true,
     };
-    run.automatic_title.state.store(.ready, .release);
+    run.execution.?.automatic_title.state.store(.ready, .release);
     @memcpy(
-        run.automatic_title.result[0.."automatic SECRET-KEY".len],
+        run.execution.?.automatic_title.result[0.."automatic SECRET-KEY".len],
         "automatic SECRET-KEY",
     );
-    run.automatic_title.result_len = "automatic SECRET-KEY".len;
-    run.automatic_title.generated = true;
+    run.execution.?.automatic_title.result_len = "automatic SECRET-KEY".len;
+    run.execution.?.automatic_title.generated = true;
     product_workspace.testing.overwriteProjectedRoot(
         &control.workspace,
         1,
@@ -16264,10 +16271,10 @@ test "released Task credential is permanently scrubbed from every product projec
     @constCast(compactTerminalPayload(compact).?).diagnostic_len =
         "compact SECRET-KEY".len;
     control.redactAllProductProjectionsNoFail("SECRET-KEY");
-    try std.testing.expect(run.automatic_title.generated_redacted);
+    try std.testing.expect(run.execution.?.automatic_title.generated_redacted);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        run.automatic_title.result[0..run.automatic_title.result_len],
+        run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
         "SECRET-KEY",
     ) == null);
     run.event_stream_finalized = true;

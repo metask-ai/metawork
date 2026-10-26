@@ -775,7 +775,16 @@ pub const OwnedFileDelivery = struct {
     }
 };
 
+/// Worker control and title production exist only while a Run owns execution.
+/// History restoration deliberately never allocates this structure.
+pub const RunExecution = struct {
+    run_control: agent.RunControl = undefined,
+    checkpoint_export_context: CheckpointExportContext = undefined,
+    automatic_title: AutomaticTitle = .{},
+};
+
 pub const RunRecord = struct {
+    execution: ?*RunExecution = null,
     /// Projection invalidation only; never persisted or supplied to AgentCore.
     projection_content_version: u64 = 1,
     /// Never encoded in history or reconstructed from a checkpoint.
@@ -808,7 +817,8 @@ pub const RunRecord = struct {
     permission_interaction: PermissionInteraction,
     input: RunInputRecord,
     submission: ?Submission = null,
-    additional_inputs: [agent.max_submitted_inputs]?AdditionalInput = @splat(null),
+    /// Actual safe history entries; active admission reserves the input capacity.
+    additional_inputs: []?AdditionalInput = &.{},
     input_continuation_pending: bool = false,
     input_continuation_cancelled: bool = false,
     input_stop_requested: bool = false,
@@ -875,10 +885,7 @@ pub const RunRecord = struct {
     next_activity_order: u64 = 1,
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
-    run_control: agent.RunControl = undefined,
-    checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
-    automatic_title: AutomaticTitle = .{},
 
     /// Main-thread observable changes only. Zero is a permanent exhausted
     /// identity, never an ABA restart; the projection writer fails closed.
@@ -1665,7 +1672,7 @@ pub fn applyEvent(
         .goal_updated => return .unknown,
         .input_adopted => |input| {
             var found = false;
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.id != input.input_id) continue;
                 if (record.adopted_turn != null or input.sequence == 0 or input.turn == 0 or
                     (record.sequence != null and record.sequence.? != input.sequence) or

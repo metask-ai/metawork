@@ -1898,7 +1898,7 @@ pub const Runtime = struct {
                     break;
                 };
                 if (!has_slot) return .wait;
-                var lease = run.run_control.tryAcquireLease() orelse return .wait;
+                var lease = run.execution.?.run_control.tryAcquireLease() orelse return .wait;
                 defer lease.deinit();
                 if (!lease.inputObservation().ready) return .wait;
                 return .{ .submit = .{ .index = index, .run_id = id } };
@@ -1999,7 +1999,7 @@ pub const Runtime = struct {
         const run = task_state.findRun(task.durable.runs, run_id) orelse return;
         const record = &task.input_submissions.items[index];
         if (input_id) |id| {
-            for (&run.additional_inputs) |*entry| if (entry.*) |*additional| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*additional| {
                 if (additional.id == id) additional.submission = record.submission;
             };
         } else {
@@ -2070,7 +2070,7 @@ pub const Runtime = struct {
         if (task.runtime.cancel_requested or run.pending_termination.load(.acquire) != .none) return error.RunStopping;
         if (task_state.terminalPayload(run) != null) return error.RunChanged;
         if (run.agent_handoff.load(.acquire) != .running) return error.RunNotReady;
-        var lease = run.run_control.tryAcquireLease() orelse return error.RunNotReady;
+        var lease = run.execution.?.run_control.tryAcquireLease() orelse return error.RunNotReady;
         defer lease.deinit();
         if (!lease.inputObservation().ready) return error.RunNotReady;
         if (!std.unicode.utf8ValidateSlice(text) or std.mem.trim(u8, text, " \t\r\n").len == 0) return error.MissingInstruction;
@@ -2171,7 +2171,7 @@ pub const Runtime = struct {
     }
 
     pub fn discardInputPayloads(self: *Runtime, run: *task_state.RunRecord) void {
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.raw_text) |raw| self.releaseInputPayload(raw);
             record.raw_text = null;
         };
@@ -2199,7 +2199,7 @@ pub const Runtime = struct {
             run.input_continuation_cancelled = true;
             run.input_continuation_pending = false;
             run.input_continuation_failure = reason;
-            for (&run.additional_inputs) |*input| if (input.*) |*record| {
+            for (run.additional_inputs) |*input| if (input.*) |*record| {
                 if (record.raw_text != null) record.continuation_cancel_reason = reason;
             };
             self.discardInputPayloads(run);
@@ -2294,7 +2294,7 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse unreachable;
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
         run.noteProjectionChange();
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .unadopted and record.state != .transferred) continue;
             if (record.continuation_cancel_reason != null) continue;
             record.state = if (target_id != null) .transferred else .unadopted;
@@ -2398,15 +2398,15 @@ pub const Runtime = struct {
         };
         run_lease_owned = false;
         checkpoint_lease_owned = false;
-        if (run_record.automatic_title.state.load(.acquire) == .pending) {
+        if (run_record.execution.?.automatic_title.state.load(.acquire) == .pending) {
             job.title_execution = owned_task_execution.OwnedTaskExecution.clone(
                 self.allocator,
                 execution,
             ) catch null;
             if (job.title_execution == null)
-                run_record.automatic_title.state.store(.ready, .release);
+                run_record.execution.?.automatic_title.state.store(.ready, .release);
         }
-        run_record.checkpoint_export_context = .{
+        run_record.execution.?.checkpoint_export_context = .{
             .task_id = task.durable.id,
             .binding_epoch = task.durable.binding_epoch,
             .terminal_kind = .run,
@@ -2425,7 +2425,7 @@ pub const Runtime = struct {
             effects.text,
             execution.api_key,
         );
-        run_record.automatic_title.provisional_applied = provisional_title_applied;
+        run_record.execution.?.automatic_title.provisional_applied = provisional_title_applied;
         const previous_active_run_id = task.runtime.active_run_id;
         const previous_active_operation = task.runtime.active_operation;
         const previous_recent_order = task.durable.recent_order;
@@ -3729,7 +3729,7 @@ pub const Runtime = struct {
         };
         if (application_result == .applied) {
             const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state != .adopted) continue;
                 if (record.raw_text) |raw| self.releaseInputPayload(raw);
                 record.raw_text = null;
@@ -3918,21 +3918,22 @@ pub const Runtime = struct {
             const task = &(entry.* orelse continue);
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (run.automatic_title.state.load(.acquire) != .ready) continue;
+                const execution = run.execution orelse continue;
+                if (execution.automatic_title.state.load(.acquire) != .ready) continue;
                 result.changed = true;
-                const candidate = if (run.automatic_title.generated)
+                const candidate = if (run.execution.?.automatic_title.generated)
                     task_policy.generatedAutomaticTitleCandidate(
-                        run.automatic_title.result[0..run.automatic_title.result_len],
+                        run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
                     )
                 else
                     null;
                 const selected = candidate orelse
                     task_policy.automaticTitleCandidate(&run.input);
                 const may_replace = run.generation == 1 and
-                    !run.automatic_title.user_overrode and
+                    !run.execution.?.automatic_title.user_overrode and
                     (task.durable.title.len == 0 or
-                        run.automatic_title.provisional_applied);
-                const keep_provisional = run.automatic_title.provisional_applied and
+                        run.execution.?.automatic_title.provisional_applied);
+                const keep_provisional = run.execution.?.automatic_title.provisional_applied and
                     candidate == null;
                 if (may_replace and !keep_provisional) if (selected) |value| {
                     const reclaimable = task.durable.title.len;
@@ -3944,7 +3945,7 @@ pub const Runtime = struct {
                     ) catch null;
                     if (projected) |title| {
                         const redacted = title.redacted or
-                            run.automatic_title.generated_redacted;
+                            run.execution.?.automatic_title.generated_redacted;
                         if (title.value.len == 0 or
                             (std.mem.eql(u8, title.value, task.durable.title) and
                                 redacted == task.durable.title_redacted))
@@ -3961,11 +3962,11 @@ pub const Runtime = struct {
                         projection.restorePrevious(reclaimable);
                     }
                 };
-                std.crypto.secureZero(u8, &run.automatic_title.result);
-                run.automatic_title.result_len = 0;
-                run.automatic_title.generated = false;
-                run.automatic_title.generated_redacted = false;
-                run.automatic_title.state.store(.settled, .release);
+                std.crypto.secureZero(u8, &run.execution.?.automatic_title.result);
+                run.execution.?.automatic_title.result_len = 0;
+                run.execution.?.automatic_title.generated = false;
+                run.execution.?.automatic_title.generated_redacted = false;
+                run.execution.?.automatic_title.state.store(.settled, .release);
             }
         }
         return result;
@@ -3979,7 +3980,7 @@ pub const Runtime = struct {
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (run.event_stream_finalized and run.automatic_title.state.load(.acquire) != .running)
+                if (run.execution != null and run.event_stream_finalized and run.execution.?.automatic_title.state.load(.acquire) != .running)
                     releaseRunEffects(run, effects);
             }
         }
@@ -5188,7 +5189,7 @@ pub const Runtime = struct {
             if (terminal.outcome != .completed and !stopped_batch) {
                 _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
             }
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state == .adopted or record.state == .transferred) continue;
                 record.state = .unknown;
                 if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
@@ -5206,7 +5207,7 @@ pub const Runtime = struct {
                 run.completed_input_counts != null and
                 !run.input_continuation_cancelled and !run.input_continuation_attempted;
             var pending = false;
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (eligible and record.state == .unadopted and record.raw_text != null) {
                     pending = true;
                 } else {
@@ -6024,9 +6025,10 @@ fn excludePendingConversationTail(task: *task_state.Task) bool {
 fn markAutomaticTitleUserOverride(task: *task_state.Task) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        if (!run.automatic_title.provisional_applied) continue;
-        switch (run.automatic_title.state.load(.acquire)) {
-            .pending, .running, .ready => run.automatic_title.user_overrode = true,
+        const execution = run.execution orelse continue;
+        if (!execution.automatic_title.provisional_applied) continue;
+        switch (run.execution.?.automatic_title.state.load(.acquire)) {
+            .pending, .running, .ready => run.execution.?.automatic_title.user_overrode = true,
             .none, .settled => {},
         }
     }
@@ -6092,7 +6094,7 @@ fn redactTaskProjection(
         const run = &(entry.* orelse continue);
         redactInputProjection(&run.input, credential, effects);
         if (run.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
-        for (&run.additional_inputs) |*message| if (message.*) |*record| {
+        for (run.additional_inputs) |*message| if (message.*) |*record| {
             record.redacted = effects.redact(record.text, credential) or record.redacted;
             _ = effects.redact(record.operation_id[0..record.operation_id_len], credential);
             if (record.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
@@ -6146,13 +6148,13 @@ fn redactTaskProjection(
                 credential,
             ) or mutable.diagnostic_redacted;
         }
-        if (run.automatic_title.state.load(.acquire) == .ready and
-            run.automatic_title.generated)
+        if (run.execution != null and run.execution.?.automatic_title.state.load(.acquire) == .ready and
+            run.execution.?.automatic_title.generated)
         {
-            run.automatic_title.generated_redacted = effects.redact(
-                run.automatic_title.result[0..run.automatic_title.result_len],
+            run.execution.?.automatic_title.generated_redacted = effects.redact(
+                run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
                 credential,
-            ) or run.automatic_title.generated_redacted;
+            ) or run.execution.?.automatic_title.generated_redacted;
         }
     }
     for (task.durable.compacts) |*entry| {
@@ -7515,10 +7517,17 @@ fn reserveRun(
         0,
     )).value;
     errdefer effects.text.discardCandidate(execution_model);
+    const additional = try self.allocator.alloc(?task_state.AdditionalInput, agent.max_submitted_inputs);
+    errdefer self.allocator.free(additional);
+    @memset(additional, null);
+    const run_execution = try self.allocator.create(task_state.RunExecution);
+    errdefer self.allocator.destroy(run_execution);
+    run_execution.* = .{};
     task.durable.next_run_generation += 1;
     var title = task_state.AutomaticTitle{};
     if (task.durable.next_run_generation == 1 and task.durable.title.len == 0)
         title.state.store(.pending, .release);
+    run_execution.automatic_title = title;
     task.durable.runs[slot] = .{
         .submitted_at_unix_ms = effects.run_clock.nowUnixMs(),
         .id = 0,
@@ -7530,13 +7539,14 @@ fn reserveRun(
         .permission_profile = task.durable.permission_profile,
         .permission_interaction = task.durable.permission_interaction,
         .input = input_record,
+        .additional_inputs = additional,
         .commentary_ends = commentary_ends,
         .tools = tools,
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = diagnostic,
         .redaction_secret = execution.api_key,
-        .automatic_title = title,
+        .execution = run_execution,
     };
     return slot;
 }
@@ -7646,7 +7656,8 @@ fn applyModelIntent(
 fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        run.automatic_title.cancel_requested.store(true, .release);
+        const execution = run.execution orelse continue;
+        execution.automatic_title.cancel_requested.store(true, .release);
         task_execution.publishAutomaticTitleFallback(run);
     }
 }
@@ -7674,7 +7685,7 @@ fn requestRunTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse
         return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
@@ -7695,7 +7706,7 @@ fn requestPermissionTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse
         return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
@@ -7928,7 +7939,7 @@ fn reviewIdentity(task: *const task_state.Task, run: *const task_state.RunRecord
 
 fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     if (run.agent_handoff.load(.acquire) != .running) return true;
-    var lease = run.run_control.tryAcquireLease() orelse return true;
+    var lease = run.execution.?.run_control.tryAcquireLease() orelse return true;
     defer lease.deinit();
     return lease.inputObservation().blocksAutomaticAllow();
 }
@@ -7992,7 +8003,7 @@ fn writeReviewHistoryGroup(writer: *std.Io.Writer, run: *const task_state.RunRec
     var previous: u32 = 0;
     for (1..count) |_| {
         var next: ?*const task_state.AdditionalInput = null;
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .adopted) continue;
             const sequence = record.sequence orelse return error.ReviewIntentUnavailable;
             if (sequence <= previous) continue;
@@ -8312,7 +8323,11 @@ fn deinitRun(
 ) void {
     std.debug.assert(run.checkpoint.lease == null);
     releaseRunEffects(run, effects);
-    releaseAutomaticTitle(&run.automatic_title);
+    if (run.execution) |execution| {
+        releaseAutomaticTitle(&execution.automatic_title);
+        self.allocator.destroy(execution);
+        run.execution = null;
+    }
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
     self.allocator.free(run.tools);
@@ -8328,6 +8343,7 @@ fn deinitRun(
         releaseProjectedSlice(self, effects, record.text);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
     };
+    self.allocator.free(run.additional_inputs);
     releaseTrackedText(self, effects, &run.assistant);
     releaseTrackedText(self, effects, &run.output_segment);
     releaseTrackedText(self, effects, &run.output_continued);
@@ -8715,6 +8731,8 @@ fn reviewHistoryTestRun(id: u64, message: []const u8) task_state.RunRecord {
 test "permission review historical groups include only adopted inputs in adoption order" {
     var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "Install package A"), reviewHistoryTestRun(2, "Use its selected source"), reviewHistoryTestRun(3, "Start installing") };
     const states = [_]task_state.AdditionalInputState{ .adopted, .pending, .unadopted, .unknown, .transferred, .adopted };
+    var additional: [states.len]?task_state.AdditionalInput = @splat(null);
+    runs[0].?.additional_inputs = &additional;
     for (states, 0..) |state, index| runs[0].?.additional_inputs[index] = .{
         .id = index + 1,
         .after_output_count = 0,

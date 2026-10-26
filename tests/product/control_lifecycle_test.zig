@@ -6942,7 +6942,7 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
     for (0..5000) |_| {
         try workbench.drainAgentEvents();
         if (!task.runtime.worker_leases.hasLive() and
-            task.durable.runs[0].?.automatic_title.state.load(.acquire) == .settled) break;
+            task.durable.runs[0].?.execution.?.automatic_title.state.load(.acquire) == .settled) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.RunDidNotSettle;
     const revision = workbench.currentRevision();

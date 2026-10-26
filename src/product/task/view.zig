@@ -658,7 +658,7 @@ fn inputReady(task: *const task_state.Task) bool {
         task.runtime.cancel_requested or task.approval_change != null or
         run.pending_termination.load(.acquire) != .none or
         run.agent_handoff.load(.acquire) != .running) return false;
-    var lease = run.run_control.tryAcquireLease() orelse return false;
+    var lease = run.execution.?.run_control.tryAcquireLease() orelse return false;
     defer lease.deinit();
     return lease.inputObservation().ready;
 }
