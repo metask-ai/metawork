@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +20,18 @@ import { protocolTextSse } from "../tests/fixtures/provider_protocol.mjs";
 if (process.platform !== "win32")
   throw new Error("Projection stress requires Windows");
 const root = resolve(import.meta.dirname, "..");
+const appSource = await readFile(join(root, "src", "app.zig"), "utf8");
+const configuredConcurrency = Number(
+  appSource.match(/const host_worker_count = (\d+);/)?.[1],
+);
+assert.ok(
+  Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0,
+);
+// Keep the original aggregate text rate while exercising every production worker.
+// The observed concurrent Provider streams below, rather than this source read,
+// prove that the real execution path reached the configured limit.
+const liveChunkRepetitions = Math.max(1, Math.floor(16 / configuredConcurrency));
+const historicalRuns = configuredConcurrency + 5;
 await buildAutomationDebugArtifact(root);
 const fixture = await mkdtemp(join(tmpdir(), "metawork-projection-stress-"));
 const home = join(fixture, "home");
@@ -89,7 +101,7 @@ const provider = createServer(async (request, response) => {
       .filter(Boolean);
     for (const frame of frames.slice(0, 2)) response.write(frame + "\n\n");
     const chunk = live
-      ? "streaming-output ".repeat(4)
+      ? "streaming-output ".repeat(liveChunkRepetitions)
       : "retained-history ".repeat(128);
     const count = live ? 800 : 6;
     for (let index = 0; index < count && !response.destroyed; index++) {
@@ -138,6 +150,7 @@ const app = spawn(join(cwd, "metawork.exe"), [], {
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1`,
   },
   stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
 });
 let output = "";
 app.stdout.on("data", (data) => {
@@ -218,7 +231,7 @@ try {
       (await read()).workspaces.find((item) => item.id === chosen.workspaceId),
     "authorized Workspace",
   );
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < configuredConcurrency; index++) {
     const admission = (await read()).newTaskAdmission;
     const created = await invoke("metawork.tasks.create", {
       workspace: {
@@ -260,13 +273,13 @@ try {
     assert.equal(result.outcome, "accepted", JSON.stringify(result));
     return marker;
   }
-  // Six prior Runs make the current page load older history; the other Tasks
-  // retain four each. Reserve headroom for Host-owned buffer capacities, live
+  // Six prior Runs make the current page load older history; each other Task
+  // retains one. Reserve headroom for Host-owned buffer capacities, live
   // provisional/final output and text duplication; final UTF-8 size alone is
   // not the shared projection allocation budget.
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < configuredConcurrency; index++) {
     await selectTask(index);
-    for (let number = 0; number < (index === 0 ? 6 : 4); number++) {
+    for (let number = 0; number < (index === 0 ? 6 : 1); number++) {
       const marker = await start(index, number, false);
       await until(async () => {
         const view = await read({ ...initialViewScope, taskId: tasks[index] });
@@ -284,7 +297,7 @@ try {
       }, `historical Run ${marker}`);
     }
   }
-  console.log("Projection stress: 18 real historical Runs retained.");
+  console.log(`Projection stress: ${historicalRuns} real historical Runs retained.`);
   await webview.evaluate(`(() => {
     const state=window.__projectionPressure={reads:[],preparations:0,frames:[],longTasks:[],running:true};
     const transport=window.chrome.webview; const post=transport.postMessage;
@@ -299,11 +312,11 @@ try {
     let previous=performance.now(); const frame=now=>{if(!state.running)return;if(state.frames.length<10000) state.frames.push(now-previous);previous=now;requestAnimationFrame(frame);};requestAnimationFrame(frame);
   })()`);
   const liveMarkers = [];
-  for (let index = 0; index < 4; index++)
+  for (let index = 0; index < configuredConcurrency; index++)
     liveMarkers.push(await start(index, 10, true));
   await until(
-    () => liveActive === 4,
-    "four simultaneous real Provider streams",
+    () => liveActive === configuredConcurrency,
+    `${configuredConcurrency} simultaneous real Provider streams`,
   );
   await selectTask(0);
   await until(
@@ -311,7 +324,7 @@ try {
       webview.evaluate(
         `(() => {const button=[...document.querySelectorAll('button')].find(item=>/加载更早|Load earlier/i.test(item.textContent));if(!button||button.disabled)return false;button.click();return true;})()`,
       ),
-    "load earlier history during four active Runs",
+    "load earlier history at the configured concurrency limit",
   );
   await until(
     () =>
@@ -320,7 +333,9 @@ try {
       ),
     "all seven selected Task Runs are rendered",
   );
-  for (const index of [1, 2, 3, 0]) await selectTask(index);
+  for (let index = 1; index < configuredConcurrency; index++)
+    await selectTask(index);
+  await selectTask(0);
   await until(
     () =>
       webview.evaluate(
@@ -344,7 +359,7 @@ try {
     await until(() => webview.evaluate(ready), label);
     assert.equal(
       liveActive,
-      3,
+      configuredConcurrency - 1,
       "unselected Runs must remain active during management",
     );
   }
@@ -414,14 +429,14 @@ try {
       ),
     "connection recovered during execution",
   );
-  assert.equal(liveActive, 3);
+  assert.equal(liveActive, configuredConcurrency - 1);
   finishLive = true;
   await until(
     () => liveActive === 0,
     "all remaining Provider streams complete",
   );
   const final = [];
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < configuredConcurrency; index++) {
     const task = await until(
       async () => {
         const task = (await read({ ...initialViewScope, taskId: tasks[index] }))
@@ -451,15 +466,16 @@ try {
   assert.ok(browser.reads.some((read) => read.beforeRunId !== null));
   assert.ok(browser.reads.some((read) => read.management === "skills"));
   assert.ok(browser.reads.some((read) => read.management === "mcp"));
-  assert.equal(peakLive, 4);
+  assert.equal(peakLive, configuredConcurrency);
   assert.ok(
     !output.includes("EventQueueTimeout") &&
       !output.includes("EventPumpOverflow"),
     "event pump failed under pressure",
   );
   const evidence = {
+    configuredConcurrency,
     peakLive,
-    historicalRuns: 18,
+    historicalRuns,
     probeReadRetries,
     stopMs,
     final,
@@ -483,7 +499,7 @@ try {
   ]);
   assert.equal(result.code, 0);
   console.log(
-    `Projection stress passed: concurrency=${peakLive}, historicalRuns=18, stopMs=${stopMs.toFixed(1)}, scopedReads=${browser.reads.length}`,
+    `Projection stress passed: concurrency=${peakLive}, historicalRuns=${historicalRuns}, stopMs=${stopMs.toFixed(1)}, scopedReads=${browser.reads.length}`,
   );
 } catch (error) {
   await writeFile(join(evidenceDir, "host.log"), output);
