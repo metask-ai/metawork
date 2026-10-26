@@ -178,7 +178,11 @@ const Host = struct {
                 .credential = input.api_key,
             }, backend.transport(), self.revision);
         }
-        var observed = evaluation.ObservedTransport{ .inner = backend.transport() };
+        var trace: @import("permission_review_network_trace").Trace = undefined;
+        try trace.init(self.init.io);
+        defer trace.deinit();
+        backend.io = trace.io();
+        var observed = evaluation.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
         const completion = try agent.Completion.init(self.init.gpa, observed.transport(), .{
             .target = .{ .provider_id = input.target.provider_id, .protocol = protocol, .base_url = input.target.base_url, .model = input.target.model },
             .credential = input.api_key,

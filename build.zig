@@ -375,12 +375,18 @@ pub fn build(b: *std.Build) void {
     });
     review_eval_module.addImport("metawork_agent", modules.agent);
     review_eval_module.addImport("permission_review", modules.product_permission_review);
+    const review_network_trace = b.createModule(.{ .root_source_file = b.path("tests/permission_review_network_trace.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
+    review_network_trace.addImport("metawork_agent", modules.agent);
+    review_eval_module.addImport("permission_review_network_trace", review_network_trace);
+    review_http_cases.addImport("permission_review_network_trace", review_network_trace);
     review_http_cases.addImport("permission_review_evaluation", review_eval_module);
     const review_eval_main = b.createModule(.{ .root_source_file = b.path("tests/permission_review_eval_main.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
     review_eval_main.addImport("metawork_agent", modules.agent);
     review_eval_main.addImport("completion_http_backend", review_http_backend);
     review_eval_main.addImport("permission_review_evaluation", review_eval_module);
+    review_eval_main.addImport("permission_review_network_trace", review_network_trace);
     modules.app.addImport("permission_review_evaluation", review_eval_module);
+    modules.app.addImport("permission_review_network_trace", review_network_trace);
     const schema_probe = b.createModule(.{ .root_source_file = b.path("tests/permission_schema_probe.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
     schema_probe.addImport("metawork_agent", modules.agent);
     schema_probe.addImport("permission_review", modules.product_permission_review);

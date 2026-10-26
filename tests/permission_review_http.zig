@@ -36,7 +36,8 @@ const Fixture = struct {
     }
 };
 
-fn invoke(owner: *agent.Completion, mode: []const u8, milliseconds: i64) review.Outcome {
+fn invoke(owner: *agent.Completion, trace: *@import("permission_review_network_trace").Trace, mode: []const u8, milliseconds: i64) review.Outcome {
+    trace.prepare();
     var cancellation = owner.newCancellation();
     return review.review(std.testing.allocator, std.testing.io, owner, .{
         .host = .{ .delegated = true, .constraints = "local fixture only", .authorization = "synthetic review" },
@@ -50,35 +51,67 @@ test "review HTTP deadline joins the old request and isolates later 503 invalid 
     defer fixture.deinit();
     const endpoint = try std.fmt.allocPrint(std.testing.allocator, "{s}/v1/messages", .{fixture.base});
     defer std.testing.allocator.free(endpoint);
-    var backend = http.Backend{ .allocator = std.testing.allocator, .io = std.testing.io };
-    var observed = evaluation.ObservedTransport{ .inner = backend.transport() };
+    var trace: @import("permission_review_network_trace").Trace = undefined;
+    try trace.init(std.testing.io);
+    defer trace.deinit();
+    try std.testing.expect(trace.io().userdata == std.testing.io.userdata);
+    try std.testing.expect(trace.io().vtable != std.testing.io.vtable);
+    inline for (@typeInfo(std.Io.VTable).@"struct".fields) |field| {
+        if (comptime !std.mem.eql(u8, field.name, "netLookup") and !std.mem.eql(u8, field.name, "netConnectIp") and !std.mem.eql(u8, field.name, "netRead") and !std.mem.eql(u8, field.name, "netWrite")) {
+            try std.testing.expect(@field(trace.table, field.name) == @field(std.testing.io.vtable.*, field.name));
+        }
+    }
+    var duplicate_trace: @import("permission_review_network_trace").Trace = undefined;
+    try std.testing.expectError(error.DiagnosticTraceAlreadyActive, duplicate_trace.init(std.testing.io));
+    var backend = http.Backend{ .allocator = std.testing.allocator, .io = trace.io() };
+    var observed = evaluation.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
     const owner = try agent.Completion.init(std.testing.allocator, observed.transport(), .{
         .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = endpoint, .model = "fixture-review" },
         .credential = "synthetic-review-key",
     });
     defer owner.deinit();
+    trace.prepare();
+    var early_cancellation = owner.newCancellation();
+    early_cancellation.request();
+    try std.testing.expect(owner.complete(.{ .messages = &.{.{ .role = .user, .text = "synthetic" }}, .max_output_tokens = 1 }, &early_cancellation).failure == .cancelled);
+    try std.testing.expect(trace.report().cancelled_before_transport);
+    try std.testing.expect(trace.report().finished == null);
     const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
-    const held = invoke(owner, "hold", 500);
+    const held = invoke(owner, &trace, "hold", 500);
     try std.testing.expect(held == .failure);
     try std.testing.expect(held.failure == .timeout);
+    try std.testing.expect(!trace.report().cancelled_before_transport);
     try std.testing.expectEqual(@as(?usize, null), observed.observation.response_bytes);
     try std.testing.expectEqual(@as(?bool, false), observed.observation.response_buffer_modified_on_failure);
+    const held_trace = trace.report();
+    try std.testing.expect(held_trace.at_cancel.?.read.pending > 0);
+    try std.testing.expectEqual(@as(u64, 0), held_trace.finished.?.read.bytes);
+    try std.testing.expect(held_trace.finished.?.write.bytes > 0);
+    try std.testing.expect(held_trace.finished.?.connect.calls > 0);
+    try std.testing.expectEqual(@as(u64, 0), held_trace.finished.?.read.pending);
     try std.testing.expect(started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() < 5_000);
-    const partial = invoke(owner, "partial-hold", 500);
+    const partial = invoke(owner, &trace, "partial-hold", 500);
     try std.testing.expect(partial == .failure);
     try std.testing.expect(partial.failure == .timeout);
     try std.testing.expectEqual(@as(?usize, null), observed.observation.response_bytes);
     try std.testing.expectEqual(@as(?bool, true), observed.observation.response_buffer_modified_on_failure);
-    const rejected = invoke(owner, "reject-503", 5_000);
+    const partial_trace = trace.report();
+    try std.testing.expect(partial_trace.at_cancel.?.read.pending > 0);
+    try std.testing.expect(partial_trace.finished.?.read.bytes > 0);
+    const trace_json = try std.json.Stringify.valueAlloc(std.testing.allocator, partial_trace, .{});
+    defer std.testing.allocator.free(trace_json);
+    try std.testing.expect(std.mem.indexOf(u8, trace_json, "synthetic-review-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, trace_json, "127.0.0.1") == null);
+    const rejected = invoke(owner, &trace, "reject-503", 5_000);
     try std.testing.expect(rejected == .failure);
     try std.testing.expect(rejected.failure == .completion);
     try std.testing.expect(rejected.failure.completion == .provider_rejected);
     try std.testing.expectEqual(@as(u16, 503), rejected.failure.completion.provider_rejected.status);
-    const invalid = invoke(owner, "invalid-json", 5_000);
+    const invalid = invoke(owner, &trace, "invalid-json", 5_000);
     try std.testing.expect(invalid == .failure);
     try std.testing.expect(invalid.failure == .invalid_output);
     for ([_][]const u8{ "success", "split-json" }) |mode| {
-        var outcome = invoke(owner, mode, 5_000);
+        var outcome = invoke(owner, &trace, mode, 5_000);
         try std.testing.expect(outcome == .suggestion);
         defer std.crypto.secureZero(u8, &outcome.suggestion.reason.bytes);
         try std.testing.expectEqual(review.Decision.allow_once, outcome.suggestion.decision);

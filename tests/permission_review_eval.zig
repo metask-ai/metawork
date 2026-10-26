@@ -3,12 +3,14 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const review = @import("permission_review");
+const network_trace = @import("permission_review_network_trace");
 const ProviderErrorType = enum { overloaded_error, rate_limit_error, authentication_error, invalid_request_error, permission_error, not_found_error, api_error, timeout_error, other };
 
 /// Test-only observation around the production transport. Records allowlisted
 /// shapes and counters, never response text, reasons, headers or credentials.
 pub const ObservedTransport = struct {
     inner: agent.CompletionTransport,
+    trace: ?*network_trace.Trace = null,
     observation: struct {
         http_status: ?u16 = null,
         provider_error_type: ?ProviderErrorType = null,
@@ -411,6 +413,7 @@ pub fn runWithCompletion(
                 const variant = (offset + repeat + case_index) % 2;
                 const metrics = &totals[variant];
                 metrics.attempts += 1;
+                if (observed) |value| if (value.trace) |trace| trace.prepare();
                 var cancellation = completion.newCancellation();
                 const start = std.Io.Clock.Timestamp.now(init.io, .awake);
                 var outcome = review.review(init.gpa, init.io, completion, .{
@@ -463,6 +466,7 @@ pub fn runWithCompletion(
                     .technical_failure = failure,
                     .completion_failure = completion_failure,
                     .transport = if (observed) |value| value.observation else null,
+                    .network = if (observed) |value| if (value.trace) |trace| trace.report() else null else null,
                     .elapsed_ms = elapsed,
                     .usage = usage,
                 });

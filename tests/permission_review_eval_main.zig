@@ -20,8 +20,11 @@ pub fn main(init: std.process.Init) !void {
     else
         3;
     if (repeats < 1 or repeats > 5) return error.InvalidEvaluationRepeats;
-    var backend: http.Backend = .{ .allocator = init.gpa, .io = init.io };
-    var observed = suite.ObservedTransport{ .inner = backend.transport() };
+    var trace: @import("permission_review_network_trace").Trace = undefined;
+    try trace.init(init.io);
+    defer trace.deinit();
+    var backend: http.Backend = .{ .allocator = init.gpa, .io = trace.io() };
+    var observed = suite.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
     const completion = try agent.Completion.init(init.gpa, observed.transport(), .{
         .target = .{ .provider_id = "permission-review-evaluation", .protocol = protocol, .base_url = base_url, .model = model },
         .credential = credential,
