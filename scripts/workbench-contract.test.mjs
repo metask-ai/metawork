@@ -2077,6 +2077,10 @@ test("Task deletion exposes one product-level progress and retry fact", () => {
 
   const unarchived = clone(retryable);
   unarchived.tasks[0].archived = false;
+  assert.deepEqual(decodeWorkbenchSnapshot(unarchived), unarchived);
+  unarchived.tasks[0].deletionStatus = "deleting";
+  assert.deepEqual(decodeWorkbenchSnapshot(unarchived), unarchived);
+  unarchived.tasks[0].lifecycle = "open";
   assert.throws(
     () => decodeWorkbenchSnapshot(unarchived),
     /invalid deletion facts/,
@@ -3604,16 +3608,19 @@ test("file image preview matches the Host shared fixture", () => {
   });
 });
 
-test("visible Tasks reject deletion state before any unrelated lifecycle checks", () => {
+test("visible Tasks allow failed deletion without archiving and reject deleting while open", () => {
   const value = clone(fixture);
   const scoped = productViewFixture(value, {
     ...initialViewScope,
     taskId: value.tasks[0].id,
   });
   scoped.taskPage.task.deletionStatus = "failed";
+  scoped.taskIndex[0].deletionStatus = "failed";
+  assert.equal(decodeScopedSnapshot(scoped).taskPage.task.deletionStatus, "failed");
+  scoped.taskPage.task.deletionStatus = "deleting";
   assert.throws(
     () => decodeScopedSnapshot(scoped),
-    /only an archived Task can have deletion state/,
+    /in-progress deletion must have closing lifecycle/,
   );
 });
 

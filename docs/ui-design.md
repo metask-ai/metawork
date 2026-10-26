@@ -220,7 +220,7 @@ Workspace
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。Host 只为最新 terminal `completed` Run 发布 nullable 未读 identity；后台完成时显示，用户打开该 Task 后只有中央工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖，且应用页面可见并获得焦点时才确认并隐藏。当前可见 Task 完成后可直接确认，不闪烁自身提示点；遮挡、失焦、Bridge 失败或 stale acknowledgement 不得提前吞掉提醒。Task 再次完成新的 Run 时重新显示；归档等价于明确处理当前完成提醒，恢复时不复活旧提示点。
-- Task 的重命名、归档/恢复和删除从内容区标题栏移除，统一通过左侧 Task 行的右键菜单访问。停止当前运行仍保留在内容区作为即时运行控制；不存在独立的“结束任务”动作。
+- 未归档 Task 的重命名、归档和删除通过左侧 Task 行的右键菜单访问；归档任务由设置管理，当前归档历史工作面提供恢复及返回归档列表入口。停止当前运行仍保留在内容区作为即时运行控制；不存在独立的“结束任务”动作。
 
 ### 5.2 全局能力入口
 
@@ -416,7 +416,7 @@ Disabled
 
 全局 Task 列表以“最近 / Recent”为标题，保留所有可见任务，每个 Task 在该列表中只出现一次；其上方展示“项目”区域，canonical snapshot 中每个 Manual Workspace 使用自己的 identity、目录名称和所属 Task 形成一个项目。Automatic Workspace 不生成项目，包括用户调整了默认目录上级位置的情形。两处任务入口共享选择、状态、完成提醒和任务操作，不复制 Task 状态或因项目展示改变绑定。
 
-全局列表与每个项目内部共用同一排序：依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 Task `recentOrder` 倒序；状态优先级不生成标题、分隔或独立栏目。项目之间按 Workspace `recentOrder` 倒序：
+全局列表与每个项目内部共用同一排序：依次按需要处理、正在运行、排队、其他未归档的优先级排列，同一优先级内按 Task `recentOrder` 倒序；状态优先级不生成标题、分隔或独立栏目。项目之间按 Workspace `recentOrder` 倒序：
 
 ```text
 Projects
@@ -430,7 +430,7 @@ Recent
 
 - 列表不按状态拆分栏目，不显示 `Needs your attention / Running / Queued / Archived` 等状态标题；
 - 只有存在仍被投影的 Manual Workspace 时显示“项目”；目录标题使用文件夹图标与单行名称，完整安全路径放在 hover title 中，redacted 时不显示路径。任务缩进一级，不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
-- 项目任务始终展开；空项目保留目录标题和无任务说明。全局归档显示开关同时作用于全局与项目列表；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
+- 项目任务始终展开；空项目保留目录标题和无任务说明。全局与项目列表固定隐藏归档任务，不提供归档显示开关；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
 - 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - Task 列表项只显示任务名称与必要状态信号，不在名称下追加 Workspace、`Default / 默认`、模型或其他配置标签；同名 Task 仍保持原名称，由用户按需重命名，不用第二行元数据替代命名；
 - 运行中、排队、等待用户、失败和中断使用图标和颜色共同表达；可访问名称通过 `aria-label` 和 tooltip 提供，不在行内保留文字状态标签；
@@ -441,11 +441,12 @@ Recent
 
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
-- 归档从日常列表隐藏，但保留记录和引用；
-- 只有已归档 Task 提供删除；删除会先收口仍存活的 Session，再移除 Task 记录，不自动删除 Workspace 中生成或修改的文件；
-- 删除进入 `deleting` 后禁用该 Task 的重命名、恢复归档和重复删除，等待 Host 自行推进；进入 `failed` 时保留归档 Task、显示失败信号并重新开放同一删除动作，Renderer 不显示或编排 checkpoint、Session release 等内部阶段。若此时 Task 已回到 `open`，用户也可以恢复归档并由 Host 原子清除失败的删除用例；仍为 `closing` 时只开放删除重试；
+- 归档从日常列表隐藏，保留记录和引用，由设置的“已归档任务”统一管理；Host 确认成功后提示“任务已归档，可在设置 → 已归档任务中查看”，提供撤销和查看。提示按准确 Task identity 绑定，悬停或键盘焦点位于其中时暂停自动消失，不抢焦点。失败保留原列表项，命令超时先对账，不自动重发；
+- 当前任务归档后保留历史工作面，持续显示已归档、恢复任务和返回已归档任务，不提供可发送 Composer、重命名、模型或审批模式编辑；只读呈现由 archived 控制，不冒用 historyReadOnly；
+- Task 可直接删除，无需归档。确认目标绑定 Task identity 并显示名称，明确永久删除历史、保留工作目录文件；有活动操作时显示“停止并删除”，默认焦点为取消。Host 一次受理后自行停止、收口 Session 与资源、确认历史提交再移除记录，Renderer 不编排停止和删除；
+- 删除进入 `deleting` 后禁用该 Task 的重命名、恢复归档和重复删除，等待 Host 自行推进；进入 `failed` 时保留 Task 及原归档状态、显示失败信号并重新开放同一删除动作，Renderer 不显示或编排 checkpoint、Session release 等内部阶段。若此时 Task 已回到 `open`，用户也可以恢复归档，或在未归档 Task 显式发送新消息、归档，由 Host 在确认安全并接纳操作时原子清除失败的删除用例；仍为 `closing` 时只开放删除重试；
 - 删除确认必须明确说明文件不会被删除；
-- queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
+- 有 active operation 的 Task 不能归档，必须先停止或取消并等待真实 terminal；删除允许停止并删除。deleting 保留原列表行显示进度，禁用冲突操作，命令 ACK 不等于删除成功；删除当前 Task 成功后回到新任务页并保留已有草稿，删除其他 Task 不改变当前工作面。
 
 ### 5.8 左下角账号入口
 
@@ -1019,9 +1020,17 @@ Providers（capability-gated）
 ├── Official provider setup and management（independent full page）
 └── Custom API（secondary group and independent add page）
 
+Archived tasks
+├── Search by task name
+└── View history / Restore / Delete
+
 ```
 
 设置是覆盖整个 Workbench 内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层 Workbench 继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回工作台` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
+
+“已归档任务”作为设置末尾的平级分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、现有安全项目/目录说明和恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。加载、失败、无归档和搜索无结果分别呈现；historyReadOnly 只允许阅读。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。
+
+点击归档历史显式离开设置，复用现有 Task 工作面；返回归档列表保留搜索、滚动和合理焦点。列表恢复留在设置，工作面恢复留在原 Task；恢复不新建 Task、不自动发送、不复活旧完成提醒，继续执行仍受 Host gate。已有搜索命中归档任务应标明归档且不自动恢复。普通设置开关仍保持原工作面与草稿；只有显式查看归档历史才导航 Task。
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 

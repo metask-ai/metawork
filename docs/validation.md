@@ -254,6 +254,8 @@ detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：
 
 ## 变更验证 Gate
 
+Task 直接删除与设置归档管理须覆盖：未归档 deleting/failed 的双侧严格 fixture；Host 停止各类 active operation、等待输入/接续/审批失效、terminal drain 与 commit-before-release、原 archived 保留、明确失败及 outcome unknown、失败后显式新意图安全清除与重启不重放。Renderer 覆盖固定删除目标、归档 toast 撤销/查看及暂停计时、设置搜索/空错/恢复/删除、日常导航隐藏归档、历史返回/草稿/焦点和完成提醒不复活。当前平台真实 Application→Bridge→Product→AgentCore vertical 另证停止并删除、文件保留、冷启动及桌面/窄窗交互；模拟测试不替代真实桌面证据。
+
 对话呈现锚点的验证按 owner 分层：Task runtime、history codec 与 SQL round trip 固定展示序号高水位、图片引用与锚点原子安装、重复引用稳定、旧记录识别及新格式严格拒绝；Bridge fixture 与 Renderer suite 固定同一身份的消息接管、输出回退、终态收尾、分页完整性和图片先后。Windows 的 `node scripts/test-conversation-webview-windows.mjs` 使用正式 automation artifact、真实 WebView2 和隔离的组件夹具，验证图片解码及节点稳定、文本选择与焦点、分页补载后的内容阅读锚点、终态详情顺序、安全失效，以及桌面/390px 的深浅主题。该组件夹具不替代真实 Host 生图、账户授权、完整桌面生命周期或系统键盘手势证据；这些验收的失败须分别保留，不能用组件通过覆盖。
 
 当前 AgentCore 系统时钟异常路径尚未完整满足“读取失败时明确报告日期未知”：POSIX 时钟读取失败可能以零 Unix time 继续生成日期。该上游缺口暂不阻塞 Core 日期上下文消费，不通过 Host 时钟、日期 fallback 或平行注入补齐；修复与异常路径回归归 AgentCore 发布方，正常请求、恢复和 Host 传参验证仍必须通过。
