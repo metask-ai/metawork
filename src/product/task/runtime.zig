@@ -2660,7 +2660,7 @@ pub const Runtime = struct {
         const insertion = pushUiRecord(task, record);
         switch (insertion) {
             .inserted => {
-                task.runtime.permission_review.settle(request_id);
+                task.runtime.permission_review.settle(request_id, .{});
                 task.durable.recent_order = self.takeRecentOrder();
             },
             .already_resolved => {},
@@ -2712,7 +2712,11 @@ pub const Runtime = struct {
         if (task.runtime.permission_review.identity) |identity| {
             if (identity.request_id == observation.request_id) return null;
         }
-        errdefer task.runtime.permission_review.settle(observation.request_id);
+        errdefer |err| task.runtime.permission_review.settle(observation.request_id, .{ .cause = switch (@as(anyerror, err)) {
+            error.ReviewInputLimit, error.ReviewIntentUnavailable, error.WriteFailed => .context_incomplete,
+            error.OutOfMemory => .capacity,
+            else => .unavailable,
+        } });
         var pending = try access.copyPendingUiRequest(self.allocator);
         defer {
             std.crypto.secureZero(u8, pending.json);
@@ -2731,7 +2735,7 @@ pub const Runtime = struct {
         task.runtime.permission_review.identity = identity;
         task.runtime.permission_review.phase = .reviewing;
         if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) {
-            _ = self.finishPermissionReview(identity);
+            _ = self.finishPermissionReview(identity, .{ .cause = .input_changed });
             return null;
         }
         const execution = task.runtime.execution() orelse return error.ReviewUnavailable;
@@ -2749,23 +2753,7 @@ pub const Runtime = struct {
         var writer = std.Io.Writer.fixed(bytes);
         var intent_buffer: [8 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &intent_buffer);
-        var root_intent_buffer: [8 * 1024]u8 = undefined;
-        defer std.crypto.secureZero(u8, &root_intent_buffer);
-        const root_intent = try reviewIntent(&run.input, &root_intent_buffer);
-        var intent_writer = std.Io.Writer.fixed(&intent_buffer);
-        try intent_writer.writeAll(root_intent);
-        for (1..@as(usize, pending.input_adopted_count) + 1) |sequence| {
-            var found = false;
-            for (run.additional_inputs) |entry| if (entry) |record| {
-                if (record.sequence != @as(u32, @intCast(sequence))) continue;
-                try intent_writer.writeAll("\n\n[Additional user instruction]\n");
-                try intent_writer.writeAll(record.text);
-                found = true;
-                break;
-            };
-            if (!found) return error.ReviewIntentUnavailable;
-        }
-        const intent = intent_writer.buffered();
+        const intent = try currentReviewIntent(run, pending.input_adopted_count, &intent_buffer);
         if (std.mem.trim(u8, intent, " \t\r\n").len == 0) return error.ReviewIntentUnavailable;
         const context = latestReviewContext(run);
         const constraints = if (agent.hostToolPermissionContext(request.tool.namespace, request.tool.name)) |effects| blk: {
@@ -2773,7 +2761,7 @@ pub const Runtime = struct {
             try writer.print("{s}\n{s}", .{ review_constraints, effects });
             break :blk writer.buffered()[start..];
         } else review_constraints;
-        const input: permission_review.Input = .{
+        var input: permission_review.Input = .{
             .host = .{ .delegated = true, .constraints = constraints, .authorization = review_authorization },
             .user_intent = try copyReviewField(&writer, text, intent, 8 * 1024, &run.redactionSecrets()),
             .request = .{
@@ -2783,6 +2771,7 @@ pub const Runtime = struct {
             },
             .context = try copyReviewField(&writer, text, context, 4 * 1024, &run.redactionSecrets()),
         };
+        try appendReviewHistory(task.durable.runs, run.id, text, &run.redactionSecrets(), &writer, &input);
         return .{ .allocator = self.allocator, .identity = identity, .input = input, .bytes = bytes, .execution = owned_execution, .tool_namespace = request.tool.namespace };
     }
 
@@ -2806,10 +2795,10 @@ pub const Runtime = struct {
 
     /// For capacity rejection/cancellation before a worker was started as well
     /// as reviewer failure. It never answers or expires the Agent request.
-    pub fn finishPermissionReview(self: *Runtime, identity: PermissionReviewIdentity) bool {
+    pub fn finishPermissionReview(self: *Runtime, identity: PermissionReviewIdentity, explanation: task_attachment.PermissionReviewState.Explanation) bool {
         const task = self.find(identity.task_id) orelse return false;
         if (!task.runtime.permission_review.matches(identity)) return false;
-        task.runtime.permission_review.settle(identity.request_id);
+        task.runtime.permission_review.settle(identity.request_id, explanation);
         return true;
     }
 
@@ -2823,19 +2812,38 @@ pub const Runtime = struct {
         const task = self.find(identity.task_id) orelse return false;
         if (self.permission_reviews_closed) return false;
         if (!reviewTaskEligible(task) or !task.runtime.permission_review.matches(identity)) return false;
-        defer _ = self.finishPermissionReview(identity);
+        defer _ = self.finishPermissionReview(identity, .{});
         if (task.runtime.active_run_id != identity.run_id) return false;
         const run = task_state.findRun(task.durable.runs, identity.run_id) orelse return false;
         if (!std.meta.eql(identity, reviewIdentity(task, run, identity.request_id, identity.policy_generation)) or
             task_state.terminalPayload(run) != null or run.pending_termination.load(.acquire) != .none)
             return false;
         const suggestion = switch (outcome) {
-            .failure => return false,
+            .failure => |failure| {
+                _ = self.finishPermissionReview(identity, .{ .cause = switch (failure) {
+                    .timeout => .timeout,
+                    .completion => |completion_failure| switch (completion_failure) {
+                        .malformed_response, .unsupported_response => .invalid_response,
+                        else => .call_failed,
+                    },
+                    .invalid_output, .output_limit, .incomplete_output => .invalid_response,
+                    .invalid_input, .input_limit => .context_incomplete,
+                    .out_of_memory => .capacity,
+                    else => .unavailable,
+                } });
+                return false;
+            },
             .suggestion => |value| value,
         };
-        const choice: PermissionChoice = switch (suggestion.decision) {
-            .needs_user => return false,
-            .allow_once => if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) return false else .allow_once,
+        const choice: ?PermissionChoice = switch (suggestion.decision) {
+            .needs_user => null,
+            .allow_once => blk: {
+                if (hasWaitingInputs(task) or inputBlocksAutomaticAllow(run)) {
+                    _ = self.finishPermissionReview(identity, .{ .cause = .input_changed });
+                    return false;
+                }
+                break :blk .allow_once;
+            },
             .deny => .deny_once,
         };
         // Check the exact current SDK request, not just a saved UI observation.
@@ -2853,10 +2861,9 @@ pub const Runtime = struct {
             parsed.deinit();
         }
         const request = parsed.value();
-        if (request.run_id != identity.run_id or request.policy_generation != identity.policy_generation or
-            std.mem.indexOfScalar(agent.PermissionChoice, request.responses, permissionChoice(choice)) == null)
-        {
-            return false;
+        if (request.run_id != identity.run_id or request.policy_generation != identity.policy_generation) return false;
+        if (choice) |value| {
+            if (std.mem.indexOfScalar(agent.PermissionChoice, request.responses, permissionChoice(value)) == null) return false;
         }
         if (suggestion.reason.len == 0 or suggestion.reason.len > permission_review.max_reason_bytes) {
             return false;
@@ -2870,7 +2877,11 @@ pub const Runtime = struct {
         if (projected.truncated or !validReviewReason(projected.value)) {
             return false;
         }
-        var prepared = try self.respondUi(identity.task_id, identity.run_id, identity.request_id, .{ .permission = choice });
+        if (choice == null) {
+            _ = self.finishPermissionReview(identity, .{ .cause = .reviewer_concern, .reason = projected.value });
+            return false;
+        }
+        var prepared = try self.respondUi(identity.task_id, identity.run_id, identity.request_id, .{ .permission = choice.? });
         if (!prepared.history_inserted) {
             prepared.rollback();
             return false;
@@ -7923,6 +7934,114 @@ fn latestReviewContext(run: *const task_state.RunRecord) []const u8 {
     return run.assistant.list.items[start..end];
 }
 
+fn currentReviewIntent(run: *const task_state.RunRecord, adopted_count: u32, buffer: []u8) ![]const u8 {
+    var root_buffer: [8 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &root_buffer);
+    var writer = std.Io.Writer.fixed(buffer);
+    try writer.writeAll(try reviewIntent(&run.input, &root_buffer));
+    for (1..@as(usize, adopted_count) + 1) |sequence| {
+        var found = false;
+        for (run.additional_inputs) |entry| if (entry) |record| {
+            if (record.sequence != @as(u32, @intCast(sequence))) continue;
+            try writer.writeAll("\n\n[Additional user instruction]\n");
+            try writer.writeAll(record.text);
+            found = true;
+            break;
+        };
+        if (!found) return error.ReviewIntentUnavailable;
+    }
+    return writer.buffered();
+}
+
+fn historicalReviewMessageCount(run: *const task_state.RunRecord) usize {
+    var count: usize = 1;
+    for (run.additional_inputs) |entry| if (entry) |record| {
+        if (record.state == .adopted) count += 1;
+    };
+    return count;
+}
+
+fn writeHistoricalReviewMessage(writer: *std.Io.Writer, text: TextProjection, value: []const u8, secrets: []const []const u8) !void {
+    if (value.len > permission_review.max_input_bytes or !std.unicode.utf8ValidateSlice(value)) return error.ReviewInputLimit;
+    const projected = try text.project(value, permission_review.max_input_bytes, secrets, 0);
+    defer {
+        std.crypto.secureZero(u8, projected.value);
+        text.discardCandidate(projected.value);
+    }
+    if (projected.truncated) return error.ReviewInputLimit;
+    try std.json.Stringify.value(projected.value, .{}, writer);
+}
+
+fn writeReviewHistoryGroup(writer: *std.Io.Writer, run: *const task_state.RunRecord, text: TextProjection, secrets: []const []const u8) !void {
+    var root_buffer: [8 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &root_buffer);
+    try writer.print("{{\"run_id\":\"{d}\",\"messages\":[", .{run.id});
+    try writeHistoricalReviewMessage(writer, text, try reviewIntent(&run.input, &root_buffer), secrets);
+    const count = historicalReviewMessageCount(run);
+    var previous: u32 = 0;
+    for (1..count) |_| {
+        var next: ?*const task_state.AdditionalInput = null;
+        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            if (record.state != .adopted) continue;
+            const sequence = record.sequence orelse return error.ReviewIntentUnavailable;
+            if (sequence <= previous) continue;
+            if (next == null or sequence < next.?.sequence.?) next = record;
+        };
+        const record = next orelse return error.ReviewIntentUnavailable;
+        try writer.writeByte(',');
+        try writeHistoricalReviewMessage(writer, text, record.text, secrets);
+        previous = record.sequence.?;
+    }
+    try writer.writeAll("]}");
+}
+
+/// Host owns evidence selection and sanitization. Complete recent groups are
+/// packed backwards so their final order remains chronological. The reviewer
+/// later applies the exact encoded budget after Control's fresh secret scrub.
+fn appendReviewHistory(runs: []const ?task_state.RunRecord, current_id: u64, text: TextProjection, secrets: []const []const u8, writer: *std.Io.Writer, input: *permission_review.Input) !void {
+    var current: ?usize = null;
+    for (runs, 0..) |*entry, index| if (entry.*) |*run| {
+        if (run.id == current_id) {
+            current = index;
+            break;
+        }
+        input.omitted_user_messages += historicalReviewMessageCount(run);
+    };
+    var index = current orelse return error.ReviewIntentUnavailable;
+    var group_buffer: [permission_review.max_input_bytes]u8 = undefined;
+    var history_buffer: [permission_review.max_input_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &group_buffer);
+    defer std.crypto.secureZero(u8, &history_buffer);
+    const capacity = writer.buffer.len - writer.end;
+    if (capacity < 2) return;
+    var start = history_buffer.len;
+    while (index > 0) {
+        index -= 1;
+        const run = if (runs[index]) |*value| value else continue;
+        const selected = history_buffer.len - start;
+        const separator: usize = if (selected > 0) 1 else 0;
+        if (selected + separator + 2 >= capacity) break;
+        var group_writer = std.Io.Writer.fixed(group_buffer[0 .. capacity - selected - separator - 2]);
+        writeReviewHistoryGroup(&group_writer, run, text, secrets) catch |err| switch (err) {
+            error.OutOfMemory, error.ProjectionCapacity => return err,
+            else => break,
+        };
+        if (separator != 0) {
+            start -= 1;
+            history_buffer[start] = ',';
+        }
+        start -= group_writer.end;
+        @memcpy(history_buffer[start..][0..group_writer.end], group_writer.buffered());
+        input.omitted_user_messages -= historicalReviewMessageCount(run);
+    }
+    if (start == history_buffer.len) return;
+    const begin = writer.end;
+    try writer.writeByte('[');
+    try writer.writeAll(history_buffer[start..]);
+    try writer.writeByte(']');
+    input.user_history_json = writer.buffer[begin..writer.end];
+}
+
 /// Only explicit user-selected input metadata is included. Skill instructions,
 /// attachment contents and Tool output do not become authorization evidence.
 fn reviewIntent(input: *const task_state.RunInputRecord, buffer: []u8) ![]const u8 {
@@ -8576,6 +8695,48 @@ test "UI history distinguishes idempotent settlement from cross-Run collision" {
     );
     try std.testing.expectEqual(@as(u64, 9), task.runtime.pending_ui_request_id);
     try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+}
+
+fn reviewHistoryTestRun(id: u64, message: []const u8) task_state.RunRecord {
+    return .{ .id = id, .generation = 1, .execution_generation = 1, .execution_protocol = .anthropic_messages, .execution_model = "m", .permission_profile = .approval_required, .permission_interaction = .interactive, .input = .{ .text = .{ .value = @constCast(message) } }, .commentary_ends = &.{}, .tools = &.{}, .terminal_diagnostic = &.{} };
+}
+
+test "permission review historical groups include only adopted inputs in adoption order" {
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "Install package A"), reviewHistoryTestRun(2, "Use its selected source"), reviewHistoryTestRun(3, "Start installing") };
+    const states = [_]task_state.AdditionalInputState{ .adopted, .pending, .unadopted, .unknown, .transferred, .adopted };
+    for (states, 0..) |state, index| runs[0].?.additional_inputs[index] = .{
+        .id = index + 1,
+        .after_output_count = 0,
+        .operation_id_len = 0,
+        .text = @constCast(if (state == .adopted) (if (index == 0) "First constraint" else "Later constraint") else "MUST_NOT_APPEAR"),
+        .redacted = false,
+        .state = state,
+        .sequence = @intCast(index + 1),
+    };
+    var projection = InputTestProjection{ .allocator = std.testing.allocator };
+    var buffer: [permission_review.max_input_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    var input: permission_review.Input = .{ .host = .{ .delegated = true, .constraints = "", .authorization = "" }, .user_intent = "Start installing", .request = .{ .tool_name = "Bash", .arguments_json = "{}", .working_directory = "" } };
+    try appendReviewHistory(&runs, 3, projection.effects().text, &.{}, &writer, &input);
+    try std.testing.expectEqual(@as(usize, 0), projection.charged);
+    try std.testing.expectEqual(@as(usize, 0), input.omitted_user_messages);
+    try std.testing.expect(std.mem.indexOf(u8, input.user_history_json, "MUST_NOT_APPEAR") == null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, input.user_history_json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
+    const messages = parsed.value.array.items[0].object.get("messages").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), messages.len);
+    try std.testing.expectEqualStrings("First constraint", messages[1].string);
+    try std.testing.expectEqualStrings("Later constraint", messages[2].string);
+    var small: [32]u8 = undefined;
+    writer = std.Io.Writer.fixed(&small);
+    input.omitted_user_messages = 0;
+    input.user_history_json = "";
+    try appendReviewHistory(&runs, 3, projection.effects().text, &.{}, &writer, &input);
+    try std.testing.expectEqualStrings("", input.user_history_json);
+    try std.testing.expectEqual(@as(usize, 4), input.omitted_user_messages);
+    var mandatory: [4]u8 = undefined;
+    try std.testing.expectError(error.WriteFailed, currentReviewIntent(&runs[2].?, 0, &mandatory));
 }
 
 test "permission review intent includes only bounded explicit Skill and multimodal metadata" {

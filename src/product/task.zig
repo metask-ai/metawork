@@ -73,6 +73,7 @@ pub const RunOutcome = state.RunOutcome;
 pub const FileReferencePosition = state.FileReferencePositionView;
 pub const FileReferenceRange = state.FileReferenceRangeView;
 pub const ProjectionError = view.Error;
+pub const max_permission_presentation_bytes = view.max_permission_presentation_bytes;
 pub const ProjectionText = view.TextProjection;
 pub const ToolProjection = view.ToolProjection;
 pub const OwnedToolProjection = view.OwnedToolProjection;

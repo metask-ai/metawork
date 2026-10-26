@@ -203,6 +203,11 @@ export async function runApprovalModeVertical({
   };
   const firstRun = await runGrant("mode-grant-seed");
   const firstRequest = await pending(firstRun);
+  assert.deepEqual(firstRequest.presentation, {
+    kind: "command",
+    command,
+    description: null,
+  });
   assert.ok(firstRequest.availableChoices.includes("allow_session"));
   const initialGeneration = BigInt(firstRequest.policyGeneration);
   await answer(firstRequest, "allow_session");

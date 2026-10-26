@@ -27,7 +27,7 @@ pub const Paths = struct {
     file_change_blobs_len: usize = 0,
     skill_staging_len: usize = 0,
     mcp_len: usize = 0,
-    canonical_user_home: ?[]u8 = null,
+    canonical_user_home: ?[:0]u8 = null,
 
     pub fn init(
         self: *Paths,
@@ -160,7 +160,7 @@ fn resolveCanonicalUserHome(
     io: std.Io,
     allocator: std.mem.Allocator,
     env_map: *std.process.Environ.Map,
-) ?[]u8 {
+) ?[:0]u8 {
     const configured = switch (builtin.os.tag) {
         .windows => env_map.get("USERPROFILE"),
         else => env_map.get("HOME"),
@@ -172,7 +172,7 @@ fn resolveCanonicalDirectory(
     io: std.Io,
     allocator: std.mem.Allocator,
     configured: []const u8,
-) ?[]u8 {
+) ?[:0]u8 {
     if (configured.len == 0 or !std.fs.path.isAbsolute(configured) or
         !std.unicode.utf8ValidateSlice(configured))
         return null;
@@ -220,4 +220,14 @@ test "product and automation data roots are compile-time isolated" {
             dataDirectoryName(.windows),
         );
     }
+}
+
+test "canonical user home keeps its sentinel allocation through release" {
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    const root = try directory.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const home = resolveCanonicalDirectory(std.testing.io, std.testing.allocator, root) orelse return error.HomeUnavailable;
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings(root, home);
 }

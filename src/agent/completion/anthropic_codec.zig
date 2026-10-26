@@ -144,3 +144,18 @@ test "Anthropic codec rejects tool use" {
         ),
     );
 }
+
+test "Anthropic thinking-only budget exhaustion preserves stop reason and usage" {
+    var result = try decode(
+        std.testing.allocator,
+        "{\"type\":\"message\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"synthetic private reasoning\"}],\"stop_reason\":\"max_tokens\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2048}}",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(types.StopReason.max_tokens, result.stop_reason);
+    try std.testing.expectEqual(@as(usize, 0), result.text.len);
+    try std.testing.expectEqual(@as(u64, 2048), result.usage.output_tokens);
+    try std.testing.expectError(error.MalformedResponse, decode(
+        std.testing.allocator,
+        "{\"type\":\"message\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"synthetic private reasoning\"}],\"stop_reason\":\"end_turn\"}",
+    ));
+}

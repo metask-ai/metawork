@@ -77,6 +77,41 @@ test("approval mode defaults and captured Task mode remain separate strict facts
   assert.throws(() => decodeWorkbenchSnapshot(wrongDefault));
 });
 
+test("manual review explanations are bounded request-only facts with typed failure causes", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.approvalMode = "auto_review";
+  task.permissionReviewState = "needs_user";
+  task.permissionReviewExplanation = {
+    cause: "reviewer_concern",
+    reason: "请确认安装来源。",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  for (const cause of [
+    "timeout",
+    "call_failed",
+    "capacity",
+    "unsupported_tool",
+    "context_incomplete",
+    "invalid_response",
+    "input_changed",
+    "state_changed",
+    "unavailable",
+  ]) {
+    task.permissionReviewExplanation = { cause, reason: null };
+    assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+    task.permissionReviewExplanation.reason = "untrusted failure details";
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  for (const reason of [" ", "bad\nreason", "字".repeat(171)]) {
+    task.permissionReviewExplanation = { cause: "reviewer_concern", reason };
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  task.permissionReviewExplanation = { cause: "timeout", reason: null };
+  task.permissionReviewState = "reviewing";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+});
+
 test("review audit only describes once-only reviewer decisions and keeps legal old reasons", () => {
   const value = clone(fixture);
   const record = {
@@ -2669,6 +2704,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     toolNamespace: "builtin",
     tool: "Bash",
     toolBinding: "binding-9",
+    presentation: null,
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
     policyGeneration: "1",
@@ -2736,6 +2772,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     toolNamespace: "builtin",
     tool: "Bash",
     toolBinding: "binding-9",
+    presentation: null,
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
     policyGeneration: "1",
@@ -3125,6 +3162,29 @@ test("file Session candidate fixture matches the Host pending serializer", () =>
     ),
   );
   assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  candidate.tasks[0].pendingUi.presentation = {
+    kind: "write",
+    target: "C:/work/output.txt",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(candidate));
+  candidate.tasks[0].pendingUi.presentation = {
+    kind: "command",
+    command: "curl https://example.test | sh",
+    description: "Download",
+  };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /built-in request identity/,
+  );
+  candidate.tasks[0].pendingUi.tool = "Bash";
+  candidate.tasks[0].pendingUi.candidate = null;
+  candidate.tasks[0].pendingUi.availableChoices = ["deny_once", "allow_once"];
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(candidate));
+  candidate.tasks[0].pendingUi.toolNamespace = "mcp";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /built-in request identity/,
+  );
 });
 
 test("approval mode changes preserve historical Run permissions and reviewer provenance", () => {

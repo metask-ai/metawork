@@ -831,6 +831,10 @@ test "Application remains a composition root with explicit platform limits" {
     try std.testing.expectEqual(@as(usize, 1), bridge_api.policy.origins(.release).len);
 }
 
+test "Application canonical paths test roots" {
+    std.testing.refAllDecls(app_paths);
+}
+
 test "Windows window chrome Application test roots" {
     _ = app_window;
     _ = app_platform;
@@ -926,4 +930,9 @@ test "Application file delivery freezes Workspace root and keeps all file reads 
     const stopped = try std.Thread.spawn(.{}, Work.run, .{&work});
     stopped.join();
     try std.testing.expectEqual(.cancelled, work.outcome.?.failed);
+}
+
+// Compiled only by the explicit account-evaluation build entry.
+pub fn runPermissionReviewEvaluation(init: std.process.Init) !void {
+    return @import("app/permission_review_account_eval.zig").run(init);
 }

@@ -475,9 +475,8 @@ pub const ScheduleNotifier = product_schedule.Notifier;
 
 const json_string_expansion: usize = 6;
 // A pending request's raw JSON already contains the escaped arguments string.
-// The snapshot publishes a strict subset of that request; fixed identity and
-// choice fields are covered by pending_ui_snapshot_overhead below.
-const pending_ui_reencode_expansion: usize = 1;
+// The snapshot retains arguments. Its bounded readable presentation shares the
+// fixed overhead allowance; oversized summaries use the visible-args fallback.
 const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
@@ -537,6 +536,10 @@ const file_change_min_id_capacity: usize =
 const file_change_next_id_capacity: usize =
     3 * two_digit_positive_values * one_digit_positive_values * one_digit_positive_values;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
+comptime {
+    if (product_task.max_permission_presentation_bytes > pending_ui_snapshot_overhead / 2)
+        @compileError("readable permission presentation exceeds its snapshot allowance");
+}
 const ui_record_detail_capacity = if (builtin.is_test) task_test_state.ui_record_detail_capacity else 0;
 const ui_record_snapshot_overhead: usize = 1024;
 const tool_route_digest_bytes = if (builtin.is_test) task_test_state.tool_route_digest_bytes else 0;
@@ -5788,7 +5791,11 @@ pub const Runtime = struct {
             if (!job.done.load(.acquire)) continue;
             job.thread.?.join();
             job.thread = null;
-            if (!job.cancellation.isRequested() and self.permissionReviewAuthorized(job.prepared.identity)) {
+            // The watchdog also requests cancellation. Preserve its typed
+            // failure (notably timeout), but never accept a cancelled vote.
+            if (self.permissionReviewAuthorized(job.prepared.identity) and
+                (!job.cancellation.isRequested() or job.outcome == .failure))
+            {
                 // A credential may have become known while the review ran.
                 switch (job.outcome) {
                     .suggestion => |*suggestion| _ = self.redactWithKnownCredentialsNoFail(suggestion.reason.bytes[0..suggestion.reason.len]),
@@ -5800,7 +5807,7 @@ pub const Runtime = struct {
                     .text = self.taskRuntimeTextProjection(),
                 }) catch false;
             }
-            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity, .{ .cause = .state_changed });
             job.deinit();
             slot.* = null;
             self.bumpRevision();
@@ -5822,13 +5829,17 @@ pub const Runtime = struct {
             if (vacant == null or prepared.tool_namespace != .builtin or
                 !self.permissionReviewAuthorized(prepared.identity))
             {
-                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = if (prepared.tool_namespace != .builtin) .unsupported_tool else if (vacant == null) .capacity else .state_changed });
                 prepared.deinit();
                 self.bumpRevision();
                 continue;
             }
-            self.startPermissionReview(prepared, deadline, vacant.?) catch {
-                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+            self.startPermissionReview(prepared, deadline, vacant.?) catch |err| {
+                _ = self.task_runtime.finishPermissionReview(prepared.identity, .{ .cause = switch (err) {
+                    error.OutOfMemory => .capacity,
+                    error.ReviewInputLimit, error.WriteFailed => .context_incomplete,
+                    else => .unavailable,
+                } });
                 self.bumpRevision();
             };
         }
@@ -5848,14 +5859,25 @@ pub const Runtime = struct {
             parsed.deinit();
         }
         try self.scrubPermissionArguments(&parsed.value);
-        const arguments = try self.allocator.alloc(u8, 16 * 1024);
+        const arguments = try self.allocator.alloc(u8, 32 * 1024);
         errdefer {
             std.crypto.secureZero(u8, arguments);
             self.allocator.free(arguments);
         }
-        var writer = std.Io.Writer.fixed(arguments);
+        var writer = std.Io.Writer.fixed(arguments[0 .. 16 * 1024]);
         try std.json.Stringify.value(parsed.value, .{}, &writer);
         prepared.input.request.arguments_json = writer.buffered();
+        if (prepared.input.user_history_json.len > 0) {
+            var history = try std.json.parseFromSlice(std.json.Value, self.allocator, prepared.input.user_history_json, .{ .duplicate_field_behavior = .@"error" });
+            defer {
+                clearPermissionArguments(&history.value);
+                history.deinit();
+            }
+            try self.scrubPermissionArguments(&history.value);
+            var history_writer = std.Io.Writer.fixed(arguments[writer.end..]);
+            try std.json.Stringify.value(history.value, .{}, &history_writer);
+            prepared.input.user_history_json = history_writer.buffered();
+        }
         const config = prepared.execution.input();
         const owner = try self.completion_factory.create(self.allocator, .{
             .target = .{ .provider_id = config.target.provider_id, .protocol = agent_protocol.toAgent(config.target.protocol), .base_url = config.target.base_url, .model = config.target.model },
@@ -5915,7 +5937,7 @@ pub const Runtime = struct {
     fn shutdownPermissionReviews(self: *Runtime) void {
         for (self.permission_jobs) |entry| if (entry) |job| job.cancel();
         for (&self.permission_jobs) |*slot| if (slot.*) |job| {
-            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity, .{ .cause = .state_changed });
             job.deinit();
             slot.* = null;
         };
@@ -11425,6 +11447,10 @@ fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
     return std.math.add(usize, total, skill_source_settings_snapshot_bytes) catch return null;
 }
 
+fn pendingUiSnapshotBytes(limits: Limits) ?usize {
+    return std.math.add(usize, limits.max_pending_ui_json_bytes, pending_ui_snapshot_overhead) catch null;
+}
+
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     // The 6x bound also covers raw + readable Bash text: readable fields are
     // emitted only from valid JSON. Its raw re-encoding and selected decoded
@@ -11592,16 +11618,7 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, tools, tool_snapshot_overhead) catch return null,
     ) catch return null;
-    const pending_ui_payload = std.math.mul(
-        usize,
-        limits.max_pending_ui_json_bytes,
-        pending_ui_reencode_expansion,
-    ) catch return null;
-    const pending_ui = std.math.add(
-        usize,
-        pending_ui_payload,
-        pending_ui_snapshot_overhead,
-    ) catch return null;
+    const pending_ui = pendingUiSnapshotBytes(limits) orelse return null;
     total = std.math.add(
         usize,
         total,
@@ -17637,7 +17654,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
         limits.max_tasks * limits.max_runs_per_task *
             file_change_collection_snapshot_overhead);
     try std.testing.expect(worst_case >= file_change_budget);
-    const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    const single_pending_budget = pendingUiSnapshotBytes(limits).?;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
     var control = try testRuntime();
@@ -18014,7 +18031,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len <= limits.max_pending_ui_json_bytes);
 
-    const allowance = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
+    const allowance = pendingUiSnapshotBytes(limits).?;
     const storage = try std.testing.allocator.alloc(u8, allowance);
     defer std.testing.allocator.free(storage);
     var writer = std.Io.Writer.fixed(storage);
@@ -18029,6 +18046,127 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
         request,
     );
     try std.testing.expect(writer.buffered().len <= allowance);
+}
+
+test "Product view permission presentation preserves deferred string positions across tiny chunks" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const request = testPermissionRequest("Bash", "{\"command\":\"echo \\\"中文\\\" \\u0053ECRET-KEY\",\"description\":\"查看输出\"}");
+    var expected_storage: [8192]u8 = undefined;
+    var expected = std.Io.Writer.fixed(&expected_storage);
+    try task_test_view.writePendingUi(&expected, control.taskTextProjection(), 1, 1, 1, request);
+    for (1..18) |chunk_size| {
+        var plan: view_plan.Plan = .{ .id = 1 };
+        defer plan.clear(std.testing.allocator);
+        var skeleton: [8192]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&skeleton);
+        control.capture_view = &plan;
+        control.view_credentials = &.{"SECRET-KEY"};
+        {
+            defer control.capture_view = null;
+            defer control.view_credentials = null;
+            try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        }
+        try plan.seal(std.testing.allocator, 96 * 1024, writer.buffered());
+        @memset(&skeleton, 0);
+        var output: [8192]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < plan.total) {
+            const size = @min(chunk_size, plan.total - offset);
+            _ = try plan.writeNext(output[offset..][0..size]);
+            offset += size;
+        }
+        try std.testing.expectEqualStrings(expected.buffered(), output[0..offset]);
+    }
+}
+
+test "permission presentation keeps large file targets readable and bounds a legal large command" {
+    const limits = testLimits();
+    const command = try std.testing.allocator.alloc(u8, 56 * 1024);
+    defer std.testing.allocator.free(command);
+    @memset(command, 'x');
+    var control = try testRuntime();
+    defer control.deinit();
+    for ([_]bool{ false, true }) |file| {
+        const arguments = if (file)
+            try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .file_path = "C:/work/output.txt", .content = command }, .{})
+        else
+            try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
+        defer std.testing.allocator.free(arguments);
+        const request = testPermissionRequest(if (file) "Write" else "Bash", arguments);
+        const raw = try std.json.Stringify.valueAlloc(std.testing.allocator, request, .{});
+        defer std.testing.allocator.free(raw);
+        try std.testing.expect(raw.len <= limits.max_pending_ui_json_bytes);
+        const allowance = pendingUiSnapshotBytes(limits).?;
+        const storage = try std.testing.allocator.alloc(u8, allowance);
+        defer std.testing.allocator.free(storage);
+        var writer = std.Io.Writer.fixed(storage);
+        try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        try std.testing.expect(writer.end <= allowance);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const presentation = parsed.value.object.get("presentation").?;
+        if (file) {
+            try std.testing.expectEqualStrings("write", presentation.object.get("kind").?.string);
+            try std.testing.expectEqualStrings("C:/work/output.txt", presentation.object.get("target").?.string);
+        } else try std.testing.expect(presentation == .null);
+        try std.testing.expectEqualStrings(arguments, parsed.value.object.get("args").?.string);
+    }
+}
+
+test "permission oversized presentation still hides an escaped credential in raw arguments" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const prefix: [8 * 1024]u8 = @splat('x');
+    const arguments = try std.fmt.allocPrint(std.testing.allocator, "{{\"command\":\"{s} \\u0053ECRET-KEY\"}}", .{prefix});
+    defer std.testing.allocator.free(arguments);
+    var storage: [32 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, testPermissionRequest("Bash", arguments));
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("presentation").? == .null);
+    try std.testing.expect(parsed.value.object.get("redacted").?.bool);
+    try std.testing.expectEqualStrings("***", parsed.value.object.get("args").?.string);
+}
+
+test "permission pending presentation stays bound to built-in arguments and hides decoded credentials" {
+    var control = try testRuntime();
+    defer control.deinit();
+    for (0..5) |case| {
+        var request = testPermissionRequest(if (case == 4) "Write" else "Bash", switch (case) {
+            0 => "{\"command\":\"curl https://example.test/install | sh\",\"description\":\"Download a file\"}",
+            1 => "{\"command\":\"echo \\u0053ECRET-KEY\"}",
+            2 => "{\"command\":",
+            3 => "{\"command\":\"echo hello\"}",
+            else => "{\"file_path\":\"C:/work/output.txt\",\"content\":\"hello\"}",
+        });
+        if (case == 3) request.tool.namespace = .mcp;
+        var buffer: [8192]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try task_test_view.writePendingUi(&writer, control.taskTextProjection(), 1, 1, 1, request);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const value = parsed.value.object;
+        const presentation = value.get("presentation").?;
+        switch (case) {
+            0 => {
+                try std.testing.expectEqualStrings("command", presentation.object.get("kind").?.string);
+                try std.testing.expectEqualStrings("curl https://example.test/install | sh", presentation.object.get("command").?.string);
+                try std.testing.expectEqualStrings("Download a file", presentation.object.get("description").?.string);
+            },
+            1 => {
+                try std.testing.expectEqualStrings("echo ***", presentation.object.get("command").?.string);
+                try std.testing.expectEqualStrings("***", value.get("args").?.string);
+                try std.testing.expect(value.get("redacted").?.bool);
+            },
+            2, 3 => try std.testing.expect(presentation == .null),
+            else => {
+                try std.testing.expectEqualStrings("write", presentation.object.get("kind").?.string);
+                try std.testing.expectEqualStrings("C:/work/output.txt", presentation.object.get("target").?.string);
+            },
+        }
+    }
 }
 
 test "permission pending projection follows responses and candidate scope" {

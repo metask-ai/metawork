@@ -870,6 +870,10 @@ export type PendingUi = {
   tool: string;
   toolBinding: string;
   args: string;
+  presentation:
+    | { kind: "command"; command: string; description: string | null }
+    | { kind: "read" | "write" | "edit" | "web_fetch"; target: string }
+    | null;
   availableChoices: PermissionChoice[];
   policyGeneration: string;
   canonicalArgumentsDigest: string;
@@ -1051,6 +1055,20 @@ export type TaskView = {
   approvalChange: TaskApprovalChange | null;
   approvalResult: TaskApprovalResult | null;
   permissionReviewState: "idle" | "reviewing" | "needs_user";
+  permissionReviewExplanation: {
+    cause:
+      | "unavailable"
+      | "reviewer_concern"
+      | "context_incomplete"
+      | "timeout"
+      | "call_failed"
+      | "invalid_response"
+      | "capacity"
+      | "unsupported_tool"
+      | "input_changed"
+      | "state_changed";
+    reason: string | null;
+  } | null;
   id: string;
   recentOrder: string;
   title: string;

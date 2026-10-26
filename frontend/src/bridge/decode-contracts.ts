@@ -3163,6 +3163,48 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     redacted: booleanValue(item.redacted, `${path}.redacted`),
   };
 }
+function decodePermissionPresentation(
+  value: unknown,
+  path: string,
+  namespace: unknown,
+  tool: unknown,
+): PendingUi["presentation"] {
+  if (value === null) return null;
+  const kind = enumValue((value as JsonObject)?.kind, `${path}.kind`, [
+    "command",
+    "read",
+    "write",
+    "edit",
+    "web_fetch",
+  ] as const);
+  const tools = {
+    command: "Bash",
+    read: "Read",
+    write: "Write",
+    edit: "Edit",
+    web_fetch: "WebFetch",
+  };
+  if (namespace !== "builtin" || tool !== tools[kind])
+    fail(path, "presentation must match the built-in request identity");
+  const item = object(
+    value,
+    path,
+    kind === "command"
+      ? ["kind", "command", "description"]
+      : ["kind", "target"],
+  );
+  if (kind === "command")
+    return {
+      kind,
+      command: stringValue(item.command, `${path}.command`),
+      description:
+        item.description === null
+          ? null
+          : stringValue(item.description, `${path}.description`),
+    };
+  return { kind, target: stringValue(item.target, `${path}.target`) };
+}
+
 function decodePendingUi(value: unknown, path: string): PendingUi | null {
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value))
@@ -3179,6 +3221,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       "tool",
       "toolBinding",
       "args",
+      "presentation",
       "availableChoices",
       "policyGeneration",
       "canonicalArgumentsDigest",
@@ -3247,6 +3290,12 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
         "Session choices require a permission candidate",
       );
     return {
+      presentation: decodePermissionPresentation(
+        item.presentation,
+        `${path}.presentation`,
+        item.toolNamespace,
+        item.tool,
+      ),
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
       order: positiveWireId(item.order, `${path}.order`),
@@ -3350,6 +3399,7 @@ function decodeTask(
     "approvalChange",
     "approvalResult",
     "permissionReviewState",
+    "permissionReviewExplanation",
     "binding",
     "modelIntent",
     "modelSelectionAvailability",
@@ -3534,6 +3584,45 @@ function decodeTask(
     `${path}.permissionReviewState`,
     ["idle", "reviewing", "needs_user"] as const,
   );
+  let permissionReviewExplanation: TaskView["permissionReviewExplanation"] =
+    null;
+  if (item.permissionReviewExplanation !== null) {
+    const explanationPath = `${path}.permissionReviewExplanation`;
+    const explanation = object(
+      item.permissionReviewExplanation,
+      explanationPath,
+      ["cause", "reason"],
+    );
+    const cause = enumValue(explanation.cause, `${explanationPath}.cause`, [
+      "unavailable",
+      "reviewer_concern",
+      "context_incomplete",
+      "timeout",
+      "call_failed",
+      "invalid_response",
+      "capacity",
+      "unsupported_tool",
+      "input_changed",
+      "state_changed",
+    ] as const);
+    const reason =
+      explanation.reason === null
+        ? null
+        : nonEmptyString(explanation.reason, `${explanationPath}.reason`);
+    if (
+      permissionReviewState !== "needs_user" ||
+      (reason !== null &&
+        (cause !== "reviewer_concern" ||
+          new TextEncoder().encode(reason).length > 512 ||
+          reason.trim().length === 0 ||
+          /[\u0000-\u001f\u007f]/u.test(reason)))
+    )
+      fail(
+        explanationPath,
+        "expected a bounded explanation for the current manual handoff",
+      );
+    permissionReviewExplanation = { cause, reason };
+  }
   if (
     (approvalMode === "full_access") !==
       (permissionProfile === "full_access") ||
@@ -3874,6 +3963,7 @@ function decodeTask(
     approvalChange,
     approvalResult,
     permissionReviewState,
+    permissionReviewExplanation,
     binding,
     modelIntent,
     modelSelectionAvailability,

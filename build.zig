@@ -348,8 +348,67 @@ pub fn build(b: *std.Build) void {
         .name = "metawork-product-permission-review-focused",
         .root_module = test_modules.product_permission_review,
     });
+    b.step("test-completion", "Run Completion codecs and typed failure regressions")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.agent_completion })).step);
+    b.step("test-app-paths", "Verify Application canonical path allocation and artifact isolation")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.app, .filters = &.{ "Application canonical paths test roots", "canonical user home", "product and automation data roots" } })).step);
     b.step("test-permission-review", "Run the independent permission reviewer tests")
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
+    const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
+    review_http_backend.addImport("metawork_agent", modules.agent);
+    const review_http_options = b.addOptions();
+    review_http_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for review HTTP fixture"));
+    review_http_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/permission_review_http.mjs"));
+    const review_http_cases = b.createModule(.{ .root_source_file = b.path("tests/permission_review_http.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    review_http_cases.addImport("metawork_agent", modules.agent);
+    review_http_cases.addImport("permission_review", modules.product_permission_review);
+    review_http_cases.addImport("completion_http_backend", review_http_backend);
+    review_http_cases.addOptions("review_http_fixture_options", review_http_options);
+    const review_http_run = b.addRunArtifact(b.addTest(.{ .root_module = review_http_cases }));
+    b.step("test-permission-review-http", "Verify real HTTP permission review cancellation and response isolation").dependOn(&review_http_run.step);
+    artifacts.tests.step.dependOn(&review_http_run.step);
+    const review_eval_module = b.createModule(.{
+        .root_source_file = b.path("tests/permission_review_eval.zig"),
+        .target = modules.agent.resolved_target,
+        .optimize = modules.agent.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    review_eval_module.addImport("metawork_agent", modules.agent);
+    review_eval_module.addImport("permission_review", modules.product_permission_review);
+    const review_network_trace = b.createModule(.{ .root_source_file = b.path("tests/permission_review_network_trace.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
+    review_network_trace.addImport("metawork_agent", modules.agent);
+    review_eval_module.addImport("permission_review_network_trace", review_network_trace);
+    review_http_cases.addImport("permission_review_network_trace", review_network_trace);
+    review_http_cases.addImport("permission_review_evaluation", review_eval_module);
+    const review_eval_main = b.createModule(.{ .root_source_file = b.path("tests/permission_review_eval_main.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    review_eval_main.addImport("metawork_agent", modules.agent);
+    review_eval_main.addImport("completion_http_backend", review_http_backend);
+    review_eval_main.addImport("permission_review_evaluation", review_eval_module);
+    review_eval_main.addImport("permission_review_network_trace", review_network_trace);
+    modules.app.addImport("permission_review_evaluation", review_eval_module);
+    modules.app.addImport("permission_review_network_trace", review_network_trace);
+    const schema_probe = b.createModule(.{ .root_source_file = b.path("tests/permission_schema_probe.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = bundle.link_libc });
+    schema_probe.addImport("metawork_agent", modules.agent);
+    schema_probe.addImport("permission_review", modules.product_permission_review);
+    modules.app.addImport("permission_schema_probe", schema_probe);
+    b.step("test-permission-schema-probe", "Verify the Account-only format capability probe")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = schema_probe })).step);
+    const review_eval_test_step = b.step("test-permission-review-evaluation", "Verify the live evaluation's safe observations and failure stop");
+    review_eval_test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = review_eval_module })).step);
+    const account_review_eval = b.option(bool, "permission-review-account-eval", "Build an opt-in Account-owned live permission evaluation instead of the desktop entry") orelse false;
+    if (account_review_eval) {
+        if (artifact != .development) @panic("Account evaluation requires the development credential owner; automation credentials remain isolated");
+        artifacts.exe.root_module.root_source_file = b.path("tests/permission_review_account_main.zig");
+    }
+    const review_eval = b.addExecutable(.{ .name = "permission-review-eval", .root_module = review_eval_main });
+    const review_eval_failure_check = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for evaluation regression"), b.pathFromRoot("tests/permission_review_eval_failfast.mjs") });
+    review_eval_failure_check.addArtifactArg(review_eval);
+    review_eval_test_step.dependOn(&review_eval_failure_check.step);
+    artifacts.tests.step.dependOn(&review_eval_failure_check.step);
+    b.step("check-permission-review-eval", "Compile the opt-in live-model permission evaluation")
+        .dependOn(&review_eval.step);
+    b.step("eval-permission-review", "Run opt-in live-model permission evaluation (requires explicit test credentials)")
+        .dependOn(&b.addRunArtifact(review_eval).step);
     const task_permission_step = b.step("test-task-permission", "Run Task permission state, history and approval tests");
     for ([_]*std.Build.Module{
         test_modules.product_task_attachment,

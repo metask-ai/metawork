@@ -32,6 +32,7 @@ import {
 import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
+import { runApprovalReadabilityVertical } from "./agentcore-approval-readability-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import {
@@ -411,6 +412,14 @@ let app;
 let exited;
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
+const approvalReadabilityOnly =
+  process.env.METAWORK_APPROVAL_READABILITY_ONLY === "1";
+const approvalOnly =
+  process.env.METAWORK_APPROVAL_ONLY === "1" || approvalReadabilityOnly;
+if (approvalOnly && process.platform !== "win32")
+  throw new Error("The approval-mode desktop audit currently requires Windows");
+if (approvalOnly && (activeInputOnly || outputOnly || builtinOfficeOnly))
+  throw new Error("Approval-only verification cannot combine other scopes");
 startApplication();
 
 desktopVertical: try {
@@ -420,7 +429,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly) {
+  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly && !approvalOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -830,6 +839,11 @@ desktopVertical: try {
     throw new Error(
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
+  if (approvalReadabilityOnly) {
+    await verifyApprovalReadability(workspaceId, expectedWorkspaceEpoch);
+    await stopApplication("approval readability verification complete");
+    break desktopVertical;
+  }
   const finishApprovalRestart =
     process.platform === "win32" && !activeInputOnly
       ? await runApprovalModeVertical({
@@ -864,6 +878,14 @@ desktopVertical: try {
     assert.equal(restoredWorkspace.epoch, expectedWorkspaceEpoch);
     assert.equal(restoredWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
+    if (approvalOnly) {
+      await verifyApprovalReadability(workspaceId, expectedWorkspaceEpoch);
+      await stopApplication("approval-mode verification complete");
+      process.stdout.write(
+        "AgentCore approval-only desktop vertical passed: real Product/Bridge/Core grants, review, mode changes, cancellation, stale responses, checkpoint and restart. Fixture model replies do not measure real-model quality; other desktop gestures were not run.\n",
+      );
+      break desktopVertical;
+    }
     await probeWindowsWebViewFocus();
     const refreshedCatalog = await invokeBridge(
       "metawork.workspaces.refreshSkillCatalog",
@@ -2684,8 +2706,18 @@ async function snapshot(options) {
           error?.bridgeCommand === "metawork.workbench.snapshot.chunk") &&
         error?.bridgeResponseError?.code === "handler_failed" &&
         error?.bridgeResponseError?.message === "StaleSnapshot";
-      if ((!stale && error?.retryableSnapshotRead !== true) || attempt >= 2)
+      const lastAttempt = stale && approvalOnly ? 9 : 2;
+      if (
+        (!stale && error?.retryableSnapshotRead !== true) ||
+        attempt >= lastAttempt
+      )
         throw error;
+      // A rejected read handle must be replaced, never reused. Give the real
+      // Renderer a turn between this probe's fresh reads of the shared slot.
+      if (stale && approvalOnly)
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(50 * (attempt + 1), 250)),
+        );
     }
   }
 }
@@ -2907,9 +2939,35 @@ async function probeWindowsClipboard({
   }
 }
 
+async function verifyApprovalReadability(workspaceId, workspaceEpoch) {
+  const webview = await connectTestWebView(chromeProbePort);
+  try {
+    await runApprovalReadabilityVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+      workspaceId,
+      workspaceEpoch,
+      workspaceRoot: canonicalWorkspace,
+      webview,
+      expectMissing,
+      evidenceDir: join(root, ".zig-cache", "approval-readability"),
+    });
+  } finally {
+    webview.close();
+  }
+}
+
 async function selectRenderedMode(taskId, targetMode) {
   const webview = await connectTestWebView(chromeProbePort);
   try {
+    // The verification-only Host collector and Renderer share one frozen-read
+    // slot. Start a fresh Renderer read after polling stops; retain every UI
+    // assertion and exercise reload while the real permission request waits.
+    if (approvalOnly) await webview.send("Page.reload");
     await poll(
       async () =>
         webview.evaluate(`(() => {
@@ -3552,6 +3610,24 @@ async function probeWindowsWebViewFocusWithColdProfileRetry() {
 }
 
 async function waitForBridge() {
+  if (approvalOnly) {
+    const webview = await connectTestWebView(chromeProbePort);
+    try {
+      // Bootstrap must finish before the verification collector starts its
+      // competing frozen reads. These controls are disabled until the real
+      // Renderer connection has accepted and confirmed its initial snapshot.
+      await poll(
+        () =>
+          webview.evaluate(
+            `(() => [...document.querySelectorAll('.task-approval-trigger')].some(control => !control.disabled))()`,
+          ),
+        commandTimeoutMs,
+        "approval Renderer bootstrap ready",
+      );
+    } finally {
+      webview.close();
+    }
+  }
   return poll(
     async () => {
       try {
@@ -3607,6 +3683,8 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let nextTitleGate = null;
   let reviewRequests = 0;
   let inputReviewRequests = 0;
+  let readabilityReviewRequests = 0;
+  let technicalReviewRequests = 0;
 
   let releaseReview = null;
   let providerError = null;
@@ -3640,8 +3718,23 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           assert.equal(payload.stream, undefined);
           assert.equal(payload.tools, undefined);
           const review = JSON.parse(payload.messages[0].content);
+          const readability =
+            review.evidence.user_intent ===
+            "请检查审批请求，确认这条命令的用途。";
           assert.equal(review.host.delegation, "current_request_only");
           assert.equal(review.evidence.request.tool_name, "Bash");
+          if (
+            review.evidence.user_intent === "请检查这条命令的审批服务故障提示。"
+          ) {
+            technicalReviewRequests++;
+            assert.equal(technicalReviewRequests, 1);
+            response.writeHead(503, {
+              "content-type": "text/plain",
+              connection: "close",
+            });
+            response.end("synthetic service unavailable");
+            return;
+          }
           if (review.evidence.user_intent === "input-review-constraint") {
             inputReviewRequests++;
             assert.equal(
@@ -3649,10 +3742,28 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
               1,
               "interjection must not schedule another review",
             );
+          } else if (readability) {
+            readabilityReviewRequests++;
+            assert.equal(readabilityReviewRequests, 1);
           } else {
             assert.equal(
               review.evidence.user_intent,
               "mode-review-current-request",
+            );
+            assert.equal(review.evidence.earlier_user_instructions.length, 1);
+            assert.deepEqual(
+              review.evidence.earlier_user_instructions[0].messages,
+              ["mode-grant-seed"],
+            );
+            assert.match(
+              review.evidence.earlier_user_instructions[0].run_id,
+              /^[1-9][0-9]*$/,
+            );
+            assert.equal(review.evidence.omitted_earlier_user_messages, 0);
+            assert.equal(
+              JSON.stringify(review.evidence).includes("MODE_GRANT"),
+              false,
+              "prior tool output cannot become user authorization evidence",
             );
             reviewRequests++;
             assert.equal(
@@ -3661,9 +3772,11 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
               "current request was automatically reviewed twice",
             );
           }
-          await new Promise((resolve) => {
-            releaseReview = resolve;
-          });
+          if (!readability) {
+            await new Promise((resolve) => {
+              releaseReview = resolve;
+            });
+          }
           response.writeHead(200, {
             "content-type": "application/json",
             connection: "close",
@@ -3675,8 +3788,10 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
                 {
                   type: "text",
                   text: JSON.stringify({
-                    decision: "allow_once",
-                    reason: "bounded fixture command",
+                    decision: readability ? "needs_user" : "allow_once",
+                    reason: readability
+                      ? "请确认该命令是否符合你要求的操作。"
+                      : "bounded fixture command",
                   }),
                 },
               ],
@@ -3791,6 +3906,12 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     get inputReviewRequests() {
       return inputReviewRequests;
+    },
+    get readabilityReviewRequests() {
+      return readabilityReviewRequests;
+    },
+    get technicalReviewRequests() {
+      return technicalReviewRequests;
     },
     get reviewRequests() {
       return reviewRequests;

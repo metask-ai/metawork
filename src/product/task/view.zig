@@ -16,6 +16,9 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidUiResponse,
 };
 
+const max_permission_presentation_input_bytes: usize = 128 * 1024;
+pub const max_permission_presentation_bytes: usize = 4 * 1024;
+
 // Borrowed parser scratch with the same FixedBufferAllocator behavior. Keep
 // the high-water mark across free, shrink and reset so every formerly owned
 // byte is scrubbed, without touching the unused part of each 128 KiB buffer.
@@ -360,6 +363,13 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"permissionReviewExplanation\":") catch return error.SnapshotTooLarge;
+    if (review_phase == .needs_user) {
+        const review = &task.runtime.permission_review;
+        writer.print("{{\"cause\":\"{s}\",\"reason\":", .{@tagName(review.cause)}) catch return error.SnapshotTooLarge;
+        if (review.reason_len > 0) try input.text.writeJson(writer, review.reason[0..review.reason_len]) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"modelIntent\":") catch return error.SnapshotTooLarge;
     if (task.durable.model_intent) |intent| {
         writer.writeAll("{\"modelRef\":{\"sourceId\":") catch return error.SnapshotTooLarge;
@@ -519,12 +529,24 @@ pub fn writePendingUi(
     const candidate_target = if (permission.candidate) |candidate| candidate.target else null;
     const target_sensitive = if (candidate_target) |target| text.containsSensitive(target) else false;
     const visible_candidate = if (target_sensitive) null else permission.candidate;
+    var presentation_scratch: [max_permission_presentation_input_bytes]u8 = undefined;
+    var presentation_allocator = JsonScratch.init(&presentation_scratch);
+    defer presentation_allocator.clear();
+    const parsed_presentation = permissionPresentation(permission, presentation_allocator.allocator());
+    const presentation_redacted = if (parsed_presentation) |value|
+        text.containsSensitive(value.target) or (if (value.description) |description| text.containsSensitive(description) else false)
+    else
+        false;
+    const presentation = if (parsed_presentation) |value|
+        if (permissionPresentationFits(value)) parsed_presentation else null
+    else
+        null;
     writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
         request_id,
         run_id,
         order,
         text.containsSensitive(permission.tool.name) or
-            text.containsSensitive(permission.arguments_json) or target_sensitive,
+            text.containsSensitive(permission.arguments_json) or target_sensitive or presentation_redacted,
     }) catch return error.SnapshotTooLarge;
     writer.print("\"kind\":\"permission\",\"toolNamespace\":\"{s}\",\"tool\":", .{
         @tagName(permission.tool.namespace),
@@ -534,7 +556,9 @@ pub fn writePendingUi(
     writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, permission.tool.binding);
     writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-    try text.writeJson(writer, permission.arguments_json);
+    try text.writeJson(writer, if (presentation_redacted) "***" else permission.arguments_json);
+    writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
+    try writePermissionPresentation(writer, text, presentation);
     writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
     var wrote_choice = false;
     for (permission.responses) |choice| {
@@ -930,6 +954,66 @@ const BashInput = struct {
     command: []const u8,
     description: ?[]const u8 = null,
 };
+
+/// Only declared built-in argument shapes produce operation facts. Shell text
+/// and Agent descriptions are never classified into effects or safety labels.
+const PermissionPresentation = struct {
+    kind: enum { command, read, write, edit, web_fetch },
+    target: []const u8,
+    description: ?[]const u8 = null,
+};
+
+fn permissionPresentation(permission: agent.PermissionRequest, allocator: std.mem.Allocator) ?PermissionPresentation {
+    const kind = std.meta.stringToEnum(enum { Bash, Read, Write, Edit, WebFetch }, permission.tool.name);
+    if (permission.tool.namespace != .builtin or kind == null or permission.arguments_json.len > max_permission_presentation_input_bytes) {
+        return null;
+    }
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed, .duplicate_field_behavior = .@"error" };
+    if (kind.? == .Bash) {
+        const parsed = std.json.parseFromSliceLeaky(BashInput, allocator, permission.arguments_json, options) catch return null;
+        return .{ .kind = .command, .target = parsed.command, .description = parsed.description };
+    }
+    if (kind.? == .WebFetch) {
+        const parsed = std.json.parseFromSliceLeaky(WebFetchInput, allocator, permission.arguments_json, options) catch return null;
+        return .{ .kind = .web_fetch, .target = parsed.url };
+    }
+    const parsed = std.json.parseFromSliceLeaky(FileMutationInput, allocator, permission.arguments_json, options) catch return null;
+    return .{ .kind = switch (kind.?) {
+        .Read => .read,
+        .Write => .write,
+        .Edit => .edit,
+        else => unreachable,
+    }, .target = parsed.file_path };
+}
+
+fn writePermissionPresentation(writer: *std.Io.Writer, text: TextProjection, presentation: ?PermissionPresentation) Error!void {
+    const value = presentation orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"kind\":\"{s}\",\"{s}\":", .{ @tagName(value.kind), if (value.kind == .command) "command" else "target" }) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, value.target);
+    if (value.kind == .command) {
+        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
+        try writeOptionalProjectedValue(writer, text, value.description);
+    }
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn permissionPresentationFits(value: PermissionPresentation) bool {
+    // A size preflight must use the standard encoder directly. Calling the
+    // deferred text projector with a temporary writer corrupts string offsets.
+    // Reserve the fixed kind/key spelling; redaction can only shorten strings.
+    var storage: [max_permission_presentation_bytes - 128]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    var writer = std.Io.Writer.fixed(&storage);
+    std.json.Stringify.value(.{ .target = value.target, .description = value.description }, .{}, &writer) catch return false;
+    return true;
+}
+
+fn writeOptionalProjectedValue(writer: *std.Io.Writer, text: TextProjection, value: ?[]const u8) Error!void {
+    if (value) |present| try text.writeJson(writer, present) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
 
 const ReadInput = struct {
     file_path: []const u8,
