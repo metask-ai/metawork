@@ -314,6 +314,7 @@ export default function App() {
   );
   const archiveNoticeId = useRef(0);
   const deleteOpener = useRef<HTMLElement | null>(null);
+  const deleteCancel = useRef<HTMLButtonElement>(null);
   const [taskArchiveErrors, setTaskArchiveErrors] = useState<
     Record<string, string>
   >({});
@@ -4583,7 +4584,9 @@ export default function App() {
         >
           <AlertDialog.Portal>
             <AlertDialog.Backdrop />
-            <AlertDialog.Popup>
+            <AlertDialog.Popup
+              initialFocus={() => deleteCancel.current ?? false}
+            >
               <AlertDialog.Title id="task-delete-title">
                 {t("task.delete_confirm_title", { title: deleteTarget.title })}
               </AlertDialog.Title>
@@ -4596,6 +4599,7 @@ export default function App() {
                   type="button"
                   variant="secondary"
                   size="md"
+                  ref={deleteCancel}
                   onClick={closeDeleteConfirmation}
                 >
                   {t("common.cancel")}

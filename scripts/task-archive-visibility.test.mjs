@@ -108,7 +108,7 @@ function taskRows(id) {
   return document.querySelectorAll(`.task-list [data-task-id="${id}"]`);
 }
 
-async function renderApp(ctx) {
+async function renderApp(ctx, { archivedTask = {} } = {}) {
   const snapshot = structuredClone(initialSnapshot);
   const task = snapshot.tasks[0];
   Object.assign(task, {
@@ -124,6 +124,7 @@ async function renderApp(ctx) {
     id: "4",
     title: "Earlier archive",
     archived: true,
+    ...archivedTask,
   });
   snapshot.workspaces[0].signals.running = 0;
   const requests = [];
@@ -431,4 +432,89 @@ test("archive notice pauses dismissal while hovered or keyboard-focused", async 
   );
   await act(async () => ctx.mock.timers.tick(8000));
   assert.equal(dismissed, 1);
+});
+
+test("restore failure stays actionable on the archived settings row", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.openArchives();
+  const list = screen.getByRole("list", { name: "Archived tasks" });
+  await app.user.click(
+    within(list).getByRole("button", { name: "Restore", exact: true }),
+  );
+  await waitFor(() => assert.equal(app.requests.length, 1));
+  await app.settle({ error: new Error("Host refused restore") });
+  await screen.findByText("The task could not be restored. Try again.");
+  assert.ok(screen.getByRole("button", { name: "Earlier archive" }));
+  assert.equal(
+    within(list).getByRole("button", { name: "Restore", exact: true }).disabled,
+    false,
+  );
+});
+
+test("newer-version archived history remains readable without mutation controls", async (ctx) => {
+  const app = await renderApp(ctx, {
+    archivedTask: {
+      continuationUnavailableReason: "history_read_only",
+      continuationAvailable: false,
+      continuationRecoveryAvailable: false,
+    },
+  });
+  await app.openArchives();
+  const list = screen.getByRole("list", { name: "Archived tasks" });
+  assert.equal(
+    within(list).getByRole("button", { name: "Restore", exact: true }).disabled,
+    true,
+  );
+  assert.equal(
+    within(list).getByRole("button", { name: "Delete record", exact: true })
+      .disabled,
+    true,
+  );
+  assert.equal(
+    within(list).getByRole("button", { name: "Earlier archive" }).disabled,
+    false,
+  );
+});
+
+test("deleting another Task in settings preserves the selected conversation", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.user.click(taskRows("3")[0]);
+  await app.openArchives();
+  await app.user.click(
+    screen.getByRole("button", { name: "Delete record", exact: true }),
+  );
+  await screen.findByRole("alertdialog");
+  await app.user.click(
+    screen.getByRole("button", { name: "Delete record", exact: true }),
+  );
+  await screen.findByText("Archived tasks will appear here.");
+  await app.user.click(
+    screen.getByRole("button", { name: "Back to workbench" }),
+  );
+  await waitFor(() =>
+    assert.equal(taskRows("3")[0].getAttribute("aria-current"), "page"),
+  );
+  assert.deepEqual(app.deletions, ["4"]);
+});
+
+test("delete confirmation defaults to cancel and cancelling has no effect", async (ctx) => {
+  const app = await renderApp(ctx);
+  fireEvent.contextMenu(taskRows("3")[0]);
+  await app.user.click(
+    await screen.findByRole("menuitem", { name: "Delete record", exact: true }),
+  );
+  await screen.findByRole("alertdialog");
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement.textContent,
+      "Cancel",
+      document.activeElement.outerHTML.slice(0, 500),
+    ),
+  );
+  await app.user.click(
+    screen.getByRole("button", { name: "Cancel", exact: true }),
+  );
+  assert.deepEqual(app.deletions, []);
+  assert.deepEqual(app.requests, []);
+  assert.equal(taskRows("3").length, 2);
 });

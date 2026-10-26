@@ -33,6 +33,7 @@ export function TaskList({
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
+  const openingDelete = useRef(false);
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
   const projects = workspaces
@@ -51,6 +52,7 @@ export function TaskList({
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
+    openingDelete.current = false;
     menuAnchor.current = event.currentTarget;
     setMenuTaskId(taskId);
   }
@@ -155,6 +157,7 @@ export function TaskList({
             collisionPadding={8}
           >
             <Menu.Popup
+              finalFocus={() => !openingDelete.current}
               className="task-menu-popover"
               aria-label={t("task.actions")}
             >
@@ -192,7 +195,11 @@ export function TaskList({
                       (menuTask.lifecycle === "closing" &&
                         menuTask.deletionStatus !== "failed")
                     }
-                    onClick={() => onTaskAction(menuTask, "delete")}
+                    onClick={() => {
+                      // The confirmation owns focus after the menu closes.
+                      openingDelete.current = true;
+                      onTaskAction(menuTask, "delete");
+                    }}
                   >
                     {t(
                       menuTask.deletionStatus === "failed"
