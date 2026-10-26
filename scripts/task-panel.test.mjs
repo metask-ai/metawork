@@ -815,7 +815,13 @@ test("Task only renders a permission card when the current request needs a user"
       screen.queryByRole("button", { name: "Deny" }) !== null,
       visible,
     );
-    assert.equal(document.body.textContent.includes(pendingUi.args), visible);
+    assert.equal(document.body.textContent.includes(pendingUi.args), false);
+    if (visible) {
+      fireEvent.click(
+        screen.getByRole("button", { name: "View operation details" }),
+      );
+      assert.ok(document.body.textContent.includes(pendingUi.args));
+    }
     if (!visible) {
       assert.ok(screen.getByText("Automatic review"));
       assert.equal(
@@ -4267,23 +4273,17 @@ test("manual and fallback permission cards keep keyboard-driven decisions usable
         }),
       ),
     );
-    if (state === "needs_user") {
-      assert.match(
-        screen.getByRole("status").textContent,
-        /could not complete/,
-      );
-    } else {
-      assert.ok(
-        screen.queryByRole("status") === null,
-        "manual card must not announce an automatic review status",
-      );
-    }
+    assert.equal(screen.queryByRole("status"), null);
+    assert.equal(screen.queryByText(/could not finish/), null);
+    const user = userEvent.setup({ document: dom.window.document });
+    screen.getByRole("button", { name: "View operation details" }).focus();
+    await user.keyboard("{Enter}");
+    if (state === "needs_user") assert.ok(screen.getByText(/could not finish/));
     assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
     assert.equal(
       screen.getByRole("button", { name: "Allow once" }).disabled,
       false,
     );
-    const user = userEvent.setup({ document: dom.window.document });
     const deny = screen.getByRole("button", { name: "Deny" });
     assert.equal(deny.tabIndex, 0);
     deny.focus();
@@ -4299,7 +4299,7 @@ test("manual and fallback permission cards keep keyboard-driven decisions usable
   }
 });
 
-test("permission actions use split styling only when their own menu exists", async () => {
+test("permission actions keep all and only available session choices in one menu", async () => {
   for (const sessionChoices of [
     [],
     ["allow_session"],
@@ -4328,25 +4328,46 @@ test("permission actions use split styling only when their own menu exists", asy
         }),
       ),
     );
-    for (const [label, choice] of [
-      ["Deny", "deny_session"],
-      ["Allow once", "allow_session"],
-    ]) {
+    for (const label of ["Deny", "Allow once"]) {
       const button = screen.getByRole("button", { name: label });
       assert.equal(
         button.classList.contains("approval-split-main"),
-        sessionChoices.includes(choice),
+        label === "Allow once" && sessionChoices.length > 0,
       );
       assert.equal(
-        button.parentElement.querySelector(".approval-split-trigger") !== null,
-        sessionChoices.includes(choice),
+        button
+          .closest(".approval-action-cluster")
+          ?.querySelector(".approval-split-trigger") != null,
+        label === "Allow once" && sessionChoices.length > 0,
       );
     }
     assert.equal(
       view.container.querySelectorAll(".approval-split-trigger").length,
-      sessionChoices.length,
+      sessionChoices.length > 0 ? 1 : 0,
     );
     const user = userEvent.setup({ document: dom.window.document });
+    if (sessionChoices.length) {
+      fireEvent.click(
+        screen.getByRole("button", { name: "More approval options" }),
+      );
+      assert.equal(
+        (await screen.findAllByRole("menuitem")).length,
+        sessionChoices.length,
+      );
+      assert.equal(
+        screen.queryByRole("menuitem", {
+          name: "Allow future identical operations",
+        }) !== null,
+        sessionChoices.includes("allow_session"),
+      );
+      assert.equal(
+        screen.queryByRole("menuitem", {
+          name: "Deny future identical operations",
+        }) !== null,
+        sessionChoices.includes("deny_session"),
+      );
+      await user.keyboard("{Escape}");
+    }
     screen.getByRole("button", { name: "Allow once" }).focus();
     await user.keyboard("{Enter}");
     assert.deepEqual(responses, [
@@ -4416,13 +4437,13 @@ test("permission intervention never exposes internal Run identity", () => {
       }),
     ),
   );
-  assert.match(markup, /class="ai-intervention"/);
+  assert.match(markup, /class="ai-intervention approval-panel"/);
   assert.match(markup, /data-kind="permission"/);
-  assert.match(markup, />Your confirmation</);
-  assert.match(markup, /class="detail-field-label">Arguments<\/p>/);
-  assert.match(markup, /class="detail-field-label">Approval scope<\/p>/);
-  assert.match(markup, />Only this operation<\/p>/);
-  assert.match(markup, /class="code-block-preview"/);
+  assert.match(markup, /Allow this command to run/);
+  assert.doesNotMatch(
+    markup,
+    /Your confirmation|detail-field-label|Only this operation|npm test/,
+  );
   assert.match(markup, /data-variant="primary"/);
   assert.equal((markup.match(/data-variant="primary"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /8472|work item/i);
@@ -4504,21 +4525,28 @@ test("permission intervention keeps session choices in split menus and explains 
 
   assert.ok(screen.getByRole("button", { name: "Deny" }));
   assert.ok(screen.getByRole("button", { name: "Allow once" }));
-  assert.equal(screen.queryByRole("button", { name: /same arguments/ }), null);
+  assert.equal(
+    screen.queryByRole("button", { name: /future identical operations/ }),
+    null,
+  );
+  assert.equal(screen.queryByRole("note"), null);
+  await user.click(
+    screen.getByRole("button", { name: "View operation details" }),
+  );
   assert.match(
     screen.getByRole("note").textContent,
     /matches the previous session rule/,
   );
   assert.match(
-    screen.getByText(/The main button allows this operation once/).textContent,
-    /identical arguments/,
+    screen.getByText(/The full operation details must match/).textContent,
+    /match this request exactly/,
   );
 
   await user.click(
     screen.getByRole("button", { name: "More approval options" }),
   );
   const sessionAllow = await screen.findByRole("menuitem", {
-    name: "Allow same arguments for this session",
+    name: "Allow future identical operations",
   });
   await user.click(sessionAllow);
   assert.deepEqual(responses, [
@@ -5666,6 +5694,12 @@ test("permission restore counts remain a qualified supplement in both locales", 
         }),
       ),
     );
+    assert.equal(screen.queryByRole("note"), null);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: translate(locale, "approval.full_request"),
+      }),
+    );
     const note = screen.getByRole("note").textContent;
     assert.ok(
       note.includes(translate(locale, "approval.reason_session_grant_missed")),
@@ -6665,25 +6699,45 @@ test("permission cards distinguish Agent purpose from the visible command and ac
       }),
     );
     assert.ok(
-      within(
-        screen.getByRole("group", {
-          name: translate(locale, "approval.agent_purpose"),
-        }),
-      ).getByText(description),
+      view.container
+        .querySelector(".approval-purpose")
+        .textContent.includes(description),
     );
     assert.ok(
-      within(
-        screen.getByRole("group", {
-          name: translate(locale, "approval.reviewer_note"),
-        }),
-      ).getByText(source.permissionReviewExplanation.reason),
+      view.container
+        .querySelector(".approval-purpose")
+        .textContent.includes(translate(locale, "approval.agent_purpose")),
     );
-    assert.equal(screen.getByText(command).closest("details"), null);
-    const details = view.container.querySelector(
-      "details.approval-request-details",
+    assert.ok(
+      screen
+        .getByRole("status")
+        .textContent.includes(source.permissionReviewExplanation.reason),
     );
-    assert.equal(details.open, false);
-    assert.ok(within(details).getByText(source.pendingUi.args));
+    assert.ok(
+      screen
+        .getByRole("status")
+        .textContent.includes(translate(locale, "approval.reviewer_note")),
+    );
+    assert.equal(
+      screen.getByText(command).closest(".approval-request-details"),
+      null,
+    );
+    assert.equal(
+      screen.queryByRole("region", {
+        name: translate(locale, "approval.full_request"),
+      }),
+      null,
+    );
+    assert.equal(screen.queryByText(source.pendingUi.args), null);
+    const toggle = screen.getByRole("button", {
+      name: translate(locale, "approval.full_request"),
+    });
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    fireEvent.click(toggle);
+    assert.ok(screen.getByText(source.pendingUi.args));
+    assert.ok(screen.getByText(translate(locale, "approval.command_effects")));
+    // A new request cannot inherit the previous request's opened disclosure.
+    source.pendingUi = { ...source.pendingUi, requestId: "next-request" };
     source.approvalMode = "manual";
     source.permissionReviewState = "idle";
     source.permissionReviewExplanation = null;
@@ -6707,22 +6761,243 @@ test("permission cards distinguish Agent purpose from the visible command and ac
         }),
       ),
     );
-    assert.ok(screen.getByText(translate(locale, "approval.manual_mode")));
-    // Raw arguments still contain an Agent description; unavailable metadata
-    // must not claim it was never supplied or omit the Bash qualification.
-    assert.ok(
-      within(
-        screen.getByRole("group", {
-          name: translate(locale, "approval.agent_purpose"),
-        }),
-      ).getByText(translate(locale, "approval.purpose_unavailable")),
-    );
-    assert.ok(screen.getByText(translate(locale, "approval.command_effects")));
     assert.equal(
-      screen.getByText(source.pendingUi.args).closest("details"),
+      screen.queryByText(translate(locale, "approval.manual_mode")),
       null,
     );
+    // Missing projection does not prove whether a purpose was supplied.
+    assert.equal(view.container.querySelector(".approval-purpose"), null);
+    assert.ok(
+      screen.getByText(translate(locale, "approval.command_unavailable")),
+    );
+    assert.equal(screen.queryByText(source.pendingUi.args), null);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: translate(locale, "approval.full_request"),
+      }),
+    );
+    assert.ok(screen.getByText(translate(locale, "approval.manual_mode")));
+    assert.ok(screen.getByText(translate(locale, "approval.command_effects")));
+    assert.equal(
+      screen
+        .getByText(source.pendingUi.args)
+        .closest(".approval-request-details") !== null,
+      true,
+    );
     assert.equal(screen.queryByText("Confirm the installation source."), null);
+    cleanup();
+  }
+});
+
+test("compact file approval titles keep the name and full location visible", () => {
+  for (const [kind, tool, target] of [
+    ["read", "Read", "C:\\outside\\项目说明.docx"],
+    ["write", "Write", "/outside/项目说明.docx"],
+    ["edit", "Edit", "C:/outside/项目说明.docx"],
+  ]) {
+    for (const locale of ["en-US", "zh-CN"]) {
+      const source = task({
+        runs: [run()],
+        currentRunId: "7",
+        approvalMode: "manual",
+        permissionReviewState: "idle",
+      });
+      setRepeatedPermissionSource(source);
+      Object.assign(source.pendingUi, { tool, presentation: { kind, target } });
+      const view = render(
+        createElement(
+          I18nContext.Provider,
+          {
+            value: {
+              locale,
+              setLocale() {},
+              t: (id, values) => translate(locale, id, values),
+            },
+          },
+          createElement(ApprovalPanel, {
+            pending: source.pendingUi,
+            task: source,
+            busy: false,
+            responsePhase: "idle",
+            respond() {},
+          }),
+        ),
+      );
+      assert.ok(
+        screen.getByRole("heading").textContent.includes("项目说明.docx"),
+      );
+      assert.ok(screen.getByText(target));
+      assert.equal(
+        view.container.querySelectorAll(".detail-field-label").length,
+        0,
+      );
+      assert.equal(screen.queryByText(source.pendingUi.args), null);
+      assert.equal(
+        screen.queryByText(translate(locale, "approval.manual_mode")),
+        null,
+      );
+      cleanup();
+    }
+  }
+});
+
+test("automatic handoffs explain the actual cause before the user decides", () => {
+  for (const cause of [
+    "unavailable",
+    "timeout",
+    "call_failed",
+    "context_incomplete",
+    "invalid_response",
+    "capacity",
+    "unsupported_tool",
+    "input_changed",
+    "state_changed",
+  ]) {
+    const source = task({
+      runs: [run()],
+      currentRunId: "7",
+      approvalMode: "auto_review",
+      permissionReviewState: "needs_user",
+      permissionReviewExplanation: { cause, reason: null },
+    });
+    setRepeatedPermissionSource(source);
+    source.pendingUi.presentation = {
+      kind: "command",
+      command: "npm test",
+      description: "Run the project tests",
+    };
+    source.pendingUi.args = JSON.stringify({ command: "npm test" });
+    render(
+      localizedView(
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond() {},
+        }),
+      ),
+    );
+    const reason = translate("en-US", `approval.handoff.${cause}`);
+    assert.ok(screen.getByRole("status").textContent.includes(reason));
+    assert.equal(
+      screen.getByText(reason).closest(".approval-request-details"),
+      null,
+    );
+    assert.ok(screen.getByText("npm test"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "View operation details" }),
+    );
+    assert.ok(screen.getByText(reason));
+    assert.equal(screen.getAllByText(reason).length, 1);
+    cleanup();
+  }
+});
+
+test("unprojected tools expose only supplied redacted arguments before approval", () => {
+  for (const [toolNamespace, tool] of [
+    ["mcp", "send_message"],
+    ["host", "send_message"],
+    ["builtin", "Read"],
+    ["mcp", "Bash"],
+  ]) {
+    for (const locale of ["en-US", "zh-CN"]) {
+      const source = task({
+        approvalMode: "manual",
+        permissionReviewState: "idle",
+        runs: [run()],
+        currentRunId: "7",
+      });
+      setRepeatedPermissionSource(source);
+      Object.assign(source.pendingUi, {
+        toolNamespace,
+        tool,
+        presentation: null,
+        redacted: true,
+        args: '{"recipient":"Design team","message":"Review the proposal","token":"[hidden]"}',
+        availableChoices: ["deny_once", "allow_once"],
+        candidate: null,
+      });
+      const decisions = [];
+      const view = render(
+        createElement(
+          I18nContext.Provider,
+          {
+            value: {
+              locale,
+              setLocale() {},
+              t: (id, values) => translate(locale, id, values),
+            },
+          },
+          createElement(ApprovalPanel, {
+            pending: source.pendingUi,
+            task: source,
+            busy: false,
+            responsePhase: "idle",
+            respond: (value) => decisions.push(value),
+          }),
+        ),
+      );
+      const args = screen.getByText(source.pendingUi.args);
+      assert.equal(args.closest(".approval-request-details"), null);
+      assert.equal(
+        args.getAttribute("aria-label"),
+        translate(locale, "approval.arguments"),
+      );
+      assert.equal(args.tabIndex, 0);
+      assert.equal(view.container.querySelector(".approval-purpose"), null);
+      assert.equal(view.container.querySelector(".approval-unavailable"), null);
+      assert.equal(screen.queryByRole("status"), null);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.full_request"),
+        }),
+      );
+      assert.equal(screen.getAllByText(source.pendingUi.args).length, 1);
+      assert.ok(
+        screen.getByText(translate(locale, "privacy.sensitive_hidden")),
+      );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.deny"),
+        }),
+      );
+      assert.deepEqual(decisions, [
+        { kind: "permission", permission: "deny_once" },
+      ]);
+      cleanup();
+    }
+  }
+});
+
+test("Bash omits absent or blank purpose without hiding the command", () => {
+  for (const description of [null, "", "   "]) {
+    const source = task({
+      approvalMode: "manual",
+      permissionReviewState: "idle",
+      runs: [run()],
+      currentRunId: "7",
+    });
+    setRepeatedPermissionSource(source);
+    source.pendingUi.presentation = {
+      kind: "command",
+      command: "npm test",
+      description,
+    };
+    const view = render(
+      localizedView(
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond() {},
+        }),
+      ),
+    );
+    assert.equal(view.container.querySelector(".approval-purpose"), null);
+    assert.ok(screen.getByText("npm test"));
+    assert.equal(screen.queryByRole("status"), null);
     cleanup();
   }
 });
@@ -6771,10 +7046,11 @@ test("file Session approval names the tool and target in both locales and submit
       ),
     );
     assert.ok(screen.getByText(source.pendingUi.candidate.target));
-    assert.ok(
-      screen.getByText(
+    assert.equal(
+      screen.queryByText(
         translate(locale, "approval.scope_file_session", { tool: "Write" }),
       ),
+      null,
     );
     assert.equal(
       screen.queryByText(translate(locale, "approval.scope_session_available")),
@@ -6785,6 +7061,12 @@ test("file Session approval names the tool and target in both locales and submit
         name: translate(locale, "approval.more_allow_options"),
       }),
     );
+    assert.ok(
+      screen.getByText(
+        translate(locale, "approval.scope_file_session", { tool: "Write" }),
+      ),
+    );
+    assert.ok(screen.getByText(translate(locale, "approval.session_expiry")));
     fireEvent.click(
       await screen.findByRole("menuitem", {
         name: translate(locale, "approval.allow_session_file"),
@@ -6795,7 +7077,7 @@ test("file Session approval names the tool and target in both locales and submit
     ]);
     fireEvent.click(
       screen.getByRole("button", {
-        name: translate(locale, "approval.more_deny_options"),
+        name: translate(locale, "approval.more_allow_options"),
       }),
     );
     fireEvent.click(

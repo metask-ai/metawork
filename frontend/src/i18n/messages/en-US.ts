@@ -1013,68 +1013,59 @@ export const enUS = {
   "task_panel.hide": "Hide side panel",
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
-  "approval.response_required": "Your confirmation",
   "approval.answered_by_reviewer": "Automatic review",
-  "approval.action.command": "Allow running a command on your computer?",
-  "approval.action.read": "Allow reading this file?",
-  "approval.action.write": "Allow writing this file?",
-  "approval.action.edit": "Allow changing this file?",
+  "approval.action.command": "Allow this command to run?",
+  "approval.action.read": "Allow reading “{target}”?",
+  "approval.action.write": "Allow writing “{target}”?",
+  "approval.action.edit": "Allow changing “{target}”?",
   "approval.action.web_fetch": "Allow requesting this URL?",
-  "approval.confirmation_reason": "Why confirmation is needed",
   "approval.manual_mode":
     "This task uses manual approval. Please confirm this operation.",
   "approval.confirm_request":
     "Please decide whether to proceed with this operation.",
-  "approval.reviewer_note": "Review model’s note",
-  "approval.agent_purpose": "Purpose stated by the Agent",
-  "approval.purpose_unavailable": "No purpose description is available.",
-  "approval.target_url": "Requested URL",
-  "approval.target_file": "Target file",
+  "approval.reviewer_note": "Reviewer’s note:",
+  "approval.agent_purpose": "Agent’s description:",
   "approval.command": "Command to run",
   "approval.command_effects":
     "The system has not verified the command’s full effects.",
   "approval.command_unavailable":
-    "A command summary is unavailable. Check the request arguments below.",
-  "approval.full_request": "View full arguments",
+    "The command is unavailable. View operation details.",
+  "approval.full_request": "View operation details",
+  "approval.hide_request": "Hide operation details",
   "approval.handoff.unavailable":
-    "Automatic review could not complete. This operation has not run.",
+    "Automatic review could not finish. Please confirm.",
   "approval.handoff.reviewer_concern":
-    "Automatic review needs your confirmation. See the review model’s note.",
+    "Automatic review raised a concern that needs your confirmation.",
   "approval.handoff.context_incomplete":
-    "Automatic review lacked usable context for a decision.",
-  "approval.handoff.timeout":
-    "Automatic review timed out. This operation has not run.",
+    "Automatic review is missing required information. Please confirm.",
+  "approval.handoff.timeout": "Automatic review timed out. Please confirm.",
   "approval.handoff.call_failed":
-    "The automatic review call failed. This operation has not run.",
+    "Automatic review is temporarily unavailable. Please confirm.",
   "approval.handoff.invalid_response":
-    "Automatic review returned no valid decision. This operation has not run.",
-  "approval.handoff.capacity":
-    "Automatic review is at capacity. Please decide for this operation.",
+    "Automatic review returned no valid decision. Please confirm.",
+  "approval.handoff.capacity": "Automatic review is busy. Please confirm.",
   "approval.handoff.unsupported_tool":
-    "This tool does not support automatic review. Please confirm its request.",
+    "This tool does not support automatic review. Please confirm.",
   "approval.handoff.input_changed":
-    "New instructions were not included in this review. Check this operation against your latest requirements.",
+    "Automatic review has not considered your new instructions. Please confirm.",
   "approval.handoff.state_changed":
-    "The task’s authorization state changed. Please confirm the current request.",
+    "Permission settings changed. Please confirm again.",
   "approval.allow_tool": "Allow {tool}?",
   "approval.arguments": "Arguments",
   "approval.deny": "Deny",
   "approval.allow_once": "Allow once",
-  "approval.allow_session_file":
-    "Allow this tool on this file for this session",
-  "approval.deny_session_file": "Deny this tool on this file for this session",
+  "approval.allow_session_file": "Allow further changes to this file",
+  "approval.deny_session_file": "Deny further changes to this file",
   "approval.scope_file_session":
-    "Once, or {tool} on the same file for this session, including different content.",
-  "approval.allow_session": "Allow same arguments for this session",
-  "approval.deny_session": "Deny same arguments for this session",
+    "Only {tool} changes to this file are covered. The changes may differ.",
+  "approval.allow_session": "Allow future identical operations",
+  "approval.deny_session": "Deny future identical operations",
   "approval.more_allow_options": "More approval options",
-  "approval.more_deny_options": "More denial options",
-  "approval.scope": "Approval scope",
   "approval.scope_once": "Only this operation",
   "approval.scope_session_available":
-    "The main button allows this operation once. More options can allow identical arguments for this session.",
+    "The full operation details must match this request exactly.",
   "approval.session_expiry":
-    "Session choices end with this task session and do not carry into a new task.",
+    "Expires when this session ends. Does not apply to new conversations.",
   "approval.why_again": "Why MetaWork is asking again",
   "approval.reason_allowed_once":
     "The previous approval applied only to that request.",

@@ -47,7 +47,7 @@ export async function runApprovalReadabilityVertical({
   const command =
     'powershell -NoProfile -Command "Write-Output APPROVAL_READABILITY"';
   const purpose = "Agent 声称仅下载公开说明。";
-  const reason = "请确认该命令是否符合你要求的操作。";
+  const reason = "用途说明与实际命令不一致，需要你确认是否执行。";
   const observations = [];
   const wait = (operation, label) => poll(operation, 20_000, label);
   const accepted = (result) =>
@@ -249,8 +249,8 @@ export async function runApprovalReadabilityVertical({
       const card = document.getElementById(${JSON.stringify(id)});
       if (!card) return null;
       card.scrollIntoView({block:'start'});
-      const details = card.querySelector('details');
-      const command = [...card.querySelectorAll('pre.code-block-preview')].find(code => !code.closest('details'));
+      const toggle = card.querySelector('.approval-details-toggle');
+      const command = [...card.querySelectorAll('pre.code-block-preview')].find(code => !code.closest('.approval-request-details'));
       const actions = [...card.querySelectorAll('.ai-intervention-actions button')];
       const canvas = document.createElement('canvas').getContext('2d');
       const color = value => {
@@ -262,13 +262,13 @@ export async function runApprovalReadabilityVertical({
         for(let item=element;item;item=item.parentElement) layers.push(color(getComputedStyle(item).backgroundColor));
         return layers.reverse().reduce((base,layer) => base.map((value,index) => layer[index]*layer[3]+value*(1-layer[3])), [255,255,255]);
       };
-      const appearance = [...card.querySelectorAll('h3,.detail-field-label,.approval-scope-value,.approval-scope-expiry,.ai-intervention-actions button')]
+      const appearance = [...card.querySelectorAll('h3,.approval-purpose,.approval-purpose span,.approval-target,.approval-concern,.approval-concern span,.approval-unavailable,.approval-details-toggle,.ai-intervention-actions button')]
         .filter(item => item.textContent.trim() && item.getClientRects().length)
         .map(item => ({label:item.textContent.slice(0,80),foreground:color(getComputedStyle(item).color),background:background(item)}));
       return { title: card.querySelector('h3').textContent, text: card.textContent,
-        fields:[...card.querySelectorAll('.detail-field-label')].map(label=>label.textContent),
-        detailsAfterScope:!details || Boolean([...card.querySelectorAll('.detail-field-label')].at(-1)?.parentElement.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING),
-        visibleCode: command?.textContent ?? null, collapsed: details ? !details.open : null,
+        fieldCount:card.querySelectorAll('.detail-field-label').length,
+        mainRows:1+card.querySelector('.ai-intervention-content').children.length,
+        visibleCode: command?.textContent ?? null, collapsed: toggle.getAttribute('aria-expanded') === 'false',
         width: innerWidth, pageWidth: document.documentElement.scrollWidth,
         buttons: actions.map(button => {const r=button.getBoundingClientRect(); return {label:button.getAttribute('aria-label') || button.textContent.trim(),left:r.left,right:r.right,height:r.height};}),
         appearance, reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -283,30 +283,18 @@ export async function runApprovalReadabilityVertical({
         expected.tool === "Write"
           ? "approval.action.write"
           : "approval.action.command",
+        {
+          target: expected.target ? path.basename(expected.target) : "",
+        },
       ),
     );
     assert.equal(view.locale, locale);
     assert.equal(view.theme, theme);
     assert.equal(view.pageWidth, width);
     assert.equal(view.reducedMotion, true);
-    const fieldIds = [
-      expected.tool === "Write"
-        ? "approval.target_file"
-        : "approval.agent_purpose",
-      "approval.confirmation_reason",
-      ...(!expected.manual && !expected.technical
-        ? ["approval.reviewer_note"]
-        : []),
-      ...(expected.tool === "Write"
-        ? []
-        : [expected.fallback ? "approval.arguments" : "approval.command"]),
-      "approval.scope",
-    ];
-    assert.deepEqual(
-      view.fields,
-      fieldIds.map((id) => translate(locale, id)),
-    );
-    assert.equal(view.detailsAfterScope, true);
+    assert.equal(view.fieldCount, 0);
+    assert.ok(view.mainRows <= (!expected.manual ? 5 : 4));
+    assert.equal(view.collapsed, true);
     for (const item of view.appearance) {
       item.contrast = textContrast(item.foreground, item.background);
       assert.ok(item.contrast >= 4.5, JSON.stringify(item));
@@ -319,36 +307,32 @@ export async function runApprovalReadabilityVertical({
       assert.ok(button.height >= 44, JSON.stringify(button));
     }
     assert.ok(view.buttons.length >= 2);
-    assert.ok(
-      view.text.includes(
-        translate(
-          locale,
-          expected.manual
-            ? "approval.manual_mode"
-            : expected.technical
-              ? "approval.handoff.call_failed"
-              : "approval.handoff.reviewer_concern",
-        ),
-      ),
-    );
-    if (expected.tool !== "Write") {
+    for (const id of [
+      "approval.manual_mode",
+      "approval.handoff.reviewer_concern",
+      "approval.command_effects",
+      "approval.scope_once",
+      "approval.session_expiry",
+      "approval.why_again",
+    ])
       assert.ok(
-        view.text.includes(translate(locale, "approval.agent_purpose")),
+        !view.text.includes(translate(locale, id)),
+        `default card leaked ${id}`,
       );
-      assert.ok(
-        view.text.includes(translate(locale, "approval.command_effects")),
+    if (expected.tool !== "Write") {
+      assert.equal(
+        view.text.includes(translate(locale, "approval.agent_purpose")),
+        !expected.fallback,
       );
       assert.equal(
         view.visibleCode,
-        expected.fallback ? task.pendingUi.args : expected.command,
+        expected.fallback ? null : expected.command,
       );
       if (expected.fallback) {
-        assert.equal(view.collapsed, null);
         assert.ok(
-          view.text.includes(translate(locale, "approval.purpose_unavailable")),
+          view.text.includes(translate(locale, "approval.command_unavailable")),
         );
       } else {
-        assert.equal(view.collapsed, true);
         assert.ok(view.text.includes(purpose));
       }
     } else {
@@ -361,9 +345,13 @@ export async function runApprovalReadabilityVertical({
     );
     if (!expected.manual && !expected.technical)
       assert.ok(view.text.includes(reason));
-    if (!expected.fallback) {
+    if (expected.technical)
+      assert.ok(
+        view.text.includes(translate(locale, "approval.handoff.call_failed")),
+      );
+    {
       await webview.evaluate(
-        `document.querySelector(${JSON.stringify(selector + " details summary")}).focus()`,
+        `document.querySelector(${JSON.stringify(selector + " .approval-details-toggle")}).focus()`,
       );
       await key("Tab", "Tab", 9);
       assert.equal(
@@ -374,7 +362,7 @@ export async function runApprovalReadabilityVertical({
       );
       await key("Tab", "Tab", 9, 8);
       const focus = await webview.evaluate(
-        `(() => {const summary=document.querySelector(${JSON.stringify(selector + " details summary")}); const style=getComputedStyle(summary); return {active:document.activeElement===summary,outline:style.outlineStyle,width:parseFloat(style.outlineWidth)};})()`,
+        `(() => {const summary=document.querySelector(${JSON.stringify(selector + " .approval-details-toggle")}); const style=getComputedStyle(summary); return {active:document.activeElement===summary,outline:style.outlineStyle,width:parseFloat(style.outlineWidth)};})()`,
       );
       assert.equal(focus.active, true);
       assert.notEqual(focus.outline, "none");
@@ -382,32 +370,45 @@ export async function runApprovalReadabilityVertical({
       await key("Enter", "Enter", 13);
       assert.equal(
         await webview.evaluate(
-          `document.querySelector(${JSON.stringify(selector + " details")}).open`,
+          `document.querySelector(${JSON.stringify(selector + " .approval-details-toggle")}).getAttribute('aria-expanded') === 'true'`,
         ),
         true,
       );
+      const expanded = await webview.evaluate(
+        `document.querySelector(${JSON.stringify(selector + " .approval-request-details")}).textContent`,
+      );
+      assert.ok(expanded.includes(task.pendingUi.args));
+      if (expected.manual)
+        assert.ok(expanded.includes(translate(locale, "approval.manual_mode")));
+      if (expected.tool !== "Write")
+        assert.ok(
+          expanded.includes(translate(locale, "approval.command_effects")),
+        );
+      if (expected.fallback) {
+        await webview.evaluate(
+          `document.querySelector(${JSON.stringify(selector + " .approval-request-details pre")}).focus()`,
+        );
+        await key("ArrowDown", "ArrowDown", 40);
+        await wait(
+          () =>
+            webview.evaluate(
+              `document.querySelector(${JSON.stringify(selector + " .approval-request-details pre")}).scrollTop > 0`,
+            ),
+          "raw arguments keyboard scroll",
+        );
+        await webview.evaluate(
+          `document.querySelector(${JSON.stringify(selector + " .approval-details-toggle")}).focus()`,
+        );
+      }
       await key("Enter", "Enter", 13);
       view.keyboard = focus;
-    } else {
-      await webview.evaluate(
-        `document.querySelector(${JSON.stringify(selector + " pre.code-block-preview")}).focus()`,
-      );
-      await key("ArrowDown", "ArrowDown", 40);
-      await wait(
-        () =>
-          webview.evaluate(
-            `document.querySelector(${JSON.stringify(selector + " pre.code-block-preview")}).scrollTop > 0`,
-          ),
-        "raw arguments keyboard scroll",
-      );
-      await key("Tab", "Tab", 9);
+      view.detailsText = expanded;
       assert.equal(
         await webview.evaluate(
-          `document.activeElement === document.querySelector(${JSON.stringify(selector + " .ai-intervention-actions button")})`,
+          `Boolean(document.querySelector(${JSON.stringify(selector + " .approval-request-details")}))`,
         ),
-        true,
+        false,
       );
-      view.keyboard = { rawArgumentsScroll: true, actionFocus: true };
     }
     const png = await webview.send("Page.captureScreenshot", {
       format: "png",
@@ -441,21 +442,67 @@ export async function runApprovalReadabilityVertical({
         Buffer.from(actions.data, "base64"),
       );
     }
-    if (expected.tool === "Write") {
+    if (expected.tool === "Write" || name === `review-${locale}-1320-light`) {
       await click(
         `${selector} button`,
         translate(locale, "approval.more_allow_options"),
       );
-      const label = translate(locale, "approval.allow_session_file", {
-        tool: "Write",
-      });
+      const labels = [
+        ...(task.pendingUi.availableChoices.includes("allow_session")
+          ? [
+              translate(
+                locale,
+                expected.tool === "Write"
+                  ? "approval.allow_session_file"
+                  : "approval.allow_session",
+              ),
+            ]
+          : []),
+        ...(task.pendingUi.availableChoices.includes("deny_session")
+          ? [
+              translate(
+                locale,
+                expected.tool === "Write"
+                  ? "approval.deny_session_file"
+                  : "approval.deny_session",
+              ),
+            ]
+          : []),
+      ];
       await wait(
         () =>
           webview.evaluate(`(() => {
         const items=[...document.querySelectorAll('.approval-choice-menu [role="menuitem"]')].filter(item=>item.getClientRects().length);
-        return items.length===1 && items[0].textContent.trim()===${JSON.stringify(label)};
+        const labels=${JSON.stringify(labels)};
+        return items.length===labels.length && items.every(item=>labels.includes(item.textContent.trim()));
       })()`),
-        "file Session menu preserves exact available choice",
+        "Session menu preserves exact available choice",
+      );
+      const menuText = await webview.evaluate(
+        "document.querySelector('.approval-choice-menu').textContent",
+      );
+      assert.ok(
+        menuText.includes(
+          translate(
+            locale,
+            expected.tool === "Write"
+              ? "approval.scope_file_session"
+              : "approval.scope_session_available",
+            { tool: "Write" },
+          ),
+        ),
+      );
+      assert.ok(
+        menuText.includes(translate(locale, "approval.session_expiry")),
+      );
+      view.menuText = menuText;
+      const menuPng = await webview.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        path.join(evidenceDir, `${name}-menu.png`),
+        Buffer.from(menuPng.data, "base64"),
       );
       await key("Escape", "Escape", 27);
       await wait(

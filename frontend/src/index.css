@@ -7103,42 +7103,100 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 8px;
 }
 
-.approval-scope-value,
-.approval-scope-expiry {
-  margin: 0;
-  line-height: 1.55;
+.approval-panel {
+  padding: 16px 18px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface-panel);
 }
 
-.approval-scope-value {
-  color: var(--ui-content-primary);
+.approval-panel .ai-intervention-header p:empty {
+  display: none;
+}
+
+.approval-panel .ai-intervention-header h3 {
   overflow-wrap: anywhere;
 }
 
-.approval-request-details {
-  min-width: 0;
-}
-
-.approval-request-details > summary {
-  color: var(--ui-content-muted);
-  cursor: pointer;
-  width: fit-content;
-  padding-block: 6px;
-}
-
-.approval-request-details > summary:focus-visible {
-  outline: 2px solid var(--ui-focus-ring);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.approval-request-details[open] > .code-block-preview {
+.approval-panel .ai-intervention-content {
   margin-top: 8px;
+  gap: 8px;
 }
 
-.approval-scope-expiry {
-  margin-top: 4px;
+.approval-purpose,
+.approval-target,
+.approval-concern,
+.approval-unavailable {
+  margin: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.approval-purpose,
+.approval-concern {
+  color: var(--ui-content-primary);
+  font-size: var(--text-label);
+}
+
+.approval-purpose > span,
+.approval-concern > span,
+.approval-target,
+.approval-unavailable {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
+}
+
+.approval-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 4px;
+}
+
+.approval-details-toggle {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ui-content-muted);
+  font: inherit;
+  font-size: var(--text-label);
+  text-align: left;
+  cursor: pointer;
+}
+
+.approval-details-toggle:hover {
+  color: var(--ui-content-primary);
+  text-decoration: underline;
+}
+
+.approval-request-details {
+  display: grid;
+  min-width: 0;
+  padding-top: 12px;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.approval-request-details p,
+.approval-choice-note p {
+  margin: 0;
+}
+
+.approval-panel .ai-intervention-actions {
+  display: flex;
+  margin-left: auto;
+}
+
+.approval-panel .ai-intervention-actions > button,
+.approval-panel .approval-action-cluster {
+  width: auto;
 }
 
 .approval-diagnostic {
@@ -7190,18 +7248,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-action-primary-hover);
 }
 
-.approval-action-cluster[data-variant="secondary"] .approval-split-trigger {
-  border: 1px solid var(--ui-border);
-  border-left: 0;
-  background: var(--ui-surface-panel);
-  color: var(--ui-content-primary);
-}
-
-.approval-action-cluster[data-variant="secondary"]
-  .approval-split-trigger:hover {
-  background: var(--ui-action-hover-surface);
-}
-
 .approval-split-trigger:disabled {
   cursor: not-allowed;
   opacity: 0.45;
@@ -7214,6 +7260,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .approval-choice-menu-item {
   min-height: 44px;
   white-space: normal;
+}
+
+.approval-choice-note {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 480px) {
