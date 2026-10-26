@@ -580,7 +580,9 @@ export function SettingsPage({
     providersPage,
   ]);
   useEffect(() => {
-    content.current?.scrollTo?.({ top: 0, behavior: "auto" });
+    if (activeSection === "archived" && content.current)
+      content.current.scrollTop = archiveManagement?.scrollTop ?? 0;
+    else content.current?.scrollTo?.({ top: 0, behavior: "auto" });
   }, [activeSection, providersPage]);
   useEffect(() => {
     if (activeSection === "providers") return;
@@ -1039,7 +1041,14 @@ export function SettingsPage({
           </a>
         </nav>
 
-        <div ref={content} className="settings-content">
+        <div
+          ref={content}
+          className="settings-content"
+          onScroll={(event) => {
+            if (activeSection === "archived")
+              archiveManagement?.onScroll?.(event.currentTarget.scrollTop);
+          }}
+        >
           <h1
             id="settings-page-title"
             ref={title}

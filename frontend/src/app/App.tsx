@@ -294,6 +294,11 @@ type LocalTaskSubmission = {
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
 };
+import {
+  ArchiveNotice,
+  type ArchiveNoticeValue,
+} from "../features/tasks/ArchiveNotice.tsx";
+
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
@@ -301,6 +306,14 @@ export default function App() {
     initialWorkbenchState,
   );
   const [archivedQuery, setArchivedQuery] = useState("");
+  const archiveView = useRef<{ scrollTop: number; focusTaskId: string | null }>(
+    { scrollTop: 0, focusTaskId: null },
+  );
+  const [archiveNotice, setArchiveNotice] = useState<ArchiveNoticeValue | null>(
+    null,
+  );
+  const archiveNoticeId = useRef(0);
+  const deleteOpener = useRef<HTMLElement | null>(null);
   const [taskArchiveErrors, setTaskArchiveErrors] = useState<
     Record<string, string>
   >({});
@@ -585,6 +598,9 @@ export default function App() {
   useEffect(() => {
     if (deleteTargetId && !deleteTarget) setDeleteTargetId(null);
   }, [deleteTargetId, deleteTarget]);
+  const noticeTask = snapshot.taskIndex.find(
+    (task) => task.id === archiveNotice?.taskId,
+  );
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
@@ -1543,6 +1559,7 @@ export default function App() {
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           latestSnapshotRef.current = null;
+          setArchiveNotice(null);
           setApprovalRequests({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
@@ -1719,13 +1736,34 @@ export default function App() {
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
   }
   function closeDeleteConfirmation() {
+    const targetId = deleteTargetId;
     setDeleteTargetId(null);
     window.requestAnimationFrame(() => {
-      const taskRow = document.querySelector<HTMLElement>(
-        `[data-task-id="${CSS.escape(activeTaskIdRef.current ?? "")}"]`,
+      if (deleteOpener.current?.isConnected) {
+        deleteOpener.current.focus();
+        return;
+      }
+      const archivedRow = document.querySelector<HTMLElement>(
+        `[data-archived-task-id="${CSS.escape(targetId ?? "")}"] button`,
       );
-      taskRow?.focus();
+      if (archivedRow) {
+        archivedRow.focus();
+        return;
+      }
+      const taskRow = document.querySelector<HTMLElement>(
+        `[data-task-id="${CSS.escape(targetId ?? "")}"]`,
+      );
+      if (taskRow) taskRow.focus();
+      else
+        document.querySelector<HTMLElement>("#settings-archived h2")?.focus();
     });
+  }
+  function requestTaskDeletion(task: TaskSummary) {
+    deleteOpener.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setDeleteTargetId(task.id);
   }
   function beginTaskPendingOperation(scope: string, operation: string) {
     if (taskPendingScopes.current.has(scope)) return false;
@@ -2913,6 +2951,22 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
+  function publishArchiveResult(taskId: string, archived: boolean) {
+    const task = latestSnapshotRef.current?.taskIndex.find(
+      (entry) => entry.id === taskId,
+    );
+    if (!task || task.archived !== archived) return;
+    if (archived)
+      setArchiveNotice({
+        id: ++archiveNoticeId.current,
+        taskId,
+        kind: "archived",
+      });
+    else
+      setArchiveNotice((current) =>
+        current?.taskId === taskId ? null : current,
+      );
+  }
   async function setArchived(
     archived: boolean,
     task: TaskSummary | TaskView | null = activeTask,
@@ -2938,8 +2992,16 @@ export default function App() {
             archived ? "operation.task_archive" : "operation.task_restore",
             { scope: "task", taskId },
           )
-        )
+        ) {
+          publishArchiveResult(taskId, archived);
           return;
+        }
+        if (archived)
+          setArchiveNotice({
+            id: ++archiveNoticeId.current,
+            taskId,
+            kind: "failed",
+          });
         await refreshSnapshot().catch(() => undefined);
         setTaskArchiveErrors((current) => ({
           ...current,
@@ -2959,6 +3021,7 @@ export default function App() {
         archived ? "operation.task_archive" : "operation.task_restore",
         { scope: "task", taskId },
       );
+      publishArchiveResult(taskId, archived);
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3027,7 +3090,7 @@ export default function App() {
       void setArchived(!task.archived, task);
       return;
     }
-    setDeleteTargetId(task.id);
+    requestTaskDeletion(task);
   }
   async function respondUi(payload: UiResponsePayload) {
     const pending = activeTask?.pendingUi;
@@ -3419,7 +3482,8 @@ export default function App() {
         composeDisabled={Boolean(
           selectedTaskSummary &&
           (selectedTaskSummary.archived ||
-            selectedTaskSummary.deletionStatus !== "idle"),
+            selectedTaskSummary.deletionStatus === "deleting" ||
+            selectedTaskSummary.lifecycle === "closing"),
         )}
         attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
@@ -4008,12 +4072,18 @@ export default function App() {
               errors: taskArchiveErrors,
               synchronized: !bridgeUnavailable,
               onQuery: setArchivedQuery,
+              scrollTop: archiveView.current.scrollTop,
+              focusTaskId: archiveView.current.focusTaskId,
+              onScroll: (scrollTop) => {
+                archiveView.current.scrollTop = scrollTop;
+              },
               onOpen: (task) => {
+                archiveView.current.focusTaskId = task.id;
                 setSettingsOpen(false);
                 openTask(task.id);
               },
               onRestore: (task) => void setArchived(false, task),
-              onDelete: (task) => setDeleteTargetId(task.id),
+              onDelete: requestTaskDeletion,
             }}
             account={snapshot.account}
             models={snapshot.models}
@@ -4341,7 +4411,37 @@ export default function App() {
           <TaskWorkspace
             newTask={newTaskDraftActive}
             hasWorkspace={Boolean(composerWorkspace)}
-            composer={composerFooter}
+            composer={
+              activeTask?.archived ? (
+                <div className="archived-task-banner">
+                  <p>{t("archive.reading")}</p>
+                  <div className="archived-task-actions">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openSettings("archived")}
+                    >
+                      {t("archive.back")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={
+                        taskMutationDisabled ||
+                        selectedTaskSummary?.historyReadOnly ||
+                        activeTask.lifecycle === "closing" ||
+                        activeTask.activeOperation !== null ||
+                        activeTask.deletionStatus === "deleting"
+                      }
+                      onClick={() => void setArchived(false, activeTask)}
+                    >
+                      {t("archive.restore")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                composerFooter
+              )
+            }
             pendingContent={pendingMessages}
             taskContent={
               <TaskContent
@@ -4437,6 +4537,45 @@ export default function App() {
         onConfigure={() => openSettings("providers")}
       />
 
+      {archiveNotice && (
+        <ArchiveNotice
+          key={archiveNotice.id}
+          notice={archiveNotice}
+          disabled={
+            bridgeUnavailable ||
+            !noticeTask ||
+            !noticeTask.archived ||
+            noticeTask.historyReadOnly ||
+            noticeTask.lifecycle === "closing" ||
+            noticeTask.deletionStatus === "deleting" ||
+            `task:${noticeTask.id}` in taskPending
+          }
+          onDismiss={() => setArchiveNotice(null)}
+          onView={() => {
+            setArchiveNotice(null);
+            openSettings("archived");
+          }}
+          onUndo={() => {
+            const taskId = archiveNotice.taskId;
+            const task = latestSnapshotRef.current?.taskIndex.find(
+              (entry) => entry.id === taskId,
+            );
+            if (!task?.archived) return;
+            void setArchived(false, task).then(() =>
+              window.requestAnimationFrame(() => {
+                if (activeTaskIdRef.current === taskId)
+                  composer.current?.focus();
+                else
+                  document
+                    .querySelector<HTMLElement>(
+                      `[data-task-id="${CSS.escape(taskId)}"]`,
+                    )
+                    ?.focus();
+              }),
+            );
+          }}
+        />
+      )}
       {deleteTarget && (
         <AlertDialog.Root
           open={confirmDelete}

@@ -108,6 +108,11 @@ export function GlobalSearch({
                   <strong>
                     {result.title || t("task.item", { id: result.taskId })}
                   </strong>
+                  {result.archived && (
+                    <span className="search-archived-label">
+                      {t("task.archived")}
+                    </span>
+                  )}
                   <small>{result.detail}</small>
                 </span>
               </button>

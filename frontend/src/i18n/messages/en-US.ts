@@ -1,4 +1,11 @@
 export const enUS = {
+  "archive.success": "Task archived. Find it in Settings → Archived tasks.",
+  "archive.undo": "Undo",
+  "archive.view": "View",
+  "archive.reading": "This task is archived. Restore it to continue.",
+  "archive.back": "Back to archived tasks",
+  "archive.restore": "Restore task",
+
   "settings.archived_tasks": "Archived tasks",
   "archive.search": "Search archived tasks",
   "archive.count": "{count} archived tasks",
@@ -637,7 +644,7 @@ export const enUS = {
   "task.delete_retry": "Retry deletion",
   "task.delete_confirm_title": "Delete task “{title}”?",
   "task.delete_confirm_body":
-    "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
+    "This permanently deletes the task and its conversation and execution history. Files in the working folder will be kept. Any running operation will be stopped first.",
   "task.stop": "Stop task",
   "compact.stop": "Stop compacting",
   "compact.started": "Context compaction started.",

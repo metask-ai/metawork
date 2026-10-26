@@ -184,6 +184,7 @@ export function workspaceDirectoryLabel(
 export type SearchResult = {
   key: string;
   kind: "task" | "instruction" | "completion";
+  archived: boolean;
   taskId: string;
   title: string;
   detail: string;
@@ -209,6 +210,7 @@ export function searchWorkbench(
         key: `task:${task.id}`,
         kind: "task",
         taskId: task.id,
+        archived: task.archived,
         title,
         detail:
           workspace.kind === "automatic"
@@ -227,6 +229,7 @@ export function searchWorkbench(
           key: `instruction:${task.id}:${run.runId}`,
           kind: "instruction",
           taskId: task.id,
+          archived: task.archived,
           title,
           detail: input,
         });
@@ -235,6 +238,7 @@ export function searchWorkbench(
           key: `completion:${task.id}:${run.runId}`,
           kind: "completion",
           taskId: task.id,
+          archived: task.archived,
           title,
           detail: output,
         });

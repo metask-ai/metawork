@@ -1,5 +1,12 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "archive.success": "任务已归档，可在“设置 → 已归档任务”中查看。",
+  "archive.undo": "撤销",
+  "archive.view": "查看",
+  "archive.reading": "此任务已归档。恢复后可以继续。",
+  "archive.back": "返回已归档任务",
+  "archive.restore": "恢复任务",
+
   "settings.archived_tasks": "已归档任务",
   "archive.search": "搜索已归档任务",
   "archive.count": "{count} 个已归档任务",
@@ -575,7 +582,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.delete_retry": "重试删除",
   "task.delete_confirm_title": "删除任务“{title}”？",
   "task.delete_confirm_body":
-    "MetaWork 中的对话与动态会被移除，工作区里的文件不会受到影响。",
+    "任务及其对话、执行历史将被永久删除，工作目录中的文件会保留。如任务正在运行，将先停止运行。",
   "task.stop": "停止任务",
   "compact.stop": "停止压缩",
   "compact.started": "已开始压缩上下文。",

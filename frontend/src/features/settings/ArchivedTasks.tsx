@@ -10,6 +10,9 @@ export type ArchivedTasksProps = {
   pending: Record<string, string>;
   errors?: Record<string, string>;
   synchronized: boolean;
+  scrollTop?: number;
+  focusTaskId?: string | null;
+  onScroll?: (scrollTop: number) => void;
   onQuery: (query: string) => void;
   onOpen: (task: TaskSummary) => void;
   onRestore: (task: TaskSummary) => void;
@@ -23,6 +26,7 @@ export function ArchivedTasks({
   pending,
   errors = {},
   synchronized,
+  focusTaskId = null,
   onQuery,
   onOpen,
   onRestore,
@@ -30,8 +34,15 @@ export function ArchivedTasks({
 }: ArchivedTasksProps) {
   const { t } = useI18n();
   const heading = useRef<HTMLHeadingElement>(null);
+  const list = useRef<HTMLUListElement>(null);
+  const lastFocusedTask = useRef<string | null>(null);
   useEffect(() => {
-    heading.current?.focus();
+    const row = focusTaskId
+      ? document.querySelector<HTMLElement>(
+          `[data-archived-task-id="${CSS.escape(focusTaskId)}"] button`,
+        )
+      : null;
+    (row ?? heading.current)?.focus();
   }, []);
   const archived = tasks
     .filter((task) => task.archived)
@@ -44,6 +55,20 @@ export function ArchivedTasks({
   const visible = archived.filter((task) =>
     task.title.toLocaleLowerCase().includes(needle),
   );
+  const visibleIds = visible.map((task) => task.id).join(",");
+  useEffect(() => {
+    if (
+      lastFocusedTask.current &&
+      !visible.some((task) => task.id === lastFocusedTask.current) &&
+      document.activeElement === document.body
+    ) {
+      (
+        list.current?.querySelector<HTMLElement>(".archived-task-title") ??
+        heading.current
+      )?.focus();
+      lastFocusedTask.current = null;
+    }
+  }, [visibleIds]);
   return (
     <section id="settings-archived" className="settings-section">
       <div className="settings-section-heading">
@@ -70,6 +95,7 @@ export function ArchivedTasks({
           </p>
         )}
         <ul
+          ref={list}
           className="settings-preference-list archived-task-list"
           aria-label={t("settings.archived_tasks")}
         >
@@ -85,6 +111,9 @@ export function ArchivedTasks({
               <li
                 className="settings-row archived-task-row"
                 key={task.id}
+                onFocusCapture={() => {
+                  lastFocusedTask.current = task.id;
+                }}
                 data-archived-task-id={task.id}
               >
                 <div className="archived-task-copy">

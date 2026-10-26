@@ -204,7 +204,7 @@ async function renderApp(ctx) {
       );
     },
     async settle(result) {
-      await act(async () => requests[0].resolve(result));
+      await act(async () => requests.at(-1).resolve(result));
     },
     async publishArchive(taskId, archived) {
       snapshot.tasks.find((entry) => entry.id === taskId).archived = archived;
@@ -311,3 +311,124 @@ for (const archived of [false, true]) {
     assert.equal(app.requests.length, 1);
   });
 }
+
+test("confirmed archive offers undo for its exact Task and keeps the history read-only", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.invoke("3", "Archive");
+  await app.settle({ archived: true });
+  await screen.findByText(
+    "Task archived. Find it in Settings → Archived tasks.",
+  );
+  assert.ok(screen.getByText("This task is archived. Restore it to continue."));
+  assert.equal(screen.queryByRole("textbox"), null);
+  assert.equal(taskRows("3").length, 0);
+  await app.user.click(
+    screen.getByRole("button", { name: "Undo", exact: true }),
+  );
+  await waitFor(() => assert.equal(app.requests.length, 2));
+  assert.deepEqual(
+    { taskId: app.requests[1].taskId, archived: app.requests[1].archived },
+    { taskId: "3", archived: false },
+  );
+  await app.settle({ archived: false });
+  await waitFor(() => assert.equal(taskRows("3").length, 2));
+  assert.equal(
+    screen.queryByText("Task archived. Find it in Settings → Archived tasks."),
+    null,
+  );
+});
+
+test("archive notice View opens the archived settings section", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.invoke("3", "Archive");
+  await app.settle({ archived: true });
+  await app.user.click(
+    await screen.findByRole("button", { name: "View", exact: true }),
+  );
+  await screen.findByRole("heading", { name: "Archived tasks" });
+  assert.ok(screen.getByRole("button", { name: "Archive target" }));
+});
+
+test("archived history returns to settings with query, scroll and focus preserved", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.openArchives();
+  await app.user.type(
+    screen.getByRole("searchbox", { name: "Search archived tasks" }),
+    "Earlier",
+  );
+  const content = document.querySelector(".settings-content");
+  content.scrollTop = 240;
+  fireEvent.scroll(content);
+  await app.user.click(screen.getByRole("button", { name: "Earlier archive" }));
+  await screen.findByText("This task is archived. Restore it to continue.");
+  assert.equal(screen.queryByRole("textbox"), null);
+  await app.user.click(
+    screen.getByRole("button", { name: "Back to archived tasks" }),
+  );
+  await screen.findByRole("heading", { name: "Archived tasks" });
+  assert.equal(
+    screen.getByRole("searchbox", { name: "Search archived tasks" }).value,
+    "Earlier",
+  );
+  assert.equal(document.querySelector(".settings-content").scrollTop, 240);
+  await waitFor(() =>
+    assert.equal(document.activeElement.textContent, "Earlier archive"),
+  );
+});
+
+test("archive timeout shows success only when canonical archive is confirmed", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.invoke("3", "Archive");
+  await app.settle({
+    archived: true,
+    error: new BridgeCommandTimeoutError("metawork.tasks.archive", 10000),
+  });
+  await screen.findByText(
+    "Task archived. Find it in Settings → Archived tasks.",
+  );
+  assert.equal(app.requests.length, 1);
+});
+
+test("archive notice pauses dismissal while hovered or keyboard-focused", async (ctx) => {
+  const { ArchiveNotice } = await vite.ssrLoadModule(
+    "/src/features/tasks/ArchiveNotice.tsx",
+  );
+  ctx.mock.timers.enable({ apis: ["setTimeout"] });
+  let dismissed = 0;
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(ArchiveNotice, {
+        notice: { id: 1, taskId: "3", kind: "archived" },
+        disabled: false,
+        onUndo() {},
+        onView() {},
+        onDismiss() {
+          dismissed++;
+        },
+      }),
+    ),
+  );
+  const notice = document.querySelector(".archive-notice");
+  fireEvent.mouseEnter(notice);
+  await act(async () => ctx.mock.timers.tick(9000));
+  assert.equal(dismissed, 0);
+  await act(async () =>
+    screen.getByRole("button", { name: "Undo", exact: true }).focus(),
+  );
+  fireEvent.mouseLeave(notice);
+  await act(async () => ctx.mock.timers.tick(9000));
+  assert.equal(dismissed, 0);
+  await act(async () =>
+    screen.getByRole("button", { name: "Undo", exact: true }).blur(),
+  );
+  await act(async () => ctx.mock.timers.tick(8000));
+  assert.equal(dismissed, 1);
+});

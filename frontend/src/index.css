@@ -10024,3 +10024,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     gap: 12px;
   }
 }
+
+.archive-notice {
+  position: fixed;
+  z-index: 45;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  max-width: min(680px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  box-shadow: var(--ui-shadow-overlay);
+}
+.archive-notice p {
+  flex: 1 1 220px;
+  margin: 0;
+}
+.archive-notice-actions {
+  display: flex;
+  gap: 8px;
+}
+.archived-task-banner {
+  padding: 16px 24px;
+  border-top: 1px solid var(--ui-border);
+}
+.archived-task-banner p {
+  margin: 0 0 12px;
+  color: var(--ui-content-muted);
+}
+.search-archived-label {
+  margin-left: 8px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+@media (max-width: 620px) {
+  .archive-notice {
+    right: 16px;
+    bottom: 16px;
+  }
+}
