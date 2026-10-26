@@ -6765,7 +6765,7 @@ test "Task deletion retries an off-thread Session release failure" {
     try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
-test "asynchronous Task deletion commit failure retains a retryable archived record" {
+test "asynchronous Task deletion commit failure retains an unarchived record" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
@@ -6797,10 +6797,10 @@ test "asynchronous Task deletion commit failure retains a retryable archived rec
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    try workbench.setTaskArchived(task_id, true);
     persistence.result = .failed;
     try workbench.deleteTask(task_id);
     try waitControlSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
+    try std.testing.expect(!workbench.task_runtime.find(task_id).?.durable.archived);
     try std.testing.expectEqual(
         @as(u64, 1),
         try workbench.taskBindingEpoch(task_id),
@@ -6826,9 +6826,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
     const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
     fake_core.waitRunEntered();
-    try workbench.cancel(task_id, run_id);
-    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
-    try workbench.setTaskArchived(task_id, true);
+    _ = run_id;
     try workbench.deleteTask(task_id);
     try waitTaskDeleted(&workbench, task_id);
     fake_core.lock();
@@ -7135,11 +7133,7 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
         error.TaskBusy,
         workbench.runTask(task_id, .{ .text = "must wait" }),
     );
-    try workbench.cancelCompact(task_id, operation_id);
-    try waitControlSnapshot(&workbench, "\"phase\":\"aborted\"");
-    try waitControlSnapshot(&workbench, "\"activeOperation\":null");
-
-    try workbench.setTaskArchived(task_id, true);
+    _ = operation_id;
     try workbench.deleteTask(task_id);
     try waitTaskDeleted(&workbench, task_id);
     fake_core.lock();

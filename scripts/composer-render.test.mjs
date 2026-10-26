@@ -371,9 +371,7 @@ function renderTaskList(tasks, props = {}) {
         tasks,
         workspaces: [],
         activeTaskId: null,
-        showArchived: false,
         onSelectTask() {},
-        onToggleArchived() {},
         ...props,
       }),
     ),
@@ -949,13 +947,13 @@ test("Task list shows tasks from different workspaces without workspace controls
       task("2", "Beta task", "workspace-b", "1"),
       archived,
     ],
-    { showArchived: true },
+    {},
   );
 
   assert.match(markup, /Alpha task/);
   assert.match(markup, /Beta task/);
-  assert.match(markup, /Archived task/);
-  assert.match(markup, /aria-label="Archived"/);
+  assert.doesNotMatch(markup, /Archived task/);
+  assert.doesNotMatch(markup, /aria-label="Archived"/);
   assert.doesNotMatch(markup, /<section|<h3/);
   assert.doesNotMatch(markup, /workspace-card|workspace-picker|>Add</);
 });
@@ -1087,9 +1085,6 @@ test("Manual projects repeat their tasks while automatic tasks stay global", () 
   assert.equal((markup.match(/aria-label="Attention"/g) ?? []).length, 2);
   assert.equal((markup.match(/task-notification-dot/g) ?? []).length, 2);
 
-  const archived = renderTaskList(tasks, { workspaces, showArchived: true });
-  assert.equal((archived.match(/data-task-id="5"/g) ?? []).length, 2);
-  assert.match(archived, />6 tasks</);
   const suppressed = renderTaskList(tasks, {
     workspaces,
     suppressedCompletionTaskId: "6",

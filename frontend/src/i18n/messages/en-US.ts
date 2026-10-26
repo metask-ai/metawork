@@ -1,4 +1,21 @@
 export const enUS = {
+  "archive.success": "Task archived. Find it in Settings → Archived tasks.",
+  "archive.undo": "Undo",
+  "archive.view": "View",
+  "archive.reading": "This task is archived. Restore it to continue.",
+  "archive.back": "Back to archived tasks",
+  "archive.restore": "Restore task",
+
+  "settings.archived_tasks": "Archived tasks",
+  "archive.search": "Search archived tasks",
+  "archive.count": "{count} archived tasks",
+  "archive.empty": "Archived tasks will appear here.",
+  "archive.no_results": "No matching tasks.",
+  "archive.sync_unavailable":
+    "Task list is unavailable. Reconnect to manage archived tasks.",
+  "archive.history_read_only": "Update MetaWork to modify this saved task.",
+  "archive.deleting": "Deleting task…",
+  "task.stop_and_delete": "Stop and delete",
   "model_setup.title": "Get started with MetaWork",
   "model_setup.body":
     "Sign in with Metask to use models, or configure your own model service.",
@@ -579,10 +596,8 @@ export const enUS = {
   "task.no_tasks":
     "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",
-  "task.show_archived": "Show archived ({count})",
   "task.history_retained":
     "Tasks this version can't open: {count}. They are kept unchanged.",
-  "task.hide_archived": "Hide archived",
   "task.archived": "Archived",
   "task.ready": "Ready",
   "task.last_result": "Last result: {result}",
@@ -627,9 +642,9 @@ export const enUS = {
   "task.restore": "Restore",
   "task.delete": "Delete record",
   "task.delete_retry": "Retry deletion",
-  "task.delete_confirm_title": "Delete this task record?",
+  "task.delete_confirm_title": "Delete task “{title}”?",
   "task.delete_confirm_body":
-    "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
+    "This permanently deletes the task and its conversation and execution history. Files in the working folder will be kept. Any running operation will be stopped first.",
   "task.stop": "Stop task",
   "compact.stop": "Stop compacting",
   "compact.started": "Context compaction started.",

@@ -3703,8 +3703,6 @@ function decodeTask(
         "unread completion must reference the latest terminal completed Run",
       );
   }
-  if (!archived && deletionStatus !== "idle")
-    fail(path, "only an archived Task can have deletion state");
   if (deletionStatus === "deleting" && lifecycle !== "closing")
     fail(path, "an in-progress deletion must have closing lifecycle");
   const restorePermission =
@@ -4935,10 +4933,7 @@ function decodeTaskSummary(value: unknown, path: string): TaskSummary {
             `${path}.unreadCompletionRunId`,
           ),
   };
-  if (
-    (!summary.archived && summary.deletionStatus !== "idle") ||
-    (summary.deletionStatus === "deleting" && summary.lifecycle !== "closing")
-  )
+  if (summary.deletionStatus === "deleting" && summary.lifecycle !== "closing")
     fail(path, "invalid deletion facts");
   if (
     summary.unreadCompletionRunId !== null &&

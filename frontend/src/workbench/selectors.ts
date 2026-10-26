@@ -55,17 +55,13 @@ function permissionReviewInProgress(task: TaskNavigation): boolean {
   );
 }
 
-export function orderedTasks<T extends TaskNavigation>(
-  tasks: T[],
-  showArchived: boolean,
-): T[] {
+export function orderedTasks<T extends TaskNavigation>(tasks: T[]): T[] {
   const byRecent = (left: T, right: T) => {
     const leftOrder = BigInt(left.recentOrder);
     const rightOrder = BigInt(right.recentOrder);
     return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
   };
   const priority = (task: T) => {
-    if (task.archived) return 4;
     if (
       task.currentRunPhase === "waiting_ui" &&
       !permissionReviewInProgress(task)
@@ -87,7 +83,7 @@ export function orderedTasks<T extends TaskNavigation>(
   };
 
   return tasks
-    .filter((task) => showArchived || !task.archived)
+    .filter((task) => !task.archived)
     .sort(
       (left, right) =>
         priority(left) - priority(right) || byRecent(left, right),
@@ -188,6 +184,7 @@ export function workspaceDirectoryLabel(
 export type SearchResult = {
   key: string;
   kind: "task" | "instruction" | "completion";
+  archived: boolean;
   taskId: string;
   title: string;
   detail: string;
@@ -213,6 +210,7 @@ export function searchWorkbench(
         key: `task:${task.id}`,
         kind: "task",
         taskId: task.id,
+        archived: task.archived,
         title,
         detail:
           workspace.kind === "automatic"
@@ -231,6 +229,7 @@ export function searchWorkbench(
           key: `instruction:${task.id}:${run.runId}`,
           kind: "instruction",
           taskId: task.id,
+          archived: task.archived,
           title,
           detail: input,
         });
@@ -239,6 +238,7 @@ export function searchWorkbench(
           key: `completion:${task.id}:${run.runId}`,
           kind: "completion",
           taskId: task.id,
+          archived: task.archived,
           title,
           detail: output,
         });

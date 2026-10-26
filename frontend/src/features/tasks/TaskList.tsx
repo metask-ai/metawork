@@ -14,9 +14,7 @@ export function TaskList({
   workspaces,
   activeTaskId,
   suppressedCompletionTaskId = null,
-  showArchived,
   onSelectTask,
-  onToggleArchived,
   onTaskAction,
   taskMutationDisabled,
   synchronized = true,
@@ -26,9 +24,7 @@ export function TaskList({
   workspaces: WorkspaceView[];
   activeTaskId: string | null;
   suppressedCompletionTaskId?: string | null;
-  showArchived: boolean;
   onSelectTask: (id: string) => void;
-  onToggleArchived: () => void;
   onTaskAction: (task: TaskSummary, action: TaskMenuAction) => void;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
@@ -37,9 +33,9 @@ export function TaskList({
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
-  const visibleTasks = orderedTasks(tasks, showArchived);
+  const openingDelete = useRef(false);
+  const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
-  const archivedCount = tasks.filter((task) => task.archived).length;
   const projects = workspaces
     .filter((workspace) => workspace.kind === "manual")
     .sort((left, right) => {
@@ -56,6 +52,7 @@ export function TaskList({
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
+    openingDelete.current = false;
     menuAnchor.current = event.currentTarget;
     setMenuTaskId(taskId);
   }
@@ -143,16 +140,6 @@ export function TaskList({
           {t("task.history_retained", { count: retainedTaskCount })}
         </p>
       )}
-      {archivedCount > 0 && (
-        <button
-          className="archived-toggle focus-ring"
-          onClick={onToggleArchived}
-        >
-          {showArchived
-            ? t("task.hide_archived")
-            : t("task.show_archived", { count: archivedCount })}
-        </button>
-      )}
       <Menu.Root
         open={menuTask !== null}
         onOpenChange={(open) => {
@@ -170,6 +157,7 @@ export function TaskList({
             collisionPadding={8}
           >
             <Menu.Popup
+              finalFocus={() => !openingDelete.current}
               className="task-menu-popover"
               aria-label={t("task.actions")}
             >
@@ -203,12 +191,15 @@ export function TaskList({
                     disabled={
                       taskMutationDisabled ||
                       menuTaskReadOnly ||
-                      !menuTask.archived ||
                       menuTask.deletionStatus === "deleting" ||
                       (menuTask.lifecycle === "closing" &&
                         menuTask.deletionStatus !== "failed")
                     }
-                    onClick={() => onTaskAction(menuTask, "delete")}
+                    onClick={() => {
+                      // The confirmation owns focus after the menu closes.
+                      openingDelete.current = true;
+                      onTaskAction(menuTask, "delete");
+                    }}
                   >
                     {t(
                       menuTask.deletionStatus === "failed"

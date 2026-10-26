@@ -34,6 +34,7 @@ import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runApprovalReadabilityVertical } from "./agentcore-approval-readability-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
+import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import {
   runOutputDeliveryVertical,
@@ -113,7 +114,22 @@ const windowsClipboardProbeScript = path.join(
 if (!process.env.METAWORK_VERTICAL_PREBUILT)
   await buildAutomationDebugArtifact(root, bundleOptions);
 const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
-await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
+const runtimeAssetOptions =
+  process.platform === "darwin" &&
+  path.basename(path.dirname(binary)) === "MacOS"
+    ? {
+        licenseDirectory: path.join(
+          path.dirname(path.dirname(binary)),
+          "Resources",
+          "licenses",
+        ),
+      }
+    : {};
+await verifyAgentCoreRuntimeAssets(
+  bundle,
+  path.dirname(binary),
+  runtimeAssetOptions,
+);
 // Exercise the shipped rg beside the Host, not an ambient development install.
 const appEnvironment = { ...process.env };
 for (const key of Object.keys(appEnvironment)) {
@@ -410,6 +426,7 @@ let exitState = null;
 let lastCheckpointObservation = null;
 let app;
 let exited;
+const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
 const approvalReadabilityOnly =
@@ -418,7 +435,10 @@ const approvalOnly =
   process.env.METAWORK_APPROVAL_ONLY === "1" || approvalReadabilityOnly;
 if (approvalOnly && process.platform !== "win32")
   throw new Error("The approval-mode desktop audit currently requires Windows");
-if (approvalOnly && (activeInputOnly || outputOnly || builtinOfficeOnly))
+if (
+  approvalOnly &&
+  (activeInputOnly || outputOnly || builtinOfficeOnly || taskArchiveOnly)
+)
   throw new Error("Approval-only verification cannot combine other scopes");
 startApplication();
 
@@ -429,7 +449,13 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!activeInputOnly && !outputOnly && !builtinOfficeOnly && !approvalOnly) {
+  if (
+    !activeInputOnly &&
+    !outputOnly &&
+    !builtinOfficeOnly &&
+    !approvalOnly &&
+    !taskArchiveOnly
+  ) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -474,6 +500,86 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (taskArchiveOnly) {
+    const catalog = await poll(
+      async () => {
+        const scope = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return scope?.availability === "ready" ||
+          scope?.availability === "degraded"
+          ? scope
+          : null;
+      },
+      commandTimeoutMs,
+      "Task archive Workspace catalog",
+    );
+    const audit = await runTaskArchiveVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      workspaceRoot: canonicalWorkspace,
+      catalog,
+    });
+    await stopApplication("Task archive cold restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    await audit.verifyRestart();
+    await writeFile(
+      join(root, ".zig-cache/task-archive-vertical-evidence.json"),
+      JSON.stringify(
+        { ...audit.evidence, binary, core: bundle.manifest?.version ?? null },
+        null,
+        2,
+      ),
+    );
+    if (process.env.METAWORK_TASK_ARCHIVE_UI_HOLD === "1") {
+      const releaseFile = join(root, ".zig-cache/task-archive-ui-release");
+      await rm(releaseFile, { force: true });
+      await writeFile(
+        join(root, ".zig-cache/task-archive-vertical-session.json"),
+        JSON.stringify(
+          {
+            pid: app.pid,
+            binary,
+            appCwd,
+            automationDir,
+            workspaceRoot: canonicalWorkspace,
+            archivedTaskId: audit.evidence.archivedTaskId,
+            uiTaskId: audit.evidence.uiTaskId,
+          },
+          null,
+          2,
+        ),
+      );
+      process.stdout.write(
+        "Task archive host vertical passed; isolated App awaits UI verification.\n",
+      );
+      await poll(
+        async () => {
+          try {
+            await readFile(releaseFile);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        600_000,
+        "Task archive UI verification release",
+      );
+    }
+    await stopApplication("Task archive verification complete");
+    process.stdout.write(
+      "Task archive desktop Host vertical passed: direct idle/running/permission-wait deletion, archive/restore, source preservation and cold restart. UI gestures require separate evidence.\n",
+    );
+    break desktopVertical;
+  }
   if (outputOnly) {
     assert.equal(process.platform, "win32");
     const catalog = await poll(

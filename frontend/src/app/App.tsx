@@ -294,13 +294,30 @@ type LocalTaskSubmission = {
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
 };
+import {
+  ArchiveNotice,
+  type ArchiveNoticeValue,
+} from "../features/tasks/ArchiveNotice.tsx";
+
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
     workbenchReducer,
     initialWorkbenchState,
   );
-  const [showArchived, setShowArchived] = useState(false);
+  const [archivedQuery, setArchivedQuery] = useState("");
+  const archiveView = useRef<{ scrollTop: number; focusTaskId: string | null }>(
+    { scrollTop: 0, focusTaskId: null },
+  );
+  const [archiveNotice, setArchiveNotice] = useState<ArchiveNoticeValue | null>(
+    null,
+  );
+  const archiveNoticeId = useRef(0);
+  const deleteOpener = useRef<HTMLElement | null>(null);
+  const deleteCancel = useRef<HTMLButtonElement>(null);
+  const [taskArchiveErrors, setTaskArchiveErrors] = useState<
+    Record<string, string>
+  >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -327,7 +344,8 @@ export default function App() {
   const [mcpQuery, setMcpQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const confirmDelete = deleteTargetId !== null;
   const [fileChanges, setFileChanges] = useState<FileChangesUiState>({
     kind: "closed",
   });
@@ -576,6 +594,14 @@ export default function App() {
     setStatuses((current) => publishStatus(current, status));
   }
   const snapshot = workbench.snapshot;
+  const deleteTarget =
+    snapshot.taskIndex.find((task) => task.id === deleteTargetId) ?? null;
+  useEffect(() => {
+    if (deleteTargetId && !deleteTarget) setDeleteTargetId(null);
+  }, [deleteTargetId, deleteTarget]);
+  const noticeTask = snapshot.taskIndex.find(
+    (task) => task.id === archiveNotice?.taskId,
+  );
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
@@ -1534,6 +1560,7 @@ export default function App() {
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           latestSnapshotRef.current = null;
+          setArchiveNotice(null);
           setApprovalRequests({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
@@ -1625,7 +1652,6 @@ export default function App() {
   }, [bridgeUnavailable, client]);
   useEffect(() => {
     setEditingTitle(false);
-    setConfirmDelete(false);
     taskPanelOpeners.current.clear();
   }, [workbench.activeTaskId]);
   useEffect(() => {
@@ -1711,13 +1737,34 @@ export default function App() {
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
   }
   function closeDeleteConfirmation() {
-    setConfirmDelete(false);
+    const targetId = deleteTargetId;
+    setDeleteTargetId(null);
     window.requestAnimationFrame(() => {
-      const taskRow = document.querySelector<HTMLElement>(
-        `[data-task-id="${CSS.escape(activeTaskIdRef.current ?? "")}"]`,
+      if (deleteOpener.current?.isConnected) {
+        deleteOpener.current.focus();
+        return;
+      }
+      const archivedRow = document.querySelector<HTMLElement>(
+        `[data-archived-task-id="${CSS.escape(targetId ?? "")}"] button`,
       );
-      taskRow?.focus();
+      if (archivedRow) {
+        archivedRow.focus();
+        return;
+      }
+      const taskRow = document.querySelector<HTMLElement>(
+        `[data-task-id="${CSS.escape(targetId ?? "")}"]`,
+      );
+      if (taskRow) taskRow.focus();
+      else
+        document.querySelector<HTMLElement>("#settings-archived h2")?.focus();
     });
+  }
+  function requestTaskDeletion(task: TaskSummary) {
+    deleteOpener.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setDeleteTargetId(task.id);
   }
   function beginTaskPendingOperation(scope: string, operation: string) {
     if (taskPendingScopes.current.has(scope)) return false;
@@ -2868,7 +2915,7 @@ export default function App() {
     if (
       !task ||
       workbenchMutationDisabled ||
-      task.id in taskPending ||
+      `task:${task.id}` in taskPending ||
       !titleDraft.trim()
     )
       return;
@@ -2905,6 +2952,22 @@ export default function App() {
       endTaskPendingOperation(scope);
     }
   }
+  function publishArchiveResult(taskId: string, archived: boolean) {
+    const task = latestSnapshotRef.current?.taskIndex.find(
+      (entry) => entry.id === taskId,
+    );
+    if (!task || task.archived !== archived) return;
+    if (archived)
+      setArchiveNotice({
+        id: ++archiveNoticeId.current,
+        taskId,
+        kind: "archived",
+      });
+    else
+      setArchiveNotice((current) =>
+        current?.taskId === taskId ? null : current,
+      );
+  }
   async function setArchived(
     archived: boolean,
     task: TaskSummary | TaskView | null = activeTask,
@@ -2912,13 +2975,14 @@ export default function App() {
     if (
       !task ||
       workbenchMutationDisabled ||
-      task.id in taskPending ||
+      `task:${task.id}` in taskPending ||
       task.activeOperation !== null
     )
       return;
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
+    setTaskArchiveErrors((current) => ({ ...current, [taskId]: "" }));
     try {
       try {
         await client.setTaskArchived(task.id, archived);
@@ -2929,9 +2993,21 @@ export default function App() {
             archived ? "operation.task_archive" : "operation.task_restore",
             { scope: "task", taskId },
           )
-        )
+        ) {
+          publishArchiveResult(taskId, archived);
           return;
+        }
+        if (archived)
+          setArchiveNotice({
+            id: ++archiveNoticeId.current,
+            taskId,
+            kind: "failed",
+          });
         await refreshSnapshot().catch(() => undefined);
+        setTaskArchiveErrors((current) => ({
+          ...current,
+          [taskId]: t(archived ? "task.archive_failed" : "task.restore_failed"),
+        }));
         setStatus(
           attentionStatus(
             archived ? "task.archive_failed" : "task.restore_failed",
@@ -2946,16 +3022,18 @@ export default function App() {
         archived ? "operation.task_archive" : "operation.task_restore",
         { scope: "task", taskId },
       );
+      publishArchiveResult(taskId, archived);
     } finally {
       endTaskPendingOperation(scope);
     }
   }
-  async function deleteTask(task = activeTask) {
+  async function deleteTask(
+    task: TaskSummary | TaskView | null = deleteTarget,
+  ) {
     if (
       !task ||
       workbenchMutationDisabled ||
-      task.id in taskPending ||
-      !task.archived ||
+      `task:${task.id}` in taskPending ||
       task.deletionStatus === "deleting" ||
       (task.lifecycle === "closing" && task.deletionStatus !== "failed")
     )
@@ -2984,7 +3062,7 @@ export default function App() {
         );
         return;
       }
-      setConfirmDelete(false);
+      setDeleteTargetId(null);
       await refreshAfterCommit(
         "task.delete_requested",
         "operation.task_delete",
@@ -3003,8 +3081,8 @@ export default function App() {
     setSearchQuery("");
   }
   function handleTaskAction(task: TaskSummary, action: TaskMenuAction) {
-    openTask(task.id);
     if (action === "rename") {
+      openTask(task.id);
       setTitleDraft(task.title);
       window.requestAnimationFrame(() => setEditingTitle(true));
       return;
@@ -3013,7 +3091,7 @@ export default function App() {
       void setArchived(!task.archived, task);
       return;
     }
-    window.requestAnimationFrame(() => setConfirmDelete(true));
+    requestTaskDeletion(task);
   }
   async function respondUi(payload: UiResponsePayload) {
     const pending = activeTask?.pendingUi;
@@ -3405,7 +3483,8 @@ export default function App() {
         composeDisabled={Boolean(
           selectedTaskSummary &&
           (selectedTaskSummary.archived ||
-            selectedTaskSummary.deletionStatus !== "idle"),
+            selectedTaskSummary.deletionStatus === "deleting" ||
+            selectedTaskSummary.lifecycle === "closing"),
         )}
         attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
@@ -3864,9 +3943,7 @@ export default function App() {
                   route === "workbench" ? workbench.activeTaskId : null
                 }
                 suppressedCompletionTaskId={suppressedCompletionTaskId}
-                showArchived={showArchived}
                 onSelectTask={openTask}
-                onToggleArchived={() => setShowArchived((shown) => !shown)}
                 onTaskAction={handleTaskAction}
                 taskMutationDisabled={workbenchMutationDisabled}
                 synchronized={!bridgeUnavailable}
@@ -3988,6 +4065,27 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
+            archiveManagement={{
+              tasks: snapshot.taskIndex,
+              workspaces: snapshot.workspaces,
+              query: archivedQuery,
+              pending: taskPending,
+              errors: taskArchiveErrors,
+              synchronized: !bridgeUnavailable,
+              onQuery: setArchivedQuery,
+              scrollTop: archiveView.current.scrollTop,
+              focusTaskId: archiveView.current.focusTaskId,
+              onScroll: (scrollTop) => {
+                archiveView.current.scrollTop = scrollTop;
+              },
+              onOpen: (task) => {
+                archiveView.current.focusTaskId = task.id;
+                setSettingsOpen(false);
+                openTask(task.id);
+              },
+              onRestore: (task) => void setArchived(false, task),
+              onDelete: requestTaskDeletion,
+            }}
             account={snapshot.account}
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
@@ -4273,7 +4371,10 @@ export default function App() {
       ) : route === "scheduled-tasks" ? (
         snapshot.scheduledTasks ? (
           <ScheduledTasksPage
-            snapshot={{ ...snapshot, scheduledTasks: snapshot.scheduledTasks }}
+            snapshot={{
+              ...snapshot,
+              scheduledTasks: snapshot.scheduledTasks,
+            }}
             disabled={
               bridgeUnavailable || !snapshot.capabilities.scheduledTasks
             }
@@ -4308,49 +4409,40 @@ export default function App() {
           className="workbench-view"
           data-view={newTaskDraftActive ? "new-task" : "task"}
         >
-          {activeTask && (
-            <AlertDialog.Root
-              open={confirmDelete}
-              onOpenChange={(open) => !open && closeDeleteConfirmation()}
-            >
-              <AlertDialog.Portal>
-                <AlertDialog.Backdrop />
-                <AlertDialog.Popup>
-                  <AlertDialog.Title id="task-delete-title">
-                    {t("task.delete_confirm_title")}
-                  </AlertDialog.Title>
-                  <AlertDialog.Description id="task-delete-description">
-                    {t("task.delete_confirm_body")}
-                  </AlertDialog.Description>
-                  <div className="delete-confirmation-actions">
-                    <Button
-                      autoFocus
-                      type="button"
-                      variant="secondary"
-                      size="md"
-                      onClick={closeDeleteConfirmation}
-                    >
-                      {t("common.cancel")}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="danger"
-                      size="md"
-                      disabled={taskMutationDisabled}
-                      onClick={() => void deleteTask()}
-                    >
-                      {t("task.delete")}
-                    </Button>
-                  </div>
-                </AlertDialog.Popup>
-              </AlertDialog.Portal>
-            </AlertDialog.Root>
-          )}
-
           <TaskWorkspace
             newTask={newTaskDraftActive}
             hasWorkspace={Boolean(composerWorkspace)}
-            composer={composerFooter}
+            composer={
+              activeTask?.archived ? (
+                <div className="archived-task-banner">
+                  <p>{t("archive.reading")}</p>
+                  <div className="archived-task-actions">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openSettings("archived")}
+                    >
+                      {t("archive.back")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={
+                        taskMutationDisabled ||
+                        selectedTaskSummary?.historyReadOnly ||
+                        activeTask.lifecycle === "closing" ||
+                        activeTask.activeOperation !== null ||
+                        activeTask.deletionStatus === "deleting"
+                      }
+                      onClick={() => void setArchived(false, activeTask)}
+                    >
+                      {t("archive.restore")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                composerFooter
+              )
+            }
             pendingContent={pendingMessages}
             taskContent={
               <TaskContent
@@ -4445,6 +4537,95 @@ export default function App() {
         onLogin={() => runModelSetupAction("login")}
         onConfigure={() => openSettings("providers")}
       />
+
+      {archiveNotice && (
+        <ArchiveNotice
+          key={archiveNotice.id}
+          notice={archiveNotice}
+          disabled={
+            bridgeUnavailable ||
+            !noticeTask ||
+            !noticeTask.archived ||
+            noticeTask.historyReadOnly ||
+            noticeTask.lifecycle === "closing" ||
+            noticeTask.deletionStatus === "deleting" ||
+            `task:${noticeTask.id}` in taskPending
+          }
+          onDismiss={() => setArchiveNotice(null)}
+          onView={() => {
+            setArchiveNotice(null);
+            openSettings("archived");
+          }}
+          onUndo={() => {
+            const taskId = archiveNotice.taskId;
+            const task = latestSnapshotRef.current?.taskIndex.find(
+              (entry) => entry.id === taskId,
+            );
+            if (!task?.archived) return;
+            void setArchived(false, task).then(() =>
+              window.requestAnimationFrame(() => {
+                if (activeTaskIdRef.current === taskId)
+                  composer.current?.focus();
+                else
+                  document
+                    .querySelector<HTMLElement>(
+                      `[data-task-id="${CSS.escape(taskId)}"]`,
+                    )
+                    ?.focus();
+              }),
+            );
+          }}
+        />
+      )}
+      {deleteTarget && (
+        <AlertDialog.Root
+          open={confirmDelete}
+          onOpenChange={(open) => !open && closeDeleteConfirmation()}
+        >
+          <AlertDialog.Portal>
+            <AlertDialog.Backdrop />
+            <AlertDialog.Popup
+              initialFocus={() => deleteCancel.current ?? false}
+            >
+              <AlertDialog.Title id="task-delete-title">
+                {t("task.delete_confirm_title", { title: deleteTarget.title })}
+              </AlertDialog.Title>
+              <AlertDialog.Description id="task-delete-description">
+                {t("task.delete_confirm_body")}
+              </AlertDialog.Description>
+              <div className="delete-confirmation-actions">
+                <Button
+                  autoFocus
+                  type="button"
+                  variant="secondary"
+                  size="md"
+                  ref={deleteCancel}
+                  onClick={closeDeleteConfirmation}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="md"
+                  disabled={
+                    workbenchMutationDisabled ||
+                    `task:${deleteTarget.id}` in taskPending ||
+                    deleteTarget.deletionStatus === "deleting"
+                  }
+                  onClick={() => void deleteTask()}
+                >
+                  {t(
+                    deleteTarget.activeOperation
+                      ? "task.stop_and_delete"
+                      : "task.delete",
+                  )}
+                </Button>
+              </div>
+            </AlertDialog.Popup>
+          </AlertDialog.Portal>
+        </AlertDialog.Root>
+      )}
     </AppShell>
   );
 }

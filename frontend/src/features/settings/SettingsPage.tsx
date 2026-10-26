@@ -20,9 +20,12 @@ import {
   accountIdentityLabel,
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import { ArchivedTasks, type ArchivedTasksProps } from "./ArchivedTasks.tsx";
 import { supportsCustomProviders } from "../../workbench/model-setup.ts";
-export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
-type SettingsSection = "general" | "account" | "models" | "providers";
+export type SettingsFocusTarget =
+  "title" | "account" | "models" | "providers" | "archived";
+type SettingsSection =
+  "general" | "account" | "models" | "providers" | "archived";
 type ProvidersPage = "list" | "builtin" | "custom";
 type RequestedSelection = {
   selectionId: string;
@@ -157,6 +160,7 @@ function customModelTestStatusLabel(
   return t(`settings.custom_model_test_status.${status}`);
 }
 export function SettingsPage({
+  archiveManagement,
   account,
   models,
   automaticWorkspaceRoot,
@@ -191,6 +195,7 @@ export function SettingsPage({
   onOpenRecharge,
   onLogout,
 }: {
+  archiveManagement?: ArchivedTasksProps;
   account: AccountView;
   models: ModelsView;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
@@ -541,7 +546,9 @@ export function SettingsPage({
     }
   })();
   useEffect(() => {
-    if (focusTarget === "providers" && customProviderSettingsAvailable) {
+    if (focusTarget === "archived") {
+      setActiveSection("archived");
+    } else if (focusTarget === "providers" && customProviderSettingsAvailable) {
       setActiveSection("providers");
     } else if (focusTarget === "models") {
       setActiveSection("models");
@@ -573,7 +580,9 @@ export function SettingsPage({
     providersPage,
   ]);
   useEffect(() => {
-    content.current?.scrollTo?.({ top: 0, behavior: "auto" });
+    if (activeSection === "archived" && content.current)
+      content.current.scrollTop = archiveManagement?.scrollTop ?? 0;
+    else content.current?.scrollTo?.({ top: 0, behavior: "auto" });
   }, [activeSection, providersPage]);
   useEffect(() => {
     if (activeSection === "providers") return;
@@ -1016,9 +1025,30 @@ export function SettingsPage({
             </span>
             <span>{t("settings.providers")}</span>
           </a>
+          <a
+            className="focus-ring"
+            href="#settings-archived"
+            aria-current={activeSection === "archived" ? "location" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("archived");
+            }}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="archive" />
+            </span>
+            <span>{t("settings.archived_tasks")}</span>
+          </a>
         </nav>
 
-        <div ref={content} className="settings-content">
+        <div
+          ref={content}
+          className="settings-content"
+          onScroll={(event) => {
+            if (activeSection === "archived")
+              archiveManagement?.onScroll?.(event.currentTarget.scrollTop);
+          }}
+        >
           <h1
             id="settings-page-title"
             ref={title}
@@ -1027,6 +1057,9 @@ export function SettingsPage({
           >
             {t("settings.title")}
           </h1>
+          {activeSection === "archived" && archiveManagement && (
+            <ArchivedTasks {...archiveManagement} />
+          )}
           {activeSection === "general" && (
             <section id="settings-general" className="settings-section">
               <div className="settings-section-heading">

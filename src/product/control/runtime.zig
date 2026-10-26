@@ -69,7 +69,6 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
-    TaskNotArchived,
     TaskReadOnly,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
@@ -4986,15 +4985,20 @@ pub const Runtime = struct {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
         _ = self.task_runtime.stopInputs(task_id);
+        try self.stopTaskOperation(task_id);
+        self.reapTaskInputResources();
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    fn stopTaskOperation(self: *Runtime, task_id: u64) Error!void {
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         switch (task.runtime.active_operation) {
             .run => |id| _ = try self.task_runtime.cancelRun(task_id, id, self.taskRuntimeOperationEffects()),
             .compact => |id| _ = try self.task_runtime.cancelCompact(task_id, id, .user_cancel, self.taskRuntimeOperationEffects()),
             .restore => self.task_runtime.cancelInputPreparation(task_id, self.taskRuntimeOperationEffects()),
             .none => {},
         }
-        self.reapTaskInputResources();
-        self.commitTaskStateNoFail();
-        self.bumpRevision();
     }
 
     /// Test-only immediate Run targeting observes Core receipt semantics. The
@@ -5633,6 +5637,14 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const requested = try self.task_runtime.requestDeletion(task_id);
+        if (requested) {
+            self.stopTaskOperation(task_id) catch |err| {
+                self.task_runtime.find(task_id).?.deletion = .failed;
+                self.reapTaskInputResources();
+                self.bumpRevision();
+                return err;
+            };
+        }
         self.reapTaskInputResources();
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
@@ -14855,7 +14867,6 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     defer control.deinit();
 
     try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
-    try std.testing.expectError(error.TaskNotArchived, control.deleteTask(3));
     try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, "  \n  "));
     try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, "bad\ttitle"));
     try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, &.{0xff}));

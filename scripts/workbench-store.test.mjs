@@ -464,3 +464,30 @@ test("security invalidation clears Host content while preserving the selected ro
     state,
   );
 });
+
+test("settings can explicitly read archived orphan history without restoring Workspace navigation", () => {
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    receivedAt: 0,
+    snapshot: snapshot("1", [task("2", "1", true)], []),
+  });
+  assert.deepEqual(navigableTasks(accepted.snapshot), []);
+  const selected = workbenchReducer(accepted, {
+    type: "task.selected",
+    taskId: "2",
+  });
+  assert.equal(selected.activeTaskId, "2");
+  const refreshed = workbenchReducer(selected, {
+    type: "snapshot.accepted",
+    receivedAt: 1,
+    snapshot: snapshot("2", [task("2", "1", true)], []),
+  });
+  assert.equal(refreshed.activeTaskId, "2");
+  assert.deepEqual(navigableTasks(refreshed.snapshot), []);
+  const restored = workbenchReducer(refreshed, {
+    type: "snapshot.accepted",
+    receivedAt: 2,
+    snapshot: snapshot("3", [task("2", "1", false)], []),
+  });
+  assert.equal(restored.activeTaskId, null);
+});

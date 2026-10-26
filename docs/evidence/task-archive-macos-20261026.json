@@ -1,0 +1,210 @@
+{
+  "id": "E-MAC-TASK-ARCHIVE-20261026",
+  "date": "2026-10-26",
+  "platform": "macOS arm64",
+  "branch": "feat/task-archive-delete",
+  "implementationRevision": "c5b747fa0afd5037c0aa8d0800d419ef952dc11b",
+  "implementationCommits": [
+    "c5b747fa0afd5037c0aa8d0800d419ef952dc11b fix: allow explicit archived history reading outside project navigation",
+    "3ed68e26f9d9a9c5236371d0659b7c3cbe769dd4 fix: hand deletion confirmation focus from task menu to cancel",
+    "156282719d4b41e2725011bf31d7fa542b2416ed feat: explain task archives with undo and return navigation",
+    "d7d65a8cd28945e23f839b9527759cca4dc98f58 feat: manage archived tasks in settings",
+    "6ca6542919b06b9fb34bbe687017cebad6b4f024 feat: stop and delete tasks without requiring archive",
+    "dd09195c2e3bea816bb0b69142d5c156a0ea9cfe feat: define direct task deletion and archived task management"
+  ],
+  "canonicalCore": "0.11.0-dev+9c2f68671198 ABI 1 revision 24",
+  "sdk": "0.11.0-fork.4",
+  "nativeExecutable": {
+    "path": "zig-out/bin/metawork",
+    "sha256": "d1c28c0ba377ca24ceb905b137a17b5418968111f4eb003412c7e7d574ff050d",
+    "artifact": "automation Debug"
+  },
+  "uiWrapper": {
+    "path": ".zig-cache/task-archive-ui-final/metawork.app",
+    "executableSha256": "e3b0200cb70a604a6a21b2c4eae12ea777b0e33d2bdf35a08997715d6fa0b08a",
+    "executableSectionsMatchNative": true,
+    "canonicalRuntimeAssetVerifier": "passed; license in Contents/Resources/licenses; rg retains canonical hash",
+    "purpose": "canonical SDK wrapper for native UI binding; no distribution acceptance claim",
+    "hashTiming": "hash measured after post-QA license placement and outer resealing; observed UI executable sections are identical"
+  },
+  "harnessFiles": {
+    "scripts/task-archive-vertical.mjs": "f92f2828025078c007a67de05c2cc1ccdc99d28402572adf2c4e14a46f8dde31",
+    "scripts/test-agentcore-vertical-macos.mjs": "d70af0a8887e2fcb15b37117a3f661df94802a226f8fedda0ee823beafecf0b1"
+  },
+  "checks": [
+    {
+      "command": "npm run check",
+      "result": "passed",
+      "log": ".zig-cache/task-archive-closeout-check.log"
+    },
+    {
+      "command": "zig build test-product-task-runtime test-product-views test-lifecycle --summary all",
+      "result": "passed",
+      "steps": 29,
+      "passed": 326
+    },
+    {
+      "command": "formal Native graph through npm test",
+      "result": "passed",
+      "steps": 233,
+      "passed": 1404,
+      "skipped": 9,
+      "total": 1413,
+      "log": ".zig-cache/task-archive-closeout-tests.log"
+    },
+    {
+      "command": "Renderer typecheck after archived orphan fix",
+      "result": "passed",
+      "log": ".zig-cache/task-archive-orphan-typecheck.log"
+    },
+    {
+      "command": "node --test scripts/workbench-store.test.mjs scripts/task-archive-visibility.test.mjs",
+      "result": "passed",
+      "passed": 33,
+      "log": ".zig-cache/task-archive-orphan-history.log"
+    },
+    {
+      "command": "node --test scripts/workbench-contract.test.mjs",
+      "result": "passed",
+      "passed": 71
+    },
+    {
+      "command": "node --test scripts/agentcore-vertical.test.mjs scripts/scheduled-tasks.test.mjs scripts/i18n.test.mjs",
+      "result": "passed",
+      "passed": 20,
+      "log": ".zig-cache/task-archive-final-harness.log"
+    },
+    {
+      "command": "npm test (initial implementation)",
+      "result": "passed",
+      "nodePassed": 942,
+      "nodeSkipped": 2,
+      "nativePassed": 1404,
+      "nativeSkipped": 9,
+      "log": ".zig-cache/task-archive-full-test.log",
+      "limit": "before four final edge cases and orphan-history test were added"
+    },
+    {
+      "command": "npm test (subsequent full run)",
+      "result": "failed",
+      "failures": [
+        "scheduled task permission selection assertion",
+        "TaskPanel worker abnormal exit"
+      ],
+      "nativeGraph": "passed",
+      "log": ".zig-cache/task-archive-closeout-tests.log"
+    },
+    {
+      "command": "node --test --test-concurrency=2 scripts/*.test.mjs",
+      "result": "failed",
+      "total": 949,
+      "passed": 946,
+      "skipped": 2,
+      "failures": [
+        "scheduled task permission selection assertion"
+      ],
+      "log": ".zig-cache/task-archive-bounded-node.log"
+    },
+    {
+      "command": "node --test --test-concurrency=1 scripts/*.test.mjs",
+      "result": "failed",
+      "total": 927,
+      "passed": 924,
+      "skipped": 2,
+      "failures": [
+        "TaskPanel worker abnormal exit"
+      ],
+      "scheduledTaskSuite": "passed",
+      "log": ".zig-cache/task-archive-serial-node.log"
+    },
+    {
+      "command": "npm run format:check",
+      "result": "failed",
+      "remaining": "frontend/src/features/tasks/TaskContent.tsx; unchanged from main",
+      "ownFormatting": "scripts/workbench-contract.test.mjs formatted in closeout",
+      "log": ".zig-cache/task-archive-format.log"
+    },
+    {
+      "command": "changed-file Prettier, all affected documentation relative links/anchors, git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "node --test scripts/agentcore-vertical.test.mjs scripts/workbench-contract.test.mjs scripts/workbench-store.test.mjs scripts/task-archive-visibility.test.mjs",
+      "result": "passed",
+      "passed": 107,
+      "log": ".zig-cache/task-archive-closeout-affected.log"
+    }
+  ],
+  "desktopHostVertical": {
+    "result": "passed",
+    "entry": "METAWORK_TASK_ARCHIVE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs",
+    "runs": "unwrapped automation executable and SDK .app wrappers",
+    "log": ".zig-cache/task-archive-final-vertical.log",
+    "cases": [
+      "idle unarchived deletion",
+      "running unarchived stop and delete with late Provider result",
+      "permission-wait deletion without tool effect",
+      "archive/restore preserves Task and Run identities and denies archived input",
+      "workspace source file preserved",
+      "clean cold restart retains archive and confirmed deletions without replay"
+    ],
+    "provider": "scripted replies through real canonical Core; not remote-model quality"
+  },
+  "nativeUi": {
+    "result": "passed for listed scenarios",
+    "scenarios": [
+      "ordinary task Archive/Delete menu entries",
+      "archive success destination notice",
+      "Undo restores exact Task and existing unsent draft",
+      "View opens archived Settings section",
+      "name search filters archived rows",
+      "history renders original user and assistant content without Composer",
+      "return preserves query and focuses source row",
+      "Settings restore opens ordinary Task without losing draft",
+      "delete confirmation names exact Task, explains file preservation and stop, defaults to Cancel",
+      "Cancel preserves task and restores task-row focus",
+      "desktop and native tiled narrow layout visually inspected",
+      "keyboard Tab reaches archive row operations"
+    ],
+    "screenshots": [
+      {
+        "path": ".zig-cache/task-archive-ui-history.png",
+        "sha256": "d03adcbd078aa3e95e621cfd7ba41c5d418d0417306847ba97e7d51acefa42f4",
+        "pixelWidth": 4718592,
+        "pixelHeight": 4292935744,
+        "retention": "local ignored QA artifact; conclusions below are the persistent record"
+      },
+      {
+        "path": ".zig-cache/task-archive-ui-narrow.png",
+        "sha256": "93f10aae70f5cfc1f46eaed6f7375ec77220be203448527e75633b8dead6aad0",
+        "pixelWidth": 4718592,
+        "pixelHeight": 4292935744,
+        "retention": "local ignored QA artifact; conclusions below are the persistent record"
+      },
+      {
+        "path": ".zig-cache/task-archive-ui-final-confirmation.png",
+        "sha256": "0a0d4e2a10676d2a9c0f383578f5da9b3612eb249b0d655726c26edfe2139197",
+        "pixelWidth": 4718592,
+        "pixelHeight": 4292935744,
+        "retention": "local ignored QA artifact; conclusions below are the persistent record"
+      }
+    ],
+    "narrow": "macOS native Window > Move & Resize > Top Left; about 757 CSS px, not a measured 390px desktop run",
+    "scope": "P4 flow and final menu-focus fix observed in real App; archived orphan selection separately verified by store/Renderer tests"
+  },
+  "unresolved": [
+    "Full Node suite is not consistently green. Scheduled-task keyboard selection is intermittently wrong; isolated 9/9 and serial run passed. Cause remains unlocated; its component, SelectionMenu and original test were not changed.",
+    "TaskPanel worker abnormal exit reproduced using main 5775b3a85a1032d3d4409b896ad88b874e70bb6e archived source and the same canonical node_modules; its paired baseline log is .zig-cache/task-archive-baseline-source-test.log. Current bounded run completed TaskPanel; no original assertion was removed.",
+    "Baseline full Node comparison had a separate generate-renderer-wire dependency failure: fresh Zig cache could not reach the fixed SQLite archive (UnknownHostName). This does not prove a baseline product failure or a clean baseline full suite.",
+    "Repository-wide formatting is not green due to unchanged TaskContent.tsx. Only task-owned formatting was corrected.",
+    "Windows, macOS Intel, real 390px window and signed/notarized distribution not validated in this change."
+  ],
+  "guards": "No dependency verifier, command allowlist or assertion was disabled. Recursive signing first altered rg and was correctly rejected; canonical bytes were restored. Wrapper license placement was corrected and outer signing plus canonical asset and executable-section checks passed.",
+  "status": "implementation and associated validation complete; broader Node/format failures remain explicitly open",
+  "unchangedFormattingBaseline": {
+    "file": "frontend/src/features/tasks/TaskContent.tsx",
+    "mainRevision": "5775b3a85a1032d3d4409b896ad88b874e70bb6e",
+    "sha256": "d2a2f99aa202d8362b6b6c76e43e7430813a0f94860979d1ac2b43d799026943",
+    "bytesIdentical": true
+  }
+}
