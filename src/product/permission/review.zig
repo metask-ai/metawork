@@ -11,10 +11,11 @@ pub const max_result_bytes: usize = 2048;
 pub const max_reason_characters: usize = 120;
 pub const max_reason_bytes: usize = max_reason_characters * 4;
 // A real thinking-only response exhausted 2048 tokens before final text. Bound
-// the single call's reasoning budget and its default lifetime together; final
-// JSON/reason limits remain independent and no retry is added.
+// the single call's reasoning budget and lifetime. The production-path replay
+// also returned a complete 3672-token response after 69.6s of network waiting;
+// allow bounded headroom for that workload without retrying or relaxing JSON.
 pub const max_output_tokens: u64 = 4096;
-pub const timeout_ms: u64 = 60_000;
+pub const timeout_ms: u64 = 90_000;
 
 /// Borrowed until review returns. The caller must remove credentials and other
 /// prohibited secrets before admission; this module is not a DLP classifier.

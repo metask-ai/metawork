@@ -521,10 +521,10 @@ fn acceptEvaluation(totals: [2]Metrics, diagnostic: bool, repeats: usize, expect
 }
 
 test "diagnostic configuration cannot pass the full quality gate" {
-    try std.testing.expect(pastProductionDeadline(true, 120_000, 60_001));
-    try std.testing.expect(!pastProductionDeadline(true, 120_000, 59_999));
-    try std.testing.expect(!pastProductionDeadline(false, 120_000, 60_001));
-    try std.testing.expect(!pastProductionDeadline(true, 60_000, 60_001));
+    try std.testing.expect(pastProductionDeadline(true, review.timeout_ms + 1, review.timeout_ms));
+    try std.testing.expect(!pastProductionDeadline(true, review.timeout_ms + 1, review.timeout_ms - 1));
+    try std.testing.expect(!pastProductionDeadline(false, review.timeout_ms + 1, review.timeout_ms));
+    try std.testing.expect(!pastProductionDeadline(true, review.timeout_ms, review.timeout_ms + 1));
     const totals: [2]Metrics = .{
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3, .unnecessary_manual = 2 },
         .{ .attempts = 6, .judged = 6, .authorized_judged = 3, .restricted_judged = 3 },
