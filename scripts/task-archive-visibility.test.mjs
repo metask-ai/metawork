@@ -156,13 +156,11 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
       const result = await new Promise((resolve) =>
         renames.push({ taskId, title, resolve }),
       );
-      if (result.committed) {
+      if (result.committed || !result.error) {
         snapshot.tasks.find((entry) => entry.id === taskId).title = title;
         snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       }
       if (result.error) throw result.error;
-      snapshot.tasks.find((entry) => entry.id === taskId).title = title;
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     },
     setTaskArchived: async (taskId, archived) => {
       const result = await new Promise((resolve) =>
@@ -252,13 +250,6 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
         onRevision(snapshot.revision, snapshot.securityEpoch ?? "1"),
       );
     },
-    async publishArchive(taskId, archived) {
-      snapshot.tasks.find((entry) => entry.id === taskId).archived = archived;
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      await act(async () =>
-        onRevision(snapshot.revision, snapshot.securityEpoch ?? "1"),
-      );
-    },
   };
 }
 
@@ -292,7 +283,7 @@ for (const activation of [
     await waitFor(() => assert.equal(app.renames.length, 1));
     assert.equal(app.renames[0].taskId, "3");
     assert.equal(app.renames[0].title, title);
-    assert.equal(screen.getByRole("textbox", { name: "Task name" }), input);
+    assert.ok(screen.getByRole("textbox", { name: "Task name" }) === input);
     assert.equal(save.disabled, true);
     for (const row of taskRows("3"))
       assert.equal(row.textContent, "Archive target");
@@ -347,7 +338,7 @@ test("rename rejects a blank draft through both Save and input Enter", async (ct
   await app.user.click(input);
   await app.user.keyboard("{Enter}");
   assert.equal(app.renames.length, 0);
-  assert.equal(screen.getByRole("textbox", { name: "Task name" }), input);
+  assert.ok(screen.getByRole("textbox", { name: "Task name" }) === input);
 });
 
 test("rename rejection preserves the draft and permits an explicit retry", async (ctx) => {
@@ -360,11 +351,8 @@ test("rename rejection preserves the draft and permits an explicit retry", async
   );
   await waitFor(() => assert.equal(app.renames.length, 1));
   await app.settleRename({ error: new Error("Host rejected rename") });
-  await screen.findAllByText("The task could not be renamed. Try again.");
-  assert.equal(
-    within(screen.getByRole("dialog")).getByRole("alert").textContent,
-    "The task could not be renamed. Try again.",
-  );
+  const error = await within(screen.getByRole("dialog")).findByRole("alert");
+  assert.equal(error.textContent, "The task could not be renamed. Try again.");
   assert.equal(
     screen.getByRole("textbox", { name: "Task name" }).value,
     "Retry this title",
@@ -384,7 +372,7 @@ test("rename rejection preserves the draft and permits an explicit retry", async
 
 test("rename Dialog traps focus and leaves the task title as display text", async (ctx) => {
   const app = await renderApp(ctx);
-  const input = await app.openRename();
+  await app.openRename();
   assert.equal(
     document.querySelector(".commandbar-task").textContent,
     "Archive target",

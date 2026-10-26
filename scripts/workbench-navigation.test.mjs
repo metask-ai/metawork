@@ -393,22 +393,22 @@ test("command bar attention is explicit and cannot leak across product identity"
     false,
   );
   assert.equal(statusVisibleInCommandBar(workspaceFailure, settings), false);
-  const taskFailure = attentionStatus("task.rename_failed", {
+  const taskFailure = attentionStatus("task.archive_failed", {
     scope: "task",
     taskId: "task-a",
   });
   assert.equal(statusVisibleInCommandBar(taskFailure, taskA), true);
   assert.equal(statusVisibleInCommandBar(taskFailure, taskB), false);
   const concurrent = [
-    attentionStatus("task.rename_failed", {
+    attentionStatus("task.archive_failed", {
       scope: "task",
       taskId: "task-a",
     }),
-    quietStatus("task.renamed", { scope: "task", taskId: "task-b" }),
+    quietStatus("task.archived_status", { scope: "task", taskId: "task-b" }),
   ].reduce(publishStatus, {});
   assert.equal(
     selectCommandBarStatus(concurrent, taskA)?.id,
-    "task.rename_failed",
+    "task.archive_failed",
   );
   assert.equal(selectCommandBarStatus(concurrent, taskB), null);
   const recoveredWorkspace = publishStatus(
