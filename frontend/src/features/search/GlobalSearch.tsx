@@ -10,6 +10,10 @@ export function GlobalSearch({
   open,
   query,
   results,
+  loading,
+  hasMore,
+  onMore,
+  onFirst,
   onQuery,
   onClose,
   onSelect,
@@ -17,6 +21,10 @@ export function GlobalSearch({
   open: boolean;
   query: string;
   results: SearchResult[];
+  loading?: boolean;
+  hasMore?: boolean;
+  onMore?: () => void;
+  onFirst?: () => void;
   onQuery: (query: string) => void;
   onClose: () => void;
   onSelect: (result: SearchResult) => void;
@@ -86,9 +94,10 @@ export function GlobalSearch({
           </div>
           <div id="search-results" className="search-results" role="listbox">
             {!query.trim() && <p>{t("search.hint")}</p>}
-            {query.trim() && results.length === 0 && (
-              <p>{t("search.no_results")}</p>
+            {query.trim() && !loading && results.length === 0 && !hasMore && (
+              <p>{t(onFirst ? "search.no_more" : "search.no_results")}</p>
             )}
+            {loading && <p role="status">{t("search.loading")}</p>}
             {results.map((result, index) => (
               <button
                 id={`search-result-${index}`}
@@ -118,6 +127,25 @@ export function GlobalSearch({
               </button>
             ))}
           </div>
+          {(hasMore || onFirst) && (
+            <div className="flex gap-3 px-4 py-3">
+              {hasMore && (
+                <button
+                  type="button"
+                  className="focus-ring"
+                  disabled={loading}
+                  onClick={onMore}
+                >
+                  {t("search.more")}
+                </button>
+              )}
+              {onFirst && (
+                <button type="button" className="focus-ring" onClick={onFirst}>
+                  {t("search.first")}
+                </button>
+              )}
+            </div>
+          )}
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

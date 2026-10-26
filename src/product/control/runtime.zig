@@ -1199,6 +1199,7 @@ const ViewPreparation = struct {
     credentials: ?ProjectionCredentials = null,
     tools: std.ArrayList(Tool) = .empty,
     raw_bytes: usize = 0,
+    search_query: [task_runtime.search_query_bytes]u8 = @splat(0),
     tool_limit: usize = 0,
     next_tool: usize = 0,
     blocks: [7]Block = undefined,
@@ -1213,6 +1214,7 @@ const ViewPreparation = struct {
     fn clear(self: *ViewPreparation, allocator: std.mem.Allocator) void {
         for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
         self.tools.deinit(allocator);
+        std.crypto.secureZero(u8, &self.search_query);
         if (self.credentials) |*credentials| credentials.deinit();
         self.tail.clear(allocator);
         self.* = .{};
@@ -1286,6 +1288,7 @@ pub const Runtime = struct {
     view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize, encoding: ?[]u8 = null } = @splat(null),
     view_cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
     projection_history_epoch: u64 = 1,
+    search_revision: u64 = 1,
     view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
@@ -4267,8 +4270,7 @@ pub const Runtime = struct {
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => {
-                _ = try self.releaseIdleTaskSession(null);
-                self.bumpRevision();
+                if (try self.releaseIdleTaskSession(null)) self.bumpRevision();
                 return error.TaskBusy;
             },
             error.McpNotRefreshed => retry: {
@@ -4279,8 +4281,7 @@ pub const Runtime = struct {
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
                     error.SessionCapacity => {
-                        _ = try self.releaseIdleTaskSession(null);
-                        self.bumpRevision();
+                        if (try self.releaseIdleTaskSession(null)) self.bumpRevision();
                         return error.TaskBusy;
                     },
                     else => return retry_err,
@@ -4568,6 +4569,8 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.task_runtime.findConst(task_id)) |task| {
             if (task.runtime.active_operation != .none) return error.RecoveryUnavailable;
+            var target = try self.resolveTaskRunModel(task_id);
+            defer if (target) |*value| value.deinit();
             if (task.runtime.attachment == .detached) {
                 _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
                 if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
@@ -4575,8 +4578,6 @@ pub const Runtime = struct {
                     return error.TaskBusy;
                 }
             }
-            var target = try self.resolveTaskRunModel(task_id);
-            defer if (target) |*value| value.deinit();
             if (target) |*value| if (task.runtime.attachment == .detached or
                 (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
                 return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
@@ -6912,12 +6913,15 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
+    pub fn writeSnapshot(self: *Runtime, output: []u8, request_input: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
         if (builtin.is_test) self.view_step_timing = .{};
         self.cancelSnapshot();
         errdefer self.cancelSnapshot();
-        try request.validate();
-        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0) return error.InvalidViewRequest;
+        try request_input.validate();
+        var request = request_input;
+        @memcpy(self.view_preparation.search_query[0..request.search_query.len], request.search_query);
+        request.search_query = self.view_preparation.search_query[0..request.search_query.len];
+        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.search_revision == 0) return error.InvalidViewRequest;
         std.debug.assert(self.view_credentials == null and self.capture_view == null);
         self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
         self.view_read.id = self.next_view_read_id;
@@ -6934,12 +6938,19 @@ pub const Runtime = struct {
         self.view_preparation.known_epoch = request.known_epoch;
         self.view_preparation.tool_limit = self.limits.max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
         for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
+        if (self.containsKnownCredential(request.search_query)) return error.InvalidViewRequest;
         var writer = std.Io.Writer.fixed(output);
         writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"historyEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch, self.projection_history_epoch }) catch return error.SnapshotTooLarge;
         if (request.task_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (request.before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{},\"receipts\":", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{}", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        // Query is bounded and copied into this frozen scope; no Bridge borrow survives.
+        writer.writeAll(",\"searchQuery\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(&writer, request.search_query);
+        writer.writeAll(",\"searchCursor\":") catch return error.SnapshotTooLarge;
+        try product_task.writeSearchCursor(&writer, request.search_cursor);
+        writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
         try self.writeViewReceipts(&writer, request.receipts, false);
         writer.writeByte('}') catch return error.SnapshotTooLarge;
         // Time-dependent execution fields are sampled even without a new CoreEvent.
@@ -7037,11 +7048,8 @@ pub const Runtime = struct {
             const index = self.view_preparation.next_block;
             const block = &self.view_preparation.blocks[index];
             if (block.version == 0) {
+                if ((try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start)) > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
                 const source = try self.view_read.sourceRange(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end);
-                defer {
-                    std.crypto.secureZero(u8, source);
-                    self.allocator.free(source);
-                }
                 block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
                 var replacement: ?[]const u8 = null;
                 var cached = false;
@@ -7101,6 +7109,13 @@ pub const Runtime = struct {
         self.view_preparation.tail = .{};
         try self.view_read.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
         try self.view_read.finalize(self.limits.max_snapshot_bytes);
+        var block_bytes: usize = 0;
+        for (self.view_preparation.blocks) |block| {
+            const bytes = (try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start));
+            if (bytes > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
+            block_bytes += bytes;
+        }
+        if (self.view_read.total - block_bytes > 768 * 1024) return error.SnapshotTooLarge;
         if (self.view_preparation.credentials) |*credentials| credentials.deinit();
         self.view_preparation.credentials = null;
         self.view_preparation.tools.deinit(self.allocator);
@@ -7199,7 +7214,11 @@ pub const Runtime = struct {
             .taskPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .limit = request.run_limit },
             .historyPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .cursor = request.before_run_id orelse 0, .limit = request.run_limit },
             .management => .{ .kind = kind, .management = @intFromEnum(request.management) },
-            .searchIndex => .{ .kind = kind, .limit = @intFromBool(request.search) },
+            .searchIndex => key: {
+                var key: view_cache.Key = .{ .kind = kind, .limit = @intFromBool(request.search), .search_query = request.search_query };
+                if (request.search_cursor) |cursor| key.search_cursor = .{ cursor.revision, cursor.security_epoch, cursor.task, cursor.run, cursor.part, cursor.offset };
+                break :key key;
+            },
             else => .{ .kind = kind },
         };
     }
@@ -7234,9 +7253,7 @@ pub const Runtime = struct {
             },
             .searchIndex => {
                 if (request.search) {
-                    writer.writeByte('[') catch return error.SnapshotTooLarge;
-                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text);
-                    writer.writeByte(']') catch return error.SnapshotTooLarge;
+                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text, request.search_query, request.search_cursor, self.search_revision, self.projection_security_epoch);
                 } else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
         }
@@ -8011,7 +8028,7 @@ pub const Runtime = struct {
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
             else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id) or
-                (if (self.task_runtime.idleSessionRoute(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
+                (if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
                 .available
             else
                 .unavailable,
@@ -10313,6 +10330,7 @@ pub const Runtime = struct {
     }
 
     fn bumpRevision(self: *Runtime) void {
+        self.search_revision = std.math.add(u64, self.search_revision, 1) catch 0;
         self.encoded_views.invalidateAll();
         if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
             block.current = false;
@@ -22323,4 +22341,29 @@ test "Save As picker cancellation deadline and shutdown preserve the pre-publica
     try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), save.releases);
+}
+
+test "Product view bounded Host search matches the independent Renderer fixture and freezes query ownership" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var query = "inspect".*;
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3, .search = true, .search_query = &query });
+    @memset(&query, 'x');
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const length = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, &output, offset, length);
+        offset += length;
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("inspect", parsed.value.object.get("scope").?.object.get("searchQuery").?.string);
+    const expected = std.mem.trim(u8, @import("product_control_contract_fixture").search_page, "\r\n");
+    var writer = std.Io.Writer.fixed(&output);
+    try std.json.Stringify.value(parsed.value.object.get("searchIndex").?, .{}, &writer);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "inspect" }, .searchIndex)) != null);
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "another" }, .searchIndex)) == null);
 }

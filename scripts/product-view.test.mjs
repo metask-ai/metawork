@@ -204,3 +204,67 @@ test("delivered Output wire consumes only bounded trusted metadata and rejects p
   delete missing.taskPage.task.runs[0].outputs;
   assert.throws(() => decodeWorkbenchSnapshot(missing));
 });
+
+test("Product bounded Host search shares Native wire and rejects oversized or stale pages", () => {
+  const page = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/search-page.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const value = structuredClone(fixture);
+  Object.assign(value.scope, {
+    search: true,
+    searchQuery: "inspect",
+    searchCursor: null,
+  });
+  value.searchIndex = page;
+  assert.equal(
+    decodeWorkbenchSnapshot(value).searchIndex.results[0].detail,
+    "inspect",
+  );
+  for (const mutate of [
+    (v) => (v.searchIndex.results[0].detail = "界".repeat(171)),
+    (v) =>
+      (v.searchIndex.results = Array.from({ length: 51 }, (_, i) => ({
+        ...page.results[0],
+        part: String(i),
+      }))),
+    (v) => (v.searchIndex.stale = true),
+    (v) => (v.searchIndex.results[0].kind = "raw_tool"),
+    (v) => (v.searchIndex.results[0].part = "18446744073709551616"),
+    (v) => (v.scope.searchQuery = "界".repeat(86)),
+    (v) =>
+      (v.scope.searchCursor = {
+        revision: "0",
+        securityEpoch: "1",
+        task: "0",
+        run: "0",
+        part: "0",
+        offset: "0",
+      }),
+  ]) {
+    const bad = structuredClone(value);
+    mutate(bad);
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+  const cursor = {
+    revision: "2",
+    securityEpoch: "2",
+    task: "0",
+    run: "1",
+    part: "0",
+    offset: "65536",
+  };
+  const working = structuredClone(value);
+  working.searchIndex = { stale: false, results: [], nextCursor: cursor };
+  assert.equal(
+    decodeWorkbenchSnapshot(working).searchIndex.nextCursor.offset,
+    "65536",
+  );
+  working.scope.searchCursor = cursor;
+  assert.throws(() => decodeWorkbenchSnapshot(working));
+});

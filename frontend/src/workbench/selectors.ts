@@ -5,7 +5,6 @@ import type {
   WorkbenchSnapshot,
   WorkspaceView,
 } from "../bridge/contracts.ts";
-import { runInputDisplay } from "./run-input.ts";
 import type { WorkbenchState } from "./store.ts";
 import { navigableTasks } from "./task-visibility.ts";
 
@@ -194,55 +193,38 @@ export function searchWorkbench(
   snapshot: WorkbenchSnapshot,
   query: string,
 ): SearchResult[] {
-  const needle = query.trim().toLocaleLowerCase();
-  if (!needle) return [];
-  const results: SearchResult[] = [];
-  const matches = (value: string) => value.toLocaleLowerCase().includes(needle);
-  const workspaces = new Map(
-    snapshot.workspaces.map((workspace) => [workspace.id, workspace]),
-  );
-  for (const task of navigableTasks(snapshot)) {
-    const workspace = workspaces.get(task.workspaceId);
-    if (!workspace) continue;
-    const title = task.title;
-    if (title && matches(title))
-      results.push({
-        key: `task:${task.id}`,
-        kind: "task",
-        taskId: task.id,
+  if (
+    !query.trim() ||
+    !snapshot.scope.search ||
+    snapshot.scope.searchQuery !== query.trim() ||
+    snapshot.searchIndex?.stale
+  )
+    return [];
+  return (snapshot.searchIndex?.results ?? []).flatMap((hit) => {
+    const task = snapshot.taskIndex.find((task) => task.id === hit.taskId);
+    if (!task) return [];
+    return [
+      {
+        key: `${hit.kind}:${hit.taskId}:${hit.runId ?? "title"}:${hit.part}`,
+        kind: hit.kind,
+        taskId: hit.taskId,
         archived: task.archived,
-        title,
-        detail:
-          workspace.kind === "automatic"
-            ? workspace.displayName
-            : workspace.canonicalRoot,
-      });
-    for (const run of snapshot.searchIndex?.filter(
-      (run) => run.taskId === task.id,
-    ) ?? []) {
-      const input = runInputDisplay(run.input);
-      const output = run.output
-        ? `${run.output.commentary.join("\n\n")}\n\n${run.output.response}`
-        : "";
-      if (matches(input))
-        results.push({
-          key: `instruction:${task.id}:${run.runId}`,
-          kind: "instruction",
-          taskId: task.id,
-          archived: task.archived,
-          title,
-          detail: input,
-        });
-      if (run.output !== null && output && matches(output))
-        results.push({
-          key: `completion:${task.id}:${run.runId}`,
-          kind: "completion",
-          taskId: task.id,
-          archived: task.archived,
-          title,
-          detail: output,
-        });
-    }
+        title: task.title,
+        detail: hit.detail,
+      },
+    ];
+  });
+}
+
+export function boundedSearchQuery(query: string): string {
+  let result = "";
+  let bytes = 0;
+  const encoder = new TextEncoder();
+  for (const codepoint of query) {
+    const size = encoder.encode(codepoint).length;
+    if (bytes + size > 256) break;
+    result += codepoint;
+    bytes += size;
   }
-  return results.slice(0, 50);
+  return result;
 }

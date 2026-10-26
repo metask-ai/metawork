@@ -2553,3 +2553,34 @@ test("send acknowledgement preserves newer text and unsubmitted attachments", ()
   });
   assert.deepEqual(drafts.draft, { kind: "text", text: "newer text" });
 });
+
+test("Global search distinguishes a pending work page and exposes bounded continuation controls", () => {
+  let more = 0;
+  let first = 0;
+  const props = {
+    open: true,
+    query: "needle",
+    results: [],
+    loading: true,
+    hasMore: true,
+    onQuery() {},
+    onClose() {},
+    onSelect() {},
+    onMore() {
+      more += 1;
+    },
+    onFirst() {
+      first += 1;
+    },
+  };
+  const view = render(searchElement(props));
+  assert.equal(screen.getByRole("status").textContent, "Searching…");
+  assert.equal(screen.queryByText("No results found."), null);
+  assert.ok(screen.getByRole("button", { name: "Continue search" }).disabled);
+  view.rerender(searchElement({ ...props, loading: false }));
+  fireEvent.click(screen.getByRole("button", { name: "Continue search" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back to first page" }));
+  assert.equal(more, 1);
+  assert.equal(first, 1);
+  view.unmount();
+});

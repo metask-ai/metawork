@@ -127,7 +127,7 @@ pub const TextProjection = struct {
         return self.contains_sensitive_fn(self.context, value);
     }
 
-    fn writeJson(
+    pub fn writeJson(
         self: TextProjection,
         writer: *std.Io.Writer,
         value: []const u8,
@@ -254,17 +254,6 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"unreadCompletionRunId\":") catch return error.SnapshotTooLarge;
     if (task_policy.unreadCompletionRunId(task)) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeByte('}') catch return error.SnapshotTooLarge;
-}
-
-pub fn writeSearchRun(writer: *std.Io.Writer, task: *const task_state.Task, run: *const task_state.RunRecord, text: TextProjection) Error!void {
-    writer.print("{{\"taskId\":\"{d}\",\"runId\":\"{d}\",\"input\":", .{ task.durable.id, run.id }) catch return error.SnapshotTooLarge;
-    try writeInput(writer, text, run.input, null);
-    if (task_state.productTerminalFacts(run)) |terminal| {
-        if (terminal.outcome == .completed) {
-            try writeRunOutput(writer, text, run);
-        } else writer.writeAll(",\"output\":null") catch return error.SnapshotTooLarge;
-    } else writer.writeAll(",\"output\":null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 

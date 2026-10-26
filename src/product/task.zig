@@ -12,6 +12,11 @@ const view = @import("product_task_view");
 const execution_binding = @import("product_task_execution_binding");
 
 pub const Runtime = runtime.Runtime;
+pub const SearchCursor = runtime.SearchCursor;
+pub const search_query_bytes = runtime.search_query_bytes;
+pub const search_result_limit = runtime.search_result_limit;
+pub const search_snippet_bytes = runtime.search_snippet_bytes;
+pub const writeSearchCursor = runtime.writeSearchCursor;
 pub const CreateTaskInput = runtime.CreateTaskInput;
 pub const PreparedCreate = runtime.PreparedCreate;
 pub const PreparedModelIntent = runtime.PreparedModelIntent;

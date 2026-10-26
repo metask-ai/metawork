@@ -1,3 +1,4 @@
+import type { SearchCursor } from "./contracts.ts";
 import { outputActionStates } from "./contracts.ts";
 import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
 import {
@@ -4753,6 +4754,36 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     servers,
   };
 }
+export function decodeSearchCursor(
+  value: unknown,
+  path: string,
+): SearchCursor | null {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "revision",
+    "securityEpoch",
+    "task",
+    "run",
+    "part",
+    "offset",
+  ]);
+  const bounded = (value: unknown, p: string) => {
+    const id = wireId(value, p);
+    u64WireInteger(value, p);
+    return id;
+  };
+  return {
+    revision: positiveU64WireId(item.revision, `${path}.revision`),
+    securityEpoch: positiveU64WireId(
+      item.securityEpoch,
+      `${path}.securityEpoch`,
+    ),
+    task: bounded(item.task, `${path}.task`),
+    run: bounded(item.run, `${path}.run`),
+    part: bounded(item.part, `${path}.part`),
+    offset: bounded(item.offset, `${path}.offset`),
+  };
+}
 export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
   const item = object(value, path, [
     "taskId",
@@ -4760,6 +4791,8 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
     "runLimit",
     "management",
     "search",
+    "searchQuery",
+    "searchCursor",
     "receipts",
   ]);
   const taskId =
@@ -4788,12 +4821,25 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
       .size !== receipts.length
   )
     fail(path, "invalid receipt query bounds");
+  const search = booleanValue(item.search, `${path}.search`);
+  const searchQuery = stringValue(item.searchQuery, `${path}.searchQuery`);
+  const searchCursor = decodeSearchCursor(
+    item.searchCursor,
+    `${path}.searchCursor`,
+  );
+  if (
+    new TextEncoder().encode(searchQuery).length > 256 ||
+    (!search && (searchQuery !== "" || searchCursor !== null))
+  )
+    fail(path, "invalid search bounds");
   return {
     receipts,
     taskId,
     beforeRunId,
     runLimit,
-    search: booleanValue(item.search, `${path}.search`),
+    search,
+    searchQuery,
+    searchCursor,
     management: enumValue(item.management, `${path}.management`, [
       "none",
       "skills",
@@ -5535,39 +5581,69 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const searchIndex =
     view.searchIndex === null
       ? null
-      : arrayValue(view.searchIndex, "$.searchIndex", (value, path) => {
-          const item = object(value, path, [
-            "taskId",
-            "runId",
-            "input",
-            "output",
+      : (() => {
+          const page = object(view.searchIndex, "$.searchIndex", [
+            "stale",
+            "results",
+            "nextCursor",
           ]);
-          const taskId = positiveWireId(item.taskId, `${path}.taskId`);
-          if (!taskIndex.some((task) => task.id === taskId))
-            fail(path, "unknown search Task");
-          const output =
-            item.output === null
-              ? null
-              : decodeRunOutput(item.output, `${path}.output`);
+          const stale = booleanValue(page.stale, "$.searchIndex.stale");
+          const results = arrayValue(
+            page.results,
+            "$.searchIndex.results",
+            (value, path) => {
+              const hit = object(value, path, [
+                "taskId",
+                "runId",
+                "part",
+                "kind",
+                "detail",
+              ]);
+              const taskId = positiveU64WireId(hit.taskId, `${path}.taskId`);
+              if (!taskIndex.some((task) => task.id === taskId))
+                fail(path, "unknown search Task");
+              const runId =
+                hit.runId === null
+                  ? null
+                  : positiveU64WireId(hit.runId, `${path}.runId`);
+              const kind = enumValue(hit.kind, `${path}.kind`, [
+                "task",
+                "instruction",
+                "completion",
+              ] as const);
+              if ((kind === "task") !== (runId === null))
+                fail(path, "search kind mismatch");
+              const detail = stringValue(hit.detail, `${path}.detail`);
+              if (new TextEncoder().encode(detail).length > 512)
+                fail(path, "unbounded search snippet");
+              return {
+                taskId,
+                runId,
+                part: u64WireInteger(hit.part, `${path}.part`),
+                kind,
+                detail,
+              };
+            },
+          );
+          const nextCursor = decodeSearchCursor(
+            page.nextCursor,
+            "$.searchIndex.nextCursor",
+          );
           if (
-            output &&
-            (output.provisional !== "" ||
-              (output.responseKind === null && output.response !== ""))
+            nextCursor &&
+            JSON.stringify(nextCursor) === JSON.stringify(scope.searchCursor)
           )
-            fail(path, "search output must be classified and terminal");
-          return {
-            taskId,
-            runId: positiveWireId(item.runId, `${path}.runId`),
-            input: decodeRunInput(item.input, `${path}.input`),
-            output,
-          };
-        });
-  if (
-    searchIndex &&
-    new Set(searchIndex.map((run) => `${run.taskId}:${run.runId}`)).size !==
-      searchIndex.length
-  )
-    fail("$.searchIndex", "duplicate search Run");
+            fail("$.searchIndex", "non-progressing search cursor");
+          if (
+            results.length > 50 ||
+            (stale && (results.length !== 0 || nextCursor !== null)) ||
+            new Set(
+              results.map((hit) => `${hit.taskId}:${hit.runId}:${hit.part}`),
+            ).size !== results.length
+          )
+            fail("$.searchIndex", "invalid search page");
+          return { stale, results, nextCursor };
+        })();
   const summary = taskIndex.find((task) => task.id === scope.taskId);
   if ((summary !== undefined) !== (taskPage !== null))
     fail("$.taskPage", "Task presence disagrees with index");

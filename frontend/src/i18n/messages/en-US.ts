@@ -1129,6 +1129,10 @@ export const enUS = {
   "operation.workspace_remove": "Removing the workspace",
   "operation.skill_catalog_refresh": "Refreshing the Skill catalog",
   "search.open": "Search",
+  "search.loading": "Searching…",
+  "search.no_more": "No more matches.",
+  "search.more": "Continue search",
+  "search.first": "Back to first page",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
   "search.hint":

@@ -70,6 +70,8 @@ pub const ProductViewRequest = struct {
     runLimit: JsonRunLimit,
     management: JsonManagement,
     search: bool,
+    searchQuery: WireText,
+    searchCursor: ?struct { revision: WireId, securityEpoch: WireId, task: WireId, run: WireId, part: WireId, offset: WireId },
     receipts: []const struct { taskId: WireId, operationId: WireText },
     known: struct { securityEpoch: WireId, versions: ViewVersions },
 
@@ -82,6 +84,8 @@ pub const ProductViewRequest = struct {
             .run_limit = self.runLimit.value,
             .management = self.management.value,
             .search = self.search,
+            .search_query = self.searchQuery.value,
+            .search_cursor = if (self.searchCursor) |cursor| .{ .revision = cursor.revision.value, .security_epoch = cursor.securityEpoch.value, .task = std.math.cast(usize, cursor.task.value) orelse return error.InvalidViewRequest, .run = std.math.cast(usize, cursor.run.value) orelse return error.InvalidViewRequest, .part = std.math.cast(usize, cursor.part.value) orelse return error.InvalidViewRequest, .offset = std.math.cast(usize, cursor.offset.value) orelse return error.InvalidViewRequest } else null,
             .receipts = storage[0..self.receipts.len],
         };
         request.known_epoch = self.known.securityEpoch.value;
@@ -1144,7 +1148,7 @@ test "complete model metadata incoming declarations retain capabilities and toke
 
 test "Product view request is closed and validates stable history identity" {
     var parsed = try parsePayload(ProductViewRequest,
-        \\{"taskId":"7","beforeRunId":"9","runLimit":4,"management":"skills","search":false,"receipts":[],"known":{"securityEpoch":"0","versions":{"context":"0","workspaces":"0","taskIndex":"0","taskPage":"0","historyPage":"0","management":"0","searchIndex":"0"}}}
+        \\{"taskId":"7","beforeRunId":"9","runLimit":4,"management":"skills","search":false,"searchQuery":"","searchCursor":null,"receipts":[],"known":{"securityEpoch":"0","versions":{"context":"0","workspaces":"0","taskIndex":"0","taskPage":"0","historyPage":"0","management":"0","searchIndex":"0"}}}
     );
     defer parsed.deinit();
     var query_storage: [64]product_control.ViewReceiptQuery = undefined;
@@ -1157,7 +1161,7 @@ test "Product view request is closed and validates stable history identity" {
         ,
         \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"unknown"}
         ,
-        \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"none","search":false,"receipts":[],"fields":["tasks"]}
+        \\{"taskId":null,"beforeRunId":null,"runLimit":4,"management":"none","search":false,"searchQuery":"","searchCursor":null,"receipts":[],"fields":["tasks"]}
     };
     for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ProductViewRequest, payload));
     parsed.value.taskId = null;
@@ -1169,7 +1173,7 @@ test "Product view request is closed and validates stable history identity" {
 }
 
 test "snapshot request scalars reject JSON coercions and accept only canonical wire forms" {
-    const valid = "{\"taskId\":\"7\",\"beforeRunId\":null,\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}";
+    const valid = "{\"taskId\":\"7\",\"beforeRunId\":null,\"runLimit\":4,\"management\":\"none\",\"search\":false,\"searchQuery\":\"\",\"searchCursor\":null,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}";
     for ([_]struct { from: []const u8, to: []const u8 }{
         .{ .from = "\"runLimit\":4", .to = "\"runLimit\":\"4\"" },
         .{ .from = "\"runLimit\":4", .to = "\"runLimit\":4.0" },

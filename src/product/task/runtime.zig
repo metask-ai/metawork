@@ -455,6 +455,29 @@ pub const CloseError = ControlError || std.Thread.SpawnError || error{
     TaskBusy,
 };
 
+/// Process-local, version-bound search position; never a history identifier.
+pub const SearchCursor = struct {
+    revision: u64,
+    security_epoch: u64,
+    task: usize = 0,
+    run: usize = 0,
+    part: usize = 0,
+    offset: usize = 0,
+};
+pub const search_query_bytes = 256;
+pub const search_result_limit = 50;
+pub const search_snippet_bytes = 512;
+pub const search_work_limit = 64 * 1024;
+pub const search_unit_limit = 128;
+
+pub fn writeSearchCursor(writer: *std.Io.Writer, cursor: ?SearchCursor) task_view.Error!void {
+    const value = cursor orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"task\":\"{d}\",\"run\":\"{d}\",\"part\":\"{d}\",\"offset\":\"{d}\"}}", .{ value.revision, value.security_epoch, value.task, value.run, value.part, value.offset }) catch return error.SnapshotTooLarge;
+}
+
 pub const RecoveryMode = enum { checkpoint, fresh };
 
 pub const RecoveryStartFacts = struct {
@@ -2935,7 +2958,7 @@ pub const Runtime = struct {
         return prepared;
     }
 
-    pub fn idleSessionRoute(self: *const Runtime, except_task_id: ?u64) ?u64 {
+    pub fn idleReleaseRouteId(self: *const Runtime, except_task_id: ?u64) ?u64 {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (except_task_id != task.durable.id and idleSessionReleasable(task)) return task.runtime.routeId();
@@ -2947,7 +2970,7 @@ pub const Runtime = struct {
     /// The caller retries admission after completion; no operation is replayed.
     pub fn releaseIdleSession(self: *Runtime, except_task_id: ?u64, notifier: task_execution.Notifier) (agent.Error || std.mem.Allocator.Error || std.Thread.SpawnError)!bool {
         for (self.tasks) |entry| if (entry) |task| {
-            if (task.runtime.close_thread != null or task.runtime.close_requested) return true;
+            if (task.runtime.close_thread != null or task.runtime.close_requested) return false;
         };
         var candidate: ?*task_state.Task = null;
         for (self.tasks) |*entry| {
@@ -4678,17 +4701,84 @@ pub const Runtime = struct {
         return task_state.submissionHasExecution(task, operation_id);
     }
 
-    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+    /// Bounds both returned bytes and matching work. Positions visit fields, not
+    /// a copied corpus; live streaming output is never searchable.
+    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection, query: []const u8, after: ?SearchCursor, revision: u64, security_epoch: u64) (task_view.Error || error{InvalidViewRequest})!void {
+        if (query.len > search_query_bytes or !std.unicode.utf8ValidateSlice(query)) return error.InvalidViewRequest;
+        const stale = if (after) |cursor| cursor.revision != revision or cursor.security_epoch != security_epoch else false;
+        var cursor = after orelse SearchCursor{ .revision = revision, .security_epoch = security_epoch };
+        writer.print("{{\"stale\":{},\"results\":[", .{stale}) catch return error.SnapshotTooLarge;
         var count: usize = 0;
-        for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                count += 1;
-                try task_view.writeSearchRun(writer, task, run, text);
+        var work: usize = 0;
+        var units: usize = 0;
+        while (!stale and query.len != 0 and cursor.task < self.tasks.len and count < search_result_limit and work < search_work_limit and units < search_unit_limit) {
+            const task = if (self.tasks[cursor.task]) |*value| value else {
+                cursor.task += 1;
+                cursor.run = 0;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
+            };
+            if (cursor.run > task.durable.runs.len) {
+                cursor.task += 1;
+                cursor.run = 0;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
             }
+            const source = searchSource(task, cursor.run, cursor.part) orelse {
+                cursor.run += 1;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
+            };
+            if (cursor.offset > source.value.len) return error.InvalidViewRequest;
+            var match: ?usize = null;
+            while (cursor.offset <= source.value.len -| query.len and query.len <= source.value.len and work < search_work_limit) {
+                var equal = true;
+                for (query, 0..) |byte, index| {
+                    work += 1;
+                    if (std.ascii.toLower(byte) != std.ascii.toLower(source.value[cursor.offset + index])) {
+                        equal = false;
+                        break;
+                    }
+                    if (work == search_work_limit and index + 1 != query.len) {
+                        equal = false;
+                        break;
+                    }
+                }
+                if (equal) {
+                    match = cursor.offset;
+                    break;
+                }
+                // Resume this candidate when a comparison exhausts the quantum.
+                // The query itself is bounded, so a fresh quantum always progresses.
+                if (work >= search_work_limit) break;
+                cursor.offset += 1;
+            }
+            if (match) |at| {
+                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.print("{{\"taskId\":\"{d}\",\"runId\":", .{task.durable.id}) catch return error.SnapshotTooLarge;
+                if (cursor.run == 0) writer.writeAll("null") catch return error.SnapshotTooLarge else writer.print("\"{d}\"", .{task.durable.runs[cursor.run - 1].?.id}) catch return error.SnapshotTooLarge;
+                writer.print(",\"part\":\"{d}\",\"kind\":\"{s}\",\"detail\":", .{ cursor.part, @tagName(source.kind) }) catch return error.SnapshotTooLarge;
+                var start = at -| 128;
+                while (start < at and source.value[start] & 0xc0 == 0x80) start += 1;
+                var end = @min(source.value.len, start + search_snippet_bytes);
+                while (end < source.value.len and end > start and source.value[end] & 0xc0 == 0x80) end -= 1;
+                try text.writeJson(writer, source.value[start..end]);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+                count += 1;
+            } else if (work >= search_work_limit) break;
+            cursor.part += 1;
+            cursor.offset = 0;
+            units += 1;
         }
+        writer.writeAll("],\"nextCursor\":") catch return error.SnapshotTooLarge;
+        try writeSearchCursor(writer, if (!stale and query.len != 0 and cursor.task < self.tasks.len) cursor else null);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
     /// Missing Task is explicit null. A history cursor must name a retained
@@ -7849,6 +7939,44 @@ fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
 }
 
+const SearchSource = struct { value: []const u8, kind: enum { task, instruction, completion } };
+fn searchSource(task: *const task_state.Task, run_slot: usize, part: usize) ?SearchSource {
+    if (run_slot == 0) return if (part == 0) .{ .value = task.durable.title, .kind = .task } else null;
+    const run = if (task.durable.runs[run_slot - 1]) |*value| value else return null;
+    var index: usize = 0;
+    switch (run.input) {
+        .text => |value| {
+            if (part == index) return .{ .value = value.value, .kind = .instruction };
+            index += 1;
+        },
+        .skill => |value| {
+            if (part == index) return .{ .value = value.invocation_name, .kind = .instruction };
+            index += 1;
+            for (value.argument_values) |argument| {
+                if (part == index) return .{ .value = argument, .kind = .instruction };
+                index += 1;
+            }
+        },
+        .multimodal => |value| {
+            if (part == index) return .{ .value = value.text orelse "", .kind = .instruction };
+            index += 1;
+            for (value.attachments) |attachment| {
+                if (part == index) return .{ .value = attachment.display_name, .kind = .instruction };
+                index += 1;
+            }
+        },
+    }
+    for (run.additional_inputs) |entry| if (entry) |input| {
+        if (part == index) return .{ .value = input.text, .kind = .instruction };
+        index += 1;
+    };
+    if (part == index) if (task_state.productTerminalFacts(run)) |terminal| {
+        if (terminal.outcome == .completed and run.event_stream_finalized)
+            return .{ .value = run.assistant.list.items, .kind = .completion };
+    };
+    return null;
+}
+
 fn idleSessionReleasable(task: *const task_state.Task) bool {
     const attached = task.runtime.attachedConst() orelse return false;
     if (attached.health != .available or !closeReady(task) or
@@ -9456,4 +9584,75 @@ test "Run execution reclamation waits for every publication and lease then prese
     try std.testing.expectEqualStrings("retained input", run.input.text.value);
     try std.testing.expectEqual(task_state.RunOutcome.completed, task_state.productTerminalFacts(run).?.outcome);
     runtime.releaseQuiescentRunEffects(effects); // Idempotent, including the retained hole.
+}
+
+test "Host search pages bounded matching work without copying history or exposing live output" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    task.durable.archived = true;
+    task.durable.title = @constCast("archived task");
+    const input = try allocator.alloc(u8, 3 * search_work_limit + 64);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    @memcpy(input[input.len - 12 ..][0..12], "needle尾部");
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, input)};
+    task.durable.runs = &runs;
+    runtime.tasks[0] = task;
+    defer runtime.tasks[0] = null;
+    const run = &runtime.tasks[0].?.durable.runs[0].?;
+    run.assistant.list = .{ .items = @constCast("live-only needle"), .capacity = 0 };
+    const Json = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) task_view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var text: task_view.TextProjection = undefined;
+    text.context = &runtime;
+    text.write_json_fn = Json.write;
+    var storage: [256 * 1024]u8 = undefined;
+    var cursor: ?SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    while (pages < 12) : (pages += 1) {
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, text, "NEEDLE", cursor, 4, 9);
+        try std.testing.expect(writer.end < storage.len);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const page = parsed.value.object;
+        for (page.get("results").?.array.items) |hit| {
+            const detail = hit.object.get("detail").?.string;
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(detail));
+            try std.testing.expect(std.mem.indexOf(u8, detail, "live-only") == null);
+            hits += 1;
+        }
+        const next = page.get("nextCursor").?;
+        if (next == .null) break;
+        const value = next.object;
+        const previous = cursor;
+        cursor = .{ .revision = 4, .security_epoch = 9, .task = try std.fmt.parseInt(usize, value.get("task").?.string, 10), .run = try std.fmt.parseInt(usize, value.get("run").?.string, 10), .part = try std.fmt.parseInt(usize, value.get("part").?.string, 10), .offset = try std.fmt.parseInt(usize, value.get("offset").?.string, 10) };
+        if (previous) |before| try std.testing.expect(!std.meta.eql(before, cursor.?));
+    }
+    try std.testing.expect(pages >= 3 and pages < 12);
+    try std.testing.expectEqual(@as(usize, 1), hits);
+    run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    run.terminal_observed = true;
+    run.event_stream_finalized = true;
+    var writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "live-only", .{ .revision = 4, .security_epoch = 9, .run = 1, .part = 1 }, 4, 9);
+    var completed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+    defer completed.deinit();
+    try std.testing.expectEqualStrings("completion", completed.value.object.get("results").?.array.items[0].object.get("kind").?.string);
+    writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "needle", cursor, 5, 9);
+    try std.testing.expectEqualStrings("{\"stale\":true,\"results\":[],\"nextCursor\":null}", writer.buffered());
+    writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "needle", cursor, 4, 10);
+    try std.testing.expectEqualStrings("{\"stale\":true,\"results\":[],\"nextCursor\":null}", writer.buffered());
+    writer = std.Io.Writer.fixed(&storage);
+    try std.testing.expectError(error.InvalidViewRequest, runtime.writeSearchProjection(&writer, text, "a" ** 257, null, 4, 9));
 }

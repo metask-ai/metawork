@@ -7978,7 +7978,7 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     defer std.testing.allocator.free(response);
     const connected = native.dispatch("{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, response);
     try std.testing.expect(std.mem.indexOf(u8, connected, "\"accepted\":true") != null);
-    const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
+    const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"searchQuery\":\"\",\"searchCursor\":null,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
     var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(begin, source, response), .{});
     defer descriptor.deinit();
     var result = descriptor.value.object.get("result").?.object;

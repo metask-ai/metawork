@@ -6081,7 +6081,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     const revision = workbench.currentRevision();
 
     try std.testing.expectError(
-        error.TaskCapacity,
+        error.TaskBusy,
         workbench.createTaskForWorkspace(
             .automatic,
             1,
@@ -10360,7 +10360,7 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         switch (read) {
             .revision => _ = control.currentRevision(),
             .snapshot => _ = try control.writeAggregateFixture(&snapshot),
-            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true }),
+            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true, .search_query = "bounded" }),
             .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
             .personal_catalog => _ = control.skillCatalog(),
             .task_catalog => _ = try control.taskCatalog(task.durable.id),
@@ -10377,18 +10377,22 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         try std.testing.expectEqual(before_revision, control.revision);
         try std.testing.expectEqual(before_phase, task_state.runPhase(run));
         try std.testing.expectEqual(before_commits, history.commits);
-        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) != null);
+        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1, .search_query = "bounded" }) != null);
         // Worker completion advances without a Renderer once Application
         // consumes its wake through the explicit Product event boundary.
         try control.drainAgentEvents();
         try std.testing.expect(run.event_stream_finalized);
         try std.testing.expectEqual(.completed, task_state.runPhase(run));
         if (read == .view) {
-            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) == null);
-            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true });
+            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1, .search_query = "bounded" }) == null);
+            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true, .search_query = "bounded" });
             var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, finalized, .{});
             defer decoded.deinit();
-            try std.testing.expect(decoded.value.object.get("searchIndex").?.array.items[0].object.get("output").? != .null);
+            const hits = decoded.value.object.get("searchIndex").?.object.get("results").?.array.items;
+            try std.testing.expect(hits.len > 0);
+            try std.testing.expect(for (hits) |hit| {
+                if (std.mem.eql(u8, hit.object.get("kind").?.string, "instruction")) break true;
+            } else false);
         }
     }
 }
@@ -10900,7 +10904,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
     try std.testing.expect(task.runtime.hasAttachedSession());
     task.durable.runs[0].?.pending_file_change_artifacts = 0;
     task.durable.runs[0].?.input_continuation_pending = true;
-    try std.testing.expect(control.task_runtime.idleSessionRoute(null) == null);
+    try std.testing.expect(control.task_runtime.idleReleaseRouteId(null) == null);
     task.durable.runs[0].?.input_continuation_pending = false;
     fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
     try std.testing.expectError(error.TaskBusy, control.createTask(input));

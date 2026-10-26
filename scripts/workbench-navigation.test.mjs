@@ -27,6 +27,7 @@ import { composerDraftWithinLimits } from "../frontend/src/features/composer/sla
 import {
   isRunInFlight,
   searchWorkbench,
+  boundedSearchQuery,
   taskDisplayState,
   pendingInputContinuation,
   orderedTasks,
@@ -447,8 +448,21 @@ test("command bar attention is explicit and cannot leak across product identity"
   );
 });
 
-test("global search finds product content and deliberately excludes raw tool output", () => {
-  const snapshot = {
+test("global search consumes only the current Host page and drops stale queries", () => {
+  const snapshot = productStateFixture({
+    tasks: [
+      task({
+        runs: [
+          run(
+            "9",
+            "private full input",
+            "private full output",
+            "completed",
+            "tool-only",
+          ),
+        ],
+      }),
+    ],
     workspaces: [
       {
         id: "1",
@@ -456,49 +470,27 @@ test("global search finds product content and deliberately excludes raw tool out
         displayName: "alpha",
         canonicalRoot: "/repo/alpha",
       },
-      {
-        id: "9",
-        kind: "automatic",
-        displayName: "Independent workspace",
-        canonicalRoot: "/data/workspaces/deadbeefdeadbeef",
-      },
     ],
-    tasks: [
-      task({
-        runs: [
-          run(
-            "9",
-            "Check release readiness",
-            "Release checklist completed",
-            "completed",
-            "secret tool-only needle",
-          ),
-        ],
-      }),
-      task({ id: "9", workspaceId: "9", title: "Automatic report" }),
-    ],
+  });
+  snapshot.scope = {
+    ...snapshot.scope,
+    search: true,
+    searchQuery: "audit",
+    searchCursor: null,
   };
-  Object.assign(
-    snapshot,
-    productStateFixture(snapshot, {
-      taskId: null,
-      beforeRunId: null,
-      runLimit: 4,
-      management: "none",
-      search: true,
-      receipts: [],
-    }),
-  );
-  assert.deepEqual(searchWorkbench(snapshot, "alpha"), []);
+  snapshot.searchIndex = {
+    stale: false,
+    results: [
+      { taskId: "1", runId: null, part: "0", kind: "task", detail: "Audit" },
+    ],
+    nextCursor: null,
+  };
   assert.equal(searchWorkbench(snapshot, "audit")[0].kind, "task");
-  assert.equal(searchWorkbench(snapshot, "readiness")[0].kind, "instruction");
-  assert.equal(searchWorkbench(snapshot, "checklist")[0].kind, "completion");
+  assert.deepEqual(searchWorkbench(snapshot, "private"), []);
   assert.deepEqual(searchWorkbench(snapshot, "tool-only"), []);
-  assert.deepEqual(searchWorkbench(snapshot, "deadbeef"), []);
-  assert.equal(
-    searchWorkbench(snapshot, "automatic report")[0].detail,
-    "Independent workspace",
-  );
+  assert.deepEqual(searchWorkbench(snapshot, "new query"), []);
+  snapshot.searchIndex.stale = true;
+  assert.deepEqual(searchWorkbench(snapshot, "audit"), []);
 });
 
 test("Composer drafts survive a WebView reload scope and fail safely when storage is unavailable", () => {
@@ -738,4 +730,11 @@ test("New task draft migration never overwrites an existing Workspace draft", ()
     ),
     "preserve_both",
   );
+});
+
+test("search query byte bound preserves Unicode codepoints", () => {
+  const query = boundedSearchQuery("界😀".repeat(100));
+  assert.ok(Buffer.byteLength(query) <= 256);
+  assert.equal(Buffer.from(query).toString("utf8"), query);
+  assert.equal(boundedSearchQuery("x".repeat(300)).length, 256);
 });

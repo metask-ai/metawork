@@ -65,6 +65,7 @@ export function productViewFixture(
   state,
   scope = { ...initialViewScope, taskId: state.tasks[0]?.id ?? null },
 ) {
+  scope = { ...initialViewScope, ...scope };
   const {
     tasks,
     workspaces,
@@ -151,14 +152,7 @@ export function productViewFixture(
           })()
         : null,
     searchIndex: scope.search
-      ? tasks.flatMap((task) =>
-          task.runs.map((run) => ({
-            taskId: task.id,
-            runId: run.id,
-            input: run.input,
-            output: run.terminal?.outcome === "completed" ? run.output : null,
-          })),
-        )
+      ? (state.searchIndex ?? { stale: false, results: [], nextCursor: null })
       : null,
     management: {
       kind: scope.management,
