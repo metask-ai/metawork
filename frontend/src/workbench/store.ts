@@ -187,9 +187,13 @@ export function workbenchReducer(
   action: WorkbenchAction,
 ): WorkbenchState {
   if (action.type === "task.selected") {
-    const task = navigableTasks(state.snapshot).find(
-      (candidate) => candidate.id === action.taskId,
-    );
+    const task =
+      navigableTasks(state.snapshot).find(
+        (candidate) => candidate.id === action.taskId,
+      ) ??
+      state.snapshot.taskIndex.find(
+        (candidate) => candidate.id === action.taskId && candidate.archived,
+      );
     if (!task) return state;
     return {
       ...state,
@@ -290,9 +294,11 @@ export function workbenchReducer(
       draftWorkspaceId: state.draftWorkspaceId,
     };
   const availableTasks = navigableTasks(snapshot);
-  const activeTaskStillExists = availableTasks.some(
-    (task) => task.id === state.activeTaskId,
-  );
+  const activeTaskStillExists =
+    availableTasks.some((task) => task.id === state.activeTaskId) ||
+    snapshot.taskIndex.some(
+      (task) => task.id === state.activeTaskId && task.archived,
+    );
   // Snapshot hydration restores the history list, not the current
   // conversation route. A Task becomes active only after an explicit user
   // selection; if that selection disappears, return to New task instead of
