@@ -283,7 +283,9 @@ export async function runApprovalReadabilityVertical({
         expected.tool === "Write"
           ? "approval.action.write"
           : "approval.action.command",
-        { target: expected.target ? path.basename(expected.target) : "" },
+        {
+          target: expected.target ? path.basename(expected.target) : "",
+        },
       ),
     );
     assert.equal(view.locale, locale);
@@ -291,9 +293,7 @@ export async function runApprovalReadabilityVertical({
     assert.equal(view.pageWidth, width);
     assert.equal(view.reducedMotion, true);
     assert.equal(view.fieldCount, 0);
-    assert.ok(
-      view.mainRows <= (!expected.manual && !expected.technical ? 5 : 4),
-    );
+    assert.ok(view.mainRows <= (!expected.manual ? 5 : 4));
     assert.equal(view.collapsed, true);
     for (const item of view.appearance) {
       item.contrast = textContrast(item.foreground, item.background);
@@ -309,7 +309,6 @@ export async function runApprovalReadabilityVertical({
     assert.ok(view.buttons.length >= 2);
     for (const id of [
       "approval.manual_mode",
-      "approval.handoff.call_failed",
       "approval.handoff.reviewer_concern",
       "approval.command_effects",
       "approval.scope_once",
@@ -321,17 +320,15 @@ export async function runApprovalReadabilityVertical({
         `default card leaked ${id}`,
       );
     if (expected.tool !== "Write") {
-      assert.ok(
+      assert.equal(
         view.text.includes(translate(locale, "approval.agent_purpose")),
+        !expected.fallback,
       );
       assert.equal(
         view.visibleCode,
         expected.fallback ? null : expected.command,
       );
       if (expected.fallback) {
-        assert.ok(
-          view.text.includes(translate(locale, "approval.purpose_unavailable")),
-        );
         assert.ok(
           view.text.includes(translate(locale, "approval.command_unavailable")),
         );
@@ -348,6 +345,10 @@ export async function runApprovalReadabilityVertical({
     );
     if (!expected.manual && !expected.technical)
       assert.ok(view.text.includes(reason));
+    if (expected.technical)
+      assert.ok(
+        view.text.includes(translate(locale, "approval.handoff.call_failed")),
+      );
     {
       await webview.evaluate(
         `document.querySelector(${JSON.stringify(selector + " .approval-details-toggle")}).focus()`,
@@ -377,17 +378,8 @@ export async function runApprovalReadabilityVertical({
         `document.querySelector(${JSON.stringify(selector + " .approval-request-details")}).textContent`,
       );
       assert.ok(expanded.includes(task.pendingUi.args));
-      if (expected.manual || expected.technical)
-        assert.ok(
-          expanded.includes(
-            translate(
-              locale,
-              expected.manual
-                ? "approval.manual_mode"
-                : "approval.handoff.call_failed",
-            ),
-          ),
-        );
+      if (expected.manual)
+        assert.ok(expanded.includes(translate(locale, "approval.manual_mode")));
       if (expected.tool !== "Write")
         assert.ok(
           expanded.includes(translate(locale, "approval.command_effects")),
@@ -450,17 +442,31 @@ export async function runApprovalReadabilityVertical({
         Buffer.from(actions.data, "base64"),
       );
     }
-    if (expected.tool === "Write") {
+    if (expected.tool === "Write" || name === `review-${locale}-1320-light`) {
       await click(
         `${selector} button`,
         translate(locale, "approval.more_allow_options"),
       );
       const labels = [
         ...(task.pendingUi.availableChoices.includes("allow_session")
-          ? [translate(locale, "approval.allow_session_file")]
+          ? [
+              translate(
+                locale,
+                expected.tool === "Write"
+                  ? "approval.allow_session_file"
+                  : "approval.allow_session",
+              ),
+            ]
           : []),
         ...(task.pendingUi.availableChoices.includes("deny_session")
-          ? [translate(locale, "approval.deny_session_file")]
+          ? [
+              translate(
+                locale,
+                expected.tool === "Write"
+                  ? "approval.deny_session_file"
+                  : "approval.deny_session",
+              ),
+            ]
           : []),
       ];
       await wait(
@@ -470,7 +476,33 @@ export async function runApprovalReadabilityVertical({
         const labels=${JSON.stringify(labels)};
         return items.length===labels.length && items.every(item=>labels.includes(item.textContent.trim()));
       })()`),
-        "file Session menu preserves exact available choice",
+        "Session menu preserves exact available choice",
+      );
+      const menuText = await webview.evaluate(
+        "document.querySelector('.approval-choice-menu').textContent",
+      );
+      assert.ok(
+        menuText.includes(
+          translate(
+            locale,
+            expected.tool === "Write"
+              ? "approval.scope_file_session"
+              : "approval.scope_session_available",
+            { tool: "Write" },
+          ),
+        ),
+      );
+      assert.ok(
+        menuText.includes(translate(locale, "approval.session_expiry")),
+      );
+      view.menuText = menuText;
+      const menuPng = await webview.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        path.join(evidenceDir, `${name}-menu.png`),
+        Buffer.from(menuPng.data, "base64"),
       );
       await key("Escape", "Escape", 27);
       await wait(

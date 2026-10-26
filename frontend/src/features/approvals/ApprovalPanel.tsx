@@ -72,6 +72,13 @@ export function ApprovalPanel({
     explanation?.cause === "reviewer_concern"
       ? explanation.reason
       : null;
+  const handoffCause =
+    task.approvalMode === "auto_review" &&
+    task.permissionReviewState === "needs_user" &&
+    explanation?.cause !== "reviewer_concern"
+      ? (explanation?.cause ?? "unavailable")
+      : null;
+  const showArguments = !presentation && !isCommand;
   const detailsOpen = expandedRequest === pending.requestId;
   const detailsId = `ui-request-${pending.requestId}-details`;
 
@@ -113,14 +120,16 @@ export function ApprovalPanel({
       status={status}
     >
       {shownTarget !== null && <p className="approval-target">{shownTarget}</p>}
-      {isCommand && (
+      {isCommand && description?.trim() && (
         <p className="approval-purpose">
-          <span>{t("approval.agent_purpose")}</span>{" "}
-          {description || t("approval.purpose_unavailable")}
+          <span>{t("approval.agent_purpose")}</span> {description}
         </p>
       )}
       {command && (
         <CodeBlock aria-label={t("approval.command")} value={command} />
+      )}
+      {showArguments && (
+        <CodeBlock aria-label={t("approval.arguments")} value={pending.args} />
       )}
       {isCommand && !command && (
         <p className="approval-unavailable">
@@ -130,6 +139,11 @@ export function ApprovalPanel({
       {concern && (
         <p className="approval-concern" role="status" aria-live="polite">
           <span>{t("approval.reviewer_note")}</span> {concern}
+        </p>
+      )}
+      {handoffCause && (
+        <p className="approval-unavailable" role="status" aria-live="polite">
+          {t(`approval.handoff.${handoffCause}`)}
         </p>
       )}
       <div className="approval-footer">
@@ -252,7 +266,7 @@ export function ApprovalPanel({
           aria-label={t("approval.full_request")}
         >
           {pending.redacted && <p>{t("privacy.sensitive_hidden")}</p>}
-          {!concern && (
+          {!concern && !handoffCause && (
             <p>
               {task.approvalMode === "manual"
                 ? t("approval.manual_mode")
@@ -267,10 +281,12 @@ export function ApprovalPanel({
             </p>
           )}
           {isCommand && <p>{t("approval.command_effects")}</p>}
-          <CodeBlock
-            aria-label={t("approval.arguments")}
-            value={pending.args}
-          />
+          {!showArguments && (
+            <CodeBlock
+              aria-label={t("approval.arguments")}
+              value={pending.args}
+            />
+          )}
           <p>{t("approval.scope_once")}</p>
           {sessionChoiceAvailable && (
             <>

@@ -4274,12 +4274,11 @@ test("manual and fallback permission cards keep keyboard-driven decisions usable
       ),
     );
     assert.equal(screen.queryByRole("status"), null);
-    assert.equal(screen.queryByText(/could not complete/), null);
+    assert.equal(screen.queryByText(/could not finish/), null);
     const user = userEvent.setup({ document: dom.window.document });
     screen.getByRole("button", { name: "View operation details" }).focus();
     await user.keyboard("{Enter}");
-    if (state === "needs_user")
-      assert.ok(screen.getByText(/could not complete/));
+    if (state === "needs_user") assert.ok(screen.getByText(/could not finish/));
     assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
     assert.equal(
       screen.getByRole("button", { name: "Allow once" }).disabled,
@@ -4357,13 +4356,13 @@ test("permission actions keep all and only available session choices in one menu
       );
       assert.equal(
         screen.queryByRole("menuitem", {
-          name: "Allow same arguments for this session",
+          name: "Allow future identical operations",
         }) !== null,
         sessionChoices.includes("allow_session"),
       );
       assert.equal(
         screen.queryByRole("menuitem", {
-          name: "Deny same arguments for this session",
+          name: "Deny future identical operations",
         }) !== null,
         sessionChoices.includes("deny_session"),
       );
@@ -4526,7 +4525,10 @@ test("permission intervention keeps session choices in split menus and explains 
 
   assert.ok(screen.getByRole("button", { name: "Deny" }));
   assert.ok(screen.getByRole("button", { name: "Allow once" }));
-  assert.equal(screen.queryByRole("button", { name: /same arguments/ }), null);
+  assert.equal(
+    screen.queryByRole("button", { name: /future identical operations/ }),
+    null,
+  );
   assert.equal(screen.queryByRole("note"), null);
   await user.click(
     screen.getByRole("button", { name: "View operation details" }),
@@ -4536,15 +4538,15 @@ test("permission intervention keeps session choices in split menus and explains 
     /matches the previous session rule/,
   );
   assert.match(
-    screen.getByText(/Session approval covers only requests/).textContent,
-    /identical arguments/,
+    screen.getByText(/The full operation details must match/).textContent,
+    /match this request exactly/,
   );
 
   await user.click(
     screen.getByRole("button", { name: "More approval options" }),
   );
   const sessionAllow = await screen.findByRole("menuitem", {
-    name: "Allow same arguments for this session",
+    name: "Allow future identical operations",
   });
   await user.click(sessionAllow);
   assert.deepEqual(responses, [
@@ -6763,15 +6765,8 @@ test("permission cards distinguish Agent purpose from the visible command and ac
       screen.queryByText(translate(locale, "approval.manual_mode")),
       null,
     );
-    // Raw arguments still contain an Agent description; unavailable metadata
-    // must not claim it was never supplied or omit the Bash qualification.
-    assert.ok(
-      view.container
-        .querySelector(".approval-purpose")
-        .textContent.includes(
-          translate(locale, "approval.purpose_unavailable"),
-        ),
-    );
+    // Missing projection does not prove whether a purpose was supplied.
+    assert.equal(view.container.querySelector(".approval-purpose"), null);
     assert.ok(
       screen.getByText(translate(locale, "approval.command_unavailable")),
     );
@@ -6846,12 +6841,17 @@ test("compact file approval titles keep the name and full location visible", () 
   }
 });
 
-test("compact approval keeps actual technical causes in the disclosure", () => {
+test("automatic handoffs explain the actual cause before the user decides", () => {
   for (const cause of [
+    "unavailable",
     "timeout",
     "call_failed",
     "context_incomplete",
     "invalid_response",
+    "capacity",
+    "unsupported_tool",
+    "input_changed",
+    "state_changed",
   ]) {
     const source = task({
       runs: [run()],
@@ -6879,13 +6879,125 @@ test("compact approval keeps actual technical causes in the disclosure", () => {
       ),
     );
     const reason = translate("en-US", `approval.handoff.${cause}`);
-    assert.equal(screen.queryByText(reason), null);
-    assert.equal(screen.queryByRole("status"), null);
+    assert.ok(screen.getByRole("status").textContent.includes(reason));
+    assert.equal(
+      screen.getByText(reason).closest(".approval-request-details"),
+      null,
+    );
     assert.ok(screen.getByText("npm test"));
     fireEvent.click(
       screen.getByRole("button", { name: "View operation details" }),
     );
     assert.ok(screen.getByText(reason));
+    assert.equal(screen.getAllByText(reason).length, 1);
+    cleanup();
+  }
+});
+
+test("unprojected tools expose only supplied redacted arguments before approval", () => {
+  for (const [toolNamespace, tool] of [
+    ["mcp", "send_message"],
+    ["host", "send_message"],
+    ["builtin", "Read"],
+    ["mcp", "Bash"],
+  ]) {
+    for (const locale of ["en-US", "zh-CN"]) {
+      const source = task({
+        approvalMode: "manual",
+        permissionReviewState: "idle",
+        runs: [run()],
+        currentRunId: "7",
+      });
+      setRepeatedPermissionSource(source);
+      Object.assign(source.pendingUi, {
+        toolNamespace,
+        tool,
+        presentation: null,
+        redacted: true,
+        args: '{"recipient":"Design team","message":"Review the proposal","token":"[hidden]"}',
+        availableChoices: ["deny_once", "allow_once"],
+        candidate: null,
+      });
+      const decisions = [];
+      const view = render(
+        createElement(
+          I18nContext.Provider,
+          {
+            value: {
+              locale,
+              setLocale() {},
+              t: (id, values) => translate(locale, id, values),
+            },
+          },
+          createElement(ApprovalPanel, {
+            pending: source.pendingUi,
+            task: source,
+            busy: false,
+            responsePhase: "idle",
+            respond: (value) => decisions.push(value),
+          }),
+        ),
+      );
+      const args = screen.getByText(source.pendingUi.args);
+      assert.equal(args.closest(".approval-request-details"), null);
+      assert.equal(
+        args.getAttribute("aria-label"),
+        translate(locale, "approval.arguments"),
+      );
+      assert.equal(args.tabIndex, 0);
+      assert.equal(view.container.querySelector(".approval-purpose"), null);
+      assert.equal(view.container.querySelector(".approval-unavailable"), null);
+      assert.equal(screen.queryByRole("status"), null);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.full_request"),
+        }),
+      );
+      assert.equal(screen.getAllByText(source.pendingUi.args).length, 1);
+      assert.ok(
+        screen.getByText(translate(locale, "privacy.sensitive_hidden")),
+      );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.deny"),
+        }),
+      );
+      assert.deepEqual(decisions, [
+        { kind: "permission", permission: "deny_once" },
+      ]);
+      cleanup();
+    }
+  }
+});
+
+test("Bash omits absent or blank purpose without hiding the command", () => {
+  for (const description of [null, "", "   "]) {
+    const source = task({
+      approvalMode: "manual",
+      permissionReviewState: "idle",
+      runs: [run()],
+      currentRunId: "7",
+    });
+    setRepeatedPermissionSource(source);
+    source.pendingUi.presentation = {
+      kind: "command",
+      command: "npm test",
+      description,
+    };
+    const view = render(
+      localizedView(
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond() {},
+        }),
+      ),
+    );
+    assert.equal(view.container.querySelector(".approval-purpose"), null);
+    assert.ok(screen.getByText("npm test"));
+    assert.equal(screen.queryByRole("status"), null);
     cleanup();
   }
 });
