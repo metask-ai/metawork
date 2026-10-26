@@ -3914,6 +3914,8 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     // Product terminal publication must not wait for the same executor job's
     // controlled checkpoint export to be released.
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    const exporting_run = &workbench.task_runtime.find(task_id).?.durable.runs[0].?;
+    try std.testing.expect(exporting_run.execution != null);
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
     try waitControlSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
@@ -6942,7 +6944,7 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
     for (0..5000) |_| {
         try workbench.drainAgentEvents();
         if (!task.runtime.worker_leases.hasLive() and
-            task.durable.runs[0].?.execution.?.automatic_title.state.load(.acquire) == .settled) break;
+            (task.durable.runs[0].?.execution == null or task.durable.runs[0].?.execution.?.automatic_title.state.load(.acquire) == .settled)) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.RunDidNotSettle;
     const revision = workbench.currentRevision();
@@ -10445,6 +10447,7 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     try std.testing.expect(task.runtime.active_operation == .none);
     try std.testing.expect(task.runtime.worker_leases.hasLive());
+    try std.testing.expect(task.durable.runs[0].?.execution != null);
     var result = try scenario.control.sendInput("during-title", scenario.task_id, .{ .text = "cancel this pending message" });
     try std.testing.expectEqual(.accepted, result.outcome);
     try std.testing.expectEqual(@as(usize, 1), task.input_submissions.items.len);
@@ -10477,6 +10480,11 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
     fake_core.releaseCompletion();
     title_released = true;
     try settleInputScenario(scenario);
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        if (task.durable.runs[0].?.execution == null and task.durable.runs[1].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunExecutionNotReclaimed;
     try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
     try std.testing.expect(fake_core.run_text_matches);
     try std.testing.expectEqualStrings("after-stop", task.durable.runs[1].?.submission.?.operationId());

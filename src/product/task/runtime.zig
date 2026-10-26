@@ -3980,8 +3980,27 @@ pub const Runtime = struct {
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (run.execution != null and run.event_stream_finalized and run.execution.?.automatic_title.state.load(.acquire) != .running)
-                    releaseRunEffects(run, effects);
+                const execution = run.execution orelse continue;
+                if (!run.event_stream_finalized or task_state.productTerminalFacts(run) == null or
+                    run.pending_file_change_artifacts != 0 or run.checkpoint.lease != null) continue;
+                switch (execution.automatic_title.state.load(.acquire)) {
+                    .none, .settled => {},
+                    .pending, .running, .ready => continue,
+                }
+                switch (run.checkpoint.state.load(.acquire)) {
+                    .none, .settled => {},
+                    .exporting, .failure_ready, .candidate_ready => continue,
+                }
+                releaseRunEffects(run, effects);
+                releaseAutomaticTitle(&execution.automatic_title);
+                self.allocator.destroy(execution);
+                run.execution = null;
+                trimHistoryEntries(task_state.AdditionalInput, self.allocator, &run.additional_inputs);
+                trimHistoryEntries(task_state.ToolView, self.allocator, &run.tools);
+                trimHistoryEntries(task_state.FileChangeView, self.allocator, &run.file_changes);
+                run.commentary_ends = self.allocator.realloc(run.commentary_ends, run.commentary_count) catch run.commentary_ends;
+                if (run.output_segment.list.items.len == 0) releaseTrackedText(self, effects, &run.output_segment);
+                if (run.output_continued.list.items.len == 0) releaseTrackedText(self, effects, &run.output_continued);
             }
         }
     }
@@ -7103,7 +7122,8 @@ fn releaseTrackedText(
 ) void {
     effects.releaseProjectionBytes(value.list.capacity);
     value.list.deinit(self.allocator);
-    value.* = undefined;
+    // A reclaimed execution buffer still belongs to a readable history record.
+    value.* = .{};
 }
 
 fn deinitFileReference(
@@ -8316,6 +8336,14 @@ fn stateForResponse(response: UiResponse) task_state.UiRecordState {
     };
 }
 
+/// Only after all consumers are quiescent. Failed shrinking keeps the owned
+/// allocation and its exact contents; memory pressure never drops history.
+fn trimHistoryEntries(comptime T: type, allocator: std.mem.Allocator, entries: *[]?T) void {
+    var len = entries.len;
+    while (len != 0 and entries.*[len - 1] == null) len -= 1;
+    entries.* = allocator.realloc(entries.*, len) catch entries.*;
+}
+
 fn deinitRun(
     self: *Runtime,
     effects: ReleaseEffects,
@@ -9288,4 +9316,65 @@ test "archive abandons failed direct deletion only after admission" {
     try std.testing.expect(try runtime.setArchived(1, true));
     try std.testing.expectEqual(task_deletion.State.idle, task.deletion);
     try std.testing.expect(task.durable.archived);
+}
+
+test "Run execution reclamation waits for every publication and lease then preserves history" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    defer runtime.tasks[0] = null;
+    const task = runtime.find(1).?;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "retained input")};
+    task.durable.runs = &runs;
+    const run = &runs[0].?;
+    run.execution = try allocator.create(task_state.RunExecution);
+    run.execution.?.* = .{};
+    defer if (run.execution) |execution| allocator.destroy(execution);
+    run.additional_inputs = try allocator.alloc(?task_state.AdditionalInput, 8);
+    @memset(run.additional_inputs, null);
+    defer allocator.free(run.additional_inputs);
+    run.additional_inputs[1] = .{ .id = 2, .after_output_count = 0, .operation_id_len = 0, .text = @constCast("retained constraint"), .redacted = false, .state = .adopted };
+    run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    run.terminal_observed = true;
+    var projection: InputTestProjection = .{ .allocator = allocator };
+    const effects = projection.effects().release;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null); // Terminal publication alone is insufficient.
+    run.event_stream_finalized = true;
+    var worker = try task.runtime.worker_leases.acquire();
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    worker.deinit();
+    for ([_]task_state.AutomaticTitleState{ .pending, .running, .ready }) |state| {
+        run.execution.?.automatic_title.state.store(state, .release);
+        runtime.releaseQuiescentRunEffects(effects);
+        try std.testing.expect(run.execution != null);
+    }
+    run.execution.?.automatic_title.state.store(.settled, .release);
+    for ([_]task_state.CheckpointPostprocessState{ .exporting, .failure_ready, .candidate_ready }) |state| {
+        run.checkpoint.state.store(state, .release);
+        runtime.releaseQuiescentRunEffects(effects);
+        try std.testing.expect(run.execution != null);
+    }
+    run.checkpoint.state.store(.settled, .release);
+    run.checkpoint.lease = try task.runtime.worker_leases.acquire();
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    run.checkpoint.lease.?.deinit();
+    run.checkpoint.lease = null;
+    run.pending_file_change_artifacts = 1;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    run.pending_file_change_artifacts = 0;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution == null);
+    try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
+    try std.testing.expectEqual(@as(usize, 0), run.output_continued.list.items.len);
+    try std.testing.expectEqual(@as(usize, 2), run.additional_inputs.len);
+    try std.testing.expectEqualStrings("retained constraint", run.additional_inputs[1].?.text);
+    try std.testing.expectEqualStrings("retained input", run.input.text.value);
+    try std.testing.expectEqual(task_state.RunOutcome.completed, task_state.productTerminalFacts(run).?.outcome);
+    runtime.releaseQuiescentRunEffects(effects); // Idempotent, including the retained hole.
 }
