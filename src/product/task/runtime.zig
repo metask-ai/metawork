@@ -528,7 +528,6 @@ pub const MutationError = std.mem.Allocator.Error || error{
 pub const DeletionError = error{
     TaskBusy,
     UnknownTask,
-    TaskNotArchived,
     TaskReadOnly,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
@@ -1804,7 +1803,8 @@ pub const Runtime = struct {
     /// Message acceptance is Task-local and independent of execution readiness.
     pub fn receiveInput(self: *Runtime, task_id: u64, operation_id: []const u8, input: RunInput, effects: OperationEffects) RunError!Submission {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle)
+        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
+            !failedDeletionCanBeAbandoned(task))
             return error.TaskClosing;
         if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
         for (operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidInput;
@@ -1863,6 +1863,7 @@ pub const Runtime = struct {
         }
         task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
         self.pending_input_bytes += payload.bytes.len;
+        if (task.deletion == .failed) task.deletion = .idle;
         task.durable.recent_order = self.takeRecentOrder();
         return submission;
     }
@@ -3274,7 +3275,7 @@ pub const Runtime = struct {
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.model_intent_prepared or task.deletion == .deleting or
+        if (task.model_intent_prepared or task.deletion == .deleting or !failedDeletionCanBeAbandoned(task) or
             task_policy.taskLifecycle(task) == .closing or
             task_policy.hasActiveOperation(task))
             return error.TaskBusy;
@@ -3286,7 +3287,7 @@ pub const Runtime = struct {
             task.runtime.permission_review.invalidate();
             acknowledgeLatestCompletion(task);
         }
-        if (!archived and task.deletion == .failed) task.deletion = .idle;
+        if (task.deletion == .failed) task.deletion = .idle;
         task.durable.recent_order = self.takeRecentOrder();
         return true;
     }
@@ -3333,11 +3334,14 @@ pub const Runtime = struct {
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null) return error.TaskReadOnly;
-        if (!task.durable.archived) return error.TaskNotArchived;
-        if (task.model_intent_prepared) return error.TaskBusy;
+        if (task.model_intent_prepared or task.approval_change != null) return error.TaskBusy;
+        if (task.runtime.restore_job) |job| {
+            if (job.binding_commit == .pending or job.binding_commit == .outcome_unknown) return error.TaskBusy;
+        }
         if (task.deletion == .deleting) return false;
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
+        _ = self.cancelWaitingInputs(task_id, .continuation_cancelled);
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         return true;
     }
@@ -4956,7 +4960,8 @@ pub const Runtime = struct {
 
     fn inputAcceptanceReason(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, max_pending: usize) ?SendInputReason {
         if (authority.shutting_down) return .shutting_down;
-        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return .task_unavailable;
+        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting or
+            !failedDeletionCanBeAbandoned(task)) return .task_unavailable;
         if (!authority.workspace_identity_exact or !authority.automatic_owner_exact) return .workspace_unavailable;
         var pending: usize = 0;
         for (task.input_submissions.items) |record| if (record.state == .waiting) {
@@ -7755,6 +7760,12 @@ fn exportRecoveryCheckpoint(job: *recovery_job.Job, access: *task_agent_session.
     };
 }
 
+fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
+    return task.deletion != .failed or
+        (task_policy.taskLifecycle(task) == .open and !task_policy.hasActiveOperation(task) and
+            !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
+}
+
 fn closeReady(task: *const task_state.Task) bool {
     if (task.runtime.active_operation != .none or
         task_state.hasUnfinalizedTerminalEvents(task) or
@@ -9217,4 +9228,46 @@ test "generated image acceptance shares submission order and refresh preserves i
     context.effects.max_file_ref_field_bytes = 1;
     try std.testing.expectError(error.ToolCapacity, replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1));
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
+}
+
+test "direct deletion preserves archive and cancels waiting inputs without accepting new messages" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    const task = runtime.find(1).?;
+    _ = try runtime.receiveInput(1, "before-delete", .{ .text = "queued message" }, projection.effects());
+    try std.testing.expect(try runtime.requestDeletion(1));
+    try std.testing.expect(!task.durable.archived);
+    try std.testing.expectEqual(task_deletion.State.deleting, task.deletion);
+    try std.testing.expect(task.input_submissions.items[0].state == .cancelled);
+    try std.testing.expect(!(try runtime.requestDeletion(1)));
+    try std.testing.expectError(error.TaskClosing, runtime.receiveInput(1, "during-delete", .{ .text = "rejected" }, projection.effects()));
+    task.deletion = .failed;
+    try std.testing.expectError(error.MissingInstruction, runtime.receiveInput(1, "invalid", .{ .text = " " }, projection.effects()));
+    try std.testing.expectEqual(task_deletion.State.failed, task.deletion);
+    var lease = try task.runtime.worker_leases.acquire();
+    try std.testing.expectError(error.TaskClosing, runtime.receiveInput(1, "unsafe", .{ .text = "rejected" }, projection.effects()));
+    lease.deinit();
+    _ = try runtime.receiveInput(1, "after-failure", .{ .text = "explicit new intent" }, projection.effects());
+    try std.testing.expectEqual(task_deletion.State.idle, task.deletion);
+    try std.testing.expect(!task.durable.archived);
+}
+
+test "archive abandons failed direct deletion only after admission" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    defer runtime.tasks[0] = null;
+    const task = runtime.find(1).?;
+    task.deletion = .failed;
+    task.model_intent_prepared = true;
+    try std.testing.expectError(error.TaskBusy, runtime.setArchived(1, true));
+    try std.testing.expectEqual(task_deletion.State.failed, task.deletion);
+    try std.testing.expect(!task.durable.archived);
+    task.model_intent_prepared = false;
+    try std.testing.expect(try runtime.setArchived(1, true));
+    try std.testing.expectEqual(task_deletion.State.idle, task.deletion);
+    try std.testing.expect(task.durable.archived);
 }
