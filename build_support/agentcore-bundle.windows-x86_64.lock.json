@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.11.0-dev+9c2f68671198",
+  "version": "0.11.0-dev+e75ad43c4557",
   "source": {
-    "commit": "9c2f686711982b9c618310413e18e45053a15a5d",
+    "commit": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
     "dirty": false
   },
   "toolchain": {
@@ -68,11 +68,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "3729e1b298e6766d3e58536e618f2d8a3c26a8d4d5e9bb95ffb48588287f7980"
+      "sha256": "95ed07b93bcadbc2db54e3186259cf905eda24b1c77067a8102a56f0014fede6"
     },
     {
       "path": "lib/metask_agentcore.dll",
-      "sha256": "7456fbdc13d2848ba7b7e17daa2384c0b064ed2f56b464decd25de27add8a1c0"
+      "sha256": "93f7cc734dd0b288a1ba96094d3923e885a787a8bc4e00acb6b07dd6b557444e"
     },
     {
       "path": "bin/rg.exe",
@@ -92,7 +92,7 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "603b40826cf3e91d5f5d451f6a4aa89a0969c1895c06f51bcecdb73cd9a08ebf"
+      "sha256": "32aab0553d6f5a8738dee369ecdcb03929d912e63ba8e87a8e0d5dae37777be9"
     },
     {
       "path": "bindings/zig/src/root.zig",
@@ -108,11 +108,11 @@
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "3c1ece110fb4a3bc91e3d2d9fde81e8289d1bad20ae8e44bc57fb3599d673992"
+      "sha256": "2ad43a1582b1b8acdc7cf31fbece856c03ddd86f522df57a7b42634131a7da36"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "a469a7e100aba11599cd003e5f71b7130b2d545ac82c3409a39d423dedf03d70"
+      "sha256": "4dabc943b9f21970783f4030014da831b65c14c3eb59eb1cba72a70b4104d7ba"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -136,7 +136,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "cc7edaba7bf4838ea4edc7a965465a6fdad983ca7a5206839fd1a2b036f5ef7a"
+      "sha256": "4339c9f065db4894bb664f14604ca04a64a7008b467b952739918df30c602736"
     }
   ]
 }
