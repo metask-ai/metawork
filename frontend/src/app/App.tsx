@@ -2941,7 +2941,6 @@ export default function App() {
         );
         return;
       }
-      if (archived) setShowArchived(true);
       await refreshAfterCommit(
         archived ? "task.archived_status" : "task.restored",
         archived ? "operation.task_archive" : "operation.task_restore",
