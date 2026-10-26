@@ -4735,40 +4735,53 @@ pub const Runtime = struct {
                 units += 1;
                 continue;
             };
-            if (cursor.offset > source.value.len) return error.InvalidViewRequest;
+            var window_storage: [search_snippet_bytes]u8 = undefined;
             var match: ?usize = null;
-            while (cursor.offset <= source.value.len -| query.len and query.len <= source.value.len and work < search_work_limit) {
-                var equal = true;
-                for (query, 0..) |byte, index| {
-                    work += 1;
-                    if (std.ascii.toLower(byte) != std.ascii.toLower(source.value[cursor.offset + index])) {
-                        equal = false;
+            while (work < search_work_limit) {
+                const window = try source.window(cursor.offset, &window_storage);
+                if (cursor.offset > window.total) return error.InvalidViewRequest;
+                if (window.bytes.len < query.len) break;
+                const base = cursor.offset;
+                while (cursor.offset - base <= window.bytes.len - query.len and work < search_work_limit) {
+                    var equal = true;
+                    for (query, 0..) |byte, index| {
+                        work += 1;
+                        if (std.ascii.toLower(byte) != std.ascii.toLower(window.bytes[cursor.offset - base + index])) {
+                            equal = false;
+                            break;
+                        }
+                        if (work == search_work_limit and index + 1 != query.len) {
+                            equal = false;
+                            break;
+                        }
+                    }
+                    if (equal) {
+                        match = cursor.offset;
                         break;
                     }
-                    if (work == search_work_limit and index + 1 != query.len) {
-                        equal = false;
-                        break;
-                    }
+                    // Preserve the candidate across a work boundary. Windows
+                    // overlap by query length, so cross-field matches survive.
+                    if (work >= search_work_limit) break;
+                    cursor.offset += 1;
                 }
-                if (equal) {
-                    match = cursor.offset;
-                    break;
-                }
-                // Resume this candidate when a comparison exhausts the quantum.
-                // The query itself is bounded, so a fresh quantum always progresses.
-                if (work >= search_work_limit) break;
-                cursor.offset += 1;
+                if (match != null or work >= search_work_limit) break;
             }
             if (match) |at| {
                 if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 writer.print("{{\"taskId\":\"{d}\",\"runId\":", .{task.durable.id}) catch return error.SnapshotTooLarge;
                 if (cursor.run == 0) writer.writeAll("null") catch return error.SnapshotTooLarge else writer.print("\"{d}\"", .{task.durable.runs[cursor.run - 1].?.id}) catch return error.SnapshotTooLarge;
                 writer.print(",\"part\":\"{d}\",\"kind\":\"{s}\",\"detail\":", .{ cursor.part, @tagName(source.kind) }) catch return error.SnapshotTooLarge;
-                var start = at -| 128;
-                while (start < at and source.value[start] & 0xc0 == 0x80) start += 1;
-                var end = @min(source.value.len, start + search_snippet_bytes);
-                while (end < source.value.len and end > start and source.value[end] & 0xc0 == 0x80) end -= 1;
-                try text.writeJson(writer, source.value[start..end]);
+                const snippet = try source.window(at -| 128, &window_storage);
+                var start: usize = 0;
+                while (start < snippet.bytes.len and snippet.bytes[start] & 0xc0 == 0x80) start += 1;
+                var end = snippet.bytes.len;
+                if (end > start) {
+                    var last = end - 1;
+                    while (last > start and snippet.bytes[last] & 0xc0 == 0x80) last -= 1;
+                    const width = std.unicode.utf8ByteSequenceLength(snippet.bytes[last]) catch return error.SnapshotTooLarge;
+                    if (end - last < width) end = last;
+                }
+                try text.writeJson(writer, snippet.bytes[start..end]);
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
                 count += 1;
             } else if (work >= search_work_limit) break;
@@ -7939,40 +7952,101 @@ fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
 }
 
-const SearchSource = struct { value: []const u8, kind: enum { task, instruction, completion } };
-fn searchSource(task: *const task_state.Task, run_slot: usize, part: usize) ?SearchSource {
-    if (run_slot == 0) return if (part == 0) .{ .value = task.durable.title, .kind = .task } else null;
-    const run = if (task.durable.runs[run_slot - 1]) |*value| value else return null;
-    var index: usize = 0;
-    switch (run.input) {
-        .text => |value| {
-            if (part == index) return .{ .value = value.value, .kind = .instruction };
-            index += 1;
-        },
-        .skill => |value| {
-            if (part == index) return .{ .value = value.invocation_name, .kind = .instruction };
-            index += 1;
-            for (value.argument_values) |argument| {
-                if (part == index) return .{ .value = argument, .kind = .instruction };
-                index += 1;
+/// A bounded window over the same readable text shown by the consumer.
+/// Composite Skill/attachment/output text is never flattened into a corpus.
+const SearchSource = struct {
+    content: union(enum) { plain: []const u8, input: *const task_state.RunInputRecord, output: *const task_state.RunRecord },
+    kind: enum { task, instruction, completion },
+
+    const Window = struct { bytes: []const u8, total: usize };
+    const Copy = struct {
+        storage: []u8,
+        skip: usize,
+        filled: usize = 0,
+        total: usize = 0,
+        fn append(self: *@This(), value: []const u8) void {
+            self.total += value.len;
+            if (self.skip >= value.len) {
+                self.skip -= value.len;
+                return;
             }
-        },
-        .multimodal => |value| {
-            if (part == index) return .{ .value = value.text orelse "", .kind = .instruction };
-            index += 1;
-            for (value.attachments) |attachment| {
-                if (part == index) return .{ .value = attachment.display_name, .kind = .instruction };
-                index += 1;
-            }
-        },
+            const count = @min(value.len - self.skip, self.storage.len - self.filled);
+            @memcpy(self.storage[self.filled..][0..count], value[self.skip..][0..count]);
+            self.filled += count;
+            self.skip = 0;
+        }
+    };
+
+    fn window(self: SearchSource, at: usize, storage: []u8) task_view.Error!Window {
+        if (self.content == .plain) {
+            const value = self.content.plain;
+            return .{ .bytes = value[@min(at, value.len)..@min(value.len, @min(at, value.len) + storage.len)], .total = value.len };
+        }
+        var copy: Copy = .{ .storage = storage, .skip = at };
+        switch (self.content) {
+            .plain => unreachable,
+            .input => |input| switch (input.*) {
+                .text => |value| copy.append(value.value),
+                .skill => |value| {
+                    copy.append("/");
+                    copy.append(value.invocation_name);
+                    if (value.argument_values.len > 1 or (value.argument_values.len == 1 and value.argument_values[0].len != 0)) {
+                        copy.append(" ");
+                        for (value.argument_values, 0..) |argument, index| {
+                            if (index != 0) copy.append(" ");
+                            copy.append(argument);
+                        }
+                    }
+                },
+                .multimodal => |value| {
+                    var present = false;
+                    if (value.text) |text| if (text.len != 0) {
+                        copy.append(text);
+                        present = true;
+                    };
+                    for (value.attachments) |attachment| if (attachment.display_name.len != 0) {
+                        if (present) copy.append(" ");
+                        copy.append(attachment.display_name);
+                        present = true;
+                    };
+                },
+            },
+            .output => |run| {
+                if (run.assistant.committed_len > run.assistant.list.items.len or run.commentary_count > run.commentary_ends.len) return error.SnapshotTooLarge;
+                const committed = run.assistant.list.items[0..run.assistant.committed_len];
+                const response_start = run.assistant_output_start orelse committed.len;
+                var previous: usize = 0;
+                for (run.commentary_ends[0..run.commentary_count], 0..) |boundary, index| {
+                    const end = std.math.cast(usize, boundary) orelse return error.SnapshotTooLarge;
+                    if (end < previous or end > committed.len) return error.SnapshotTooLarge;
+                    if (index != 0) copy.append("\n\n");
+                    copy.append(committed[previous..end]);
+                    previous = end;
+                }
+                if (previous != response_start) return error.SnapshotTooLarge;
+                copy.append("\n\n");
+                copy.append(committed[response_start..]);
+            },
+        }
+        return .{ .bytes = storage[0..copy.filled], .total = copy.total };
     }
+};
+
+fn searchSource(task: *const task_state.Task, run_slot: usize, part: usize) ?SearchSource {
+    if (run_slot == 0) return if (part == 0) .{ .content = .{ .plain = task.durable.title }, .kind = .task } else null;
+    const run = if (task.durable.runs[run_slot - 1]) |*value| value else return null;
+    if (part == 0) return .{ .content = switch (run.input) {
+        .text => |value| .{ .plain = value.value },
+        else => .{ .input = &run.input },
+    }, .kind = .instruction };
+    var index: usize = 1;
     for (run.additional_inputs) |entry| if (entry) |input| {
-        if (part == index) return .{ .value = input.text, .kind = .instruction };
+        if (part == index) return .{ .content = .{ .plain = input.text }, .kind = .instruction };
         index += 1;
     };
     if (part == index) if (task_state.productTerminalFacts(run)) |terminal| {
         if (terminal.outcome == .completed and run.event_stream_finalized)
-            return .{ .value = run.assistant.list.items, .kind = .completion };
+            return .{ .content = .{ .output = run }, .kind = .completion };
     };
     return null;
 }
@@ -9642,6 +9716,9 @@ test "Host search pages bounded matching work without copying history or exposin
     run.terminal_publication.store(.published, .release);
     run.terminal_observed = true;
     run.event_stream_finalized = true;
+    run.assistant.committed_len = run.assistant.list.items.len;
+    run.assistant_output_start = 0;
+    run.assistant_output_kind = .final;
     var writer = std.Io.Writer.fixed(&storage);
     try runtime.writeSearchProjection(&writer, text, "live-only", .{ .revision = 4, .security_epoch = 9, .run = 1, .part = 1 }, 4, 9);
     var completed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
@@ -9655,4 +9732,157 @@ test "Host search pages bounded matching work without copying history or exposin
     try std.testing.expectEqualStrings("{\"stale\":true,\"results\":[],\"nextCursor\":null}", writer.buffered());
     writer = std.Io.Writer.fixed(&storage);
     try std.testing.expectError(error.InvalidViewRequest, runtime.writeSearchProjection(&writer, text, "a" ** 257, null, 4, 9));
+}
+
+fn searchTestProjection(context: *const anyopaque) task_view.TextProjection {
+    const Json = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) task_view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var text: task_view.TextProjection = undefined;
+    text.context = context;
+    text.write_json_fn = Json.write;
+    return text;
+}
+
+fn searchTestCursor(value: std.json.Value) !?SearchCursor {
+    if (value == .null) return null;
+    const fields = value.object;
+    return .{
+        .revision = try std.fmt.parseInt(u64, fields.get("revision").?.string, 10),
+        .security_epoch = try std.fmt.parseInt(u64, fields.get("securityEpoch").?.string, 10),
+        .task = try std.fmt.parseInt(usize, fields.get("task").?.string, 10),
+        .run = try std.fmt.parseInt(usize, fields.get("run").?.string, 10),
+        .part = try std.fmt.parseInt(usize, fields.get("part").?.string, 10),
+        .offset = try std.fmt.parseInt(usize, fields.get("offset").?.string, 10),
+    };
+}
+
+test "Host search retains readable Skill attachment and paragraph boundaries across windows" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    defer runtime.tasks[0] = null;
+    const task = &runtime.tasks[0].?;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "unrelated")};
+    task.durable.runs = &runs;
+    const run = &runs[0].?;
+    var tools = [_]?task_state.ToolView{.{ .route_digest = @splat(0), .id = @constCast("tool"), .order = 1, .name = @constCast("Bash"), .input = @constCast("raw-tool-only"), .progress = @constCast("raw-tool-only"), .content = @constCast("raw-tool-only"), .state = .completed }};
+    run.tools = &tools;
+    var arguments = [_][]u8{ @constCast("alpha"), @constCast("beta") };
+    run.input = .{ .skill = .{ .skill_id = @constCast("skill"), .catalog_revision = @constCast("1"), .invocation_name = @constCast("audit"), .display_name = @constCast("Audit"), .argument_values = &arguments } };
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .file, .format = null, .display_name = @constCast(""), .size_bytes = 0, .redacted = true },
+        .{ .kind = .file, .format = null, .display_name = @constCast("report.pdf"), .size_bytes = 1 },
+    };
+    var ends = [_]u64{ 5, 11 };
+    const long = try allocator.alloc(u8, 507);
+    defer allocator.free(long);
+    @memset(long, 'a');
+    const Case = struct { query: []const u8, expected: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .query = "/audit alpha", .expected = "/audit alpha beta" },
+        .{ .query = "alpha beta", .expected = "/audit alpha beta" },
+        .{ .query = "a needle", .expected = null },
+        .{ .query = "Read report.pdf", .expected = "Read report.pdf" },
+        .{ .query = "first\n\nsecond", .expected = "first\n\nsecond\n\nanswer" },
+        .{ .query = "second\n\nanswer", .expected = "first\n\nsecond\n\nanswer" },
+        .{ .query = "firstsecond", .expected = "" },
+        .{ .query = "raw-tool-only", .expected = "" },
+    };
+    for (cases, 0..) |case, index| {
+        if (index == 2) {
+            arguments[0] = long;
+            arguments[1] = @constCast("needle");
+        }
+        if (index == 3) run.input = .{ .multimodal = .{ .text = @constCast("Read"), .attachments = &attachments } };
+        if (index == 4) {
+            run.input = .{ .text = .{ .value = @constCast("unrelated") } };
+            run.assistant.list = .{ .items = @constCast("firstsecondanswer"), .capacity = 0 };
+            run.assistant.committed_len = 17;
+            run.commentary_ends = &ends;
+            run.commentary_count = 2;
+            run.assistant_output_start = 11;
+            run.assistant_output_kind = .final;
+            run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+            run.terminal_publication.store(.published, .release);
+            run.terminal_observed = true;
+            run.event_stream_finalized = true;
+        }
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), case.query, null, 1, 1);
+        var page = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer page.deinit();
+        const hits = page.value.object.get("results").?.array.items;
+        if (case.expected) |expected| {
+            if (expected.len == 0) {
+                try std.testing.expectEqual(@as(usize, 0), hits.len);
+                continue;
+            }
+            try std.testing.expectEqual(@as(usize, 1), hits.len);
+            try std.testing.expectEqualStrings(expected, hits[0].object.get("detail").?.string);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), hits.len);
+            const detail = hits[0].object.get("detail").?.string;
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.mem.indexOf(u8, detail, "a needle") != null);
+        }
+        try std.testing.expect(page.value.object.get("nextCursor").? == .null);
+    }
+}
+
+test "Host search traverses more than one full result page exactly once including sparse and archived history" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 4);
+    defer runtime.deinitStorage();
+    defer @memset(runtime.tasks, null);
+    const histories = try allocator.alloc([16]?task_state.RunRecord, 4);
+    defer allocator.free(histories);
+    for (histories, 0..) |*runs, t| {
+        for (runs, 1..) |*entry, id| entry.* = reviewHistoryTestRun(id, "needle");
+        var task = testModelIntentTask();
+        task.durable.id = t + 1;
+        task.durable.title = @constCast("unrelated");
+        task.durable.archived = t == 3;
+        task.durable.runs = runs;
+        runtime.tasks[t] = task;
+    }
+    histories[1][3] = null;
+    var additional = [_]?task_state.AdditionalInput{ null, .{ .id = 1, .after_output_count = 0, .operation_id_len = 0, .text = @constCast("needle extra"), .redacted = false, .state = .adopted } };
+    histories[0][0].?.additional_inputs = &additional;
+    var seen: [4][16][2]bool = @splat(@splat(@splat(false)));
+    var cursor: ?SearchCursor = null;
+    var total: usize = 0;
+    var pages: usize = 0;
+    while (pages < 8) : (pages += 1) {
+        var storage: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), "needle", cursor, 5, 9);
+        var page = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer page.deinit();
+        const hits = page.value.object.get("results").?.array.items;
+        try std.testing.expect(hits.len <= search_result_limit);
+        if (pages == 0) try std.testing.expectEqual(search_result_limit, hits.len);
+        for (hits) |hit| {
+            const object = hit.object;
+            const t = try std.fmt.parseInt(usize, object.get("taskId").?.string, 10);
+            const r = try std.fmt.parseInt(usize, object.get("runId").?.string, 10);
+            const part = try std.fmt.parseInt(usize, object.get("part").?.string, 10);
+            try std.testing.expect(t >= 1 and t <= 4 and r >= 1 and r <= 16 and part < 2);
+            try std.testing.expect(!seen[t - 1][r - 1][part]);
+            seen[t - 1][r - 1][part] = true;
+            total += 1;
+        }
+        const before = cursor;
+        cursor = try searchTestCursor(page.value.object.get("nextCursor").?);
+        if (cursor == null) break;
+        if (before) |value| try std.testing.expect(!std.meta.eql(value, cursor.?));
+    }
+    try std.testing.expect(pages >= 1 and pages < 8);
+    try std.testing.expectEqual(@as(usize, 64), total);
+    try std.testing.expect(!seen[1][3][0]);
+    try std.testing.expect(seen[0][0][1] and seen[3][15][0]);
 }
