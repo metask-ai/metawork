@@ -2184,7 +2184,18 @@ test "Task source settings stay pinned until an explicit same-model selection in
 }
 
 test "Task model rebind confirms a full target connection and restores the original once on failure" {
-    const Failure = enum { none, restore, set_model, target_export, stale_intent, baseline_export, baseline_history, original_close, candidate_close, rollback, baseline_unknown_old, baseline_unknown_new, baseline_unknown_shutdown, shutdown };
+    const Failure = enum { none, restore, set_model, target_export, stale_intent, baseline_export, baseline_history, original_close, original_close_start, target_queue, candidate_close, candidate_close_start, rollback, rollback_queue, baseline_unknown_old, baseline_unknown_new, baseline_unknown_shutdown, shutdown };
+    const Blocker = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire))
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        fn noop(_: *anyopaque) void {}
+    };
     for (std.enums.values(Failure)) |failure| {
         const unknown = failure == .baseline_unknown_old or failure == .baseline_unknown_new or failure == .baseline_unknown_shutdown;
         const reject_target = failure != .none and failure != .baseline_unknown_new;
@@ -2199,7 +2210,9 @@ test "Task model rebind confirms a full target connection and restores the origi
         const storage = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
         defer std.testing.allocator.free(storage);
         var persistence = TaskPersistenceProbe{ .storage = storage };
+        var wake_loop: fixture.LifecycleWakeLoop = .{};
         var configuration = productControlConfiguration();
+        configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = persistence.capability();
         if (unknown) configuration.task_persistence.resolve_commit_fn = struct {
@@ -2210,7 +2223,7 @@ test "Task model rebind confirms a full target connection and restores the origi
             }
         }.resolve;
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1, .event_ready_notifier = .{ .context = &wake_loop, .notify_fn = fixture.LifecycleWakeLoop.agentWake } });
         defer {
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
@@ -2224,6 +2237,15 @@ test "Task model rebind confirms a full target connection and restores the origi
             .max_tools_per_run = 1,
         }, configuration);
         defer workbench.deinit();
+        var blocker: Blocker = .{};
+        defer blocker.released.store(true, .release);
+        var close_blocker: Blocker = .{};
+        defer {
+            close_blocker.released.store(true, .release);
+            fake_core.lock();
+            fake_core.session_destroy_probe = null;
+            fake_core.unlock();
+        }
         defer fake_core.releaseControlled();
         defer fake_core.releaseControlledRestore();
         var vault: TaskModelsVault = .{};
@@ -2247,7 +2269,7 @@ test "Task model rebind confirms a full target connection and restores the origi
 
         try waitCheckpointRecord(&workbench, &persistence);
         for (0..2000) |_| {
-            workbench.syncLifecycle();
+            try wake_loop.drain(&workbench);
             if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
@@ -2284,13 +2306,19 @@ test "Task model rebind confirms a full target connection and restores the origi
                     persistence.result = .outcome_unknown;
                 },
                 .original_close => fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR),
-                .candidate_close => {
+                .original_close_start => workbench.task_runtime.test_rebind_close_start_failure = error.SystemResources,
+                .target_queue => {
+                    fake_core.lock();
+                    fake_core.session_destroy_probe = .{ .context = &close_blocker, .observe_fn = Blocker.execute };
+                    fake_core.unlock();
+                },
+                .candidate_close, .candidate_close_start => {
                     fake_core.lock();
                     fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
                     fake_core.unlock();
                     fake_core.armControlledRestore();
                 },
-                .rollback => {
+                .rollback, .rollback_queue => {
                     fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
                     fake_core.armControlledRestore();
                 },
@@ -2299,18 +2327,44 @@ test "Task model rebind confirms a full target connection and restores the origi
             try std.testing.expect(attempt != 0);
             try std.testing.expectEqual(.restore, std.meta.activeTag(task.runtime.active_operation));
         }
+        if (failure == .target_queue) {
+            for (0..5000) |_| {
+                try wake_loop.drain(&workbench);
+                if (close_blocker.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CloseDidNotStart;
+            try workbench.executor.enqueue(.{ .identity = &blocker, .context = &blocker, .execute_fn = Blocker.execute, .cancel_fn = Blocker.noop });
+            for (0..5000) |_| {
+                if (blocker.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.BlockerDidNotStart;
+            try workbench.executor.enqueue(.{ .identity = &configuration, .context = &blocker, .execute_fn = Blocker.noop, .cancel_fn = Blocker.noop });
+            try workbench.executor.enqueue(.{ .identity = &persistence, .context = &blocker, .execute_fn = Blocker.noop, .cancel_fn = Blocker.noop });
+            close_blocker.released.store(true, .release);
+            for (0..5000) |_| {
+                if (task.runtime.close_completion.load(.acquire) != .running and wake_loop.pending.load(.acquire) != 0) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CloseDidNotFinish;
+            // The close wake must consume both immediate enqueue failures:
+            // target restore and the one permitted original restore attempt.
+            try wake_loop.drain(&workbench);
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expectEqual(.none, task.runtime.active_operation);
+            try std.testing.expectEqual(.runtime_busy, task.runtime.last_restore_failure.?);
+        }
         var rejected_unknown_blob: ?product_task.checkpoint_store.Identity = null;
         if (unknown) {
             const original_blob = task.durable.checkpoint.?.blob;
             for (0..5000) |_| {
-                workbench.syncLifecycle();
+                try wake_loop.drain(&workbench);
                 if (task.runtime.restore_job.?.binding_commit == .outcome_unknown) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.TestUnexpectedResult;
             const baseline_blob = task.runtime.restore_job.?.rebind.?.baseline.?.blob;
             if (failure == .baseline_unknown_old) rejected_unknown_blob = baseline_blob;
             try std.testing.expect(!std.meta.eql(original_blob, baseline_blob));
-            for (0..10) |_| workbench.syncLifecycle();
+            for (0..10) |_| try wake_loop.drain(&workbench);
             try checkpoint_store.verify(original_blob);
             try checkpoint_store.verify(baseline_blob);
             try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
@@ -2335,10 +2389,9 @@ test "Task model rebind confirms a full target connection and restores the origi
             persistence.result = .committed;
             try std.testing.expectEqual(.outcome_unknown, workbench.recoverTaskHistory(workbench.currentRevision()));
         }
-        if (failure == .target_export or failure == .stale_intent or failure == .candidate_close or failure == .rollback or failure == .shutdown) {
+        if (failure == .target_export or failure == .stale_intent or failure == .candidate_close or failure == .candidate_close_start or failure == .rollback or failure == .rollback_queue or failure == .shutdown) {
             for (0..5000) |_| {
-                try workbench.drainAgentEvents();
-                workbench.syncLifecycle();
+                try wake_loop.drain(&workbench);
                 fake_core.lock();
                 const entered = fake_core.restore_entered;
                 fake_core.unlock();
@@ -2392,14 +2445,35 @@ test "Task model rebind confirms a full target connection and restores the origi
                     .expected_catalog_generation = ready.catalog_generation,
                 }),
                 .candidate_close => fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR),
+                .candidate_close_start => workbench.task_runtime.test_rebind_close_start_failure = error.SystemResources,
                 .rollback => fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CORE_ERROR),
+                .rollback_queue => {
+                    try workbench.executor.enqueue(.{ .identity = &blocker, .context = &blocker, .execute_fn = Blocker.execute, .cancel_fn = Blocker.noop });
+                    try workbench.executor.enqueue(.{ .identity = &persistence, .context = &blocker, .execute_fn = Blocker.noop, .cancel_fn = Blocker.noop });
+                },
                 else => unreachable,
             }
             fake_core.releaseControlledRestore();
+            if (failure == .rollback_queue) {
+                // The target worker finishes and the blocker takes its slot.
+                // Fill the freed queue slot before consuming the target result,
+                // so the original-configuration enqueue fails synchronously.
+                for (0..5000) |_| {
+                    if (blocker.entered.load(.acquire)) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.BlockerDidNotStart;
+                try workbench.executor.enqueue(.{ .identity = &configuration, .context = &blocker, .execute_fn = Blocker.noop, .cancel_fn = Blocker.noop });
+                // The target has completed and the fallback cannot enqueue.
+                // One actual wake must settle both results; later queued wakes
+                // must not conceal a falsely reported finished transition.
+                try std.testing.expect(wake_loop.pending.load(.acquire) != 0);
+                try wake_loop.drain(&workbench);
+                try std.testing.expect(task.runtime.restore_job == null);
+                try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            }
         }
         for (0..5000) |_| {
-            try workbench.drainAgentEvents();
-            workbench.syncLifecycle();
+            try wake_loop.drain(&workbench);
             if (task.runtime.restore_job == null) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
@@ -2407,7 +2481,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         try std.testing.expect(task.runtime.restore_job == null);
         if (rejected_unknown_blob) |blob| {
             for (0..5000) |_| {
-                workbench.syncLifecycle();
+                try wake_loop.drain(&workbench);
                 checkpoint_store.verify(blob) catch |err| {
                     try std.testing.expectEqual(error.BlobMissing, err);
                     break;
@@ -2415,7 +2489,7 @@ test "Task model rebind confirms a full target connection and restores the origi
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.TestUnexpectedResult;
         }
-        if (failure == .baseline_export or failure == .baseline_history or failure == .baseline_unknown_old or failure == .original_close or failure == .candidate_close or failure == .rollback) {
+        if (failure == .baseline_export or failure == .baseline_history or failure == .baseline_unknown_old or failure == .original_close or failure == .original_close_start or failure == .target_queue or failure == .candidate_close or failure == .candidate_close_start or failure == .rollback or failure == .rollback_queue) {
             try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
             try std.testing.expectEqual(old_generation, task.durable.execution_generation);
             try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
@@ -2427,18 +2501,18 @@ test "Task model rebind confirms a full target connection and restores the origi
             const restores = fake_core.checkpoint_restores;
             const runs = fake_core.run_calls;
             fake_core.unlock();
-            try std.testing.expectEqual(@as(usize, if (failure == .rollback) 2 else if (failure == .candidate_close) 1 else 0), restores);
+            try std.testing.expectEqual(@as(usize, if (failure == .rollback) 2 else if (failure == .candidate_close or failure == .candidate_close_start or failure == .rollback_queue) 1 else 0), restores);
             try std.testing.expectEqual(@as(usize, 1), runs);
-            if (failure == .original_close or failure == .candidate_close) {
+            if (failure == .original_close or failure == .candidate_close or failure == .candidate_close_start) {
                 try std.testing.expect(task.runtime.close_failed);
-            } else if (failure == .rollback) {
+            } else if (failure == .rollback or failure == .rollback_queue or failure == .target_queue) {
                 try std.testing.expect(!task.runtime.hasAttachedSession());
             } else {
                 try std.testing.expect(task.runtime.hasAttachedSession());
                 try std.testing.expectEqualStrings("fixture-secret", task.runtime.executionConst().?.secret);
             }
             // Settling again cannot restart a failed switch or replay input.
-            for (0..10) |_| workbench.syncLifecycle();
+            for (0..10) |_| try wake_loop.drain(&workbench);
             fake_core.lock();
             const settled_restores = fake_core.checkpoint_restores;
             fake_core.unlock();
@@ -2485,14 +2559,327 @@ test "Task model rebind confirms a full target connection and restores the origi
                 try std.testing.expectEqual(@as(u64, 2), next_run);
             }
             for (0..2000) |_| {
-                try workbench.drainAgentEvents();
-                workbench.syncLifecycle();
+                try wake_loop.drain(&workbench);
                 if (task.durable.runs[1]) |*run| if (task_state.productTerminalFacts(run) != null and run.event_stream_finalized) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             }
             try std.testing.expectEqualStrings("other-model", task.durable.runs[1].?.execution_model);
         }
     }
+}
+
+test "Task model rebind candidate close releases an earlier shared writer waiter in the same wake" {
+    const Barrier = struct {
+        persistence: TaskPersistenceProbe,
+        hold_writer: std.atomic.Value(bool) = .init(false),
+        writer_entered: std.atomic.Value(bool) = .init(false),
+        writer_released: std.atomic.Value(bool) = .init(false),
+        hold_close: std.atomic.Value(bool) = .init(false),
+        close_entered: std.atomic.Value(bool) = .init(false),
+        close_released: std.atomic.Value(bool) = .init(false),
+
+        fn save(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.hold_writer.swap(false, .acq_rel)) {
+                self.writer_entered.store(true, .release);
+                while (!self.writer_released.load(.acquire))
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+            return TaskPersistenceProbe.commit(&self.persistence, bytes);
+        }
+
+        fn close(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!self.hold_close.load(.acquire)) return;
+            self.close_entered.store(true, .release);
+            while (!self.close_released.load(.acquire))
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    };
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    var wake_loop: fixture.LifecycleWakeLoop = .{};
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2, .event_ready_notifier = .{ .context = &wake_loop, .notify_fn = fixture.LifecycleWakeLoop.agentWake } });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(bytes);
+    var barrier = Barrier{ .persistence = .{ .storage = bytes } };
+    var configuration = productControlConfiguration();
+    configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = .{ .context = &barrier, .enabled = true, .commit_fn = Barrier.save, .confirmed_commit_fn = Barrier.save };
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 2, .max_runs_per_task = 2 }, configuration);
+    defer workbench.deinit();
+    defer {
+        barrier.writer_released.store(true, .release);
+        barrier.close_released.store(true, .release);
+        fake_core.releaseControlledRestore();
+        fake_core.lock();
+        fake_core.session_destroy_probe = null;
+        fake_core.unlock();
+    }
+    var vault: TaskModelsVault = .{};
+    defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+    try workbench.startCustomProviders(home, vault.port());
+    defer workbench.stopCustomProviders();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    const target = try configureTaskRebindTarget(&workbench);
+    const ready = workbench.modelsView().custom_providers[0];
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    const waiter_id = try workbench.createTask(input);
+    const waiter = workbench.task_runtime.find(waiter_id).?;
+    try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&workbench, waiter_id));
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (waiter.runtime.attachment == .detached and waiter.runtime.close_thread == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.WaiterDidNotDetach;
+    const id = try workbench.createTask(input);
+    const task = workbench.task_runtime.find(id).?;
+    _ = try workbench.runTask(id, .{ .text = "Preserve this context while changing connection." });
+    try waitCheckpointRecord(&workbench, &barrier.persistence);
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.BaselineDidNotSettle;
+    fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+    fake_core.setRestoreHistory(1, 0);
+    _ = try workbench.selectTaskModel(id, .{
+        .expected_selection_revision = task.durable.model_intent.?.revision,
+        .target = target.model,
+        .expected_source_generation = ready.source_generation,
+        .expected_catalog_generation = ready.catalog_generation,
+    });
+    fake_core.armControlledRestore();
+    _ = try workbench.restoreTaskConversation(id, task.durable.binding_epoch);
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        fake_core.lock();
+        const entered = fake_core.restore_entered;
+        fake_core.unlock();
+        if (entered) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TargetRestoreDidNotStart;
+    barrier.hold_writer.store(true, .release);
+    fake_core.releaseControlledRestore();
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (barrier.writer_entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TargetWriterDidNotStart;
+    try std.testing.expectEqual(.pending, task.runtime.restore_job.?.binding_commit);
+    _ = try workbench.restoreTaskConversation(waiter_id, waiter.durable.binding_epoch);
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (waiter.runtime.restore_job.?.completionReady() and wake_loop.pending.load(.acquire) == 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.WaiterDidNotComplete;
+    try std.testing.expectEqual(.not_started, waiter.runtime.restore_job.?.binding_commit);
+    // Cancellation during the confirmed write must adopt durable truth and
+    // reject the Session. Its failed close is the final barrier release.
+    try workbench.stopTask(id);
+    barrier.hold_close.store(true, .release);
+    fake_core.lock();
+    fake_core.session_destroy_probe = .{ .context = &barrier, .observe_fn = Barrier.close };
+    fake_core.unlock();
+    fake_core.failNextSessionDestroy();
+    barrier.writer_released.store(true, .release);
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (barrier.close_entered.load(.acquire) and wake_loop.pending.load(.acquire) == 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.CandidateCloseDidNotStart;
+    try std.testing.expectEqual(.closing_candidate, task.runtime.restore_job.?.rebind.?.phase);
+    try std.testing.expectEqual(.committed, task.runtime.restore_job.?.binding_commit);
+    barrier.close_released.store(true, .release);
+    for (0..5000) |_| {
+        if (task.runtime.close_completion.load(.acquire) != .running and wake_loop.pending.load(.acquire) != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.CandidateCloseDidNotFinish;
+    try wake_loop.drain(&workbench);
+    try std.testing.expect(task.runtime.restore_job == null);
+    try std.testing.expectEqual(.none, task.runtime.active_operation);
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    try std.testing.expect(task.runtime.close_failed);
+    try std.testing.expectEqual(.session_poisoned, task.runtime.liveConst().?.health);
+    try std.testing.expectEqual(@as(usize, 0), task.runtime.executionConst().?.secret.len);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.binding_epoch);
+    if (waiter.runtime.restore_job) |job|
+        try std.testing.expect(job.binding_commit != .not_started);
+    for (0..5000) |_| {
+        try wake_loop.drain(&workbench);
+        if (waiter.runtime.restore_job == null and !waiter.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.WaiterDidNotSettle;
+    try std.testing.expect(waiter.runtime.hasAttachedSession());
+    try std.testing.expectEqual(.none, waiter.runtime.active_operation);
+    fake_core.lock();
+    const runs = fake_core.run_calls;
+    const restores = fake_core.checkpoint_restores;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), runs);
+    try std.testing.expectEqual(@as(usize, 1), restores);
+}
+
+test "Task model rebind shutdown settles completed and running close workers without later wakes" {
+    const CloseBarrier = struct {
+        stop_at: usize,
+        calls: std.atomic.Value(usize) = .init(0),
+        entered: std.atomic.Value(bool) = .init(false),
+        join_entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+
+        fn observeJoin(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.join_entered.store(true, .release);
+        }
+
+        fn observe(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.calls.fetchAdd(1, .acq_rel) + 1 != self.stop_at) return;
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire))
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    };
+    const ShutdownRelease = struct {
+        barrier: *CloseBarrier,
+        cancellation: *const std.atomic.Value(bool),
+        observed: bool = false,
+
+        fn run(self: *@This()) void {
+            for (0..5000) |_| {
+                if (self.barrier.join_entered.load(.acquire)) {
+                    self.observed = self.cancellation.load(.acquire);
+                    break;
+                }
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+            self.barrier.released.store(true, .release);
+        }
+    };
+    for ([_]bool{ false, true }) |candidate| for ([_]bool{ false, true }) |completed| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        var wake_loop: fixture.LifecycleWakeLoop = .{};
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1, .event_ready_notifier = .{ .context = &wake_loop, .notify_fn = fixture.LifecycleWakeLoop.agentWake } });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoints.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+        defer std.testing.allocator.free(bytes);
+        var persistence = TaskPersistenceProbe{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = persistence.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoints };
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3 }, configuration);
+        defer workbench.deinit();
+        var barrier = CloseBarrier{ .stop_at = if (candidate) 2 else 1 };
+        workbench.task_runtime.test_rebind_close_join_observer = .{ .context = &barrier, .observe_fn = CloseBarrier.observeJoin };
+        defer {
+            barrier.released.store(true, .release);
+            fake_core.lock();
+            fake_core.session_destroy_probe = null;
+            fake_core.unlock();
+        }
+        var vault: TaskModelsVault = .{};
+        defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+        try workbench.startCustomProviders(home, vault.port());
+        defer workbench.stopCustomProviders();
+        try installControlExecution(&workbench);
+        installTwoModelCatalog(&workbench);
+        const target = try configureTaskRebindTarget(&workbench);
+        const ready = workbench.modelsView().custom_providers[0];
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const id = try workbench.createTask(input);
+        const task = workbench.task_runtime.find(id).?;
+        const epoch = task.durable.binding_epoch;
+        _ = try workbench.runTask(id, .{ .text = "Keep this original context." });
+        try waitCheckpointRecord(&workbench, &persistence);
+        for (0..5000) |_| {
+            try wake_loop.drain(&workbench);
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.BaselineDidNotSettle;
+        fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+        fake_core.setRestoreHistory(1, 0);
+        _ = try workbench.selectTaskModel(id, .{
+            .expected_selection_revision = task.durable.model_intent.?.revision,
+            .target = target.model,
+            .expected_source_generation = ready.source_generation,
+            .expected_catalog_generation = ready.catalog_generation,
+        });
+        fake_core.lock();
+        fake_core.session_destroy_probe = .{ .context = &barrier, .observe_fn = CloseBarrier.observe };
+        if (candidate) fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
+        fake_core.unlock();
+        _ = try workbench.restoreTaskConversation(id, epoch);
+        for (0..5000) |_| {
+            try wake_loop.drain(&workbench);
+            if (barrier.entered.load(.acquire)) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.CloseDidNotStart;
+        try std.testing.expectEqual(@as(@TypeOf(task.runtime.restore_job.?.rebind.?.phase), if (candidate) .closing_candidate else .closing_original), task.runtime.restore_job.?.rebind.?.phase);
+        try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
+        try std.testing.expectEqual(.running, task.runtime.close_completion.load(.acquire));
+        if (completed) {
+            barrier.released.store(true, .release);
+            // Observe completion without consuming its queued wake.
+            for (0..5000) |_| {
+                if (task.runtime.close_completion.load(.acquire) != .running) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CloseDidNotFinish;
+            workbench.shutdownExecutor();
+        } else {
+            var release = ShutdownRelease{ .barrier = &barrier, .cancellation = &task.runtime.restore_job.?.cancellation };
+            const thread = try std.Thread.spawn(.{}, ShutdownRelease.run, .{&release});
+            workbench.shutdownExecutor();
+            thread.join();
+            try std.testing.expect(release.observed);
+        }
+        // No event-loop turn follows shutdownExecutor before these assertions.
+        try std.testing.expect(task.runtime.restore_job == null);
+        try std.testing.expectEqual(.none, task.runtime.active_operation);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        try std.testing.expect(task.runtime.close_thread == null);
+        try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+        try std.testing.expect(task.durable.runs[1] == null);
+        fake_core.lock();
+        const restores = fake_core.checkpoint_restores;
+        const runs = fake_core.run_calls;
+        const destroyed = fake_core.session_destroyed;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, if (candidate) 1 else 0), restores);
+        try std.testing.expectEqual(@as(usize, 1), runs);
+        try std.testing.expectEqual(@as(usize, if (candidate) 2 else 1), destroyed);
+    };
 }
 
 test "detached Task restores its committed target across restart without a global default" {
@@ -9083,8 +9470,10 @@ test "recovery binding confirmation retains candidates and never writes on the m
             return true;
         }
     };
-    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false, reject_model: bool = false, cancel_candidate: bool = false, single_wake: bool = false }{
+    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false, reject_model: bool = false, cancel_candidate: bool = false, single_wake: bool = false, writer_waiter: bool = false }{
         .{ .result = .committed, .single_wake = true },
+        .{ .result = .committed, .writer_waiter = true },
+        .{ .result = .failed, .writer_waiter = true },
         .{ .result = .committed, .reject_model = true },
         .{ .result = .committed, .cancel_candidate = true },
         .{ .result = .committed, .cancel_binding = true },
@@ -9106,7 +9495,8 @@ test "recovery binding confirmation retains candidates and never writes on the m
     defer std.testing.allocator.free(candidate_bytes);
     for (cases) |case| {
         fake_core.reset();
-        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        var wake_loop: fixture.LifecycleWakeLoop = .{};
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = if (case.writer_waiter) 2 else 1, .event_ready_notifier = .{ .context = &wake_loop, .notify_fn = fixture.LifecycleWakeLoop.agentWake } });
         defer {
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
@@ -9115,19 +9505,22 @@ test "recovery binding confirmation retains candidates and never writes on the m
         var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
         defer checkpoint_store.deinit();
         var configuration = productControlConfiguration();
+        configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = history.capability(null);
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1 };
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = if (case.writer_waiter) 2 else 1, .max_workspaces = 1 };
         var input = productControlTaskInput();
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
         var task_id: u64 = undefined;
+        var waiter_id: ?u64 = null;
         {
             var seed = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
             defer seed.deinit();
             try installControlExecution(&seed);
+            if (case.writer_waiter) waiter_id = try seed.createTask(input);
             task_id = try seed.createTask(input);
         }
         const old_frame = try std.testing.allocator.dupe(u8, storage[0..history.len]);
@@ -9269,6 +9662,40 @@ test "recovery binding confirmation retains candidates and never writes on the m
         try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
         try std.testing.expect(task.runtime.worker_leases.hasLive());
         try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
+        if (waiter_id) |id| {
+            // The earlier Task waits on the later Task's shared writer. When
+            // that writer finishes, its one wake must also release the waiter.
+            _ = try control.restoreTaskConversation(id, 1);
+            const waiter = control.task_runtime.find(id).?;
+            for (0..2000) |_| {
+                if (waiter.runtime.restore_job.?.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.WaiterDidNotComplete;
+            for (0..2000) |_| {
+                if (wake_loop.pending.load(.acquire) == 0) break;
+                try wake_loop.drain(&control);
+            } else return error.WakesDidNotSettle;
+            try std.testing.expectEqual(.not_started, waiter.runtime.restore_job.?.binding_commit);
+            history.released.store(true, .release);
+            for (0..2000) |_| {
+                if (wake_loop.pending.load(.acquire) != 0) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.WriterDidNotNotify;
+            try wake_loop.drain(&control);
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            if (waiter.runtime.restore_job) |waiting|
+                try std.testing.expect(waiting.binding_commit != .not_started);
+            for (0..2000) |_| {
+                try wake_loop.drain(&control);
+                if (waiter.runtime.restore_job == null and waiter.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.WaiterDidNotSettle;
+            try std.testing.expect(!waiter.runtime.worker_leases.hasLive());
+            try std.testing.expectEqual(.none, waiter.runtime.active_operation);
+            try std.testing.expectEqual(@as(u64, if (case.result == .committed) 2 else 1), waiter.durable.binding_epoch);
+            continue;
+        }
         if (!case.shutdown) try control.renameTask(task_id, "changed during binding confirmation");
         if (case.stale) try installControlExecutionGeneration(&control, 3);
         try std.testing.expectEqual(main_commits, history.main_commits);

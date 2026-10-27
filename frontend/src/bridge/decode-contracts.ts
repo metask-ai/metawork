@@ -1,6 +1,9 @@
 import type { SearchCursor } from "./contracts.ts";
 import { outputActionStates } from "./contracts.ts";
-import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
+import {
+  decodeTaskApprovalResultWire,
+  decodeUpdateViewWire,
+} from "./generated-wire.ts";
 import {
   exactKeys,
   fail,
@@ -5024,6 +5027,48 @@ export function decodeViewVersions(value: unknown): ViewVersions {
     ]),
   ) as ViewVersions;
 }
+export function decodeUpdateView(value: unknown) {
+  const path = "$.updates";
+  const result = decodeUpdateViewWire(value, path);
+  if (
+    result.latestVersion !== null &&
+    (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(
+      result.latestVersion,
+    ) ||
+      result.latestVersion.length > 32 ||
+      result.latestVersion.split(".").some((part) => Number(part) > 0xffffffff))
+  )
+    fail(path, "invalid release version");
+  if ((result.checkState === "failed") !== (result.checkError !== "none"))
+    fail(path, "inconsistent check outcome");
+  if ((result.downloadState === "failed") !== (result.downloadError !== "none"))
+    fail(path, "inconsistent download outcome");
+  if (
+    (result.updateAvailable && result.latestVersion === null) ||
+    (result.downloadAvailable && !result.updateAvailable)
+  )
+    fail(path, "inconsistent release availability");
+  return result;
+}
+export function decodeUpdateCommandResult(value: unknown) {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "accepted",
+      "rejected",
+      "unavailable",
+    ] as const),
+  };
+}
+export function decodeUpdateWebsiteResult(value: unknown) {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "opened",
+      "unavailable",
+    ] as const),
+  };
+}
 export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const view = object(value, "$", [
     "revision",
@@ -5057,6 +5102,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "capabilities",
     "permissions",
     "account",
+    "updates",
     "models",
     "newTaskAdmission",
     "automaticWorkspaceRoot",
@@ -5793,6 +5839,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     capabilities,
     permissions,
     account: decodeAccount(root.account, "$.account"),
+    updates: decodeUpdateView(root.updates),
     models: decodeModels(root.models, "$.models"),
     newTaskAdmission: decodeNewTaskAdmission(
       root.newTaskAdmission,

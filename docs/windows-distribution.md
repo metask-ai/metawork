@@ -58,7 +58,7 @@ signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选�
 
 该入口只调用现有 Windows certificate provider，不安装、升级、登录或修改 SimplySign，不导入导出证书，也不改变 CSP/KSP、证书库或 PIN 设置。是否弹出 SimplySign 授权由现有 provider 和证书策略决定。
 
-安装器生成不等于自动更新能力；更新协议、channel、回滚和旧版本迁移不在当前入口范围内。
+打包入口显式开启 `automatic-update-check`，应用内版本提醒与浏览器下载遵循[Product 架构](product-architecture.md#28-版本提醒与下载交接)。安装器生成不等于自动安装更新能力；自动更新协议、channel、回滚和旧版本迁移不在当前入口范围内。
 
 工具能力参考 [Inno Setup 官方说明](https://jrsoftware.org/isinfo.php)、[ISCC 命令行](https://jrsoftware.org/ishelp/topic_compilercmdline.htm)和 [Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)。
 

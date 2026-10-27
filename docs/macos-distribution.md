@@ -129,7 +129,7 @@ DMG 是拖放式分发，不提供能代替用户退出旧 Host 的安装器事�
 
 入口先验证全部所选 canonical bundles，每轮构建替换当前 `.app`，并由 `hdiutil convert -ov` 写入对应最终 DMG。本流程不创建 preview 或 ZIP。`all` 中任一架构失败即使整个命令失败，已经完成签名、公证和验证的前序架构 DMG 仍是独立有效产物。等待超时不会取消 Apple 已接收的 submission，必须以原 submission ID 继续查询，不能盲目重传同一构建。
 
-现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；DMG 是只读拖拽分发容器，不是带安装逻辑的 PKG，也不提供更新能力。`.dev` identity 仍是当前产品 Bundle ID，不因产物改为 DMG 而自动升级成独立 production channel。
+现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；DMG 是只读拖拽分发容器，不是带安装逻辑的 PKG，不执行自动替换或安装。打包入口显式开启 `automatic-update-check`；应用内版本提醒与浏览器下载遵循[Product 架构](product-architecture.md#28-版本提醒与下载交接)，不构成 DMG 安装事务。`.dev` identity 仍是当前产品 Bundle ID，不因产物改为 DMG 而自动升级成独立 production channel。
 
 普通 `check`、`test`、Debug/Release build、Windows baseline 和 automation 不依赖 Apple Development、Developer ID 或 notary credential，也不访问真实 Keychain。
 

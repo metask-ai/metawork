@@ -3154,6 +3154,33 @@ pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
     );
 }
 
+/// Models native wake queuing and the Agent coordinator's separate coalescing
+/// flag. Every delivered effects_wake drains Product exactly once.
+pub const LifecycleWakeLoop = struct {
+    pending: std.atomic.Value(usize) = .init(0),
+    agent_pending: std.atomic.Value(bool) = .init(false),
+
+    pub fn wake(context: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        _ = self.pending.fetchAdd(1, .release);
+        return true;
+    }
+
+    pub fn agentWake(context: ?*anyopaque) lifecycle.EventReadyNotification {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.agent_pending.swap(true, .acq_rel)) return .already_pending;
+        _ = wake(context);
+        return .scheduled;
+    }
+
+    pub fn drain(self: *@This(), control: *product_control.Runtime) !void {
+        if (self.pending.load(.acquire) == 0) return;
+        _ = self.pending.fetchSub(1, .acq_rel);
+        self.agent_pending.store(false, .release);
+        try control.drainAgentEvents();
+    }
+};
+
 pub fn productControlConfiguration() product_control.Configuration {
     return .{ .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } } };
 }

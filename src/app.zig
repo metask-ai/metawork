@@ -36,6 +36,9 @@ const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
+const product_update = @import("metawork_product_update");
+const update_coordinator = @import("app/update_coordinator.zig");
+const update_http = @import("app/update_http_transport.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -134,6 +137,8 @@ const App = struct {
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
     single_instance: ?*app_single_instance.Coordinator = null,
+    update_transport: ?update_http.Adapter = null,
+    updates: ?update_coordinator.Coordinator = null,
     history_restore_owner: ?*app_stores.Stores = null,
 
     fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
@@ -346,12 +351,43 @@ const App = struct {
             .reset_store_fn = resetModelsStore,
         });
 
+        if (product_identity.artifact_kind != .automation) {
+            const host = self.platform.dispatcherPlatform();
+            self.update_transport = .{ .allocator = std.heap.c_allocator, .io = self.io };
+            self.updates = .{
+                .allocator = std.heap.c_allocator,
+                .io = self.io,
+                .management = control_storage.updateManagement(),
+                .transport = self.update_transport.?.transport(),
+                .host = .{ .context = host.context, .now_ns_fn = host.now_fn, .wake_fn = host.wake_fn, .start_timer_fn = host.start_timer_fn, .cancel_timer_fn = host.cancel_timer_fn, .open_fn = host.open_external_url_fn, .on_main_thread_fn = host.on_main_thread_fn },
+            };
+            self.updates.?.start(product_identity.automatic_update_checks);
+            self.dispatcher.?.setUpdatesHost(.{ .context = self, .check_fn = requestUpdateCheck, .download_fn = requestUpdateDownload, .website_fn = openUpdateWebsite, .cancel_fn = cancelUpdateDownload });
+        }
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
+    }
+
+    fn requestUpdateCheck(context: *anyopaque) product_update.CommandOutcome {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.updates) |*coordinator| coordinator.requestCheck() else .unavailable;
+    }
+    fn requestUpdateDownload(context: *anyopaque, expected_version: []const u8) product_update.CommandOutcome {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.updates) |*coordinator| coordinator.requestDownload(expected_version) else .unavailable;
+    }
+    fn openUpdateWebsite(context: *anyopaque) bool {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.updates) |*coordinator| coordinator.openWebsite() else false;
+    }
+    fn cancelUpdateDownload(context: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(context));
+        if (self.updates) |*coordinator| coordinator.cancelDownload();
     }
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.control) |control| control.beginShutdown();
+        if (self.updates) |*coordinator| coordinator.shutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.account_started) if (self.account_coordinator) |coordinator|
@@ -380,6 +416,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
             dispatcher.setModelsHost(null);
+            dispatcher.setUpdatesHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -419,6 +456,7 @@ const App = struct {
         _ = native_runtime;
         switch (value) {
             .effects_wake => {
+                if (self.updates) |*coordinator| coordinator.drain();
                 if (self.single_instance) |coordinator|
                     if (coordinator.drain()) self.platform.activateMainWindow();
                 if (self.account_coordinator) |coordinator|
@@ -450,6 +488,11 @@ const App = struct {
                 };
             },
             .timer => |timer| {
+                if (timer.id == update_coordinator.timer_id) {
+                    if (self.updates) |*coordinator| coordinator.onTimer();
+                    if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
+                    return;
+                }
                 if (self.account_coordinator) |coordinator|
                     if (coordinator.onTimer(timer.id))
                         return;
@@ -871,6 +914,8 @@ test {
     std.testing.refAllDecls(office_skills);
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);
+    std.testing.refAllDecls(update_http);
+    std.testing.refAllDecls(update_coordinator);
     std.testing.refAllDecls(models_automation_vault);
     std.testing.refAllDecls(models_coordinator);
     std.testing.refAllDecls(attachment_images);

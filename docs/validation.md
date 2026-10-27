@@ -254,6 +254,8 @@ detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：
 
 ## 变更验证 Gate
 
+版本提醒的定向入口为 `zig build test-updates-host`，覆盖纯 Product 接受与调度、真实本地 HTTP GET/HEAD 的大小和重定向边界、独立 worker/取消/join/丢 wake timer 收口、当前版本和 URL 重新校验、断连撤销以及 Bridge authority。Renderer 运行 typecheck 与 updates-contract、bridge-client、workbench-contract、account-menu suites；跨语言 fixture 必须绑定实际 Host 编码与实际 Renderer 解码，验证 failed/error 和 availability 不变量。正式 Native graph、architecture guard 和当前平台 build 仍负责 module graph/allowlist。桌面验收覆盖角落唯一提醒、无下拉箭头、账号入口独立、未登录/长名/键盘/窄窗和官网下载错误；macOS/Windows 的真实系统 handler 交接各自记录，不用 fixture 或 handler ACK 证明浏览器下载完成，不向另一平台扩大结论。分发构建显式启用 `automatic-update-check`，开发与普通 ReleaseFast 默认不启用；automation 与该选项同时请求必须在构建入口拒绝，不访问正式更新源；无测试可绕过 canonical bundle 要求。
+
 Task 直接删除与设置归档管理须覆盖：未归档 deleting/failed 的双侧严格 fixture；Host 停止各类 active operation、等待输入/接续/审批失效、terminal drain 与 commit-before-release、原 archived 保留、明确失败及 outcome unknown、失败后显式新意图安全清除与重启不重放。Renderer 覆盖固定删除目标、归档 toast 撤销/查看及暂停计时、设置搜索/空错/恢复/删除、日常导航隐藏归档、历史返回/草稿/焦点和完成提醒不复活。当前平台真实 Application→Bridge→Product→AgentCore vertical 另证停止并删除、文件保留、冷启动及桌面/窄窗交互；模拟测试不替代真实桌面证据。
 
 对话呈现锚点的验证按 owner 分层：Task runtime、history codec 与 SQL round trip 固定展示序号高水位、图片引用与锚点原子安装、重复引用稳定、旧记录识别及新格式严格拒绝；Bridge fixture 与 Renderer suite 固定同一身份的消息接管、输出回退、终态收尾、分页完整性和图片先后。Windows 的 `node scripts/test-conversation-webview-windows.mjs` 使用正式 automation artifact、真实 WebView2 和隔离的组件夹具，验证图片解码及节点稳定、文本选择与焦点、分页补载后的内容阅读锚点、终态详情顺序、安全失效，以及桌面/390px 的深浅主题。该组件夹具不替代真实 Host 生图、账户授权、完整桌面生命周期或系统键盘手势证据；这些验收的失败须分别保留，不能用组件通过覆盖。
@@ -431,6 +433,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 `E-ATTACHMENT-MACOS-20260902` 的 arm64 真实交互证据为：系统 picker 选择 `0b0a714cdf0e9cfb99830d2fd58afd78eedf655080c0ff09fbcb3dd3d5576e26`、逐项移除 `cb012ce2f8541d6b49921e74e403755b387235deeb98571322da9359bba49cb9`、取消 `ef8b8c08c528c997cc08115c72122511aedec78290fd5c47e90b898dc2474c17`、最终焦点 `f1b7121669516a2bc33a3e58cd934d3ae09a8edd4d6779b4d2981f553e00a695`、窄窗 `961c0eb23d274100bfcfa17967b113a4732982c9bcaccb2be8d7dffb030f0776`（均为截图 SHA-256）。窄窗附件由 automation 经正式 choose/staging 后续链路注入；其他四项使用真实 `NSOpenPanel` 和 Renderer 交互。
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
+
+### E-MAC-UPDATE-REMINDER-20261027
+
+macOS arm64 的版本提醒已通过 Product/Control/Bridge 与实际 Renderer decoder 的关联回归，以及真实回环 HTTP 的 GET/HEAD、容量、重定向、超时和取消收口验证；同一 Application HTTP adapter 对官方 manifest 的实际 HTTPS GET 成功，匹配包的 HEAD 成功且未读取安装包正文。启用后台检查的隔离 ReleaseFast artifact 构建及 automation isolation 通过，automation 与后台检查同时启用的实际构建被明确拒绝。
+
+实际 macOS Application 的共享外链 capability 已经由既有 `metawork.host.links.openExternal` 路径把固定官网下载页交给系统 Chrome，并通过浏览器可访问性确认页面已打开；Update 专用命令、预检策略和断连撤销由确定性 owner/Bridge 回归负责。该次 SDK automation 的单一 response artifact 被 React eventAck 覆盖，外链命令回执视为 unknown，未重放外链动作，不能把浏览器观察冒充该回执。组件浏览器检查覆盖中文浅色、390 px 英文深色、长名称省略、独立角落入口、操作换行及失效链接提示；不宣称实际安装、应用内下载完成或 Windows 桌面通过。
+
+证据与具体运行结果位于 `.zig-cache/updates-{final-review-tests,node-qualified-all,check,live-manifest,release-final}.log`、`.zig-cache/updates-native-browser-evidence.json`。完整 Native graph 的唯一失败为用户已有未提交的凭据 wake 用例；同一测试字节在变更前 Git 基线上复现相同失败，定位见 `.zig-cache/updates-baseline.json` 与 `.zig-cache/updates-baseline-native.log`，不能报告整个仓库测试全绿。Windows 的本功能真实桌面/TLS/浏览器交接仍未验收，已有共享平台能力证据不替代该项。
 
 ### E-WIN-MSVC-20261017
 

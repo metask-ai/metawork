@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const update = @import("metawork_product_update");
+const product_identity = @import("metawork_product_identity");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -1254,6 +1256,7 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
+    updates: update.Runtime,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1644,6 +1647,10 @@ pub const Runtime = struct {
             .skill = skill,
             .change_notifier = configuration.change_notifier,
             .run_clock = configuration.run_clock,
+            .updates = update.Runtime.init(product_identity.version, .{
+                .os = if (builtin.os.tag == .windows) .windows else .macos,
+                .arch = if (builtin.cpu.arch == .aarch64) .arm64 else .x64,
+            }) catch unreachable,
             .executor = executor,
             .approval_executor = approval_executor,
             .attachment_executor = attachment_executor,
@@ -5230,6 +5237,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.updates.stop();
         self.output_checks.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
@@ -6067,6 +6075,7 @@ pub const Runtime = struct {
         // candidate; snapshot reads never supply another lifecycle turn.
         changed = self.syncApprovalChanges() or changed;
         const task_sync = self.task_runtime.reconcileLifecycle(.{
+            .join_rebind_closes = self.shutting_down and self.executor_shutdown,
             .max_title_bytes = self.limits.max_task_title_bytes,
             .text = self.taskRuntimeTextProjection(),
             .recovery = self.taskRuntimeRecoveryEffects(),
@@ -6952,6 +6961,8 @@ pub const Runtime = struct {
             @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
         try self.writeAccount(writer);
+        writer.writeAll(",\"updates\":") catch return error.SnapshotTooLarge;
+        std.json.Stringify.value(self.updates.view(), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
@@ -10405,6 +10416,65 @@ pub const Runtime = struct {
         if (self.schedule.takeChanged()) self.bumpRevision();
     }
 
+    pub fn updateManagement(self: *Runtime) update.Management {
+        return .{ .context = self, .start_fn = updateStart, .next_check_fn = updateNextCheck, .begin_check_fn = updateBeginCheck, .complete_check_fn = updateCompleteCheck, .begin_download_fn = updateBeginDownload, .complete_download_fn = updateCompleteDownload, .browser_result_fn = updateBrowserResult, .cancel_download_fn = updateCancelDownload, .stop_fn = updateStop };
+    }
+
+    fn updateStart(context: *anyopaque, now_ms: u64, automatic: bool) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return;
+        self.updates.start(now_ms, automatic);
+        self.updateChanged();
+    }
+    fn updateNextCheck(context: *anyopaque) ?u64 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return if (self.shutting_down) null else self.updates.next_check_ms;
+    }
+    fn updateBeginCheck(context: *anyopaque, now_ms: u64) ?update.CheckPreparation {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return null;
+        const id = self.updates.beginCheck(now_ms) orelse return null;
+        self.updateChanged();
+        return .{ .id = id, .target = self.updates.target };
+    }
+    fn updateCompleteCheck(context: *anyopaque, id: u64, completion: update.CheckCompletion) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.updates.completeCheck(id, completion)) self.updateChanged();
+    }
+    fn updateBeginDownload(context: *anyopaque, expected_version: []const u8) ?update.DownloadPreparation {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return null;
+        const result = self.updates.beginDownload(expected_version);
+        self.updateChanged();
+        return result;
+    }
+    fn updateCompleteDownload(context: *anyopaque, id: u64, result: update.HeadResult) ?update.Url {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const url = self.updates.completeDownload(id, result);
+        self.updateChanged();
+        return url;
+    }
+    fn updateBrowserResult(context: *anyopaque, opened: bool) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.browserResult(opened);
+        self.updateChanged();
+    }
+    fn updateCancelDownload(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.cancelDownload();
+        self.updateChanged();
+    }
+    fn updateStop(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.stop();
+        self.updateChanged();
+    }
+
+    fn updateChanged(self: *Runtime) void {
+        self.bumpRevision();
+        _ = self.change_notifier.notify();
+    }
+
     fn bumpRevision(self: *Runtime) void {
         self.encoded_views.invalidateAll();
         if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
@@ -10417,6 +10487,36 @@ pub const Runtime = struct {
         return self.projection_security_epoch;
     }
 };
+
+test "updates Control publishes committed facts through the canonical live context" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const management = control.updateManagement();
+    const initial = control.currentRevision();
+    management.start_fn(management.context, 1, true);
+    const check = management.begin_check_fn(management.context, 30_001).?;
+    try std.testing.expect(management.begin_check_fn(management.context, 30_002) == null);
+    management.complete_check_fn(management.context, check.id, .{ .release = .{
+        .version = try update.Version.parse("999.0.0"),
+        .download = null,
+    } });
+    try std.testing.expect(control.currentRevision() > initial);
+    var buffer: [96 * 1024]u8 = undefined;
+    const raw = try control.writeViewFixture(&buffer, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
+    defer parsed.deinit();
+    const view = parsed.value.object.get("context").?.object.get("updates").?.object;
+    try std.testing.expectEqualStrings("succeeded", view.get("checkState").?.string);
+    try std.testing.expectEqualStrings("999.0.0", view.get("latestVersion").?.string);
+    try std.testing.expect(view.get("updateAvailable").?.bool);
+    try std.testing.expect(!view.get("downloadAvailable").?.bool);
+    try std.testing.expectEqual(@as(usize, 7), view.count());
+    const failed = management.begin_check_fn(management.context, 50_000).?;
+    management.complete_check_fn(management.context, failed.id, .{ .failed = .timeout });
+    try std.testing.expect(control.updates.view().updateAvailable);
+    control.beginShutdown();
+    try std.testing.expect(management.begin_check_fn(management.context, 60_000) == null);
+}
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const OutputFileEffect = OutputCheckHarness;
@@ -10435,8 +10535,8 @@ pub const TestSupport = if (builtin.is_test) struct {
         try recordTestOutput(control, @splat(3), "results/年度报告.docx");
     }
 
-    pub fn filePreviewFixture(root: []const u8) !Runtime {
-        return testImagePreviewRuntime(root);
+    pub fn filePreviewFixture(control: *Runtime, root: []const u8) !void {
+        try testImagePreviewRuntime(control, root);
     }
 
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
@@ -11939,19 +12039,26 @@ fn testRuntimeWith(configuration: Configuration) !Runtime {
 }
 
 fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime {
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try initTestRuntimeWithLimits(control, limits, configuration);
+    return control.*;
+}
+
+fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: Configuration) !void {
     test_agent_runtime.io = std.testing.io;
     // This fixture models a known default source configuration. Source-store
     // recovery tests supply their own Runtime and explicit restore evidence.
     var fixture_configuration = configuration;
     fixture_configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
-    var control = try Runtime.init(
+    control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         limits,
         fixture_configuration,
     );
-    try installTestExecution(&control);
+    try installTestExecution(control);
     var task_execution = try control.cloneCurrentTaskExecution(control.allocator);
     errdefer task_execution.deinit();
     control.revision = 0;
@@ -12065,7 +12172,6 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
             .active_operation = .{ .run = 7 },
         },
     };
-    return control;
 }
 
 const TestScheduleClock = struct {
@@ -13122,7 +13228,9 @@ test "Task state round trip restores product history without fabricating a Sessi
     var source_history_len: usize = 0;
 
     {
-        var source = try testRuntime();
+        const source = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(source);
+        try initTestRuntimeWithLimits(source, testLimits(), .{});
         defer source.deinit();
         try source.replaceTracked(
             &source.task_runtime.tasks[0].?.durable.workspace_root,
@@ -13453,7 +13561,9 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     try restored.setTaskArchived(3, true);
     try restored.deleteTask(3);
-    var deleted_restore = try Runtime.init(
+    const deleted_restore = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(deleted_restore);
+    deleted_restore.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -17861,7 +17971,9 @@ fn maximumProjectionFixture() !Runtime {
 
 fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime {
     test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -17869,7 +17981,7 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
         .{},
     );
     errdefer control.deinit();
-    try installMaximumAccountProjection(&control);
+    try installMaximumAccountProjection(control);
 
     for (0..limits.max_tasks) |task_index| {
         var root_storage: [64]u8 = undefined;
@@ -18096,12 +18208,14 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
     );
     if (limits.max_tasks == (Limits{}).max_tasks) try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
-    return control;
+    return control.*;
 }
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
-    var control = try maximumProjectionFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try maximumProjectionFixture();
     defer control.deinit();
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
@@ -19457,8 +19571,8 @@ test "file preview redaction protects credentials that cross a truncation bounda
     );
 }
 
-fn testImagePreviewRuntime(root: []const u8) !Runtime {
-    var control = try testRuntime();
+fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
+    try initTestRuntimeWithLimits(control, testLimits(), .{});
     errdefer control.deinit();
     product_workspace.testing.installOwned(&control.workspace, 1, .{
         .id = 2,
@@ -19475,7 +19589,6 @@ fn testImagePreviewRuntime(root: []const u8) !Runtime {
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"preview-tool\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"image.jpg\"},\"title\":\"image\",\"kind\":\"text\"}]}}");
     defer event.deinit();
     try control.applyEvent(&event);
-    return control;
 }
 
 const PreviewTestCapture = struct {
@@ -19506,7 +19619,9 @@ test "file preview scans all original bytes including a credential across the sc
     @memcpy(bytes[0..jpeg.len], jpeg);
     @memcpy(bytes[file_preview_scan_bytes - 4 ..][0..10], "SECRET-KEY");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
-    var control = try testImagePreviewRuntime(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
     try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, 3, 7, "file-3-1-1-1"));
@@ -19532,7 +19647,9 @@ test "file preview immutable original transfer is sequential and revoked by secu
     const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
     @memcpy(bytes[0..jpeg.len], jpeg);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
-    var control = try testImagePreviewRuntime(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
     _ = control.beginFilePreview(72, 3, 7, "file-3-1-1-1");
@@ -21491,7 +21608,9 @@ test "Product view duplicate credential ownership preserves reads while exact ne
 }
 
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
-    var control = try maximumProjectionFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try maximumProjectionFixture();
     defer control.deinit();
     const epoch = control.projection_history_epoch;
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
@@ -21719,9 +21838,11 @@ test "transport cancellation cannot revoke a replacement Product read" {
 }
 
 test "Product view cached large body moves into frozen read without a body-sized begin copy" {
-    var control = try TestSupport.maximumSmallFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try TestSupport.maximumSmallFixture();
     defer control.deinit();
-    try TestSupport.installResultFixture(&control, true);
+    try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const request: ViewRequest = .{ .task_id = 1 };
@@ -21817,7 +21938,7 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
     for (0..16) |fail_index| {
         const control = try std.testing.allocator.create(Runtime);
         defer std.testing.allocator.destroy(control);
-        control.* = try testRuntime();
+        try initTestRuntimeWithLimits(control, testLimits(), .{});
         defer control.deinit();
         var output: [96 * 1024]u8 = undefined;
         var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
@@ -21840,9 +21961,11 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
     }
     try std.testing.expect(reached_success);
 
-    var control = try TestSupport.maximumSmallFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try TestSupport.maximumSmallFixture();
     defer control.deinit();
-    try TestSupport.installResultFixture(&control, true);
+    try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const task_slot = @intFromEnum(view_cache.Kind.taskPage);

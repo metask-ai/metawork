@@ -2,18 +2,20 @@
 const std = @import("std");
 const snapshot = @import("snapshot_contract");
 const task_view = @import("task_view_contract");
+const update = @import("product_update");
 pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     const writer = &output.interface;
     try writer.writeAll("// Generated from Host wire types. Do not edit.\n");
-    try writer.writeAll("import { object, booleanValue, positiveWireId, positiveU64WireId, u64WireInteger, positiveNumber, enumValue } from './wire-codec.ts';\n");
+    try writer.writeAll("import { object, stringValue, booleanValue, positiveWireId, positiveU64WireId, u64WireInteger, positiveNumber, enumValue } from './wire-codec.ts';\n");
     try writer.print("export const maxSnapshotBytes = {d};\nexport const maxSnapshotChunkBytes = {d};\n", .{ snapshot.max_snapshot_bytes, snapshot.chunk_bytes });
     try writer.print("export const maxSnapshotPreparationSteps = {d};\n", .{snapshot.max_preparation_steps});
     try emitEnumValues(task_view.ApprovalFailureReason, "approvalFailureReasons", writer);
     try emit(snapshot.SnapshotPreparing, "SnapshotPreparing", writer);
     try emit(snapshot.SnapshotDescriptor, "SnapshotDescriptor", writer);
     try emit(task_view.ApprovalResult, "TaskApprovalResultWire", writer);
+    try emit(update.View, "UpdateViewWire", writer);
     try writer.flush();
 }
 
@@ -43,6 +45,10 @@ fn tsType(comptime T: type, writer: *std.Io.Writer) !void {
             } else @compileError("Unsupported wire scalar");
         },
         .bool => try writer.writeAll("boolean"),
+        .pointer => |info| {
+            if (info.size != .slice or info.child != u8 or !info.is_const) @compileError("Unsupported wire pointer");
+            try writer.writeAll("string");
+        },
         .@"enum" => |info| {
             inline for (info.fields, 0..) |field, i| {
                 if (i > 0) try writer.writeAll(" | ");
@@ -60,6 +66,10 @@ fn tsType(comptime T: type, writer: *std.Io.Writer) !void {
 fn decode(comptime T: type, comptime value: []const u8, comptime path: []const u8, writer: *std.Io.Writer) anyerror!void {
     switch (@typeInfo(T)) {
         .bool => try writer.print("booleanValue({s}, {s})", .{ value, path }),
+        .pointer => |info| {
+            if (info.size != .slice or info.child != u8 or !info.is_const) @compileError("Unsupported wire pointer");
+            try writer.print("stringValue({s}, {s})", .{ value, path });
+        },
         .@"struct" => {
             if (@hasDecl(T, "wire_scalar")) {
                 try writer.print("{s}({s}, {s})", .{ T.wire_scalar, value, path });

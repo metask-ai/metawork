@@ -580,6 +580,7 @@ async function packageWindows() {
       "build",
       `-Dtarget=${bundle.target}`,
       "-Doptimize=ReleaseFast",
+      "-Dautomatic-update-check=true",
       "--prefix",
       distribution.releaseBuildPath,
     ],

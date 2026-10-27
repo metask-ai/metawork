@@ -44,6 +44,8 @@ import {
   assertTaskFlag,
   assertUiResponseAccepted,
   decodeAccountCommandResult,
+  decodeUpdateCommandResult,
+  decodeUpdateWebsiteResult,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeSkillCatalogRefreshResult,
@@ -250,6 +252,21 @@ export class BridgeClient {
       (command, payload) => this.invoke(command, payload),
       scope,
       this.viewCache,
+    );
+  }
+  async checkUpdates() {
+    return decodeUpdateCommandResult(
+      await this.invoke(commands.updatesCheck, {}),
+    );
+  }
+  async openUpdateDownload(expectedVersion: string) {
+    return decodeUpdateCommandResult(
+      await this.invoke(commands.updatesOpenDownload, { expectedVersion }),
+    );
+  }
+  async openUpdateWebsite() {
+    return decodeUpdateWebsiteResult(
+      await this.invoke(commands.updatesOpenWebsite, {}),
     );
   }
   async openExternalLink(url: string) {
