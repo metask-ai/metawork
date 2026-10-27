@@ -9,6 +9,7 @@ pub const migrations: []const sql.Migration = &.{.{
 }};
 
 pub const codec = @import("codec.zig");
+pub const repository = @import("repository.zig");
 
 comptime {
     @setEvalBranchQuota(4_000_000);

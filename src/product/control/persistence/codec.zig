@@ -62,14 +62,113 @@ const Restore = struct {
     }
 };
 
+pub const Row = struct {
+    table: []const u8,
+    columns: []const []const u8,
+    primary: []const usize,
+    values: []const sql.Value,
+    key: []const u8,
+    digest: [32]u8,
+};
+
+fn primaryNames(comptime table: []const u8) []const []const u8 {
+    if (std.mem.eql(u8, table, "history_state")) return &.{"singleton"};
+    if (std.mem.eql(u8, table, "workspaces") or std.mem.eql(u8, table, "tasks")) return &.{"id"};
+    if (std.mem.eql(u8, table, "retained_records")) return &.{ "kind", "id" };
+    if (std.mem.eql(u8, table, "task_ui_history")) return &.{ "task_id", "request_id" };
+    if (std.mem.eql(u8, table, "task_input_submissions")) return &.{ "task_id", "operation_id" };
+    if (std.mem.eql(u8, table, "runs") or std.mem.eql(u8, table, "task_compacts")) return &.{ "task_id", "id" };
+    return &.{ "task_id", "run_id", "id" };
+}
+
+fn identityValue(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), value: sql.Value) !void {
+    try bytes.append(allocator, @intFromEnum(std.meta.activeTag(value)));
+    switch (value) {
+        .null_value => {},
+        .integer => |v| {
+            var b8: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b8, @bitCast(v), .big);
+            try bytes.appendSlice(allocator, &b8);
+        },
+        .real => |v| {
+            var b8: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b8, @bitCast(v), .big);
+            try bytes.appendSlice(allocator, &b8);
+        },
+        .blob, .text => |v| {
+            var b8: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b8, v.len, .big);
+            try bytes.appendSlice(allocator, &b8);
+            try bytes.appendSlice(allocator, v);
+        },
+    }
+}
+
+fn rowFor(allocator: std.mem.Allocator, comptime table: []const u8, values: anytype) !Row {
+    const fields = std.meta.fields(@TypeOf(values));
+    const names = try allocator.alloc([]const u8, fields.len);
+    const params = try allocator.alloc(sql.Value, fields.len);
+    inline for (fields, 0..) |field, i| {
+        names[i] = field.name;
+        params[i] = @field(values, field.name);
+    }
+    const primary = try allocator.alloc(usize, primaryNames(table).len);
+    inline for (comptime primaryNames(table), 0..) |name, i| {
+        var found = false;
+        inline for (fields, 0..) |field, j| {
+            if (comptime std.mem.eql(u8, name, field.name)) {
+                primary[i] = j;
+                found = true;
+            }
+        }
+        if (!found) return error.Invalid;
+    }
+    var key: std.ArrayList(u8) = .empty;
+    try key.appendSlice(allocator, table);
+    try key.append(allocator, 0);
+    for (primary) |index| try identityValue(allocator, &key, params[index]);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(key.items);
+    for (params) |value| {
+        const tag = [_]u8{@intFromEnum(std.meta.activeTag(value))};
+        hash.update(&tag);
+        switch (value) {
+            .null_value => {},
+            .integer => |v| {
+                var b8: [8]u8 = undefined;
+                std.mem.writeInt(u64, &b8, @bitCast(v), .big);
+                hash.update(&b8);
+            },
+            .real => |v| {
+                var b8: [8]u8 = undefined;
+                std.mem.writeInt(u64, &b8, @bitCast(v), .big);
+                hash.update(&b8);
+            },
+            .blob, .text => |v| {
+                var b8: [8]u8 = undefined;
+                std.mem.writeInt(u64, &b8, v.len, .big);
+                hash.update(&b8);
+                hash.update(v);
+            },
+        }
+    }
+    return .{ .table = table, .columns = names, .primary = primary, .values = params, .key = try key.toOwnedSlice(allocator), .digest = hash.finalResult() };
+}
+
 pub const Batch = struct {
     allocator: std.mem.Allocator,
     mutations: std.ArrayList(sql.Mutation) = .empty,
+    capture: bool = false,
+    rows: std.ArrayList(Row) = .empty,
     pending_table: []const u8 = "",
     pending_sql: std.ArrayList(u8) = .empty,
     params: std.ArrayList(sql.Value) = .empty,
 
     fn add(self: *@This(), comptime table: []const u8, values: anytype) !void {
+        if (self.capture) {
+            try self.rows.append(self.allocator, try rowFor(self.allocator, table, values));
+            return;
+        }
         const fields = std.meta.fields(@TypeOf(values));
         if (!std.mem.eql(u8, self.pending_table, table) or self.params.items.len + fields.len > sql.Limits.parameters)
             try self.flush();
@@ -309,10 +408,18 @@ pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire, limits: wir
     return batchForPreserving(allocator, state, .{}, limits);
 }
 
+pub fn rowsFor(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits) ![]const Row {
+    return (try build(allocator, state, preserved, limits, true)).rows.items;
+}
+
 pub fn batchForPreserving(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits) !Batch {
+    return build(allocator, state, preserved, limits, false);
+}
+
+fn build(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits, capture: bool) !Batch {
     try validateState(allocator, state, limits);
     try validatePreserved(allocator, state, preserved);
-    var batch = Batch{ .allocator = allocator };
+    var batch = Batch{ .allocator = allocator, .capture = capture };
     try writeState(&batch, state);
     for (state.workspaces, 0..) |value, ordinal| try writeWorkspace(&batch, value, ordinal);
     for (state.tasks, 0..) |task, ordinal| try writeTask(&batch, task, ordinal);

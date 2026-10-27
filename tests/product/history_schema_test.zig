@@ -942,3 +942,63 @@ test "a failed page cannot publish a partial history aggregate" {
     try std.testing.expect(fault.delivered != 0);
     try expectSame(arena.allocator(), database.capability(), state);
 }
+
+test "repository commits only changed rows and keeps witness atomic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var state = try history.fixture(a);
+    var first = try repository.prepare(state, .{}, @splat(1));
+    defer first.deinit();
+    try std.testing.expect(first.changed_rows > 1);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&first));
+    try expectSame(a, database.capability(), state);
+    var same = try repository.prepare(state, .{}, @splat(2));
+    defer same.deinit();
+    try std.testing.expectEqual(@as(usize, 0), same.changed_rows);
+    try std.testing.expectEqual(@as(usize, 1), same.mutations.len);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&same));
+    state.tasks[0].title = "changed title";
+    var changed = try repository.prepare(state, .{}, @splat(3));
+    defer changed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), changed.changed_rows);
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, repository.commit(&changed));
+    try std.testing.expectEqual(@as(u64, 2), (try schema.repository.readWitness(database.capability())).generation);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&changed));
+    try expectSame(a, database.capability(), state);
+}
+
+test "repository deletes Task descendants and backfills a previously failed change" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var state = try history.fixture(a);
+    var first = try repository.prepare(state, .{}, @splat(1));
+    defer first.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&first));
+    state.tasks[0].title = "not lost after disk failure";
+    var failed = try repository.prepare(state, .{}, @splat(2));
+    defer failed.deinit();
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, repository.commit(&failed));
+    state.default_approval_mode = "full_access";
+    var catchup = try repository.prepare(state, .{}, @splat(3));
+    defer catchup.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&catchup));
+    try expectSame(a, database.capability(), state);
+    state.tasks = &.{};
+    var deletion = try repository.prepare(state, .{}, @splat(4));
+    defer deletion.deinit();
+    try std.testing.expect(deletion.deleted_rows > 0);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deletion));
+    try expectSame(a, database.capability(), state);
+}
