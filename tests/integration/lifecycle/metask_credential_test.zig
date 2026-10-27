@@ -91,17 +91,38 @@ fn runCalls() usize {
     return fake_core.run_calls;
 }
 
-fn runAndExpect(control: *control_api.Runtime, task_id: u64, operation: []const u8, expected: fixture.product_task.RunOutcome) !void {
+fn runAndExpect(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Runtime, task_id: u64, operation: []const u8, expected: fixture.product_task.RunOutcome, options: struct { check_baseline_handoff: bool = false }) !void {
     const task = control.task_runtime.find(task_id).?;
     const previous_calls = runCalls();
     const accepted = try control.sendInput(operation, task_id, .{ .text = "Reply with a short text; do not call tools." });
     try std.testing.expectEqual(.accepted, accepted.outcome);
+    if (options.check_baseline_handoff) {
+        // Hold the event loop until both export and the input's history writer
+        // have completed. A single real wake must then admit baseline saving,
+        // even if other completion notifications are still queued behind it.
+        for (0..5000) |_| {
+            var writers_ready = true;
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
+                writers_ready = slot.job.completionReady() and writers_ready;
+            };
+            if (task.runtime.restore_job.?.completionReady() and writers_ready and wake_loop.pending.load(.acquire) != 0) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.BaselineDidNotFinish;
+        try wake_loop.drain(control);
+        const job = task.runtime.restore_job orelse return error.RebindEndedBeforeBaselineConfirmation;
+        try std.testing.expect(job.rebind.?.phase != .exporting_baseline);
+        if (job.rebind.?.phase == .confirming_baseline)
+            try std.testing.expect(job.binding_commit != .not_started);
+    }
     for (0..5000) |_| {
-        try control.drainAgentEvents();
-        control.syncLifecycle();
+        try wake_loop.drain(control);
         if (runCalls() > previous_calls and task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    } else return error.RunDidNotSettle;
+    } else {
+        if (task.runtime.restore_job) |job| if (job.rebind) |rebind|
+            std.debug.print("isolated input stalled: phase={s}, binding_commit={s}\n", .{ @tagName(rebind.phase), @tagName(job.binding_commit) });
+        return error.RunDidNotSettle;
+    }
     try std.testing.expectEqual(previous_calls + 1, runCalls());
     const run = fixture.product_task.testing.policy_module.latestTerminalRun(task.durable.runs).?;
     const terminal = fixture.product_task.testing.state_module.productTerminalFacts(run).?;
@@ -198,7 +219,8 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const renewed_token = if (scenario == .continuation_unchanged) access_a else access_b;
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
-    const runtime = try fixture.createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    var wake_loop: fixture.LifecycleWakeLoop = .{};
+    const runtime = try fixture.createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2, .event_ready_notifier = .{ .context = &wake_loop, .notify_fn = fixture.LifecycleWakeLoop.agentWake } });
     defer {
         fixture.shutdownTestComposition(runtime) catch unreachable;
         fixture.deinitTestComposition(runtime);
@@ -213,6 +235,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     defer history.deinit();
     var review = ReviewProbe{};
     var configuration = fixture.productControlConfiguration();
+    configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
     if (scenario == .reviewer) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
     configuration.task_persistence = History.capability(&history);
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
@@ -257,7 +280,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const old_epoch = old.durable.binding_epoch;
     const old_source = old.runtime.executionConst().?.source_generation;
     const old_revision = old.durable.model_intent.?.revision;
-    try runAndExpect(&control, old_id, "before-expiry", .completed);
+    try runAndExpect(&wake_loop, &control, old_id, "before-expiry", .completed, .{});
     try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
     try std.testing.expectEqualDeep(fixture.credentialDigest(access_a), fake_core.sessions[0].credential_digest);
 
@@ -272,7 +295,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     if (scenario == .detached) {
         try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
         for (0..5000) |_| {
-            control.syncLifecycle();
+            try wake_loop.drain(&control);
             if (old.runtime.attachment == .detached and old.runtime.close_thread == null) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.DetachDidNotSettle;
@@ -308,7 +331,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         try expectBlocked(&control, old_id, "replaced-authorization");
         try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
         const new_id = try createTask(&control, workspace);
-        try runAndExpect(&control, new_id, "new-authorization", .completed);
+        try runAndExpect(&wake_loop, &control, new_id, "new-authorization", .completed, .{});
         return;
     }
     if (scenario == .queued_rotation or continuation) {
@@ -368,7 +391,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
             try std.testing.expectEqual(.accepted, accepted.outcome);
             if (scenario == .stale_restore) {
                 for (0..5000) |_| {
-                    control.syncLifecycle();
+                    try wake_loop.drain(&control);
                     fake_core.lock();
                     const entered = fake_core.restore_entered;
                     fake_core.unlock();
@@ -379,12 +402,11 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
                 fake_core.releaseControlledRestore();
             }
             for (0..5000) |_| {
-                try control.drainAgentEvents();
-                control.syncLifecycle();
+                try wake_loop.drain(&control);
                 if (old.runtime.restore_job == null and !old.runtime.worker_leases.hasLive() and old.runtime.close_thread == null) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.RestoreDidNotSettle;
-            control.syncLifecycle();
+            try wake_loop.drain(&control);
             try std.testing.expectEqual(.failed, old.input_submissions.items[old.input_submissions.items.len - 1].state);
             try std.testing.expectEqual(@as(usize, 1), runCalls());
             return;
@@ -396,7 +418,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
             try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
             if (continuation) {
                 for (0..1000) |_| {
-                    control.syncLifecycle();
+                    try wake_loop.drain(&control);
                     if (old.durable.runs[1].?.additional_inputs[0] != null) break;
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 } else return error.AdditionalInputNotSubmitted;
@@ -408,8 +430,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
             if (continuation_failure) {
                 if (scenario != .continuation_restore_failure) {
                     for (0..5000) |_| {
-                        try control.drainAgentEvents();
-                        control.syncLifecycle();
+                        try wake_loop.drain(&control);
                         fake_core.lock();
                         const entered = fake_core.restore_entered;
                         fake_core.unlock();
@@ -422,8 +443,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
                     fake_core.releaseControlledRestore();
                 }
                 for (0..5000) |_| {
-                    try control.drainAgentEvents();
-                    control.syncLifecycle();
+                    try wake_loop.drain(&control);
                     if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive() and old.runtime.close_thread == null) break;
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 } else return error.RestoreDidNotSettle;
@@ -434,13 +454,12 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
                 try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
                 try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
                 try std.testing.expectEqual(@as(usize, 0), control.task_runtime.pending_input_bytes);
-                for (0..10) |_| control.syncLifecycle();
+                for (0..10) |_| try wake_loop.drain(&control);
                 try std.testing.expectEqual(@as(usize, 2), runCalls());
                 return;
             }
             for (0..5000) |_| {
-                try control.drainAgentEvents();
-                control.syncLifecycle();
+                try wake_loop.drain(&control);
                 if (runCalls() == 3 and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.QueuedRunDidNotSettle;
@@ -454,19 +473,27 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
                 try std.testing.expect(additional.raw_text == null);
                 try std.testing.expect(source.input_continuation_failure == null);
                 try std.testing.expectEqual(@as(usize, 0), control.task_runtime.pending_input_bytes);
-                for (0..5) |_| control.syncLifecycle();
+                for (0..5) |_| try wake_loop.drain(&control);
                 try std.testing.expectEqual(@as(usize, 3), runCalls());
             }
             return;
         }
-        try runAndExpect(&control, old_id, "rotated-before-old-expiry", .completed);
+        if (scenario == .rotation) {
+            // Model an idle desktop before the sole post-refresh input. Earlier
+            // baseline/catalog notifications must not rescue a missing handoff.
+            for (0..100) |_| {
+                try wake_loop.drain(&control);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(@as(usize, 0), wake_loop.pending.load(.acquire));
+        }
+        try runAndExpect(&wake_loop, &control, old_id, "rotated-before-old-expiry", .completed, .{ .check_baseline_handoff = scenario == .rotation });
         if (scenario == .reviewer) {
             fake_core.setSessionPlan(.ui_wait);
             const accepted = try control.sendInput("review-new-authority", old_id, .{ .text = "Ask permission for this operation." });
             try std.testing.expectEqual(.accepted, accepted.outcome);
             for (0..5000) |_| {
-                try control.drainAgentEvents();
-                control.syncLifecycle();
+                try wake_loop.drain(&control);
                 if (old.permissionReviewPhase() == .needs_user) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.ReviewDidNotSettle;
@@ -478,8 +505,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
             try control.respondUi(old_id, old.runtime.active_run_id, old.runtime.pending_ui_request_id, .{ .permission = .allow_once });
             fake_core.releaseControlled();
             for (0..5000) |_| {
-                try control.drainAgentEvents();
-                control.syncLifecycle();
+                try wake_loop.drain(&control);
                 if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.RunDidNotSettle;
@@ -510,8 +536,8 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     fake_core.rejected_credential_digest = fixture.credentialDigest(access_a);
     fake_core.unlock();
     if (rotate) {
-        try runAndExpect(&control, old_id, "expired-old-first", .completed);
-        try runAndExpect(&control, old_id, "expired-old-repeat", .completed);
+        try runAndExpect(&wake_loop, &control, old_id, "expired-old-first", .completed, .{});
+        try runAndExpect(&wake_loop, &control, old_id, "expired-old-repeat", .completed, .{});
         try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
         try std.testing.expect(old_epoch != old.durable.binding_epoch);
         try std.testing.expect(old_generation != old.durable.execution_generation);
@@ -519,7 +545,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         try std.testing.expectEqual(@as(usize, 2), fake_core.session_created);
         try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
         const new_id = try createTask(&control, workspace);
-        try runAndExpect(&control, new_id, "fresh-task-control", .completed);
+        try runAndExpect(&wake_loop, &control, new_id, "fresh-task-control", .completed, .{});
         const new = control.task_runtime.find(new_id).?;
         try std.testing.expectEqualStrings(access_b, new.runtime.executionConst().?.secret);
         try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[2].credential_digest);
@@ -562,7 +588,6 @@ fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const
     const before = runCalls();
     const result = try control.sendInput(operation, task_id, .{ .text = "No tools; this must not reach the provider." });
     try std.testing.expectEqual(.accepted, result.outcome);
-    control.syncLifecycle();
     const task = control.task_runtime.find(task_id).?;
     const record = task.input_submissions.items[task.input_submissions.items.len - 1];
     try std.testing.expectEqual(.failed, record.state);

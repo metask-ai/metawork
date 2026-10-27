@@ -1059,9 +1059,18 @@ pub const RecoverySync = struct {
     changed: bool = false,
     durable_changed: bool = false,
     mcp_refresh_needed: bool = false,
+
+    fn include(self: *RecoverySync, next: RecoverySync) void {
+        self.changed = next.changed or self.changed;
+        self.durable_changed = next.durable_changed or self.durable_changed;
+        self.mcp_refresh_needed = next.mcp_refresh_needed or self.mcp_refresh_needed;
+    }
 };
 
 pub const LifecycleEffects = struct {
+    /// Only after admission is closed and both executors have joined. The
+    /// existing close owner joins and consumes each rebind close exactly once.
+    join_rebind_closes: bool = false,
     max_title_bytes: usize,
     text: TextProjection,
     recovery: RecoveryEffects,
@@ -1179,6 +1188,10 @@ pub const Runtime = struct {
     pending_input_bytes: usize = 0,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
+    /// Deterministic caller-path coverage without exhausting OS thread limits.
+    test_rebind_close_start_failure: if (@import("builtin").is_test) ?std.Thread.SpawnError else void = if (@import("builtin").is_test) null else {},
+    /// Tests keep the close blocked until shutdown reaches its physical join.
+    test_rebind_close_join_observer: if (@import("builtin").is_test) ?struct { context: *anyopaque, observe_fn: *const fn (*anyopaque) void } else void = if (@import("builtin").is_test) null else {},
     agent_runtime_shutdown_complete: bool = false,
     permission_reviews_closed: bool = false,
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
@@ -5462,59 +5475,78 @@ pub const Runtime = struct {
         var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            const completion = task.runtime.close_completion.load(.acquire);
-            if (completion == .none or completion == .running or
-                task_state.hasUnfinalizedTerminalEvents(task))
-                continue;
-            task.runtime.close_thread.?.join();
-            task.runtime.close_thread = null;
-            std.debug.assert(task.runtime.hasClosingSession());
-            task.runtime.close_completion.store(.none, .release);
-            switch (completion) {
-                .closed => {
-                    const rebind_close = if (task.runtime.restore_job) |job| if (job.rebind) |rebind|
-                        rebind.phase == .closing_original or rebind.phase == .closing_candidate
-                    else
-                        false else false;
-                    std.debug.assert(task.runtime.worker_leases.liveCount() == @as(usize, if (rebind_close) 1 else 0));
-                    result.durable_changed = excludePendingConversationTail(task) or
-                        result.durable_changed;
-                    std.debug.assert(
-                        task.runtime.closingWorkerBinding().?.state() == .released,
-                    );
-                    var live = task.runtime.detach(.released);
-                    releaseExecutionValueNoFail(task, &live.execution, effects);
-                    if (live.pinned_catalog) |*snapshot| {
-                        effects.releaseProjectionBytes(snapshot.projected_bytes);
-                        snapshot.deinit();
-                    }
-                    task.conversation_observation = .{};
-                    task.runtime.close_requested = false;
-                    task.runtime.close_failed = false;
-                },
-                .failed_reusable, .failed_poisoned, .failed_closing => {
-                    task.runtime.close_requested = false;
-                    task.runtime.close_failed = true;
-                    if (task.deletion == .deleting) task.deletion = .failed;
-                    if (task.runtime.discarding_restore) task.runtime.last_restore_failure = .candidate_cleanup_failed;
-                    switch (completion) {
-                        .failed_reusable => task.runtime.restoreCloseFailure(if (task.runtime.discarding_restore) .session_poisoned else .available),
-                        .failed_poisoned => task.runtime.restoreCloseFailure(.session_poisoned),
-                        .failed_closing => {},
-                        else => unreachable,
-                    }
-                    if (task.runtime.parked_capabilities != null and task.runtime.attached() != null) {
-                        task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
-                        task.runtime.restore_catalog = null;
-                        task.runtime.parked_capabilities.?.deinit() catch {};
-                        task.runtime.parked_capabilities = null;
-                    }
-                },
-                .none, .running => unreachable,
-            }
-            task.runtime.cancel_requested = false;
-            result.changed = true;
+            const close = self.syncTaskCloseCompletion(task, effects, false);
+            result.changed = close.changed or result.changed;
+            result.durable_changed = close.durable_changed or result.durable_changed;
         }
+        return result;
+    }
+
+    fn closingRebind(task: *const task_state.Task) bool {
+        if (task.runtime.close_thread == null) return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        return rebind.phase == .closing_original or rebind.phase == .closing_candidate;
+    }
+
+    fn syncTaskCloseCompletion(self: *Runtime, task: *task_state.Task, effects: ReleaseEffects, join_running: bool) LifecycleSync {
+        var result: LifecycleSync = .{};
+        if (task_state.hasUnfinalizedTerminalEvents(task)) return result;
+        var completion = task.runtime.close_completion.load(.acquire);
+        if (completion == .none or (completion == .running and !join_running)) return result;
+        if (@import("builtin").is_test) {
+            if (join_running and completion == .running) if (self.test_rebind_close_join_observer) |observer|
+                observer.observe_fn(observer.context);
+        }
+        task.runtime.close_thread.?.join();
+        completion = task.runtime.close_completion.load(.acquire);
+        task.runtime.close_thread = null;
+        std.debug.assert(task.runtime.hasClosingSession());
+        task.runtime.close_completion.store(.none, .release);
+        switch (completion) {
+            .closed => {
+                const rebind_close = if (task.runtime.restore_job) |job| if (job.rebind) |rebind|
+                    rebind.phase == .closing_original or rebind.phase == .closing_candidate
+                else
+                    false else false;
+                std.debug.assert(task.runtime.worker_leases.liveCount() == @as(usize, if (rebind_close) 1 else 0));
+                result.durable_changed = excludePendingConversationTail(task) or
+                    result.durable_changed;
+                std.debug.assert(
+                    task.runtime.closingWorkerBinding().?.state() == .released,
+                );
+                var live = task.runtime.detach(.released);
+                releaseExecutionValueNoFail(task, &live.execution, effects);
+                if (live.pinned_catalog) |*snapshot| {
+                    effects.releaseProjectionBytes(snapshot.projected_bytes);
+                    snapshot.deinit();
+                }
+                task.conversation_observation = .{};
+                task.runtime.close_requested = false;
+                task.runtime.close_failed = false;
+            },
+            .failed_reusable, .failed_poisoned, .failed_closing => {
+                task.runtime.close_requested = false;
+                task.runtime.close_failed = true;
+                if (task.deletion == .deleting) task.deletion = .failed;
+                if (task.runtime.discarding_restore) task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                switch (completion) {
+                    .failed_reusable => task.runtime.restoreCloseFailure(if (task.runtime.discarding_restore) .session_poisoned else .available),
+                    .failed_poisoned => task.runtime.restoreCloseFailure(.session_poisoned),
+                    .failed_closing => {},
+                    else => unreachable,
+                }
+                if (task.runtime.parked_capabilities != null and task.runtime.attached() != null) {
+                    task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+                    task.runtime.restore_catalog = null;
+                    task.runtime.parked_capabilities.?.deinit() catch {};
+                    task.runtime.parked_capabilities = null;
+                }
+            },
+            .none, .running => unreachable,
+        }
+        task.runtime.cancel_requested = false;
+        result.changed = true;
         return result;
     }
 
@@ -5670,9 +5702,19 @@ pub const Runtime = struct {
         enqueueRecovery(job, effects);
     }
 
+    fn startRebindCloseWorker(self: *Runtime, task: *task_state.Task, notifier: task_execution.Notifier, retrying: bool) std.Thread.SpawnError!void {
+        if (@import("builtin").is_test) {
+            if (self.test_rebind_close_start_failure) |err| {
+                self.test_rebind_close_start_failure = null;
+                return err;
+            }
+        }
+        return startCloseWorker(task, notifier, retrying);
+    }
+
     /// Advances preparation on the composition thread. Core export/restore,
     /// history confirmation and close each retain their existing worker owner.
-    fn syncRebindPreparation(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, effects: RecoveryEffects, release: ReleaseEffects, notifier: task_execution.Notifier) enum { waiting, changed, candidate } {
+    fn syncRebindPreparation(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, effects: RecoveryEffects, release: ReleaseEffects, notifier: task_execution.Notifier) enum { waiting, advanced, finished, candidate } {
         const rebind = &job.rebind.?;
         switch (rebind.phase) {
             .exporting_baseline => {
@@ -5680,7 +5722,7 @@ pub const Runtime = struct {
                     var duplicate = job.outcome.baseline.clone(self.allocator) catch {
                         task.runtime.last_restore_failure = .checkpoint_io;
                         self.finishRecovery(task, job, effects, release);
-                        return .changed;
+                        return .finished;
                     };
                     if (job.attempt.checkpoint) |*previous| previous.deinit(self.allocator);
                     job.attempt.checkpoint = duplicate;
@@ -5688,14 +5730,14 @@ pub const Runtime = struct {
                     rebind.baseline = job.outcome.baseline;
                     job.outcome = .none;
                     rebind.phase = .confirming_baseline;
-                    return .changed;
+                    return .advanced;
                 }
                 task.runtime.last_restore_failure = job.failure() orelse .checkpoint_io;
                 if (rebind.export_poisoned) if (task.runtime.attached()) |attached| {
                     attached.health = .session_poisoned;
                 };
                 self.finishRecovery(task, job, effects, release);
-                return .changed;
+                return .finished;
             },
             .confirming_baseline => {
                 switch (job.binding_commit) {
@@ -5704,13 +5746,13 @@ pub const Runtime = struct {
                         if (job.cancellation.load(.acquire)) {
                             task.runtime.last_restore_failure = .cancelled;
                             self.finishRecovery(task, job, effects, release);
-                            return .changed;
+                            return .finished;
                         }
                         const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
                         const overlay = beginCheckpointCoverageOverlay(task, &candidate) orelse {
                             task.runtime.last_restore_failure = .checkpoint_mismatch;
                             self.finishRecovery(task, job, effects, release);
-                            return .changed;
+                            return .finished;
                         };
                         const previous = task.durable.checkpoint;
                         const previous_anchor = task.durable.checkpoint_anchor;
@@ -5727,12 +5769,12 @@ pub const Runtime = struct {
                             .failed => .failed,
                             .outcome_unknown => .outcome_unknown,
                         };
-                        return if (job.binding_commit == .not_started) .waiting else .changed;
+                        return if (job.binding_commit == .not_started) .waiting else .advanced;
                     },
                     .failed => {
                         task.runtime.last_restore_failure = task.runtime.last_restore_failure orelse .binding_persistence_failed;
                         self.finishRecovery(task, job, effects, release);
-                        return .changed;
+                        return .finished;
                     },
                     .committed => {
                         const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
@@ -5753,20 +5795,21 @@ pub const Runtime = struct {
                         {
                             task.runtime.last_restore_failure = if (job.cancellation.load(.acquire)) .cancelled else .restore_rejected;
                             self.finishRecovery(task, job, effects, release);
-                            return .changed;
+                            return .finished;
                         }
                         std.debug.assert(task.runtime.worker_leases.liveCount() == 1);
                         const attached = task.runtime.attached().?;
                         task.runtime.restore_catalog = attached.pinned_catalog;
                         attached.pinned_catalog = null;
                         rebind.phase = .closing_original;
-                        startCloseWorker(task, notifier, false) catch {
+                        self.startRebindCloseWorker(task, notifier, false) catch {
                             task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
                             task.runtime.restore_catalog = null;
                             task.runtime.last_restore_failure = .runtime_busy;
                             self.finishRecovery(task, job, effects, release);
+                            return .finished;
                         };
-                        return .changed;
+                        return .advanced;
                     },
                 }
             },
@@ -5779,25 +5822,25 @@ pub const Runtime = struct {
                     };
                     task.runtime.last_restore_failure = .candidate_cleanup_failed;
                     self.finishRecovery(task, job, effects, release);
-                    return .changed;
+                    return .finished;
                 }
                 if (task.runtime.attachment != .detached) return .waiting;
                 const authority = rebindAuthority(task, job, effects);
                 if (authority.shutting_down) {
                     task.runtime.last_restore_failure = .cancelled;
                     self.finishRecovery(task, job, effects, release);
-                    return .changed;
+                    return .finished;
                 }
                 if (rebind.phase == .closing_candidate or job.cancellation.load(.acquire) or
                     !authority.workspace_authority_exact or !authority.automatic_owner_exact or !authority.target_execution_authority_exact)
                 {
                     rebind.failure = rebind.failure orelse .restore_rejected;
                     self.beginOriginalRestore(task, job, effects, release);
-                    return .changed;
+                    return .advanced;
                 }
                 rebind.phase = .restoring_target;
                 enqueueRecovery(job, effects);
-                return .changed;
+                return .advanced;
             },
             .restoring_target, .restoring_original => {
                 if (job.outcome == .candidate) return .candidate;
@@ -5805,8 +5848,10 @@ pub const Runtime = struct {
                 if (rebind.phase == .restoring_target) {
                     rebind.failure = task.runtime.last_restore_failure;
                     self.beginOriginalRestore(task, job, effects, release);
-                } else self.finishRecovery(task, job, effects, release);
-                return .changed;
+                    return .advanced;
+                }
+                self.finishRecovery(task, job, effects, release);
+                return .finished;
             },
         }
     }
@@ -5818,13 +5863,44 @@ pub const Runtime = struct {
         notifier: task_execution.Notifier,
     ) RecoverySync {
         var result: RecoverySync = .{};
+        // Confirmed results still hold the shared history barrier until their
+        // Task adopts/rejects them. Settle these owners before an earlier Task
+        // tries the writer, so its only completion wake also serves waiters.
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const job = task.runtime.restore_job orelse continue;
-            if (!job.completionReady()) continue;
+            if (job.binding_commit != .committed and job.binding_commit != .failed) continue;
+            result.include(self.syncTaskRecovery(task, effects, release, notifier));
+        }
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            result.include(self.syncTaskRecovery(task, effects, release, notifier));
+        }
+        return result;
+    }
+
+    /// Continue only after a synchronous transition. Reacquire the job on every
+    /// step: finishing recovery destroys it, and enqueuing transfers its state
+    /// to a worker until completionReady publishes the result.
+    fn syncTaskRecovery(
+        self: *Runtime,
+        task: *task_state.Task,
+        effects: RecoveryEffects,
+        release: ReleaseEffects,
+        notifier: task_execution.Notifier,
+    ) RecoverySync {
+        var result: RecoverySync = .{};
+        while (true) {
+            const job = task.runtime.restore_job orelse break;
+            if (!job.completionReady()) break;
             if (job.rebind != null) switch (self.syncRebindPreparation(task, job, effects, release, notifier)) {
-                .waiting => continue,
-                .changed => {
+                .waiting => break,
+                .finished => {
+                    std.debug.assert(task.runtime.restore_job == null);
+                    result.changed = true;
+                    break;
+                },
+                .advanced => {
                     result.changed = true;
                     continue;
                 },
@@ -5887,7 +5963,7 @@ pub const Runtime = struct {
                 const advances_binding = job.attempt.source_execution_generation != job.attempt.target_execution_generation;
                 if (advances_binding or job.rebind != null) {
                     switch (job.binding_commit) {
-                        .pending, .outcome_unknown => continue,
+                        .pending, .outcome_unknown => break,
                         .not_started => if (allowed) adoption: {
                             const previous_epoch = task.durable.binding_epoch;
                             if (advances_binding and previous_epoch == std.math.maxInt(u64)) {
@@ -5933,7 +6009,8 @@ pub const Runtime = struct {
                                 .outcome_unknown => .outcome_unknown,
                             };
                             if (job.binding_commit != .not_started) result.changed = true;
-                            continue;
+                            if (job.binding_commit == .committed or job.binding_commit == .failed) continue;
+                            break;
                         },
                         .committed => {
                             // Durable truth must be adopted even if external
@@ -6044,7 +6121,7 @@ pub const Runtime = struct {
                         if (restore_original) {
                             rebind.phase = .closing_candidate;
                             task.runtime.close_requested = false;
-                            startCloseWorker(task, notifier, true) catch {
+                            self.startRebindCloseWorker(task, notifier, true) catch {
                                 task.runtime.close_failed = true;
                             };
                             result.changed = true;
@@ -6105,9 +6182,21 @@ pub const Runtime = struct {
         result.changed = self.syncCheckpointPostprocesses(effects.checkpoint) or result.changed;
         result.changed = self.requestPoisonedSessionCloses() or result.changed;
         result.changed = self.syncRequestedCloses(effects.notifier) or result.changed;
-        const closes = self.syncCloseCompletions(effects.release);
-        result.changed = closes.changed or result.changed;
-        result.durable_changed = closes.durable_changed or result.durable_changed;
+        var rebind_close_settled = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            const rebind_close = closingRebind(task);
+            const close = self.syncTaskCloseCompletion(task, effects.release, effects.join_rebind_closes and rebind_close);
+            result.changed = close.changed or result.changed;
+            result.durable_changed = close.durable_changed or result.durable_changed;
+            rebind_close_settled = (close.changed and rebind_close) or rebind_close_settled;
+        }
+        // A settled close can end recovery and release the shared history
+        // barrier. Advance its owner and every writer waiter in this turn,
+        // including shutdown where no later wake runs. This is one bounded
+        // pass after physical closes, never a loop driven by `changed`.
+        if (rebind_close_settled)
+            result.include(self.syncRecoveryCompletions(effects.recovery, effects.release, effects.notifier));
         // Checkpoint/close reconciliation above can retire the final lease on
         // this very pass. Do not retain the scrub credential until another wake.
         self.releaseQuiescentRunEffects(effects.release);
