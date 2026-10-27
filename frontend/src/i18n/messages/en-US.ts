@@ -92,6 +92,35 @@ export const enUS = {
   "about.developer": "Developer",
   "about.developer_name": "Metask",
   "about.version": "Version",
+  "updates.section": "Version updates",
+  "updates.available": "Update available",
+  "updates.open": "View new version {version}",
+  "updates.new_version": "Version {version} is available",
+  "updates.check": "Check for updates",
+  "updates.retry": "Retry check",
+  "updates.checking": "Checking for updates…",
+  "updates.check_hint": "Check whether a new version is available.",
+  "updates.latest": "You’re up to date.",
+  "updates.check_failed": "Couldn’t check for updates. Try again later.",
+  "updates.last_known":
+    "This check failed. This is the last confirmed version.",
+  "updates.download": "Download update",
+  "updates.preparing": "Checking the download link…",
+  "updates.browser_opened": "Sent to your browser. Check the download there.",
+  "updates.package_missing":
+    "The update package for this platform is not available yet. Visit the website.",
+  "updates.link_invalid":
+    "The download link is unavailable. Download from the website.",
+  "updates.version_changed":
+    "The version information changed. Check for updates again.",
+  "updates.download_unavailable":
+    "The download link is temporarily unavailable. Retry or visit the website.",
+  "updates.browser_failed": "Couldn’t open your browser. Try again later.",
+  "updates.action_unavailable":
+    "This action is unavailable. Check the current status before retrying.",
+  "updates.command_unknown":
+    "The outcome couldn’t be confirmed. Check the current status or your browser before retrying.",
+  "updates.website": "Download website",
   "connection.connecting": "Connecting to the Workbench…",
   "connection.connected": "Workbench connected.",
   "connection.recovered": "Workbench connection recovered.",

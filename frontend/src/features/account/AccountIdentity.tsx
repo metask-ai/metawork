@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { AccountView } from "../../bridge/contracts.ts";
+import type { AccountView, UpdateView } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -10,7 +10,10 @@ import {
   accountIdentityInitial,
   accountIdentityLabel,
 } from "../../workbench/account-identity.ts";
-import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
+import {
+  AboutMetaWorkDialog,
+  type UpdateControls,
+} from "./AboutMetaWorkDialog.tsx";
 
 export function AccountIdentity({
   account,
@@ -21,6 +24,8 @@ export function AccountIdentity({
   onBeginLogin,
   onCancel,
   onLogout,
+  updates,
+  updateControls,
 }: {
   account: AccountView;
   active: boolean;
@@ -30,12 +35,15 @@ export function AccountIdentity({
   onBeginLogin: () => void;
   onCancel: () => void;
   onLogout: () => void;
+  updates: UpdateView;
+  updateControls: UpdateControls;
 }) {
   const { t } = useI18n();
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const aboutReturnFocus = useRef<HTMLButtonElement | null>(null);
   const authenticated = account.state === "authenticated";
   const identityName = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
@@ -113,7 +121,12 @@ export function AccountIdentity({
                 </Menu.Item>
                 <Menu.Item
                   className="account-menu-item focus-ring"
-                  onClick={() => choose(() => setAboutOpen(true))}
+                  onClick={() =>
+                    choose(() => {
+                      aboutReturnFocus.current = trigger.current;
+                      setAboutOpen(true);
+                    })
+                  }
                 >
                   <Icon name="info" />
                   {t("about.menu_item")}
@@ -147,17 +160,37 @@ export function AccountIdentity({
               <strong title={identityName}>{identityName}</strong>
               {identityStatus && <small>{identityStatus}</small>}
             </span>
-            <Icon name="chevron" />
           </Menu.Trigger>
+          {updates.updateAvailable && (
+            <button
+              type="button"
+              className="account-update-trigger focus-ring"
+              aria-label={t("updates.open", {
+                version: updates.latestVersion!,
+              })}
+              disabled={updateControls.disabled}
+              onClick={(event) => {
+                aboutReturnFocus.current = event.currentTarget;
+                setAboutOpen(true);
+              }}
+            >
+              {t("updates.available")}
+            </button>
+          )}
         </div>
       </Menu.Root>
 
       <AboutMetaWorkDialog
+        updates={updates}
+        updateControls={updateControls}
         open={aboutOpen}
         onOpenChange={(nextOpen) => {
           setAboutOpen(nextOpen);
           if (!nextOpen)
-            window.requestAnimationFrame(() => trigger.current?.focus());
+            window.requestAnimationFrame(() => {
+              const target = aboutReturnFocus.current;
+              (target?.isConnected ? target : trigger.current)?.focus();
+            });
         }}
       />
 

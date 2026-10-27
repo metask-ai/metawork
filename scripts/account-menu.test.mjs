@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -73,31 +74,62 @@ const account = {
 };
 const productVersion = readNativePackageManifest(process.cwd()).metadata
   .version;
+const updateAvailable = JSON.parse(
+  readFileSync(
+    new URL("../src/product/update.fixture", import.meta.url),
+    "utf8",
+  ),
+);
+const updateControls = {
+  disabled: false,
+  generation: "1",
+  check: async () => true,
+  download: async () => true,
+  website: async () => true,
+};
 
-function renderIdentity(callbacks, accountView = account) {
-  return render(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
+function identityElement(callbacks, accountView = account, locale = "en-US") {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale,
+        setLocale() {},
+        t: (id, values) => translate(locale, id, values),
       },
-      createElement(AccountIdentity, {
-        account: accountView,
-        active: false,
+    },
+    createElement(AccountIdentity, {
+      account: accountView,
+      updates: {
+        checkState: "unchecked",
+        checkError: "none",
+        latestVersion: null,
+        updateAvailable: false,
+        downloadAvailable: false,
+        downloadState: "idle",
+        downloadError: "none",
+      },
+      updateControls: {
         disabled: false,
-        cancelDisabled: false,
-        onBeginLogin() {},
-        onCancel() {},
-        onOpenSettings() {},
-        onLogout() {},
-        ...callbacks,
-      }),
-    ),
+        generation: "1",
+        check: async () => true,
+        download: async () => true,
+        website: async () => true,
+      },
+      active: false,
+      disabled: false,
+      cancelDisabled: false,
+      onBeginLogin() {},
+      onCancel() {},
+      onOpenSettings() {},
+      onLogout() {},
+      ...callbacks,
+    }),
   );
+}
+
+function renderIdentity(callbacks, accountView = account, locale = "en-US") {
+  return render(identityElement(callbacks, accountView, locale));
 }
 
 test("authenticated account identity does not repeat a healthy connection status", () => {
@@ -358,4 +390,201 @@ test("native drag exclusions cover mounted menu/dialog portals and their backdro
     portal.querySelector('[class*="fixed inset-0"]'),
     "dialog backdrop must share the excluded portal",
   );
+});
+
+test("new version uses a separate corner button without a dropdown arrow or accidental menu", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let download;
+  renderIdentity({
+    updates: updateAvailable,
+    updateControls: {
+      ...updateControls,
+      download: async (version) => {
+        download = version;
+        return true;
+      },
+    },
+  });
+  const accountTrigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+  assert.equal(accountTrigger.querySelector("svg"), null);
+  assert.equal(accountTrigger.querySelector("button"), null);
+  const updateTrigger = screen.getByRole("button", {
+    name: "View new version 0.2.10",
+  });
+  assert.equal(updateTrigger.parentElement, accountTrigger.parentElement);
+  await user.click(updateTrigger);
+  assert.equal(screen.queryByRole("menu"), null);
+  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  assert.match(dialog.textContent, /Version 0.2.10 is available/u);
+  assert.equal(download, undefined);
+  await user.click(screen.getByRole("button", { name: "Download update" }));
+  await waitFor(() => assert.equal(download, "0.2.10"));
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.ok(document.activeElement === updateTrigger));
+});
+
+test("invalid download offers an explicit website action without automatically opening it", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let websites = 0;
+  renderIdentity({
+    updates: {
+      ...updateAvailable,
+      downloadState: "failed",
+      downloadError: "invalid_link",
+    },
+    updateControls: {
+      ...updateControls,
+      website: async () => {
+        websites++;
+        return true;
+      },
+    },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "View new version 0.2.10" }),
+  );
+  assert.match(
+    screen.getByRole("alert").textContent,
+    /download link is unavailable/iu,
+  );
+  assert.equal(websites, 0);
+  await user.click(screen.getByRole("button", { name: "Download website" }));
+  await waitFor(() => assert.equal(websites, 1));
+});
+
+test("update statuses distinguish a missing package, last confirmed release and browser handoff", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  for (const [patch, message] of [
+    [
+      { downloadAvailable: false },
+      /package for this platform is not available/iu,
+    ],
+    [
+      { checkState: "failed", checkError: "network" },
+      /last confirmed version/iu,
+    ],
+    [{ downloadState: "opened" }, /Sent to your browser/iu],
+  ]) {
+    renderIdentity({ updates: { ...updateAvailable, ...patch } });
+    await user.click(
+      screen.getByRole("button", { name: "View new version 0.2.10" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+    assert.match(dialog.textContent, message);
+    assert.doesNotMatch(
+      dialog.textContent,
+      /download complete|installed|up to date/iu,
+    );
+    assert.ok(screen.getByRole("button", { name: "Download website" }));
+    if (patch.downloadAvailable === false)
+      assert.equal(
+        screen.queryByRole("button", { name: "Download update" }),
+        null,
+      );
+    cleanup();
+  }
+});
+
+test("manual check prevents duplicate clicks and waits for authoritative state", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let complete;
+  let calls = 0;
+  renderIdentity({
+    updateControls: {
+      ...updateControls,
+      check: () => {
+        calls++;
+        return new Promise((resolve) => {
+          complete = resolve;
+        });
+      },
+    },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: "About" }));
+  await user.dblClick(
+    screen.getByRole("button", { name: "Check for updates" }),
+  );
+  assert.equal(calls, 1);
+  assert.equal(
+    screen.getByRole("button", { name: "Check for updates" }).disabled,
+    true,
+  );
+  assert.match(screen.getByRole("status").textContent, /Checking for updates/u);
+  complete(true);
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Check for updates" }).disabled,
+      false,
+    ),
+  );
+  assert.doesNotMatch(screen.getByRole("status").textContent, /up to date/iu);
+});
+
+test(
+  "closing About invalidates late action feedback and a disappeared update restores account focus",
+  { timeout: 10000 },
+  async () => {
+    const user = userEvent.setup({ document: dom.window.document });
+    let complete;
+    const controls = {
+      ...updateControls,
+      download: () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    };
+    const rendered = renderIdentity({
+      updates: updateAvailable,
+      updateControls: controls,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "View new version 0.2.10" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Download update" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+    await user.click(
+      screen.getByRole("button", { name: "View new version 0.2.10" }),
+    );
+    complete(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(screen.queryByRole("alert"), null);
+    rendered.rerender(
+      identityElement({
+        updates: {
+          ...updateAvailable,
+          updateAvailable: false,
+          downloadAvailable: false,
+        },
+      }),
+    );
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      assert.ok(
+        document.activeElement ===
+          screen.getByRole("button", { name: "Account and application menu" }),
+      ),
+    );
+  },
+);
+
+test("update entry works signed out in Chinese and never depends on account command availability", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity(
+    { updates: updateAvailable, disabled: true },
+    { state: "signed_out", displayName: "", emailHint: "", phoneHint: "" },
+    "zh-CN",
+  );
+  await user.click(screen.getByRole("button", { name: "查看新版本 0.2.10" }));
+  assert.match(screen.getByRole("dialog").textContent, /新版本 0.2.10 可用/u);
+  assert.equal(
+    screen.getByRole("button", { name: "下载新版" }).disabled,
+    false,
+  );
+  assert.ok(screen.getByRole("button", { name: "官网下载" }));
 });
