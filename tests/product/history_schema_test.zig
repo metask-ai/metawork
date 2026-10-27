@@ -1002,3 +1002,32 @@ test "repository deletes Task descendants and backfills a previously failed chan
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deletion));
     try expectSame(a, database.capability(), state);
 }
+
+test "repository preserves witness atomicity beyond 128 retained-record statements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var state = try history.fixture(a);
+    const retained = try a.alloc(history.wire.RetainedRecord, 140);
+    for (retained, 0..) |*record, i| record.* = .{ .kind = .task, .id = 100 + i, .order = 100 + i, .payload = "{\"future\":true}" };
+    state.next_task_id = 241;
+    state.next_task_recent_order = 241;
+    var prepared = try repository.prepare(state, .{ .retained = retained }, @splat(1));
+    defer prepared.deinit();
+    try std.testing.expect(prepared.mutations.len > sql.Limits.exec_statements);
+    try std.testing.expect(prepared.chunks.len > 1);
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, repository.commit(&prepared));
+    try std.testing.expectEqual(@as(u64, 0), (try schema.repository.readWitness(database.capability())).generation);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&prepared));
+    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    try std.testing.expectEqual(@as(usize, 140), loaded.preserved.retained.len);
+    var deletion = try repository.prepare(state, .{}, @splat(2));
+    defer deletion.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deletion));
+    try expectSame(a, database.capability(), state);
+}

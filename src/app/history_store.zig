@@ -911,6 +911,55 @@ test "SQLite explicit recovery retires only the failed legacy import source" {
     try std.testing.expect(try store.hasSqlRecoveryEvidence());
 }
 
+test "SQLite large single Task backfills beyond batch bytes and recovers above 32 MiB" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const body = try aa.alloc(u8, 128 * 1024);
+    @memset(body, 'x');
+    var state = try testHistory(aa, 1, 136, body);
+    const all_runs = state.tasks[0].runs;
+    {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        state.tasks[0].runs = all_runs[0..1];
+        state.tasks[0].next_run_generation = 2;
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        state.tasks[0].runs = all_runs;
+        state.tasks[0].next_run_generation = 137;
+        var bytes = try wire.encodeAlloc(a, state, .{}, store.limits);
+        defer a.free(bytes);
+        try std.testing.expect(bytes.len > 32 * 1024 * 1024);
+        var decoded = try wire.decodeRecovering(a, bytes, store.limits);
+        defer decoded.deinit();
+        try std.testing.expect(!decoded.degraded);
+        try std.testing.expectEqual(@as(usize, 136), decoded.value.tasks[0].runs.len);
+        store.database.?.test_hooks.fail_before_commit = true;
+        try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
+        // One unrelated receipt change must carry every previously failed Run.
+        state.tasks[0].completion_seen_run_id = 136;
+        a.free(bytes);
+        bytes = try wire.encodeAlloc(a, state, .{}, store.limits);
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+        try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    }
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const bytes = (try store.loadAlloc(a)).?;
+    defer a.free(bytes);
+    var loaded = try wire.decodeRecovering(a, bytes, store.limits);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 136), loaded.value.tasks[0].runs.len);
+    try std.testing.expectEqual(@as(?u64, 136), loaded.value.tasks[0].completion_seen_run_id);
+    try std.testing.expectEqualSlices(u8, body, loaded.value.tasks[0].runs[135].assistant);
+}
+
 test "failed retired-store cleaning retains its secret lease without blocking SQL commits" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});

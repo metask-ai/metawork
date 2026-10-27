@@ -2519,12 +2519,16 @@ pub fn encodeAlloc(allocator: std.mem.Allocator, state: StateWire, preserved: Pr
     while (true) {
         const output = try allocator.alloc(u8, capacity);
         const encoded = encodeUncheckedImpl(output, state, preserved) catch |err| {
+            std.crypto.secureZero(u8, output);
             allocator.free(output);
-            if ((err != error.TaskStoreEncodeFailed and err != error.TaskStoreTooLarge) or capacity == max_snapshot_bytes) return err;
+            if (err == error.TaskStoreTooLarge or capacity == max_snapshot_bytes) return err;
             capacity = @min(capacity * 2, max_snapshot_bytes);
             continue;
         };
-        defer allocator.free(output);
+        defer {
+            std.crypto.secureZero(u8, output);
+            allocator.free(output);
+        }
         return allocator.dupe(u8, encoded);
     }
 }
@@ -2719,7 +2723,7 @@ pub fn decodeRecovering(
             offset = findNextFrame(input, offset + 1) orelse break;
             continue;
         };
-        if (header[4] != 0 or payload_len > max_store_bytes or payload_end > input.len) {
+        if (header[4] != 0 or payload_len > max_snapshot_bytes or payload_end > input.len) {
             degraded = true;
             if (payload_end <= input.len) offset = payload_end else offset = findNextFrame(input, offset + 1) orelse break;
             continue;
@@ -3022,13 +3026,13 @@ fn appendRecord(
     order: u64,
     value: anytype,
 ) Error!void {
-    if (output.len -| offset.* < frame_header_bytes) return error.TaskStoreTooLarge;
+    if (output.len -| offset.* < frame_header_bytes) return error.TaskStoreEncodeFailed;
     const header_start = offset.*;
     offset.* += frame_header_bytes;
     var writer = std.Io.Writer.fixed(output[offset.*..]);
     std.json.Stringify.value(value, .{}, &writer) catch return error.TaskStoreEncodeFailed;
     const payload = writer.buffered();
-    if (payload.len > max_store_bytes or payload.len > std.math.maxInt(u32))
+    if (payload.len > max_snapshot_bytes or payload.len > std.math.maxInt(u32))
         return error.TaskStoreTooLarge;
     writeFrameHeader(output[header_start .. header_start + frame_header_bytes], kind, id, order, payload);
     offset.* += payload.len;
@@ -3044,9 +3048,9 @@ fn appendRawRecord(
     order: u64,
     payload: []const u8,
 ) Error!void {
-    if (payload.len > max_store_bytes or payload.len > std.math.maxInt(u32))
+    if (payload.len > max_snapshot_bytes or payload.len > std.math.maxInt(u32))
         return error.TaskStoreTooLarge;
-    if (output.len -| offset.* < frame_header_bytes + payload.len) return error.TaskStoreTooLarge;
+    if (output.len -| offset.* < frame_header_bytes + payload.len) return error.TaskStoreEncodeFailed;
     writeFrameHeader(output[offset.* .. offset.* + frame_header_bytes], kind, id, order, payload);
     offset.* += frame_header_bytes;
     @memcpy(output[offset.* .. offset.* + payload.len], payload);

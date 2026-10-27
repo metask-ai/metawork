@@ -122,6 +122,77 @@ fn insertGroup(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
     return .{ .statement = .{ .sql = text, .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, encoded, .{}) }}) } };
 }
 
+fn insertRow(a: std.mem.Allocator, row: codec.Row) !sql.Mutation {
+    const placeholders = try a.alloc([]const u8, row.columns.len);
+    const updates = try a.alloc([]const u8, row.columns.len);
+    for (row.columns, 0..) |name, i| {
+        placeholders[i] = try std.fmt.allocPrint(a, "?{d}", .{i + 1});
+        updates[i] = try std.fmt.allocPrint(a, "{s}=excluded.{s}", .{ name, name });
+    }
+    const primary = try a.alloc([]const u8, row.primary.len);
+    for (row.primary, 0..) |field, i| primary[i] = row.columns[field];
+    return .{ .statement = .{
+        .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s}) ON CONFLICT({s}) DO UPDATE SET {s}", .{ row.table, try join(a, row.columns, ","), try join(a, placeholders, ","), try join(a, primary, ","), try join(a, updates, ",") }),
+        .params = try cloneValues(a, row.values),
+    } };
+}
+
+// Conservative encoded size, including BLOB hex and JSON string escaping.
+// A large single row binds directly rather than doubling its payload.
+fn transportSize(row: codec.Row) usize {
+    return valuesTransportSize(row.values);
+}
+
+fn valuesTransportSize(values: []const sql.Value) usize {
+    var size: usize = 16;
+    for (values) |value| size += 32 + switch (value) {
+        .text => |bytes| bytes.len * 6,
+        .blob => |bytes| bytes.len * 2,
+        else => @as(usize, 0),
+    };
+    return size;
+}
+
+fn appendDeletes(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), entries: []const Entry) !void {
+    var start: usize = 0;
+    while (start < entries.len) {
+        var end = start;
+        var bytes: usize = 0;
+        while (end < entries.len) {
+            const size = valuesTransportSize(entries[end].primary);
+            if (end != start and size > sql.Limits.exec_parameter_bytes / 4 -| bytes) break;
+            bytes += size;
+            end += 1;
+        }
+        try mutations.append(a, try deleteGroup(a, entries[start..end]));
+        start = end;
+    }
+}
+
+fn appendGroup(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), rows: []const codec.Row) !void {
+    const target = sql.Limits.exec_parameter_bytes / 4;
+    var groups: std.ArrayList([]const codec.Row) = .empty;
+    var start: usize = 0;
+    while (start < rows.len) {
+        var end = start;
+        var bytes: usize = 0;
+        while (end < rows.len) {
+            const size = transportSize(rows[end]);
+            if (end != start and size > target -| bytes) break;
+            bytes += size;
+            end += 1;
+            if (bytes >= target) break;
+        }
+        try groups.append(a, rows[start..end]);
+        start = end;
+    }
+    // All previous ordinals must be vacant before any position is reused.
+    for (groups.items) |group| if (!std.mem.eql(u8, rows[0].table, "history_state")) try mutations.append(a, try vacateOrder(a, group));
+    for (groups.items) |group| {
+        try mutations.append(a, if (group.len == 1 and transportSize(group[0]) >= target) try insertRow(a, group[0]) else try insertGroup(a, group));
+    }
+}
+
 fn deleteGroup(a: std.mem.Allocator, entries: []const Entry) !sql.Mutation {
     const first = entries[0];
     const encoded = try a.alloc([]const Cell, entries.len);
@@ -134,7 +205,8 @@ fn deleteGroup(a: std.mem.Allocator, entries: []const Entry) !sql.Mutation {
 
 // Ordinals describe a projection, not identity. Free the affected positions
 // before an upsert can reuse one; the temporary range is above every live
-// ordinal and is never visible outside this transaction.
+// ordinal and is never visible outside this transaction. The upper half is
+// temporary: the bounded snapshot cannot contain 2^31 ordered records.
 fn vacateOrder(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
     const first = rows[0];
     const keys = try a.alloc([]const Cell, rows.len);
@@ -146,7 +218,7 @@ fn vacateOrder(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
     const predicates = try a.alloc([]const u8, first.primary.len);
     for (first.primary, 0..) |field, i| predicates[i] = try std.fmt.allocPrint(a, "t.{s}={s}", .{ first.columns[field], try expression(a, i) });
     return .{ .statement = .{
-        .sql = try std.fmt.allocPrint(a, "WITH shift AS MATERIALIZED(SELECT coalesce(max(ordinal),-1)+1 AS delta FROM {s}) UPDATE {s} AS t SET ordinal=ordinal+(SELECT delta FROM shift) WHERE EXISTS(SELECT 1 FROM json_each(?1) AS j WHERE {s})", .{ first.table, first.table, try join(a, predicates, " AND ") }),
+        .sql = try std.fmt.allocPrint(a, "UPDATE {s} AS t SET ordinal=ordinal+2147483648 WHERE EXISTS(SELECT 1 FROM json_each(?1) AS j WHERE {s})", .{ first.table, try join(a, predicates, " AND ") }),
         .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, keys, .{}) }}),
     } };
 }
@@ -160,6 +232,7 @@ pub const Prepared = struct {
     previous: Witness,
     next: Witness,
     mutations: []const sql.Mutation,
+    chunks: []const []const sql.Mutation,
     changed_rows: usize,
     deleted_rows: usize,
     pub fn deinit(self: *Prepared) void {
@@ -222,7 +295,7 @@ pub const Repository = struct {
                 }
             }
             if (missing.items.len != 0) {
-                try mutations.append(a, try deleteGroup(a, missing.items));
+                try appendDeletes(a, &mutations, missing.items);
                 deleted += missing.items.len;
             }
         }
@@ -241,8 +314,7 @@ pub const Repository = struct {
                 } else try group.append(a, row);
             }
             if (group.items.len != 0) {
-                if (!std.mem.eql(u8, table, "history_state")) try mutations.append(a, try vacateOrder(a, group.items));
-                try mutations.append(a, try insertGroup(a, group.items));
+                try appendGroup(a, &mutations, group.items);
                 changed += group.items.len;
             }
         }
@@ -254,13 +326,32 @@ pub const Repository = struct {
         const next_digest = try a.dupe(u8, &next.digest);
         const previous_digest = try a.dupe(u8, &self.witness.digest);
         try mutations.append(a, .{ .statement = .{ .sql = "UPDATE history_state SET witness_generation=?1,witness_digest=?2 WHERE singleton=1 AND witness_generation=?3 AND witness_digest=?4", .params = try a.dupe(sql.Value, &.{ .{ .blob = generation }, .{ .blob = next_digest }, .{ .blob = previous }, .{ .blob = previous_digest } }) }, .expected_changes = .{ .exactly = 1 } });
-        if (!sql.validMutations(mutations.items)) return error.AtomicGroupCapacity;
-        return .{ .arena = arena, .next_index = next_index, .previous = self.witness, .next = next, .mutations = try mutations.toOwnedSlice(a), .changed_rows = changed, .deleted_rows = deleted };
+        var chunks: std.ArrayList([]const sql.Mutation) = .empty;
+        var first: usize = 0;
+        var bytes: usize = 0;
+        for (mutations.items, 0..) |mutation, i| {
+            if (!sql.validMutations(&.{mutation})) return error.AtomicGroupCapacity;
+            var size: usize = 0;
+            for (mutation.statement.params) |value| size += switch (value) {
+                .blob => |v| v.len,
+                .text => |v| v.len,
+                else => @as(usize, 0),
+            };
+            if (i - first == sql.Limits.exec_statements or size > sql.Limits.exec_parameter_bytes - bytes) {
+                try chunks.append(a, mutations.items[first..i]);
+                first = i;
+                bytes = 0;
+            }
+            bytes += size;
+        }
+        try chunks.append(a, mutations.items[first..]);
+        if (chunks.items.len > sql.Limits.exec_chunks) return error.AtomicGroupCapacity;
+        return .{ .arena = arena, .next_index = next_index, .previous = self.witness, .next = next, .mutations = mutations.items, .chunks = try chunks.toOwnedSlice(a), .changed_rows = changed, .deleted_rows = deleted };
     }
 
     pub fn commit(self: *Repository, prepared: *Prepared) sql.MutationOutcome {
         if (!Witness.eql(prepared.previous, self.witness)) return .conflict;
-        const result = self.database.mutate(prepared.mutations);
+        const result = self.database.mutateChunks(prepared.chunks);
         if (result == .committed) self.accept(prepared);
         return result;
     }
