@@ -1686,6 +1686,7 @@ pub const Runtime = struct {
                 control.automatic_root_configuration.health = .path_unavailable;
             };
         }
+        control.task_persistence.restored_bytes = null;
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
         // Skill records name Workspace ids; the allocator must never hand out
@@ -5751,6 +5752,7 @@ pub const Runtime = struct {
     }
 
     pub fn taskHistoryRecoveryAvailable(self: *const Runtime) bool {
+        if (self.task_persistence.restore_incompatible) return false;
         if (!self.task_persistence.enabled) return false;
         if (self.task_runtime.approvalHistoryWorkerActive()) return false;
         return switch (self.task_persistence_health) {
@@ -9504,6 +9506,7 @@ pub const Runtime = struct {
         source.visit(self, scrubAccountCredential) catch unreachable;
         self.account_credentials = null;
         self.account_credential_generation = 0;
+        self.syncHistoryCredentials(null, null);
         self.invalidateProjectionSecurity();
     }
 
@@ -9514,11 +9517,11 @@ pub const Runtime = struct {
         self.account_credential_generation = generation;
         self.invalidateProjectionSecurity();
         source.visit(self, scrubAccountCredential) catch unreachable;
+        self.syncHistoryCredentials(null, null);
     }
 
     fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.task_persistence.credential(credential, true);
         self.redactAllProductProjectionsNoFail(credential);
     }
 
@@ -9567,18 +9570,50 @@ pub const Runtime = struct {
 
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        self.task_persistence.credential(credential, true);
         if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
         self.redactAllProductProjectionsNoFail(credential);
+        self.syncHistoryCredentials(credential, null);
     }
 
     fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        self.task_persistence.credential(credential, self.retainsProjectionCredential(credential, credential.ptr));
         // All aliases into the retiring owner disappear together. Other owned
         // copies of the exact value still protect the same projection boundary.
         if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
         self.redactAllProductProjectionsNoFail(credential);
+        self.syncHistoryCredentials(null, credential.ptr);
+    }
+
+    fn syncHistoryCredentials(self: *Runtime, extra: ?[]const u8, retiring: ?[*]const u8) void {
+        if (self.task_persistence.credentials_fn == null) return;
+        const Collection = struct {
+            values: [128][]const u8 = undefined,
+            count: usize = 0,
+            retiring: ?[*]const u8,
+            fn visit(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
+                const c: *@This() = @ptrCast(@alignCast(context));
+                if (value.len == 0 or (c.retiring != null and value.ptr == c.retiring.?)) return;
+                for (c.values[0..c.count]) |existing| if (std.mem.eql(u8, existing, value)) return;
+                if (c.count == c.values.len) return error.OutOfMemory;
+                c.values[c.count] = value;
+                c.count += 1;
+            }
+        };
+        var collected: Collection = .{ .retiring = retiring };
+        var complete = true;
+        if (extra) |value| Collection.visit(&collected, value) catch {
+            complete = false;
+        };
+        Collection.visit(&collected, self.execution_state.credential()) catch {
+            complete = false;
+        };
+        if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
+            complete = false;
+        };
+        self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
+            complete = false;
+        };
+        if (!self.task_persistence.credentials(collected.values[0..collected.count], complete)) self.markTaskPersistenceWriteFailed();
     }
 
     fn invalidateProjectionSecurity(self: *Runtime) void {
@@ -22472,4 +22507,38 @@ test "Product view queued recovery failure preserves the shared Session blocker 
     try std.testing.expectEqualStrings(wanted, writer.buffered());
     try std.testing.expectEqual(.session_releasing, sendInputRejection(error.SessionReleasing));
     try std.testing.expectEqual(.session_capacity, sendInputRejection(error.SessionCapacity));
+}
+
+test "history allowance admits more than sixteen Runs beyond the old shared projection budget" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_history_bytes = 8 * 1024 * 1024;
+    control.limits.max_user_message_bytes = 256 * 1024;
+    const task = control.task_runtime.find(3).?;
+    const body = try control.allocator.alloc(u8, 128 * 1024);
+    defer control.allocator.free(body);
+    @memset(body, 'x');
+    for (0..24) |index| {
+        const slot = try control.reserveRunRecord(task, .{ .text = body });
+        const run = &task.durable.runs[slot].?;
+        run.id = index + 8;
+        _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+        run.file_change_observation = .complete;
+        run.event_stream_finalized = true;
+        run.terminal_observed = true;
+        run.agent_handoff.store(.finishing, .release);
+        control.task_runtime.releaseQuiescentRunEffects(control.taskRuntimeReleaseEffects());
+    }
+    try std.testing.expect(control.projection_bytes > 1536 * 1024);
+    var count: usize = 0;
+    for (task.durable.runs) |entry| {
+        if (entry != null) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+    const encoded = try control.encodeTaskHistoryCandidate(null);
+    defer control.allocator.free(encoded);
+    var recovered = try task_persistence.decodeRecovering(control.allocator, encoded, control.taskPersistenceLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 25), recovered.value.tasks[0].runs.len);
+    try std.testing.expect(!recovered.degraded);
 }

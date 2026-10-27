@@ -2648,13 +2648,13 @@ pub const Runtime = struct {
         if (task_state.terminalPayload(run_record) != null) return continuation_cancelled;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         defer access.deinit();
-        try ensureUiHistory(self.allocator, task);
         const record = prepareCancelledUiRecord(
             self,
             &access,
             run_id,
             &run_record.redactionSecrets(),
         );
+        try ensureCancellationHistory(self.allocator, task, record);
         var identity_collision = false;
         const dispatch = requestRunTermination(run_record, .user_cancel);
         if (effects.executor.cancel(run_record)) {
@@ -3051,7 +3051,6 @@ pub const Runtime = struct {
         const retrying = task.runtime.close_failed and
             task.runtime.hasClosingSession();
         if (task.runtime.live() == null) return false;
-        try ensureUiHistory(self.allocator, task);
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         if (task.runtime.active_operation == .compact) {
             const compact_id = switch (task.runtime.active_operation) {
@@ -3090,6 +3089,7 @@ pub const Runtime = struct {
             )
         else
             null;
+        try ensureCancellationHistory(self.allocator, task, cancelled_ui);
         if (task_state.findRun(
             task.durable.runs,
             task.runtime.active_run_id,
@@ -7722,6 +7722,8 @@ fn reserveRun(
     };
     if (task.durable.next_run_generation == std.math.maxInt(u64))
         return error.RunGenerationExhausted;
+    // Keep one no-allocation cancellation receipt beyond the next decision.
+    try ensureUiHistory(self.allocator, task);
     var input_record = try copyRunInput(self, task, input, &.{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} }, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
     const tools = try self.allocator.alloc(
@@ -8579,7 +8581,13 @@ fn classifyUiRecordIdentity(
 }
 
 fn ensureUiHistory(allocator: std.mem.Allocator, task: *task_state.Task) std.mem.Allocator.Error!void {
-    if (task.durable.ui_history_next < task.durable.ui_history.len) return;
+    if (task.durable.ui_history_next + 2 <= task.durable.ui_history.len) return;
+    _ = try growHistory(allocator, task_state.UiRecord, &task.durable.ui_history);
+}
+
+fn ensureCancellationHistory(allocator: std.mem.Allocator, task: *task_state.Task, record: ?task_state.UiRecord) std.mem.Allocator.Error!void {
+    const value = record orelse return;
+    if (classifyUiRecordIdentity(task.durable.ui_history, value.run_id, value.request_id) != .inserted or task.durable.ui_history_next < task.durable.ui_history.len) return;
     _ = try growHistory(allocator, task_state.UiRecord, &task.durable.ui_history);
 }
 
@@ -8804,8 +8812,10 @@ fn deinitTask(
     task.input_submissions.deinit(self.allocator);
     task.input_submissions = .empty;
     releaseAttachmentNoFail(self, task, effects, .cold_start);
-    for (task.durable.runs) |*entry| if (entry.*) |*run|
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
         deinitRun(self, effects, run);
+        entry.* = null;
+    };
     self.allocator.free(task.durable.runs);
     for (task.durable.compacts) |*entry| if (entry.*) |*compact|
         deinitCompact(self, effects, compact);
@@ -9983,6 +9993,45 @@ test "search revision exhaustion cannot wrap into a reusable cursor identity" {
     try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
     runtime.noteSearchChange();
     try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
+}
+
+test "Task history grows past fifty records while a worker retains the first Task" {
+    const a = std.testing.allocator;
+    var runtime = try Runtime.init(a, 1);
+    defer runtime.deinitStorage();
+    defer @memset(runtime.tasks, null);
+    const records = try a.alloc(task_state.Task, 101);
+    defer a.free(records);
+    records[0] = testModelIntentTask();
+    runtime.tasks[0] = &records[0];
+    var lease = try records[0].runtime.worker_leases.acquire();
+    defer lease.deinit();
+    const first = runtime.find(1).?;
+    for (1..101) |index| {
+        const slot = try runtime.reserveTaskSlot();
+        records[index] = testModelIntentTask();
+        records[index].durable.id = index + 1;
+        runtime.tasks[slot] = &records[index];
+        try std.testing.expectEqual(first, runtime.find(1).?);
+        try std.testing.expect(first.runtime.worker_leases.hasLive());
+    }
+    try std.testing.expectEqual(@as(usize, 101), runtime.taskCount());
+}
+
+test "Task approval history grows without replacing the oldest decision" {
+    const a = std.testing.allocator;
+    var task = testModelIntentTask();
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "history")};
+    task.durable.runs = &runs;
+    task.durable.ui_history = try a.alloc(?task_state.UiRecord, 1);
+    @memset(task.durable.ui_history, null);
+    defer a.free(task.durable.ui_history);
+    for (1..65) |id| {
+        try ensureUiHistory(a, &task);
+        try std.testing.expectEqual(UiRecordInsertion.inserted, pushUiRecord(&task, .{ .request_id = id, .run_id = 7, .kind = .permission, .state = .denied, .answered_by = .user }));
+    }
+    try std.testing.expectEqual(@as(usize, 64), task.durable.ui_history_count);
+    for (task.durable.ui_history[0..64], 1..) |record, id| try std.testing.expectEqual(id, record.?.request_id);
 }
 
 test "Host search matches Unicode case variants and preserves raw UTF-8 through continuation" {

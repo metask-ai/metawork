@@ -139,6 +139,14 @@ pub const Stores = struct {
         if (self.automatic_workspace_configuration) |*store| store.deinit();
         self.* = .{ .allocator = allocator };
     }
+
+    pub fn releaseTaskRestore(self: *Stores) void {
+        if (self.task_restored_bytes) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+            self.task_restored_bytes = null;
+        }
+    }
 };
 
 pub fn commitScheduledTaskStore(
@@ -179,9 +187,9 @@ pub fn commitTaskStore(
     return store.commit(bytes, false);
 }
 
-pub fn taskStoreCredential(context: ?*anyopaque, value: []const u8, retained: bool) void {
-    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return));
-    store.credential(value, retained);
+pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool) bool {
+    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return false));
+    return store.syncCredentials(values, complete);
 }
 
 pub fn resolveTaskStoreCommit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {

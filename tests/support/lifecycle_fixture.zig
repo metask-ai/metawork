@@ -282,7 +282,8 @@ pub const FakeCore = struct {
     completion_condition: std.Io.Condition = .init,
     runtime: FakeRuntime = .{},
     catalogs: [16]FakeCatalog = [_]FakeCatalog{.{}} ** 16,
-    sessions: [16]FakeSession = [_]FakeSession{.{}} ** 16,
+    // Retired handles remain address-stable for stale-handle assertions.
+    sessions: [128]FakeSession = [_]FakeSession{.{}} ** 128,
     next_plan: Plan = .immediate,
     runtime_created: usize = 0,
     runtime_destroyed: usize = 0,

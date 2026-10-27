@@ -84,9 +84,10 @@ pub const Capability = struct {
     enabled: bool = false,
     restored_bytes: ?[]const u8 = null,
     restore_failed: bool = false,
+    restore_incompatible: bool = false,
     // Callback-scoped acquisition/retirement notice. Concrete history storage
     // owns any bounded copy needed until sanitizing retired disk versions.
-    credential_fn: ?*const fn (?*anyopaque, []const u8, bool) void = null,
+    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool) bool = null,
 
     commit_fn: *const fn (
         context: ?*anyopaque,
@@ -99,8 +100,8 @@ pub const Capability = struct {
         bytes: []const u8,
     ) Commit = unsupportedCommit,
 
-    pub fn credential(self: Capability, value: []const u8, retained: bool) void {
-        if (self.credential_fn) |notify| notify(self.context, value, retained);
+    pub fn credentials(self: Capability, values: []const []const u8, complete: bool) bool {
+        return if (self.credentials_fn) |notify| notify(self.context, values, complete) else true;
     }
 
     pub fn commit(self: Capability, bytes: []const u8) Commit {

@@ -1527,11 +1527,10 @@ test "automatic Workspace preparation owns capacity and settles its private allo
         std.fs.path.basename(rolled_back_facts.canonical_root),
     );
     defer std.testing.allocator.free(rolled_back_key);
-    try std.testing.expect(!runtime.automaticCapacityAvailable());
-    try std.testing.expectError(
-        error.WorkspaceCapacity,
-        runtime.prepareAutomatic("", storage, true),
-    );
+    try std.testing.expect(runtime.automaticCapacityAvailable());
+    var additional = try runtime.prepareAutomatic("", storage, true);
+    try std.testing.expect(additional.id() != rolled_back.id());
+    try std.testing.expect(runtime.rollbackPreparedAutomatic(&additional, storage));
     try std.testing.expect(runtime.rollbackPreparedAutomatic(&rolled_back, storage));
     try std.testing.expect(runtime.automaticCapacityAvailable());
     try std.testing.expectError(
@@ -1561,7 +1560,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
     var completed = try runtime.prepareAutomatic("", storage, true);
     const completed_id = completed.id();
     runtime.completeAutomatic(&completed);
-    try std.testing.expect(!runtime.automaticCapacityAvailable());
+    try std.testing.expect(runtime.automaticCapacityAvailable());
     runtime.releaseAutomatic(completed_id, storage);
     try std.testing.expect(runtime.automaticCapacityAvailable());
 }
