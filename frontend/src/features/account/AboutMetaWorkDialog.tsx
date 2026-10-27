@@ -193,7 +193,7 @@ export function AboutMetaWorkDialog({
               </Button>
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="md"
                 disabled={updateControls.disabled || busy}
                 onClick={() => void act("website")}
