@@ -156,7 +156,7 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 `office_resource_publish.macos` 补 canonical Native SDK 当前未公开的排他目录发布能力，只由 Application 的 Office 资源 owner 同步调用。调用者拥有父目录 handle、stage 与最终资源核验；seam 不保存 handle、启动线程或创建生命周期状态，返回时没有在途调用，shutdown 无额外工作。目标存在须返回冲突，调用者重新打开并完整核验真实赢家；其他错误沿既有非致命来源失败撤销 Office 来源，不改用普通 rename、硬链接或复制。公开 OS symbol 只允许 `renameatx_np`，不扩展到私有运行时、用户文档或 Product 文件发布。验证覆盖重复发布、空目录/文件/链接占位保留与并发唯一赢家；SDK 等价能力可用并验收后原位替换并删除 seam、allowlist 和专用测试。
 
-`external_link_handoff` 只允许三种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
+`external_link_handoff` 只允许四种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。Update 只使用当前 release、用户显式点击且版本绑定的官方目标包地址，或固定官网地址；预检完成后仍由 Product owner 重新校验，连接撤销与 shutdown 禁止迟到交接。URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
 
 `app_single_instance` 必须同时满足：
 

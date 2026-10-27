@@ -16,6 +16,9 @@
     },
     .bridge = .{
         .commands = .{
+            .{ .name = "metawork.updates.check", .origins = .{"zero://app"} },
+            .{ .name = "metawork.updates.openDownload", .origins = .{"zero://app"} },
+            .{ .name = "metawork.updates.openWebsite", .origins = .{"zero://app"} },
             .{ .name = "metawork.smoke.ping", .origins = .{"zero://app"} },
             .{ .name = "metawork.smoke.eventAck", .origins = .{"zero://app"} },
             .{ .name = "metawork.events.connect", .origins = .{"zero://app"} },

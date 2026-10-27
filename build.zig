@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
         b.resolveInstallPrefix(prefix, .{});
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
+    const automatic_update_checks = b.option(bool, "automatic-update-check", "Enable periodic official version checks for this distribution artifact") orelse false;
+    if (artifact == .automation and automatic_update_checks)
+        @panic("automation artifacts must not enable official update checks");
     // Include the ICO in the generated resource path's cache identity.
     const windows_resources = b.addWriteFiles();
     _ = windows_resources.addCopyFile(b.path("assets/icons/app-icon.ico"), "app-icon.ico");
@@ -59,11 +62,15 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install.step);
         office_skill_shell_step.dependOn(&install.step);
     }
-    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact);
+    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact, automatic_update_checks);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
-        wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)
+        wireAgentCore(b, artifacts.tests.root_module, bundle, artifact, automatic_update_checks)
     else
         modules;
+    const update_tests = b.addTest(.{ .name = "metawork-updates", .root_module = test_modules.product_update });
+    const run_update_tests = b.addRunArtifact(update_tests);
+    b.step("test-updates", "Run bounded Product update policy tests").dependOn(&run_update_tests.step);
+    artifacts.tests.step.dependOn(&run_update_tests.step);
     const office_publish_tests = b.addTest(.{
         .name = "metawork-office-resource-publish",
         .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
@@ -119,6 +126,11 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-sdk-consumption", "Run Application Native SDK effect bindings")
         .dependOn(&b.addRunArtifact(sdk_consumption_tests).step);
+    const update_host_step = b.step("test-updates-host", "Run update HTTP, lifecycle and Bridge tests");
+    update_host_step.dependOn(&run_update_tests.step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-control", .root_module = test_modules.product_control_runtime, .filters = &.{ "updates", "snapshot serializer matches", "Automatic Workspace snapshot exposes" } })).step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-host", .root_module = test_modules.app, .filters = &.{"updates"} })).step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-bridge", .root_module = test_modules.bridge, .filters = &.{ "updates", "Dispatcher validates authority" } })).step);
     const window_chrome_tests = b.addTest(.{
         .name = "metawork-window-chrome",
         .root_module = test_modules.app,
@@ -543,6 +555,7 @@ fn addRendererWireGenerator(b: *std.Build) void {
     const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
+    module.addImport("product_update", b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host }));
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -618,6 +631,7 @@ fn addLifecycleTests(
 }
 
 const WiredModules = struct {
+    product_update: *std.Build.Module,
     storage: *std.Build.Module,
     storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
@@ -1090,6 +1104,7 @@ fn wireAgentCore(
     root_module: *std.Build.Module,
     bundle: agentcore_bundle.Bundle,
     artifact: ArtifactOption,
+    automatic_update_checks: bool,
 ) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
     if (bundle.deployment_target) |deployment_target|
@@ -1100,6 +1115,7 @@ fn wireAgentCore(
     const runner = existingImport(root_module, "runner");
     const artifact_options = b.addOptions();
     artifact_options.addOption([]const u8, "kind", @tagName(artifact));
+    artifact_options.addOption(bool, "automatic_update_checks", automatic_update_checks);
     const product_identity = b.createModule(.{
         .root_source_file = b.path("src/product_identity.zig"),
         .target = target,
@@ -1314,6 +1330,11 @@ fn wireAgentCore(
     agent_provider_probe.addImport("agent_completion", agent_completion);
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
+    const product_update = b.createModule(.{
+        .root_source_file = b.path("src/product/update.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const models_contract = b.createModule(.{
         .root_source_file = b.path("src/product/models/contract.zig"),
         .target = target,
@@ -2039,6 +2060,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("metawork_product_update", product_update);
+    product_control_runtime.addImport("metawork_product_identity", product_identity);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);
@@ -2123,6 +2146,7 @@ fn wireAgentCore(
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_product_models_contract", models_contract);
     bridge.addImport("metawork_product_control", product_control);
+    bridge.addImport("metawork_product_update", product_update);
     bridge.addImport("metawork_product_mcp", product_mcp);
     bridge.addImport("metawork_product_skill", product_skill);
 
@@ -2196,6 +2220,7 @@ fn wireAgentCore(
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
+    app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);
@@ -2240,6 +2265,7 @@ fn wireAgentCore(
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;
     return .{
+        .product_update = product_update,
         .storage = storage,
         .storage_sql = storage_sql,
         .product_control_history_schema = product_control_history_schema,

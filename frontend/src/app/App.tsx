@@ -4023,6 +4023,23 @@ export default function App() {
 
           <AccountIdentity
             account={snapshot.account}
+            updates={snapshot.updates}
+            updateControls={{
+              disabled: bridgeUnavailable,
+              generation: bridgeGeneration,
+              check: async () => {
+                const result = await client.checkUpdates();
+                await refreshSnapshot();
+                return result.outcome === "accepted";
+              },
+              download: async (version) => {
+                const result = await client.openUpdateDownload(version);
+                await refreshSnapshot();
+                return result.outcome === "accepted";
+              },
+              website: async () =>
+                (await client.openUpdateWebsite()).outcome === "opened",
+            }}
             active={settingsOpen}
             disabled={bridgeUnavailable || accountBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}

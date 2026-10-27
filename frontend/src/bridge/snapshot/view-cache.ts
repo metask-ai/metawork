@@ -31,6 +31,7 @@ const decodedFields: Record<
     "capabilities",
     "permissions",
     "account",
+    "updates",
     "models",
     "newTaskAdmission",
     "skillCatalog",

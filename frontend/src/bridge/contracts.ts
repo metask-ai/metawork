@@ -1,7 +1,9 @@
 import {
   approvalFailureReasons,
   type TaskApprovalResultWire,
+  type UpdateViewWire,
 } from "./generated-wire.ts";
+export type UpdateView = UpdateViewWire;
 export { approvalFailureReasons };
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
@@ -1249,6 +1251,7 @@ export const emptyViewVersions: ViewVersions = {
   searchIndex: "0",
 };
 export type WorkbenchSnapshot = {
+  updates: UpdateView;
   revision: string;
   blockVersions: ViewVersions;
   securityEpoch: string;

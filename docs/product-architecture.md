@@ -13,7 +13,7 @@ Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、
 
 Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit；后者只取得 Account 的窄 authorization lease，并绑定 Models Metask catalog worker、credential vault、Agent-owned model probe 与 Models 管理生命周期。Account commit 后，Application 先发布 Account fact，再通知 Models observer；observer 只能请求当次 lease、查询无 secret 的当次授权证明或声明授权不可用，不能读取 Account 内部 token owner或把 Models 结果写回 Account。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models desired commit、Schedule scrub 和已安装 execution reconciliation 属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
 
-Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
+Models、Workspace、Task、Schedule、Skill、MCP 与 Update 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
 Product 事务只使用三种机制：
 
@@ -312,6 +312,18 @@ Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过
 Models desired default 在自身 registry transaction 中先提交，不等待 Schedule scrub。Schedule scrub 明确失败或 outcome unknown 时不得安装新的 active execution；Product Control 保留旧 active credential owner、关闭 desired/active 不匹配的新 Task admission并发布 recovery。恢复成功后按当前 Models desired authority重新 resolve和安装，不回滚 Models，也不改写 Account fact。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，credential 不进入 Bridge 或 Renderer；credential、locator、Authorization header 和可重建 secret 的 metadata 永远不进入 projection、result、event、日志、产品历史或 checkpoint record。
+
+### 2.8 版本提醒与下载交接
+
+Update aggregate 独占正式版本比较、官方 manifest 接受规则、进程内检查时机和用户下载意图；Account、Models、Task 与 Agent 不参与该 authority。Application 只执行注入的 HTTP、timer、独立有界 worker 与系统 handler effect。worker 持有 owned 请求与窄 transport，不持有 Product/Native Runtime；完成回到主线程后由 Update 校验请求 identity、当前 release 和 admission。状态走现有 ProductDelivery context，URL 不进入 projection、日志或持久化。
+
+官方 manifest 的必需字段为 `version` 与 `downloads`；后者按 `macos | windows` 与 `arm64 | x64` 提供已发布包的完整 URL。正式版本是无前导零的三个十进制 u32，按数值比较，不接受预发布、build metadata 或降级。已知字段严格验型、重复键与超限拒绝，未知扩展字段不产生行为。目标只能由 Host 构建目标选择，不能猜测另一架构或拼接文件名；缺少目标包仍可发布新版事实，下载不可用。服务地址与下载主机由唯一 Product 输入固定；下载仅接受官方 HTTPS 主机、无 userinfo/显式端口/fragment/空白控制字符的有界绝对 URL，保留 query 原字节。
+
+后台检查只在显式启用的分发构建中，于主窗口就绪后延迟启动并按进程内单调时钟周期运行；手动检查可提前，同一时刻最多一个在途检查且共享结果。失败不立即重试，不阻塞其他产品路径；不持久化检查时间、远端 manifest 或忽略版本。有效 manifest 原子替换已确认 release，失败保留上次事实但不得声称本次已是最新。请求无账号凭据、产品内容或设备身份，TLS 正常验证、拒绝重定向，正文与耗时有界。
+
+下载命令必须绑定用户看到的版本；Host 重新校验当前 release/目标/URL，不能改投较新版本。用户点击授权一次有界 HEAD 预检及随后系统浏览器交接：2xx 可交接，404/410 为明确失效，405/501 仅表示 HEAD 不支持、仍可按原授权交接；其他 HTTP、网络与超时保留暂时不可用的真实原因。预检不读取安装包正文，也不证明随后 GET 成功。打开前再次校验版本和 URL，预检结果只能消费一次。系统 handler 受理不等于下载完成或安装；失败只提示显式官网动作，绝不自动换目标、跳官网或重放 effect。
+
+连接撤销使尚未交接的下载意图失效；检查结果可继续作为全局事实供新连接读取。shutdown 先关闭 Update admission、撤销 timer 并取消/join 独立 worker，之后才能释放依赖；迟到结果不得重新发布或打开浏览器。检查与预检不使用 Agent/Task Executor。后台完成的主线程 wake 丢失时只由同一 coordinator 的有界完成 timer 收口，不借 Renderer 轮询。
 
 ## 3. 并发与生命周期
 

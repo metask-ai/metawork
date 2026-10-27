@@ -18,6 +18,7 @@ pub const RendererBridgeConnect = struct {
 };
 pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
+pub const UpdateDownload = struct { expectedVersion: []const u8 };
 
 pub const WireText = struct {
     value: []const u8,

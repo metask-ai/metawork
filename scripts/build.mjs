@@ -52,12 +52,17 @@ export async function buildNative(
     optimize,
     target,
     automation = false,
+    automaticUpdateCheck = false,
     installPrefix,
     frontendDir,
     signal,
   } = {},
 ) {
   if (!target) throw new Error("Native build requires a verified target");
+  if (automation && automaticUpdateCheck)
+    throw new Error(
+      "automation artifacts must not enable official update checks",
+    );
   const args = [
     nativeCli,
     "build",
@@ -68,6 +73,7 @@ export async function buildNative(
     `-Dartifact=${automation ? "automation" : "development"}`,
   ];
   if (automation) args.push("-Dautomation=true");
+  if (automaticUpdateCheck) args.push("-Dautomatic-update-check=true");
   if (installPrefix) args.push(`-Dinstall-prefix=${installPrefix}`);
   if (frontendDir) args.push(`-Dfrontend-dist=${frontendDir}`);
   await runChild(process.execPath, args, {
@@ -98,15 +104,27 @@ export async function buildAutomationDebugArtifact(
 const isMain =
   process.argv[1] !== undefined &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMain) {
-  const [mode, targetId] = process.argv.slice(2);
+export function parseBuildArguments(args) {
+  const [mode, ...rest] = args;
+  const automaticUpdateCheck = rest.includes("--automatic-update-check");
+  const targets = rest.filter((value) => value !== "--automatic-update-check");
   if (
-    (process.argv.length !== 3 && process.argv.length !== 4) ||
-    (mode !== "debug" && mode !== "release")
+    (mode !== "debug" && mode !== "release") ||
+    targets.length > 1 ||
+    targets.some((value) => value.startsWith("--")) ||
+    rest.filter((value) => value === "--automatic-update-check").length > 1 ||
+    (automaticUpdateCheck && mode !== "release")
   )
     throw new Error(
-      "usage: node scripts/build.mjs debug|release [agentcore-target-id]",
+      "usage: node scripts/build.mjs debug|release [agentcore-target-id] [--automatic-update-check]",
     );
+  return { mode, targetId: targets[0], automaticUpdateCheck };
+}
+
+if (isMain) {
+  const { mode, targetId, automaticUpdateCheck } = parseBuildArguments(
+    process.argv.slice(2),
+  );
 
   const bundle = await verifyStagedAgentCoreBundle(
     repositoryRoot,
@@ -122,6 +140,7 @@ if (isMain) {
     await buildNative(repositoryRoot, {
       optimize: "ReleaseFast",
       target: bundle.target,
+      automaticUpdateCheck,
     });
     await verifyNativeAutomationIsolation();
   }

@@ -127,6 +127,36 @@ test("release version has one manifest owner and exact package mirrors", () => {
   );
 });
 
+test("official update checks require distribution opt-in and stay outside Agent and Renderer networking", () => {
+  const build = read("build.zig");
+  assert.match(
+    build,
+    /b\.option\(bool, "automatic-update-check"[\s\S]*?orelse false/,
+  );
+  assert.match(build, /artifact == \.automation and automatic_update_checks/);
+  assert.match(
+    read("src/app.zig"),
+    /\.start\(product_identity\.automatic_update_checks\)/,
+  );
+  assert.match(read("scripts/package-macos.mjs"), /"--automatic-update-check"/);
+  assert.match(
+    read("scripts/package-windows.mjs"),
+    /"-Dautomatic-update-check=true"/,
+  );
+  assertNoImports(
+    ["src/product/update.zig"],
+    ["native_sdk", "metawork_app", "metawork_agent", "metask_transport"],
+  );
+  assert.doesNotMatch(
+    read("src/product/update.zig"),
+    /std\.http\.Client|std\.Thread\.spawn/,
+  );
+  assert.doesNotMatch(
+    read("frontend/src/features/account/AboutMetaWorkDialog.tsx"),
+    /\bfetch\(|window\.zero|https:\/\//,
+  );
+});
+
 test("artifact identities preserve development and isolate automation namespaces", () => {
   const identity = read("src/product_identity.zig");
   const app = read("src/app.zig");
