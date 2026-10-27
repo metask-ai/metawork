@@ -6041,6 +6041,7 @@ pub const Runtime = struct {
         // candidate; snapshot reads never supply another lifecycle turn.
         changed = self.syncApprovalChanges() or changed;
         const task_sync = self.task_runtime.reconcileLifecycle(.{
+            .join_rebind_closes = self.shutting_down and self.executor_shutdown,
             .max_title_bytes = self.limits.max_task_title_bytes,
             .text = self.taskRuntimeTextProjection(),
             .recovery = self.taskRuntimeRecoveryEffects(),
