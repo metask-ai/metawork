@@ -3,6 +3,7 @@
 //! encoding, and the only Bridge -> Product Control calls.
 
 const std = @import("std");
+const update = @import("metawork_product_update");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -153,6 +154,14 @@ pub const McpSecretSlot = union(enum) {
 };
 
 /// Application-owned Models effects that cannot run inside Product Control.
+pub const UpdatesHost = struct {
+    context: *anyopaque,
+    check_fn: *const fn (*anyopaque) update.CommandOutcome,
+    download_fn: *const fn (*anyopaque, []const u8) update.CommandOutcome,
+    website_fn: *const fn (*anyopaque) bool,
+    cancel_fn: *const fn (*anyopaque) void,
+};
+
 pub const ModelsHost = struct {
     context: *anyopaque,
     refresh_catalog_fn: *const fn (*anyopaque) models_contract.CommandResult,
@@ -255,6 +264,7 @@ pub const Dispatcher = struct {
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
     models_host: ?ModelsHost = null,
+    updates_host: ?UpdatesHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -324,6 +334,10 @@ pub const Dispatcher = struct {
         self.models_host = host;
     }
 
+    pub fn setUpdatesHost(self: *Dispatcher, host: ?UpdatesHost) void {
+        self.updates_host = host;
+    }
+
     /// Registers the complete product command table. Automation may change
     /// authority in controlled builds, but it does not add a parallel protocol.
     pub fn register(
@@ -344,6 +358,9 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.read_preview_image, .function = readPreviewImage },
             .{ .name = commands.open_external_link, .function = openExternalLink },
+            .{ .name = commands.updates_check, .function = checkUpdates },
+            .{ .name = commands.updates_open_download, .function = openUpdateDownload },
+            .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
@@ -497,6 +514,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn breakConnection(self: *Dispatcher) void {
+        if (self.updates_host) |host| host.cancel_fn(host.context);
         self.cancelOutputConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
@@ -666,6 +684,7 @@ pub const Dispatcher = struct {
         }
         if (self.control) |control| control.cancelSnapshot();
         self.cancelPreviewConnection();
+        if (self.updates_host) |host| host.cancel_fn(host.context);
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.preview_high_water = 0;
         self.output_high_water = 0;
@@ -788,6 +807,40 @@ pub const Dispatcher = struct {
             generation == 0 or
             generation != self.window_chrome_generation)
             return error.StaleWindowChromeDocument;
+    }
+
+    fn checkUpdates(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        const result: update.CommandOutcome = if (self.updates_host) |host| host.check_fn(host.context) else .unavailable;
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(result)});
+    }
+
+    fn openUpdateDownload(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.UpdateDownload, invocation.request.payload);
+        defer parsed.deinit();
+        _ = try update.Version.parse(parsed.value.expectedVersion);
+        const result: update.CommandOutcome = if (self.updates_host) |host| host.download_fn(host.context, parsed.value.expectedVersion) else .unavailable;
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(result)});
+    }
+
+    fn openUpdateWebsite(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        const opened = if (self.updates_host) |host| host.website_fn(host.context) else false;
+        return encodeExternalLinkOutcome(output, if (opened) "opened" else "unavailable");
     }
 
     fn openExternalLink(
@@ -6797,6 +6850,8 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
+        update_calls: usize = 0,
+        update_cancels: usize = 0,
         wake_calls: usize = 0,
         account_calls: usize = 0,
         models_calls: usize = 0,
@@ -6811,6 +6866,22 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .acceptedAttempt(41),
         models_result: models_contract.CommandResult = .acceptedResult(),
 
+        fn checkUpdates(context: *anyopaque) update.CommandOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.update_calls += 1;
+            return .accepted;
+        }
+        fn downloadUpdate(context: *anyopaque, version: []const u8) update.CommandOutcome {
+            std.testing.expectEqualStrings("0.2.8", version) catch return .rejected;
+            return checkUpdates(context);
+        }
+        fn updateWebsite(context: *anyopaque) bool {
+            return checkUpdates(context) == .accepted;
+        }
+        fn cancelUpdate(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.update_cancels += 1;
+        }
         fn wake(context: ?*anyopaque) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.wake_calls += 1;
@@ -7000,6 +7071,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .refresh_catalog_fn = Harness.refreshModels,
         .reset_store_fn = Harness.resetModels,
     });
+    dispatcher.setUpdatesHost(.{ .context = &harness, .check_fn = Harness.checkUpdates, .download_fn = Harness.downloadUpdate, .website_fn = Harness.updateWebsite, .cancel_fn = Harness.cancelUpdate });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -7180,6 +7252,35 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    for ([_][]const u8{
+        "{\"id\":\"update-extra\",\"command\":\"metawork.updates.check\",\"payload\":{\"url\":\"https://evil.test\"}}",
+        "{\"id\":\"update-url\",\"command\":\"metawork.updates.openDownload\",\"payload\":{\"expectedVersion\":\"0.2.8\",\"url\":\"https://evil.test\"}}",
+        "{\"id\":\"update-invalid\",\"command\":\"metawork.updates.openDownload\",\"payload\":{\"expectedVersion\":\"latest\"}}",
+        "{\"id\":\"update-website-extra\",\"command\":\"metawork.updates.openWebsite\",\"payload\":{\"url\":\"https://evil.test\"}}",
+    }) |request| {
+        const denied = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, denied, "\"handler_failed\"") != null);
+    }
+    const wrong_update = native_dispatcher.dispatch("{\"id\":\"update-wrong-window\",\"command\":\"metawork.updates.check\",\"payload\":{}}", .{ .origin = "zero://app", .window_id = 99 }, &response);
+    try std.testing.expect(std.mem.indexOf(u8, wrong_update, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), harness.update_calls);
+    for ([_][]const u8{
+        "{\"id\":\"update-check\",\"command\":\"metawork.updates.check\",\"payload\":{}}",
+        "{\"id\":\"update-download\",\"command\":\"metawork.updates.openDownload\",\"payload\":{\"expectedVersion\":\"0.2.8\"}}",
+    }) |request| {
+        const accepted = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, accepted, "\"outcome\":\"accepted\"") != null);
+    }
+    const website = native_dispatcher.dispatch("{\"id\":\"update-website\",\"command\":\"metawork.updates.openWebsite\",\"payload\":{}}", source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, website, "\"outcome\":\"opened\"") != null);
+    try std.testing.expectEqual(@as(usize, 3), harness.update_calls);
+    const cancels = harness.update_cancels;
+    dispatcher.breakConnection();
+    try std.testing.expectEqual(cancels + 1, harness.update_cancels);
+    const disconnected_update = native_dispatcher.dispatch("{\"id\":\"update-after-disconnect\",\"command\":\"metawork.updates.openWebsite\",\"payload\":{}}", source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, disconnected_update, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 3), harness.update_calls);
+    _ = native_dispatcher.dispatch("{\"id\":\"update-reconnect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &response);
     for ([_][]const u8{
         "{\"id\":\"open-https\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com/a?q=1#result\"}}",
         "{\"id\":\"open-http\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"http://localhost:3000/\"}}",

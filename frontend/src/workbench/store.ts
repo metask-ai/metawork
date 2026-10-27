@@ -41,6 +41,15 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
+    updates: {
+      checkState: "unavailable",
+      checkError: "none",
+      latestVersion: null,
+      updateAvailable: false,
+      downloadAvailable: false,
+      downloadState: "idle",
+      downloadError: "none",
+    },
     blockVersions: emptyViewVersions,
     securityEpoch: "1",
     historyEpoch: "1",

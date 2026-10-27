@@ -254,6 +254,8 @@ detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：
 
 ## 变更验证 Gate
 
+版本提醒的定向入口为 `zig build test-updates-host`，覆盖纯 Product 接受与调度、真实本地 HTTP GET/HEAD 的大小和重定向边界、独立 worker/取消/join/丢 wake timer 收口、当前版本和 URL 重新校验、断连撤销以及 Bridge authority。Renderer 运行 typecheck 与 updates-contract、bridge-client、workbench-contract、account-menu suites；跨语言 fixture 必须绑定实际 Host 编码与实际 Renderer 解码，验证 failed/error 和 availability 不变量。正式 Native graph、architecture guard 和当前平台 build 仍负责 module graph/allowlist。桌面验收覆盖角落唯一提醒、无下拉箭头、账号入口独立、未登录/长名/键盘/窄窗和官网下载错误；macOS/Windows 的真实系统 handler 交接各自记录，不用 fixture 或 handler ACK 证明浏览器下载完成，不向另一平台扩大结论。分发构建显式启用后台检查，automation 不访问正式更新源；无测试可绕过 canonical bundle 要求。
+
 Task 直接删除与设置归档管理须覆盖：未归档 deleting/failed 的双侧严格 fixture；Host 停止各类 active operation、等待输入/接续/审批失效、terminal drain 与 commit-before-release、原 archived 保留、明确失败及 outcome unknown、失败后显式新意图安全清除与重启不重放。Renderer 覆盖固定删除目标、归档 toast 撤销/查看及暂停计时、设置搜索/空错/恢复/删除、日常导航隐藏归档、历史返回/草稿/焦点和完成提醒不复活。当前平台真实 Application→Bridge→Product→AgentCore vertical 另证停止并删除、文件保留、冷启动及桌面/窄窗交互；模拟测试不替代真实桌面证据。
 
 对话呈现锚点的验证按 owner 分层：Task runtime、history codec 与 SQL round trip 固定展示序号高水位、图片引用与锚点原子安装、重复引用稳定、旧记录识别及新格式严格拒绝；Bridge fixture 与 Renderer suite 固定同一身份的消息接管、输出回退、终态收尾、分页完整性和图片先后。Windows 的 `node scripts/test-conversation-webview-windows.mjs` 使用正式 automation artifact、真实 WebView2 和隔离的组件夹具，验证图片解码及节点稳定、文本选择与焦点、分页补载后的内容阅读锚点、终态详情顺序、安全失效，以及桌面/390px 的深浅主题。该组件夹具不替代真实 Host 生图、账户授权、完整桌面生命周期或系统键盘手势证据；这些验收的失败须分别保留，不能用组件通过覆盖。

@@ -139,6 +139,7 @@ pub const CheckError = enum { none, network, timeout, invalid_manifest, unavaila
 pub const DownloadState = enum { idle, checking, opened, failed };
 pub const DownloadError = enum { none, stale_version, missing_download, invalid_link, network, timeout, browser_unavailable, unavailable };
 pub const HeadResult = enum { accessible, unsupported, invalid_link, network, timeout };
+pub const CommandOutcome = enum { accepted, rejected, unavailable };
 
 pub fn headResult(status: u16) HeadResult {
     return switch (status) {
@@ -161,6 +162,22 @@ pub const View = struct {
 };
 pub const DownloadPreparation = struct { id: u64, version: Version, url: Url };
 pub const CheckCompletion = union(enum) { release: Release, failed: CheckError };
+pub const CheckPreparation = struct { id: u64, target: Target };
+
+/// Application receives only update lifecycle capabilities, never the Control
+/// owner or a mutable aggregate pointer. All callbacks execute on its thread.
+pub const Management = struct {
+    context: *anyopaque,
+    start_fn: *const fn (*anyopaque, u64, bool) void,
+    next_check_fn: *const fn (*anyopaque) ?u64,
+    begin_check_fn: *const fn (*anyopaque, u64) ?CheckPreparation,
+    complete_check_fn: *const fn (*anyopaque, u64, CheckCompletion) void,
+    begin_download_fn: *const fn (*anyopaque, []const u8) ?DownloadPreparation,
+    complete_download_fn: *const fn (*anyopaque, u64, HeadResult) ?Url,
+    browser_result_fn: *const fn (*anyopaque, bool) void,
+    cancel_download_fn: *const fn (*anyopaque) void,
+    stop_fn: *const fn (*anyopaque) void,
+};
 
 pub const Runtime = struct {
     current: Version,
@@ -186,6 +203,7 @@ pub const Runtime = struct {
         self.automatic = automatic;
         self.next_check_ms = if (automatic) now_ms +| Limits.initial_delay_ms else null;
         self.check_state = .unchecked;
+        self.check_error = .none;
     }
 
     pub fn due(self: *const Runtime, now_ms: u64) bool {
@@ -228,8 +246,8 @@ pub const Runtime = struct {
             .checkState = self.check_state,
             .checkError = self.check_error,
             .latestVersion = if (self.release) |*release| release.version.text.slice() else null,
-            .updateAvailable = newer,
-            .downloadAvailable = newer and self.release.?.download != null,
+            .updateAvailable = self.available and newer,
+            .downloadAvailable = self.available and newer and self.release.?.download != null,
             .downloadState = self.download_state,
             .downloadError = self.download_error,
         };
@@ -296,6 +314,7 @@ pub const Runtime = struct {
         self.next_check_ms = null;
         self.check_id = null;
         self.check_state = .unavailable;
+        self.check_error = .none;
         self.cancelDownload();
     }
 };
@@ -446,4 +465,12 @@ test "updates disconnect and shutdown revoke pending browser effects and stale c
     try std.testing.expect(runtime.beginCheck(80_000) == null);
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);
     try std.testing.expect(!runtime.due(std.math.maxInt(u64)));
+}
+
+test "updates actual Host encoding matches the independent URL-free Renderer fixture" {
+    var runtime = try startedRuntime(false);
+    try installFixture(&runtime);
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, runtime.view(), .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @embedFile("update.fixture"), "\r\n"), json);
 }

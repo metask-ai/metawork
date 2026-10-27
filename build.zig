@@ -123,6 +123,11 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-sdk-consumption", "Run Application Native SDK effect bindings")
         .dependOn(&b.addRunArtifact(sdk_consumption_tests).step);
+    const update_host_step = b.step("test-updates-host", "Run update HTTP, lifecycle and Bridge tests");
+    update_host_step.dependOn(&run_update_tests.step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-control", .root_module = test_modules.product_control_runtime, .filters = &.{ "updates", "snapshot serializer matches", "Automatic Workspace snapshot exposes" } })).step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-host", .root_module = test_modules.app, .filters = &.{"updates"} })).step);
+    update_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-updates-bridge", .root_module = test_modules.bridge, .filters = &.{ "updates", "Dispatcher validates authority" } })).step);
     const window_chrome_tests = b.addTest(.{
         .name = "metawork-window-chrome",
         .root_module = test_modules.app,
@@ -543,6 +548,7 @@ fn addRendererWireGenerator(b: *std.Build) void {
     const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
+    module.addImport("product_update", b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host }));
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -2045,6 +2051,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("metawork_product_update", product_update);
+    product_control_runtime.addImport("metawork_product_identity", product_identity);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);
@@ -2127,6 +2135,7 @@ fn wireAgentCore(
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_product_models_contract", models_contract);
     bridge.addImport("metawork_product_control", product_control);
+    bridge.addImport("metawork_product_update", product_update);
     bridge.addImport("metawork_product_mcp", product_mcp);
     bridge.addImport("metawork_product_skill", product_skill);
 
@@ -2200,6 +2209,7 @@ fn wireAgentCore(
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
+    app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);

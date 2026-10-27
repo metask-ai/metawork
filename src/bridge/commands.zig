@@ -12,6 +12,9 @@ pub const window_chrome_refresh = "metawork.host.windowChrome.refresh";
 pub const window_chrome_control = "metawork.host.windowChrome.control";
 pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
 pub const open_external_link = "metawork.host.links.openExternal";
+pub const updates_check = "metawork.updates.check";
+pub const updates_open_download = "metawork.updates.openDownload";
+pub const updates_open_website = "metawork.updates.openWebsite";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const choose_automatic_workspace_root = "metawork.workspaces.chooseAutomaticRoot";
 pub const reset_automatic_workspace_root = "metawork.workspaces.resetAutomaticRoot";
@@ -116,6 +119,9 @@ pub const product = [_][]const u8{
     window_chrome_control,
     window_chrome_disconnect,
     open_external_link,
+    updates_check,
+    updates_open_download,
+    updates_open_website,
     choose_workspace,
     choose_automatic_workspace_root,
     reset_automatic_workspace_root,

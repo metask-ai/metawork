@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const update = @import("metawork_product_update");
+const product_identity = @import("metawork_product_identity");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -1220,6 +1222,7 @@ const ViewPreparation = struct {
 };
 
 pub const Runtime = struct {
+    updates: update.Runtime,
     run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1609,6 +1612,10 @@ pub const Runtime = struct {
             .skill = skill,
             .change_notifier = configuration.change_notifier,
             .run_clock = configuration.run_clock,
+            .updates = update.Runtime.init(product_identity.version, .{
+                .os = if (builtin.os.tag == .windows) .windows else .macos,
+                .arch = if (builtin.cpu.arch == .aarch64) .arm64 else .x64,
+            }) catch unreachable,
             .executor = executor,
             .approval_executor = approval_executor,
             .attachment_executor = attachment_executor,
@@ -5144,6 +5151,7 @@ pub const Runtime = struct {
 
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
+        self.updates.stop();
         self.output_checks.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
@@ -6864,6 +6872,8 @@ pub const Runtime = struct {
             @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
         try self.writeAccount(writer);
+        writer.writeAll(",\"updates\":") catch return error.SnapshotTooLarge;
+        std.json.Stringify.value(self.updates.view(), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
@@ -10279,6 +10289,65 @@ pub const Runtime = struct {
         if (self.schedule.takeChanged()) self.bumpRevision();
     }
 
+    pub fn updateManagement(self: *Runtime) update.Management {
+        return .{ .context = self, .start_fn = updateStart, .next_check_fn = updateNextCheck, .begin_check_fn = updateBeginCheck, .complete_check_fn = updateCompleteCheck, .begin_download_fn = updateBeginDownload, .complete_download_fn = updateCompleteDownload, .browser_result_fn = updateBrowserResult, .cancel_download_fn = updateCancelDownload, .stop_fn = updateStop };
+    }
+
+    fn updateStart(context: *anyopaque, now_ms: u64, automatic: bool) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return;
+        self.updates.start(now_ms, automatic);
+        self.updateChanged();
+    }
+    fn updateNextCheck(context: *anyopaque) ?u64 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return if (self.shutting_down) null else self.updates.next_check_ms;
+    }
+    fn updateBeginCheck(context: *anyopaque, now_ms: u64) ?update.CheckPreparation {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return null;
+        const id = self.updates.beginCheck(now_ms) orelse return null;
+        self.updateChanged();
+        return .{ .id = id, .target = self.updates.target };
+    }
+    fn updateCompleteCheck(context: *anyopaque, id: u64, completion: update.CheckCompletion) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.updates.completeCheck(id, completion)) self.updateChanged();
+    }
+    fn updateBeginDownload(context: *anyopaque, expected_version: []const u8) ?update.DownloadPreparation {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return null;
+        const result = self.updates.beginDownload(expected_version);
+        self.updateChanged();
+        return result;
+    }
+    fn updateCompleteDownload(context: *anyopaque, id: u64, result: update.HeadResult) ?update.Url {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const url = self.updates.completeDownload(id, result);
+        self.updateChanged();
+        return url;
+    }
+    fn updateBrowserResult(context: *anyopaque, opened: bool) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.browserResult(opened);
+        self.updateChanged();
+    }
+    fn updateCancelDownload(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.cancelDownload();
+        self.updateChanged();
+    }
+    fn updateStop(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.updates.stop();
+        self.updateChanged();
+    }
+
+    fn updateChanged(self: *Runtime) void {
+        self.bumpRevision();
+        _ = self.change_notifier.notify();
+    }
+
     fn bumpRevision(self: *Runtime) void {
         self.encoded_views.invalidateAll();
         if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
@@ -10291,6 +10360,36 @@ pub const Runtime = struct {
         return self.projection_security_epoch;
     }
 };
+
+test "updates Control publishes committed facts through the canonical live context" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const management = control.updateManagement();
+    const initial = control.currentRevision();
+    management.start_fn(management.context, 1, true);
+    const check = management.begin_check_fn(management.context, 30_001).?;
+    try std.testing.expect(management.begin_check_fn(management.context, 30_002) == null);
+    management.complete_check_fn(management.context, check.id, .{ .release = .{
+        .version = try update.Version.parse("999.0.0"),
+        .download = null,
+    } });
+    try std.testing.expect(control.currentRevision() > initial);
+    var buffer: [96 * 1024]u8 = undefined;
+    const raw = try control.writeViewFixture(&buffer, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, raw, .{});
+    defer parsed.deinit();
+    const view = parsed.value.object.get("context").?.object.get("updates").?.object;
+    try std.testing.expectEqualStrings("succeeded", view.get("checkState").?.string);
+    try std.testing.expectEqualStrings("999.0.0", view.get("latestVersion").?.string);
+    try std.testing.expect(view.get("updateAvailable").?.bool);
+    try std.testing.expect(!view.get("downloadAvailable").?.bool);
+    try std.testing.expectEqual(@as(usize, 7), view.count());
+    const failed = management.begin_check_fn(management.context, 50_000).?;
+    management.complete_check_fn(management.context, failed.id, .{ .failed = .timeout });
+    try std.testing.expect(control.updates.view().updateAvailable);
+    control.beginShutdown();
+    try std.testing.expect(management.begin_check_fn(management.context, 60_000) == null);
+}
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub const OutputFileEffect = OutputCheckHarness;

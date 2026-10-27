@@ -159,7 +159,7 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 - 每个 Task 在创建时记录无 secret 的 generation、protocol 与模型历史事实；不得固化 Account identity 或 API Key 元数据。全局默认变化不改写 Task 历史或 live Agent Session；
 - 没有用户标题的 Task 在首个 Run admission 时立即使用旧的本地有界摘要作为临时标题，避免模型返回前退化为 identity 占位；Run 收口后再使用该 Task 已固定的同一 ExecutionConfig 通过独立 Completion 生成一个不超过 32 个 Unicode 字符的标题并替换临时值。该请求不创建 Session、Run history 或 Conversation，也不改变 Run outcome；失败、超时、拒绝或非法结果保留临时标题。用户在生成完成前后设置的标题都具有优先权，后台结果不得覆盖；
 - 每个 Task 至多一个 active operation：当前可以是 non-terminal Run、manual compact 或 Conversation restore，包括 executor 中的 `queued` 状态；Run、compact 与 restore 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact、restore 和其他 Session mutation。Task 独占有界待处理消息，支持文本、Skill 与完成 staging 的附件，不占 active-operation 槽，不在接收时创建 Run。有效发送不因内部启动、停止或收尾被阻塞；Task 决定就绪插话、等待或下一 Run。Stop 只取消当时已有消息与当前 operation，之后的新输入保留。原文不持久化，重启后的未执行安全记录只显示中断；
-- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`models`、`newTaskAdmission`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 只发布 Metask identity 与授权状态，Models 独立发布 provider catalog、Provider-local/global selection、revision、persistence health 与 Custom Provider，`newTaskAdmission` 独立发布 Product Control active `ModelRef`、generation、selection revision 与新 Task admission；Renderer 只为 New task draft 保存可空 Manual Workspace identity 和 runtime-only 模型覆盖选择，Host 不发布全局 selected Workspace；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent、必填 nullable `modelSelection` 及各 owner 对应的 expected generation/epoch，Host 重新校验 window、ownership、active source、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
+- Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`models`、`updates`、`newTaskAdmission`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 只发布 Metask identity 与授权状态，Models 独立发布 provider catalog、Provider-local/global selection、revision、persistence health 与 Custom Provider，`newTaskAdmission` 独立发布 Product Control active `ModelRef`、generation、selection revision 与新 Task admission；Renderer 只为 New task draft 保存可空 Manual Workspace identity 和 runtime-only 模型覆盖选择，Host 不发布全局 selected Workspace；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent、必填 nullable `modelSelection` 及各 owner 对应的 expected generation/epoch，Host 重新校验 window、ownership、active source、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
 - 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费；用户在 Host 原生目录选择器中确认目录即完成 Manual Workspace 授权，不再追加重复的 trust 确认。Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 普通文本及多模态输入的用户文字按 Product Control `Limits.max_user_message_bytes` 执行 UTF-8 字节发送上限。输入框不得静默截断；超限时保留完整可编辑草稿、明确提示并禁用发送。草稿保存预算独立于发送预算，支持超限草稿在有界容量内恢复；Skill 输入继续遵守独立的参数与总字节合同。
@@ -252,7 +252,8 @@ New task Composer 在当前已选 Provider 内选择模型，来源可以是 Met
 - 数据目录 lease 是阻止双写的最终裁决。既有 Host 无响应或协议不兼容时不得绕过 lease 启动第二套 Store：交互式启动显示固定的可操作提示并以失败状态退出，automation 不显示系统对话框并以失败状态退出；
 - 一体化标题栏由 Renderer 绘制窗口按钮并提交固定语义意图，Bridge 校验 transport authority 后交由 Application 通过 Native SDK Runtime API 或已登记 Native Compat seam 执行；Windows 用户双击有效标题栏候选区时切换最大化/还原，普通按下仍进入系统拖动语义，macOS 保留 Native SDK 与系统偏好定义的标题栏双击行为；Renderer 不持有原生窗口 identity、handle 或执行权；
 - 提供受控的文件/目录选择；
-- 为通知、更新和系统集成保留明确入口；
+- 版本提醒不依赖登录：显式启用的分发构建启动后后台检查正式版本，长期运行时周期检查，关于提供手动检查；只在左下角账户行右侧显示独立“有新版”入口。点击后在关于查看版本并显式下载适配当前运行目标的安装包，由系统浏览器承担下载，系统 handler 受理不得呈现为下载完成。缺包、无效链接或临时错误保留明确原因并提供用户点击的官网入口，不自动改变目标、跳官网或中断 Task；不提供应用内下载进度、自动安装/重启、强制更新、忽略版本或持久化检查记录。版本接受、并发及生命周期见[Product 架构](product-architecture.md#28-版本提醒与下载交接)，呈现见[UI 设计规范](ui-design.md#58-左下角账号入口)；
+- 为通知与其他系统集成保留明确入口；
 - Renderer 只能调用 Host 显式开放的领域命令。
 
 ### 5.9 Workbench 界面与任务组织
@@ -402,7 +403,7 @@ Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改入口在检查后准备同 Task 普通草稿，由用户手动发送，不代表文档已修改；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改入口在检查后准备同 Task 普通草稿，由用户手动发送，不代表文档已修改；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布、自动安装更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

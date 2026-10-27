@@ -1,6 +1,7 @@
 // Generated from Host wire types. Do not edit.
 import {
   object,
+  stringValue,
   booleanValue,
   positiveWireId,
   positiveU64WireId,
@@ -92,5 +93,81 @@ export function decodeTaskApprovalResultWire(
             "recovery_failed",
             "dependency_contract",
           ] as const),
+  };
+}
+export type UpdateViewWire = {
+  checkState: "unchecked" | "checking" | "succeeded" | "failed" | "unavailable";
+  checkError:
+    "none" | "network" | "timeout" | "invalid_manifest" | "unavailable";
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  downloadAvailable: boolean;
+  downloadState: "idle" | "checking" | "opened" | "failed";
+  downloadError:
+    | "none"
+    | "stale_version"
+    | "missing_download"
+    | "invalid_link"
+    | "network"
+    | "timeout"
+    | "browser_unavailable"
+    | "unavailable";
+};
+export function decodeUpdateViewWire(
+  value: unknown,
+  path: string,
+): UpdateViewWire {
+  const item = object(value, path, [
+    "checkState",
+    "checkError",
+    "latestVersion",
+    "updateAvailable",
+    "downloadAvailable",
+    "downloadState",
+    "downloadError",
+  ]);
+  return {
+    checkState: enumValue(item.checkState, path + ".checkState", [
+      "unchecked",
+      "checking",
+      "succeeded",
+      "failed",
+      "unavailable",
+    ] as const),
+    checkError: enumValue(item.checkError, path + ".checkError", [
+      "none",
+      "network",
+      "timeout",
+      "invalid_manifest",
+      "unavailable",
+    ] as const),
+    latestVersion:
+      item.latestVersion === null
+        ? null
+        : stringValue(item.latestVersion, path + ".latestVersion"),
+    updateAvailable: booleanValue(
+      item.updateAvailable,
+      path + ".updateAvailable",
+    ),
+    downloadAvailable: booleanValue(
+      item.downloadAvailable,
+      path + ".downloadAvailable",
+    ),
+    downloadState: enumValue(item.downloadState, path + ".downloadState", [
+      "idle",
+      "checking",
+      "opened",
+      "failed",
+    ] as const),
+    downloadError: enumValue(item.downloadError, path + ".downloadError", [
+      "none",
+      "stale_version",
+      "missing_download",
+      "invalid_link",
+      "network",
+      "timeout",
+      "browser_unavailable",
+      "unavailable",
+    ] as const),
   };
 }

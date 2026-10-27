@@ -27,11 +27,15 @@ Windows 窗口按钮执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 外部链接只通过 `metawork.host.links.openExternal` 打开。payload 精确为 `{ url }`，URL 的 UTF-8 长度上限为 4096 bytes；Host 在已连接的启动窗口与主线程上重新校验，只接受不含空白、控制字符、反斜杠或 userinfo 的绝对 `http`/`https` URL，以及非空且不含 CR/LF 注入的 `mailto` URL。结果精确为 `{ outcome: "opened" | "rejected" | "unavailable" }`：`opened` 只表示系统 handler 已接收请求，`rejected` 表示目标不满足闭合策略，`unavailable` 表示平台能力或系统 handler 失败。结构错误、额外字段、不可信 origin、未连接或错误 window 仍是 Bridge error。该命令不允许 `file`、自定义 scheme、相对地址、任意导航、URL 日志、重试或 fallback；Renderer 必须在点击时同步阻止 WebView 默认导航，严格解码结果，并把非 `opened` 与 transport failure 就地呈现。
 
+版本提醒通过产品命令 `metawork.updates.check`、`metawork.updates.openDownload`、`metawork.updates.openWebsite` 承运。check/website payload 精确为 `{}`；download 精确为 `{ expectedVersion }`，为 canonical 正式版本，不能携带 URL、平台或架构。三者都要求已协商的启动窗口与主线程。check/download 结果为 `{ outcome: "accepted" | "rejected" | "unavailable" }`，accepted 只表示接纳或复用在途操作；website 为 `{ outcome: "opened" | "unavailable" }`，opened 只表示系统 handler 受理。结构、来源、窗口或连接错误仍为 Bridge error。断连撤销 pending download，迟到 HEAD 结果无权打开浏览器。
+
+实时 context 必须包含 URL-free `updates`：`checkState = unchecked | checking | succeeded | failed | unavailable`、`checkError = none | network | timeout | invalid_manifest | unavailable`、nullable `latestVersion`、`updateAvailable`、`downloadAvailable`、`downloadState = idle | checking | opened | failed` 及 `downloadError = none | stale_version | missing_download | invalid_link | network | timeout | browser_unavailable | unavailable`。failed 必须且仅能携带非 none 的对应错误；可下载必先有新版，新版必须有 canonical 版本。失败时允许保留已确认版本。该字段参加既有 context 内容版本与原子复用，不增加第二个数据面。领域接受、调度和交接 authority 以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准。
+
 ## 2. ProductDelivery 与 Snapshot transport
 
 ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。工作台摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。
 
-实时上下文必须覆盖当前消费者所需的 Account、capabilities、permissions、Models、new-task admission 以及相关 command CAS 事实。Task Composer、TaskInformation、模型选择、Slash 和附件能力在 Task 页面保持实时；Models、Skills、MCP 与 Schedule 的异步管理结果在对应页面挂载期间继续更新，不能仅在进入页面时读取一次。
+实时上下文必须覆盖当前消费者所需的 Account、capabilities、permissions、Models、updates、new-task admission 以及相关 command CAS 事实。Task Composer、TaskInformation、模型选择、Slash 和附件能力在 Task 页面保持实时；Models、Skills、MCP 与 Schedule 的异步管理结果在对应页面挂载期间继续更新，不能仅在进入页面时读取一次。
 
 一次响应冻结同一 Product 提交 revision，明确所返回范围、产品块 identity、内容版本及安全代次。Renderer 只复用 Host 确认仍有效的块，并原子接纳本次页面所需的摘要、上下文和 Task 内容；没有返回某个范围不等于该范围为空。内容版本表达数据变化，不是第二个协议版本。缺失块、错误关联、重复 identity 和未知范围均严格拒绝，不能从其他 Task 或全局默认补造事实。
 
