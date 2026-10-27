@@ -82,13 +82,16 @@ C = [Product Control runtime](../../src/product/control/runtime.zig)，R = [Task
 
 跟踪空间与对象/删除意图一起预留；不能先改数据，随后因申请 dirty 容器失败而漏标。read receipt、流式输出、凭据清洗、失败补写和 TaskBusy 跳过同样登记。历史编号与修改版本分开，不用 Product UI revision 代替。
 
-一次保存冻结 dirty 的版本及必要父链/跨记录依赖，输出若干**各自完整的业务原子组**：
+一次保存冻结 dirty 的版本及必要父链/跨记录依赖，先确定**完整的业务原子组**，再装入有限的 SQL 提交批次；原子组是最小不可拆单位，不是必须独占一次 COMMIT 的单位：
 
-1. SQL 同一事务包含该组的全部数据和提交 witness。新父记录未落盘时必须随子记录写入。
-2. 可以先后提交互不依赖的组，不能把 checkpoint/coverage、转入关联、删除或审批候选拆开。
-3. 确认后，仅清除实际提交且内存版本未再变化的标记；unknown 不清除。失败积压没有排空时，不因另一个 Task 局部提交成功就把保存状态恢复正常。
-4. 普通补写一轮应覆盖当时全部 dirty 组；必须确认的关键组只以自身及依赖的确认结果交付权限/安装候选，其余失败积压继续保留，不能谎称整个历史已保存。
-5. SQL 触发的级联/范围更新也必须更新对应版本账目。checkpoint coverage 可用与现有 overlay 完全相同条件的集合 UPDATE，不能把每个旧 Run 编成一条无界 statement 列表。
+1. 一个事务可以包含多个互不冲突的完整普通 dirty 组，新父记录未落盘时必须连同父链装入。只合并、不拆组，事务同时成功或失败；一个 witness 覆盖该事务的全部冻结数据。
+2. 根据 A 实测并核定的 statement、参数字节及冻结内存额度尽量合并，达到额度后另起事务。不能为了填满批次拆开 checkpoint/coverage、转入关联或删除；单组已超限则按 §4 解决额度，不能拆碎伪装成功。
+3. 必须确认的候选默认保持现有独立确认及其必要依赖，不为合并而等待或夹带无关积压；不把临时 overlay、在途/unknown 候选混进普通补写，不新增多候选调度机制。
+4. 每批确认后，仅清除该批实际提交且内存版本未再变化的标记；failed/unknown 不清除。后批失败不撤销前批已经确认的结果，剩余积压保留；不能因另一个 Task 局部提交成功就把保存状态恢复正常。
+5. 普通补写一轮覆盖当时全部普通 dirty 组，但一次调用的 COMMIT 数由装箱后的批次数决定，不固定为组数。必须确认的组只以自身及依赖的确认结果交付权限/安装候选，不能谎称整个历史已保存。
+6. SQL 触发的级联/范围更新也必须更新对应版本账目。checkpoint coverage 可用与现有 overlay 完全相同条件的集合 UPDATE，不能把每个旧 Run 编成一条无界 statement 列表。
+
+合并不等于保证同步调用一定够快。A 必须包含 1/10/100 个 dirty Task 的整轮补写，分别由审批在途、写失败后恢复、首次凭据清洗、启动 normalization 形成；记录事务数、实际 I/O、冻结/SQL 各段及连续主线程墙钟和全部排空的尾延迟。先测单组再测合并批次，不能用单次 COMMIT 的均值代替整轮成本；若仍不满足现有 Gate，先评审该具体补写路径的有界执行，再接生产，不退回每组一次同步 COMMIT。
 
 测试在补写完成、dirty 清空后，独立读取 SQL 历史并与内存的完整 canonical 参考状态比较；不能复用 dirty 选择器作为参考。刻意漏标必须让比较失败。每个必须确认的事务另验其整体 before/after，不能等最终全绿掩盖中间不一致。
 
@@ -96,7 +99,7 @@ C = [Product Control runtime](../../src/product/control/runtime.zig)，R = [Task
 
 审批模式、模型意图、checkpoint、重绑定、删除等继续使用现有 Prepared/overlay 机制。冻结的是该事务的明确候选；临时 overlay 不加入普通 dirty，不让在途候选进入别的保存。确认成功才安装并结算版本；失败回滚自己的候选，不能撤销别的已接纳修改。
 
-将全文件字节比较替换为一个**仅记录最后一次提交**的 witness：在 history root 保存 generation 和该次冻结业务变更的摘要，随同一 SQL 事务写入。保存候选时同时保留此前 witness；不建设通用事务日志或重放表。
+将全文件字节比较替换为一个**仅记录最后一次提交**的 witness：在 history root 保存 generation 和该次冻结业务变更的摘要，随同一 SQL 事务写入。保存候选时同时保留此前 witness；普通合并批次的摘要覆盖批内所有组，unknown 时整批冻结，不能把同一个事务判成部分成功；不建设通用事务日志或重放表。
 
 SQLite 返回 `outcome_unknown` 时按现有 Storage 规则 poison instance。暂停数据库新写入，保持交互内存事实/dirty 和资源引用；通过 Application 关闭旧借用并重开同一文件，验证 schema 后读回：匹配候选 witness 才确认已提交；匹配此前 witness 才确认未提交；不匹配或读不出则保持恢复待处理。禁止重发 Run/权限/原用户命令，也不能用后来内存重新生成一个候选冒充原事务。只有一个写入者且 unknown 后禁止新写，最后 witness 才足以判定。
 
@@ -114,13 +117,15 @@ SQLite 返回 `outcome_unknown` 时按现有 Storage 规则 poison instance。�
 | `runs.additional_inputs_json` | 按 additional input 存 row | receipt/采纳/转入独立更新；避免改一次 receipt 携带整轮追加文本 |
 | `Run.outputs` 尚未进入实验 schema | 随 Run 保存有界 typed 成果 metadata | 补上当前生产字段，保留 identity、locator、size/digest、redacted；不存文件内容或授权 |
 | 当前 retained/read-only frame | 保存有身份的原 payload；与正常行分开加载 | 保留旧版本无法理解的历史与高水位，不因迁移静默丢记录 |
-| history root | 最后 witness、初始化标记/来源指纹 | unknown 判定与大规模导入的发布边界，不用文件存在表示迁移成功 |
+| history root | 最后一次提交 witness | 判定运行期提交 unknown；导入在临时文件中完成，不在库中增加 copying 标记或来源指纹 |
 
-其余有界 input、commentary offsets、File References、单个 ModelRef 等继续用已有 typed JSON；不改为 EAV，逐项对照当前 `StateWire/restoreTask` 的字段和恢复语义，不把只覆盖旧 schema 的 SQL 往返当完整性证明；不保存 runtime reason、原始 payload、credential 或 live Session。旧迁移身份不原地重写；通过后续迁移新增所需结构，旧聚合列不再作为运行时写入/查询权威。若保留物理旧列是当前 DDL 能力限制，只保留固定空占位，不保留双份 active 数据或两条读取路径。尚未部署的隔离 SQL fixture 随新的生产接受规则收口，不承诺未经批准的开发数据库兼容。
+其余有界 input、commentary offsets、File References、单个 ModelRef 等继续用已有 typed JSON；不改为 EAV，逐项对照当前 `StateWire/restoreTask` 的字段和恢复语义，不把只覆盖旧 schema 的 SQL 往返当完整性证明；不保存 runtime reason、原始 payload、credential 或 live Session。现有迁移 1–8 从未进入生产 history 路径，仅由隔离实验消费。首个生产 schema 采用**一次硬切**：整理并合并为一个新的初始迁移，直接定义实际需要的表与字段；移除被替代的实验迁移输入、废弃 JSON 列/触发器及其 fixture 依赖，不把固定空占位和额外 loader 校验带进生产。不支持从实验 SQL 数据库升级的兼容路径，也不能据此清空遇到的未知文件；正式旧用户数据来源仍只有 framed store。
+
+生产接受身份从首个发布的 schema 开始固定，此后的迁移只追加，既有 checksum/prefix 校验不弱化。实施前再核对 Application/build/release 的实际消费；若发现任何已经承诺保留的 SQL 数据身份，停止硬切并单独评审，不靠“测试库”标签抹掉真实数据。此处只修订未来方案，本次不修改 SQL、迁移校验器或合同真源。
 
 **当前 64 statements / 8 MiB 参数与结果不是已经证明足够的业务上界。** 完整 Run 可涉及 32 个 Tool、256 个 File Change，加上父链、消息与覆盖关系；单条旧合法保留 frame 也可能大于当前 SQL query 预算。不能借用现有限额拒绝本来合法的迁移数据，不能拆开原子事务，也不能改用绕过 authorizer 的 raw SQLite。
 
-最小处理是先为每一种原子组生成最大合法 fixture，计算 statement/参数/最大值及查询结果的真实上界。集合 UPDATE/DELETE 避免随历史总量展开；独立 dirty 组分次提交。仍不够时，只对现有 bounded `mutate/query` 和 engine LENGTH 作有证据的最小额度调整，保留有限数组、单一 COMMIT、authorizer 与 outcome 语义；不开放交互式 transaction handle、callback transaction 或任意 PRAGMA。具体常量由代码和边界测试拥有，不能凭本文先拍一个大数字。额度推导和评审必须在任何用户数据切换之前完成。
+最小处理是先为每一种原子组生成最大合法 fixture，计算 statement/参数/最大值及查询结果的真实上界。集合 UPDATE/DELETE 避免随历史总量展开；独立 dirty 组按额度合并成有限批次。仍不够时，只对现有 bounded `mutate/query` 和 engine LENGTH 作有证据的最小额度调整，保留有限数组、单一 COMMIT、authorizer 与 outcome 语义；不开放交互式 transaction handle、callback transaction 或任意 PRAGMA。具体常量由代码和边界测试拥有，不能凭本文先拍一个大数字。额度推导和评审必须在任何用户数据切换之前完成。
 
 ## 5. #12/#25 必须连同内存和视图一起解除
 
@@ -141,19 +146,52 @@ Run 正文与 Unicode Host 搜索复用上一分支。需要补齐的只是随�
 
 SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional candidate，仅 query terminal 为 ok 才采纳；预算失败释放候选后缩小只读批次，不能接纳一半结果。单条合法 row 也必须落在已推导的最大值内。loader 期间禁止业务写入/其他借用者，最后完整校验再发布，所以跨查询观察一致，不需要增加读连接或交互式读事务。
 
-## 6. 新文件初始化、迁移与恢复
+## 6. 临时库导入、发布与应用内恢复
 
-正式数据库文件名现在就与旧 store 区分；不等性能探针之后再定格式身份。Application 只打开路径与执行授权 effect，Product 决定初始化/迁移/恢复资格。
+正式文件保持 `workbench-history.sqlite`，旧格式保持 `workbench-history.store`；不混装，也不靠改旧文件帧来阻止降级。Application 只执行已授权的文件/Database 生命周期 effect；初始化、迁移、健康和恢复资格仍由 Product 决定。
 
-1. **已存在 ready SQL 历史**：验证迁移身份和业务 root，完整 loader 校验。只读 SQL；旁边后来出现的旧 `.store` 不再触发自动合并或覆盖。
-2. **不存在 SQL 历史**：只有旧 canonical 和唯一恢复/quarantine artifact 都不存在，才能初始化为空。存在旧合法 canonical 则只导入当前支持的 framed 格式；不扩展到旧 JSON/任意开发 frame。
-3. **导入先准备**：冻结并校验来源身份，解析原文件；保留合法数据、可识别的只读/retained payload 和计数，按当前规则 normalization，验证其 artifact 引用。无法完整分类或来源读取失败时停在迁移待处理，保留旧文件，不将损坏当空库。
-4. **大导入不要求一个无界事务**：在新 SQL 文件内先提交 `copying + 来源指纹` 标记，分有限批次导入；没有 ready root 的这些行不是业务权威，尚不发放 Product capability，也不接纳用户操作。完成后读回完整验证，最后一个事务写 root/高水位并将初始化标记改为 ready，这是唯一业务发布点。
-5. **中断**：仅在能证明是本程序未发布的 copying 数据、来源未变且原文件仍完整时，清除该未发布内容后从头导入；不做逐记录恢复日志。未知状态、来源变更或 root 缺失但有无标记的业务数据必须报错，不能猜测为空。最终发布 unknown 先重开读回 ready 标记及来源身份，不能直接清空重来。
-6. **旧文件与降级**：发布、重开验证之前原文件不改动。成功后旧文件只是受管迁移证据，不再是 active authority；不建设永久未脱敏备份。凭据维护必须覆盖它，允许在确认导入全部事实后受控退休；未导入的 quarantine/未知材料不得随手删除。旧构建看不到新历史，但不能覆盖 SQL。新版本返回时始终以已确认 SQL 为准；不承诺降级后新增的旧历史自动合并。
-7. **损坏与文件**：完整 SQL 中的业务局部失效按 owner 规则隔离，SQLite 文件/迁移身份不可信则不自动重建。显式恢复处理完整 DB/WAL 状态，不只 rename 主文件。checkpoint/附件/artifact 维持原目录和身份；只在完整可信 root/引用集合成立后做 orphan cleanup，unknown、degraded/未分类保留记录存在时不冒险删文件。
+### 6.1 临时库是唯一导入候选，正式文件发布是唯一提交点
 
-正常启动的 normalization 要保存后才能取得未来恢复/清理所需的确认；不能因启动时没有活跃 worker，就漏掉 pending→excluded、interrupted、未完成 File Change 的 incomplete 与消息降级。它不触发原有模型输入重放。
+1. Application 已取得 canonical data root 的 Primary lease 后，先观察正式 SQL、旧 canonical 和现有恢复证据。若正式 SQL 已存在，先按正式历史观察，不能当作可随手丢弃的导入残留。
+2. 没有正式 SQL 时，在同目录、本程序独占且可识别的私有临时路径创建导入库。新库和后续空库初始化使用相同流程，不增加库内 copying 标记、持久来源指纹、逐记录进度或断点续传。
+3. 读取当前旧来源，分有限事务导入；保留合法事实、可识别的 read-only/retained payload、高水位及 artifact 引用，按当前规则 normalization。完整 loader 读回、业务/引用/安全校验和 root 初始化成功，才允许准备发布；初始化 witness 绑定完整已校验候选的业务摘要，不只是最后一批的计数。分批 COMMIT 只使临时库中的数据完整，不授予产品权威，也不发放正式数据库 capability。
+4. 发布前确认来源仍是本次导入的观察；变化则放弃未发布导入，重新读取当前来源，不把它升级成永久迁移错误。该检查只需本次 owned 观察，不写进数据库；持续变化时返回应用内重试，不无限循环。
+5. 在临时库完成并验证 WAL TRUNCATE checkpoint，所有使用者退出、Database shutdown/destroy 完成。确认必要内容已经在主文件、没有待应用的 WAL，才通过同目录发布 effect 将**已关闭的临时主文件** rename 为正式文件并执行现有平台要求的 durable sync。不能 rename 使用中的 SQLite、带未结算 WAL 发布主文件，或把旧 sidecar 拼给新库。[SQLite 文件与 journal 配对约束](https://sqlite.org/howtocorrupt.html)
+6. 正式目标原应不存在；发布前复查，出现赢家则重观察，禁止覆盖。只有发布被确认 committed，随后重开并验证正式库，才交出 runtime capability。WAL/关闭/发布 effect 的跨平台正确性由 A/B 验证；不为通过而新增未经架构接受的低层调用。
+7. 发布结果 unknown 时先重观察正式目标：能验证为原候选才确认成功；明确未发布才能重做；不能判定就保留候选和原件，通过应用内重试继续观察，不清空待定文件或重放用户命令。若发生进程退出，下次启动以是否有完整可信的正式库分流，不能只因有文件就视为 ready。
+
+**未发布的普通导入可以直接丢掉重来，不要求旧来源未变。** 下次启动若正式库不存在，就在确认无活跃 owner 后清理本程序识别的普通导入临时库及其 sidecar，再按当前来源重新导入。临时路径、数据目录归属和临时文件用途须能确认，清理失败则应用内重试，不能删除不明文件。显式恢复过程中保留的候选和 quarantine 属于恢复证据，不按普通导入缓存自动清理。
+
+### 6.2 每一种停止观察都有应用内动作
+
+| 当前观察 | 默认行为 | 应用内恢复/重试 |
+| --- | --- | --- |
+| 正式 SQL 完整有效 | loader 验证后以它为唯一历史权威 | 正常使用；旁边后来出现的 `.store` 不自动合并或覆盖它 |
+| 正式 SQL 不存在，旧 canonical 合法 | 自动按 §6.1 导入，直到发布前不改变原文件 | 临时 IO/发布失败提供重试；旧来源改变时按当前来源重做，不要求用户删临时文件 |
+| 正式 SQL、旧 canonical 和恢复证据都不存在 | 以同一临时库流程初始化当前空历史 | 初始化失败保留 typed health，应用内重试；没有发布就不宣称保存可用 |
+| 正式 SQL 不存在，旧 `.store` 可读但无法识别/解码，或仅有既有 quarantine/未完成恢复证据 | 不自动清空；从当前可用的内存事实运行，显示 history 诊断，不冻结所有交互 | **开放既有 `recoverTaskHistory` 显式入口**，校验 revision 后按 §6.3 保全原件并发布当前内存历史；初始内存为空时即初始化空 SQL，不要求手动删文件 |
+| 正式 SQL 不存在，只有本程序普通导入临时库 | 它从未发布，不作为历史真相 | 清理后从当前旧来源重做；来源变更不阻止重做；若当前来源也不能分类，转上一行的显式恢复 |
+| 正式 SQL 存在但无法识别、schema 过新/不匹配、缺 root 或数据损坏 | 分别发布观察，保留原件；可信局部数据仍按现有隔离规则保留，不把它当首次启动或偷偷退回 `.store` | 支持版本可打开时提示使用该版本；也允许用户通过既有显式恢复，将当前可信内存历史发布为新 SQL，原 SQL/sidecar 保全到 quarantine |
+| 路径/权限/磁盘/文件读取等物理 IO 失败 | 不假定为空，不回滚当前有效内存事实，不伪造保存正常 | 应用内重试打开/保存；可以可靠执行保全 effect 时允许显式恢复，否则明确报告失败，空间/权限可用后重试 |
+| runtime commit 或恢复发布 outcome unknown | 保留原候选及资源，阻止新的数据库写入 | 入口优先做原 witness/目标读回，不得直接 quarantine 待确认事务或另建空库；确认结果后才继续补写或恢复 |
+
+“普通保存不可用”和“恢复 effect 不可用”必须分开。即使正式 Database 尚未能打开，Application 仍可提供受限的临时库、保全和发布 effect，让 Product 发布既有恢复动作；不能因为没有 `sql.Database` 就把恢复按钮一并关掉。真正无法执行文件 effect 时给出可重试的物理失败，不承诺绕过权限。
+
+### 6.3 复用现有显式恢复语义，不要求用户操作文件
+
+沿用 `recoverTaskHistory(expected_revision)` 的用户动作、revision 检查和 typed 结果，以及 [FileStore.recover](../../src/product/task/persistence.zig) 当前“先准备 replacement，再 quarantine 原件，再 durable publish”的保全顺序。复用的是入口与语义，不能把 SQLite bytes 原样交给旧 framed `FileStore.recover`，也不为过渡先生成一个新的旧格式 canonical。
+
+- 先处理原 unknown：优先读回原 witness，不得把未确认事务当损坏重置。可进行显式恢复时，冻结**点击恢复时的可信内存状态**；若用户已经在保存不可用期间创建了有效 Task，恢复须保存这些事实，不能一律清空。
+- 当前内存为空才形成空 SQL；在独立的恢复候选临时库中构建、完整校验、结算 WAL 并关闭。准备失败时不移动原件。
+- 发布前停止并收敛正式库全部借用者。旧 `.store` 或正式 DB 的现存组件按授权移入唯一 quarantine；SQL 以 DB/WAL/SHM 的完整现存集合保全，不只 rename 主文件，更不能删除可能仍需要的 WAL。已有隔离证据不覆盖、不自动清理，也不猜测性地拼回主库。
+- 保全途中断/失败不删除任何旧证据：明确能恢复原位置时按现有语义恢复；否则保持可诊断的恢复待处理，并允许用户从同一入口重试。canonical 缺失且有恢复证据绝不是首次启动；再次恢复可保全仍在原位置的组件，不能要求用户手工删文件。
+- 确认正式路径不存在旧 sidecar 后，以与 §6.1 相同的关闭候选发布规则安装 replacement。只有 committed 且重开验证成功才恢复 ready；failed 保留原件与内存，unknown 保留精确候选、读回目标，不自动再发恢复意图。跨多文件的隔离过程不冒充一个原子 rename，唯一新权威切换仍是已关闭 replacement 的发布。
+
+### 6.4 旧版本、normalization 和 artifact
+
+普通导入发布前旧文件保持原样；成功后它只是受管迁移证据，不再是 active authority，也不是永久未脱敏备份。凭据维护覆盖它；确认全部事实导入后才允许受控退休，未分类的 quarantine 不自动删除。旧构建看不到新历史，但不能覆盖新 SQL；新版本返回仍读可信正式 SQL，不承诺合并降级期间的旧历史。
+
+正常启动 normalization 继续保存 pending→excluded、interrupted、未完成 File Change 的 incomplete 与消息降级，再取得后续恢复/清理所需的确认，不重放模型输入。checkpoint、附件和 artifact 目录/身份保持；只有完整可信历史及引用集合成立才清理 orphan，unknown、degraded 或未分类证据仍在时禁止冒险清理。
 
 ## 7. 凭据与 WAL：只补必要的安全能力
 
@@ -173,15 +211,15 @@ SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional ca
 
 | 步骤 | 交付与边界 | 进入下一步前必须成立 |
 | --- | --- | --- |
-| A 核实单元与额度 | 本盘点落到测试 fixture；测 post-refactor 历史内存、最大合法 SQL 原子组/值/查询；已有单连接同步提交与 WAL 维护的 Windows 成本、安装包增量 | 明确生产额度；合法输入无暗中新限制；安全清除验证成立。只做窄 probe，不切换用户数据 |
-| B 最小 SQL 往返 | 在隔离目录复用现有 backend/schema，补必要累计表、witness、loader、copying→ready 与受限导入；不改生产 Application | 新旧事实完整对照、unknown 读回、迁移中断、opaque 保全、artifact 引用和安全清理全部通过 |
+| A 核实单元与额度 | 本盘点落到测试 fixture；测 post-refactor 历史内存、最大合法 SQL 原子组/值/查询；已有单连接同步提交与 WAL 维护的 Windows 成本、1/10/100 个 dirty Task 合并补写的整轮尾延迟、安装包增量 | 明确生产额度；合法输入无暗中新限制；安全清除验证成立。只做窄 probe，不切换用户数据 |
+| B 最小 SQL 往返 | 在隔离目录复用 backend，整理首个生产 schema，补必要累计表、witness、loader、关闭临时库发布及显式恢复；不改生产 Application | 新旧事实完整对照、unknown 读回、迁移/恢复中断、来源变更重做、应用内恢复、opaque 保全、artifact 引用和安全清理全部通过 |
 | C 接上真实持久化路径 | 一次性替换 bytes capability 为 history-specific 变化与冻结候选；dirty/确认协议接入 T01–T23；Application 生命周期切换 | 普通及必须确认路径工作；原有审批/恢复 worker 不重做；移除旧 production writer，不双写或静默 fallback |
 | D 解开累计容量 | 稳定的可增长 Task/Run/Compact、审批保留、自动 Workspace/Skill 注册元数据、独立历史预算；补导航/manifest/Compact/UI 分页 | 16/50/8/16 不再作为历史名额；所有视图有界；真实小 Session 预算下不丢历史/重复执行 |
 | E 发布前验收 | 正式 Native/Bridge/Renderer、canonical Core、迁移/故障/容量及实际 SQLite I/O 测量；同步实际变化的唯一真源 | 下节完整通过才可关闭 #12/#25；每个可工作的 DAG 子任务完成后评估独立提交 |
 
 不将 C 里的同步调用方全部改成异步状态机。同步 API 不保证主线程一定够快：现有 WAL/FULL 会同步存储，自动 checkpoint 也可能发生在触发提交的线程。A 必须量到这些尾部延迟，不能只看均值或放宽 durability。只有某个实际路径不满足既有执行/展示门槛时，才单独复用已有 executor 并评审该路径的交接；不能在实现途中悄悄扩大为全局异步框架。[SQLite WAL 性能说明](https://sqlite.org/wal.html#performance_considerations)
 
-A 的候选历史预算、Storage 额度、同步提交/安全维护实测与生产包体积是前置 Gate，本文没有把它们写成已测通过。任一结果推翻首版全历史常驻或默认同步的假设，先回到评审调整最小方案，再做 C。此阶段不批准用户数据迁移，也不执行任何删除旧 store 的动作。
+A 的候选历史预算、Storage 额度、同步提交/安全维护/积压补写实测与生产包体积是前置 Gate，本文没有把它们写成已测通过。任一结果推翻首版全历史常驻或默认同步的假设，先回到评审调整最小方案，再做 C。此阶段不批准用户数据迁移，也不执行任何删除旧 store 的动作。
 
 ## 9. 最小完整验收
 
@@ -191,8 +229,16 @@ A 的候选历史预算、Storage 额度、同步提交/安全维护实测与生
 4. **原子性逐项命中**：T11–T19 每条确认路径注入提交前失败、COMMIT unknown、返回后崩溃和读回失败；checkpoint 在途叠加普通保存后失败，重启仍能恢复；coverage/reference、审批/profile 和跨 Run 转入关系不出现一半。
 5. **补写**：分别制造 TaskBusy、写失败、仅改已读状态；只触发一次无关 Task 的正常 durable boundary，待补写完成后正常退出和强杀重启。故意漏标触发独立完整对照失败；版本已变化不能被旧 worker 清掉。
 6. **接纳与外部 effect**：自动审批确认失败/unknown 不交付权限；人工响应沿原语义；Schedule 候选未知保留目录且不重放；Task 删除未确认不删 blob/附件/artifact；no-fail 终态、拒绝权限和取消的控制空间始终可用。
-7. **迁移/恢复**：旧文件不变到 ready 发布；每个导入批次后强杀；来源变化、缺 root、有残留 quarantine、版本过新、局部未知 frame 与损坏分别处理；旧构建使用旧文件后新 SQL 不被覆盖或重复导入；不只测试小历史往返。
+7. **迁移/恢复**：普通导入发布前旧文件不变；每个临时库导入批次、checkpoint、关闭、rename/sync 与 quarantine 中间点强杀。完整复现“导入中崩溃 → 旧 release 改写 `.store` → 新版重启”：未发布导入自动按最新来源重做，不永久报来源变更。可读但无法分类的旧 store、仅有 quarantine、正式 SQL 缺 root/过新/损坏、IO 失败分别在应用内重试或显式恢复，均不要求手动删文件；恢复保存当前有效内存事实，准备失败不移动原件，unknown 不重放。旧构建使用旧文件后已发布 SQL 不被覆盖或重复导入；不只测试小历史往返。
 8. **凭据**：新建后未知值写入、改写后仅留旧 WAL、长文本跨页/JSON 转义/多个字段、retained payload 和迁移源分别命中；可安全改写的正例在首次获知后受管文件不残留该已知值，无法理解/安全改写的 retained payload 必须明确保持维护未完成，不能通过丢弃它来通过测试。清理失败保持未完成。连续 64 个图像 Run 的重复借用/释放不新增全库扫描、WAL 安全清理或重写；测试与日志不记录凭据原文。
-9. **性能与体积**：实际测每次必须确认的提交 P50/P99/最大值、10 次审批的整轮附加等待、启动/重放时间、常驻和峰值内存、DB/WAL 维护及单位 Run/持续负载的实际 I/O。注明 logical 参数量、进程 I/O 与物理写入的口径，不把预设事件数乘文件大小冒充实测，不为采样造产品 VFS。生产 SQLite 编译增量按相同构建配置实测。既有 Debug 32.9481 ms、Release 16.8729 ms 的视图失败保留，SQLite 不自动解决；新增持久化及原视图成本分开归因，既有 Gate 不放宽。
+9. **性能与体积**：实际测每次必须确认的提交 P50/P99/最大值、10 次审批的整轮附加等待、启动/重放时间、常驻和峰值内存、DB/WAL 维护及单位 Run/持续负载的实际 I/O。另测 1/10/100 个 dirty Task 的整轮排空尾延迟及连续主线程停顿，分别覆盖审批期间积压、磁盘满/写失败恢复、首次凭据清洗与启动 normalization；报告完整组合并前后的 COMMIT 数、批次额度、准备与 SQL 耗时和实际 I/O，不按组数固定做 N 次 COMMIT。注明 logical 参数量、进程 I/O 与物理写入的口径，不把预设事件数乘文件大小冒充实测，不为采样造产品 VFS。生产 SQLite 编译增量按相同构建配置实测。既有 Debug 32.9481 ms、Release 16.8729 ms 的视图失败保留，SQLite 不自动解决；新增持久化及原视图成本分开归因，既有 Gate 不放宽。
 
 本次只交付这份盘点与草案。没有产品代码、SQL、build、合同或测试实现变更；没有迁移、建库、重新跑性能或替换旧文件。下一次得到实施授权后，先执行 A，而不是直接切换保存路径。
+
+## 10. 本轮评审修订记录
+
+- P2-1：原子组与 SQL 批次解耦；完整普通组合并提交，witness 和版本确认覆盖整批；A/验收增加积压场景的整轮尾延迟，不引入多候选调度器。
+- P2-2：撤回正式库内的导入状态标记和持久来源指纹；改为临时库校验、WAL 收尾、关闭后发布。未发布导入不因旧来源变化而保留；所有停止观察都接到应用内重试/既有显式恢复，保留原件和 unknown，不要求用户删文件。
+- P2-3：未发布实验迁移 1–8 不承担生产兼容职责；首次接入前整理成干净的初始生产 schema，迁移身份从首个发布版本起固定。保持 Storage checksum 校验，不修改任何真实用户数据。
+
+修订只发生在本方案；没有修改产品、SQL、测试或规范真源，没有授权或执行 A。
