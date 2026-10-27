@@ -149,6 +149,7 @@ pub const Database = struct {
             .query_fn = queryBound,
             .mutate_fn = mutateBound,
             .maintain_fn = maintainBound,
+            .mutate_chunks_fn = mutateChunksBound,
         };
     }
 
@@ -269,6 +270,10 @@ pub const Database = struct {
         self: *Database,
         mutations: []const sql.Mutation,
     ) sql.MutationOutcome {
+        return self.mutateChunks(&.{mutations});
+    }
+
+    fn mutateChunks(self: *Database, chunks: []const []const sql.Mutation) sql.MutationOutcome {
         switch (self.beginOperation()) {
             .entered => {},
             .rejected => return .rejected,
@@ -288,7 +293,7 @@ pub const Database = struct {
         self.connection.setAuthorizer(mutationAuthorizer) catch |err|
             return self.rollbackMutation(mutationFailure(err));
 
-        for (mutations) |mutation| {
+        for (chunks) |chunk| for (chunk) |mutation| {
             const item = mutation.statement;
             const statement = prepareOne(&self.connection, item.sql) catch |err|
                 return self.rollbackMutation(mutationFailure(err));
@@ -300,7 +305,7 @@ pub const Database = struct {
             );
             _ = c.sqlite3_finalize(statement);
             if (failure) |outcome| return self.rollbackMutation(outcome);
-        }
+        };
         return self.commitMutation();
     }
 
@@ -445,6 +450,11 @@ pub const Database = struct {
     fn maintainBound(context: *anyopaque, operation: sql.Maintenance) sql.QueryOutcome {
         const self: *Database = @ptrCast(@alignCast(context));
         return self.maintain(operation);
+    }
+
+    fn mutateChunksBound(context: *anyopaque, chunks: []const []const sql.Mutation) sql.MutationOutcome {
+        const self: *Database = @ptrCast(@alignCast(context));
+        return self.mutateChunks(chunks);
     }
 };
 
@@ -686,6 +696,33 @@ test "exact change conflict rolls the complete mutation batch back" {
             count.receiver(),
         ),
     );
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+}
+
+test "chunked mutation exceeds batch count atomically and rolls back a later conflict" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    const capability = database.capability();
+    var values: [129][1]sql.Value = undefined;
+    var mutations: [129]sql.Mutation = undefined;
+    for (&mutations, 0..) |*mutation, i| {
+        values[i] = .{.{ .integer = @intCast(i + 1) }};
+        mutation.* = .{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(?)", .params = &values[i] } };
+    }
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, capability.mutate(&mutations));
+    try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutateChunks(&.{ mutations[0..128], mutations[128..] }));
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, capability.query("SELECT COUNT(*) FROM storage_conformance", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 129), count.value);
+    const first = [_]sql.Mutation{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1000)" } }};
+    const last = [_]sql.Mutation{.{ .statement = .{ .sql = "UPDATE storage_conformance SET text_value='x' WHERE id=999" }, .expected_changes = .{ .exactly = 1 } }};
+    try std.testing.expectEqual(sql.MutationOutcome.conflict, capability.mutateChunks(&.{ &first, &last }));
+    count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, capability.query("SELECT COUNT(*) FROM storage_conformance WHERE id=1000", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, capability.mutateChunks(&.{ &first, &.{} }));
+    count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, capability.query("SELECT COUNT(*) FROM storage_conformance WHERE id=1000", &.{}, count.receiver()));
     try std.testing.expectEqual(@as(i64, 0), count.value);
 }
 

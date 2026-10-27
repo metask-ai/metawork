@@ -8,6 +8,7 @@ pub const Limits = struct {
     pub const sql_bytes: usize = 64 * 1024;
     pub const parameters: usize = 64;
     pub const exec_statements: usize = 128;
+    pub const exec_chunks: usize = 128;
     pub const query_parameter_bytes: usize = 1024 * 1024;
     pub const exec_parameter_bytes: usize = 32 * 1024 * 1024;
     pub const result_rows: usize = 8 * 1024;
@@ -128,6 +129,7 @@ pub const Database = struct {
         mutations: []const Mutation,
     ) MutationOutcome,
     maintain_fn: *const fn (context: *anyopaque, operation: Maintenance) QueryOutcome,
+    mutate_chunks_fn: ?*const fn (context: *anyopaque, chunks: []const []const Mutation) MutationOutcome = null,
 
     pub fn query(
         self: Database,
@@ -147,6 +149,16 @@ pub const Database = struct {
     pub fn mutate(self: Database, mutations: []const Mutation) MutationOutcome {
         if (!validMutations(mutations)) return .rejected;
         return self.mutate_fn(self.context, mutations);
+    }
+
+    /// Bounded input chunks, one transaction and one final outcome. This does
+    /// not expose a transaction handle or permit partial acknowledgement.
+    pub fn mutateChunks(self: Database, chunks: []const []const Mutation) MutationOutcome {
+        if (chunks.len == 0 or chunks.len > Limits.exec_chunks) return .rejected;
+        for (chunks) |chunk| if (!validMutations(chunk)) return .rejected;
+        if (self.mutate_chunks_fn) |mutate_chunks| return mutate_chunks(self.context, chunks);
+        if (chunks.len == 1) return self.mutate_fn(self.context, chunks[0]);
+        return .rejected;
     }
 
     pub fn maintain(self: Database, operation: Maintenance) QueryOutcome {
