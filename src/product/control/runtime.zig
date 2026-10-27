@@ -69,6 +69,8 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
+    SessionReleasing,
+    SessionReleaseFailed,
     TaskReadOnly,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
@@ -4269,10 +4271,7 @@ pub const Runtime = struct {
             .release = self.taskRuntimeReleaseEffects(),
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
-            error.SessionCapacity => {
-                if (try self.releaseIdleTaskSession(null)) self.bumpRevision();
-                return error.TaskBusy;
-            },
+            error.SessionCapacity => return self.sessionPressureError(null),
             error.McpNotRefreshed => retry: {
                 self.recoverExpiredMcpCatalogNoFail();
                 mcp_selection = null;
@@ -4280,10 +4279,7 @@ pub const Runtime = struct {
                 task_input.mcp_selection = mcp_selection;
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
-                    error.SessionCapacity => {
-                        if (try self.releaseIdleTaskSession(null)) self.bumpRevision();
-                        return error.TaskBusy;
-                    },
+                    error.SessionCapacity => return self.sessionPressureError(null),
                     else => return retry_err,
                 };
             },
@@ -4401,6 +4397,27 @@ pub const Runtime = struct {
         if (!self.task_persistence_health.operational() or self.checkpoint_store == null or
             self.checkpoint_store_health.load(.acquire) != .ready) return false;
         return self.task_runtime.releaseIdleSession(except_task_id, self.taskRuntimeOperationEffects().worker.notifier);
+    }
+
+    /// Only a Task still owning a live/closing Session can block capacity.
+    pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_failed and task.runtime.liveConst() != null) return task.durable.id;
+        };
+        return null;
+    }
+
+    fn sessionPressureError(self: *Runtime, except_task_id: ?u64) Error {
+        const started = self.releaseIdleTaskSession(except_task_id) catch |err| return err;
+        if (started) {
+            self.bumpRevision();
+            return error.SessionReleasing;
+        }
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_thread != null or task.runtime.close_requested) return error.SessionReleasing;
+        };
+        if (self.sessionReleaseFailureTaskId() != null) return error.SessionReleaseFailed;
+        return error.SessionCapacity;
     }
 
     fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!struct { skill: ?*lifecycle.SkillRestoreInputs, mcp: ?*lifecycle.McpSelection, mcp_catalog_generation: ?u64 } {
@@ -4574,8 +4591,7 @@ pub const Runtime = struct {
             if (task.runtime.attachment == .detached) {
                 _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
                 if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
-                    if (try self.releaseIdleTaskSession(task_id)) self.bumpRevision();
-                    return error.TaskBusy;
+                    return self.sessionPressureError(task_id);
                 }
             }
             if (target) |*value| if (task.runtime.attachment == .detached or

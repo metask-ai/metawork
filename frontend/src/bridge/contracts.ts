@@ -1754,6 +1754,9 @@ export type TaskCreateReason =
   | "model_selection_changed"
   | "stale_catalog"
   | "capacity_reached"
+  | "session_releasing"
+  | "session_capacity"
+  | "session_close_failed"
   | "shutting_down";
 export type TaskCreateResult =
   | {
@@ -1769,6 +1772,7 @@ export type TaskCreateResult =
       bindingEpoch: null;
       mcpAuthority: null;
       reason: TaskCreateReason;
+      blockingTaskId?: string;
     };
 export type TaskWorkspaceIntent =
   | {
@@ -1895,6 +1899,9 @@ export type TaskRestoreReason =
   | "task_unavailable"
   | "recovery_unavailable"
   | "capacity_reached"
+  | "session_releasing"
+  | "session_capacity"
+  | "session_close_failed"
   | "shutting_down";
 export type TaskRestoreResult =
   | {
@@ -1908,6 +1915,7 @@ export type TaskRestoreResult =
       taskId: string;
       attemptId: null;
       reason: TaskRestoreReason;
+      blockingTaskId?: string;
     };
 export type CatalogRefreshReason =
   | "workspace_changed"

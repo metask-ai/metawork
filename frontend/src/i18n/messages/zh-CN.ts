@@ -1319,6 +1319,11 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.selection_unavailable":
     "该工作区已不可用，请刷新后选择其他工作区。",
   "mutation.transport_failed": "MetaWork 无法确认这次操作。",
+  "mutation.reason.session_releasing": "正在释放空闲会话名额，请稍后重试。",
+  "mutation.reason.session_capacity":
+    "当前没有可安全释放的执行会话名额，请稍后重试。",
+  "mutation.reason.session_close_failed":
+    "任务“{task}”的会话关闭失败，请先处理该任务后重试。",
   "mutation.reason.execution_changed": "执行配置已变化，请确认最新配置后重试。",
   "mutation.reason.execution_unavailable": "当前选择的执行配置暂时不可用。",
   "mutation.reason.workspace_changed":

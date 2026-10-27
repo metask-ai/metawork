@@ -6081,7 +6081,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     const revision = workbench.currentRevision();
 
     try std.testing.expectError(
-        error.TaskBusy,
+        error.SessionCapacity,
         workbench.createTaskForWorkspace(
             .automatic,
             1,
@@ -10887,7 +10887,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
     const run_id = try control.runTask(id, .{ .text = "Keep this accepted work running." });
     try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
     const task = control.task_runtime.find(id).?;
-    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
     try std.testing.expect(task.runtime.hasAttachedSession());
     try std.testing.expect(!task.runtime.cancel_requested);
     try std.testing.expectEqual(run_id, task.runtime.active_operation.run);
@@ -10900,14 +10900,14 @@ test "Session pressure never cancels busy work or automatically retries a failed
     } else return error.TestUnexpectedResult;
     // Terminal work still cannot be released while an artifact or continuation owns it.
     task.durable.runs[0].?.pending_file_change_artifacts = 1;
-    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
     try std.testing.expect(task.runtime.hasAttachedSession());
     task.durable.runs[0].?.pending_file_change_artifacts = 0;
     task.durable.runs[0].?.input_continuation_pending = true;
     try std.testing.expect(control.task_runtime.idleReleaseRouteId(null) == null);
     task.durable.runs[0].?.input_continuation_pending = false;
     fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
-    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expectError(error.SessionReleasing, control.createTask(input));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (task.runtime.close_failed) break;
@@ -10915,9 +10915,10 @@ test "Session pressure never cancels busy work or automatically retries a failed
     } else return error.TestUnexpectedResult;
     try std.testing.expect(task.runtime.hasClosingSession());
     try std.testing.expect(task.runtime.parked_capabilities != null);
+    try std.testing.expectEqual(id, control.sessionReleaseFailureTaskId().?);
     const destroyed = fake_core.session_destroyed;
     for (0..8) |_| {
-        try std.testing.expectError(error.TaskBusy, control.createTask(input));
+        try std.testing.expectError(error.SessionReleaseFailed, control.createTask(input));
         control.syncLifecycle();
     }
     try std.testing.expectEqual(destroyed, fake_core.session_destroyed);

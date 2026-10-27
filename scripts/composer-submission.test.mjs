@@ -282,6 +282,17 @@ async function renderSubmissionApp(
           bindingEpoch: createdTask.binding.epoch,
         }),
       ),
+    rejectCreation: async (reason, blockingTaskId, index = 0) =>
+      act(async () =>
+        createResolvers[index]({
+          accepted: false,
+          taskId: null,
+          bindingEpoch: null,
+          mcpAuthority: null,
+          reason,
+          ...(blockingTaskId ? { blockingTaskId } : {}),
+        }),
+      ),
     settle: async (result = { accepted: true }) =>
       act(async () => resolveRun(result)),
   };
@@ -1318,4 +1329,27 @@ test("App retains unknown messages across Tasks at local capacity and preserves 
   await act(async () => {});
   assert.equal(fixture.inputs.length, 65);
   assert.equal(fixture.inputs.at(-1)[2].text, "draft kept at capacity");
+});
+
+test("App names the Task blocking Session release and allows a later explicit creation retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "My unsent instruction" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await fixture.rejectCreation("session_close_failed", "7");
+  await screen.findByText(
+    "The session for task “7” could not close. Resolve that task before retrying.",
+  );
+  assert.equal(fixture.inputs.length, 0);
+  fireEvent.change(fixture.textarea, {
+    target: { value: "My deliberate retry" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "My deliberate retry");
+  await fixture.settle();
 });

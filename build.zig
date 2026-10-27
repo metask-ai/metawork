@@ -2076,6 +2076,7 @@ fn wireAgentCore(
     product_control_contract_fixture.addOption([]const u8, "output_action", @embedFile("frontend/src/bridge/__fixtures__/output-action.fixture"));
     product_control_contract_fixture.addOption([]const u8, "delivered_output", @embedFile("frontend/src/bridge/__fixtures__/delivered-output.fixture"));
     product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
+    product_control_contract_fixture.addOption([]const u8, "session_pressure", @embedFile("frontend/src/bridge/__fixtures__/session-pressure.fixture"));
     product_control_contract_fixture.addOption([]const u8, "search_page", @embedFile("frontend/src/bridge/__fixtures__/search-page.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));

@@ -390,6 +390,9 @@ const taskCreateReasons = [
   "model_selection_changed",
   "stale_catalog",
   "capacity_reached",
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "shutting_down",
 ] as const;
 const taskRunReasons = [
@@ -436,6 +439,9 @@ const taskRestoreReasons = [
   "task_unavailable",
   "recovery_unavailable",
   "capacity_reached",
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "shutting_down",
 ] as const;
 const catalogRefreshReasons = [
@@ -6305,6 +6311,21 @@ export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
     reason: nonEmptyString(item.reason, "$.reason"),
   };
 }
+function decodeSessionBlocker(
+  item: Record<string, unknown>,
+  reason: string | null,
+): { blockingTaskId?: string } {
+  if (reason === "session_close_failed")
+    return {
+      blockingTaskId: positiveU64WireId(
+        item.blockingTaskId,
+        "$.blockingTaskId",
+      ),
+    };
+  if (item.blockingTaskId !== undefined)
+    fail("$.blockingTaskId", "unexpected Session blocker");
+  return {};
+}
 export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
   const item = object(value, "$", [
     "accepted",
@@ -6312,10 +6333,14 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     "bindingEpoch",
     "mcpAuthority",
     "reason",
+    ...(record(value, "$").reason === "session_close_failed"
+      ? ["blockingTaskId"]
+      : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   if (accepted) {
     if (item.reason !== null) fail("$.reason", "expected null");
+    decodeSessionBlocker(item, null);
     return {
       accepted: true,
       taskId: positiveWireId(item.taskId, "$.taskId"),
@@ -6330,12 +6355,14 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     item.mcpAuthority !== null
   )
     fail("$", "a rejected Task creation cannot expose identities");
+  const reason = enumValue(item.reason, "$.reason", taskCreateReasons);
   return {
     accepted: false,
     taskId: null,
     bindingEpoch: null,
     mcpAuthority: null,
-    reason: enumValue(item.reason, "$.reason", taskCreateReasons),
+    reason,
+    ...decodeSessionBlocker(item, reason),
   };
 }
 export function decodeTaskRunResult(
@@ -6485,12 +6512,16 @@ export function decodeTaskRestoreResult(
     "taskId",
     "attemptId",
     "reason",
+    ...(record(value, "$").reason === "session_close_failed"
+      ? ["blockingTaskId"]
+      : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const taskId = positiveWireId(item.taskId, "$.taskId");
   if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
   if (accepted) {
     if (item.reason !== null) fail("$.reason", "expected null");
+    decodeSessionBlocker(item, null);
     return {
       accepted: true,
       taskId,
@@ -6499,11 +6530,13 @@ export function decodeTaskRestoreResult(
     };
   }
   if (item.attemptId !== null) fail("$.attemptId", "expected null");
+  const reason = enumValue(item.reason, "$.reason", taskRestoreReasons);
   return {
     accepted: false,
     taskId,
     attemptId: null,
-    reason: enumValue(item.reason, "$.reason", taskRestoreReasons),
+    reason,
+    ...decodeSessionBlocker(item, reason),
   };
 }
 export function assertCompactCancelAccepted(

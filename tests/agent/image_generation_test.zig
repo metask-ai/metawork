@@ -1901,7 +1901,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     } else return error.TestUnexpectedResult;
     const receipt = task.durable.runs[0].?.outputs[0].?.id;
     const old_epoch = task.durable.binding_epoch;
-    try std.testing.expectError(error.TaskBusy, control.createTask(input));
+    try std.testing.expectError(error.SessionReleasing, control.createTask(input));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (task.runtime.attachment == .detached) break;
@@ -1914,7 +1914,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
         if (control.task_runtime.catalogProjection(second).?.availability != .loading) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
-    try std.testing.expectError(error.TaskBusy, control.restoreTaskConversation(first, old_epoch));
+    try std.testing.expectError(error.SessionReleasing, control.restoreTaskConversation(first, old_epoch));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.find(second).?.runtime.attachment == .detached) break;

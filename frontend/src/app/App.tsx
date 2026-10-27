@@ -296,6 +296,7 @@ type LocalTaskSubmission = {
   draft: ComposerDraft;
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
+  blockingTaskId?: string;
 };
 import {
   ArchiveNotice,
@@ -2471,6 +2472,8 @@ export default function App() {
               ...entry,
               state,
               reason: "reason" in result ? result.reason : undefined,
+              blockingTaskId:
+                "blockingTaskId" in result ? result.blockingTaskId : undefined,
             }
           : entry,
       ),
@@ -3484,7 +3487,14 @@ export default function App() {
             </p>
             {entry.reason && (
               <p className="projection-note">
-                {t(mutationReasonMessageId(entry.reason))}
+                {t(mutationReasonMessageId(entry.reason), {
+                  task:
+                    snapshot.taskIndex.find(
+                      (task) => task.id === entry.blockingTaskId,
+                    )?.title ||
+                    entry.blockingTaskId ||
+                    "",
+                })}
               </p>
             )}
             {(entry.state === "failed" ||

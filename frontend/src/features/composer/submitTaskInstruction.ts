@@ -13,7 +13,11 @@ export type TaskSubmissionResult =
   | { kind: "accepted"; taskId: string }
   | { kind: "rejected"; taskId: string; reason: SendInputReason }
   | { kind: "unknown"; taskId: string | null }
-  | { kind: "create_rejected"; reason: TaskCreateReason }
+  | {
+      kind: "create_rejected";
+      reason: TaskCreateReason;
+      blockingTaskId?: string;
+    }
   | { kind: "cancelled"; taskId: string | null };
 
 type SessionOptions = {
@@ -53,6 +57,10 @@ export class TaskSubmissionSession {
           if (result.accepted) {
             this.taskId = result.taskId;
             if (this.options.current()) this.options.onCreated(result.taskId);
+          } else {
+            // A later explicit click may try again after a definite rejection.
+            // A lost/unknown creation remains cached and is never replayed.
+            this.creation = null;
           }
           return result;
         });
@@ -78,7 +86,13 @@ export class TaskSubmissionSession {
       if (!taskId) {
         const created = await this.identity();
         if (!created.accepted)
-          return { kind: "create_rejected", reason: created.reason };
+          return {
+            kind: "create_rejected",
+            reason: created.reason,
+            ...(created.blockingTaskId
+              ? { blockingTaskId: created.blockingTaskId }
+              : {}),
+          };
         taskId = created.taskId;
       }
       if (entry.cancelled) return { kind: "cancelled", taskId };

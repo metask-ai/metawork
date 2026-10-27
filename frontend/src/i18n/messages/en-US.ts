@@ -1497,6 +1497,12 @@ export const enUS = {
   "account.options_updated":
     "Available options were updated. Review them and choose again.",
   "mutation.transport_failed": "MetaWork could not confirm the change.",
+  "mutation.reason.session_releasing":
+    "Releasing an idle session. Please retry shortly.",
+  "mutation.reason.session_capacity":
+    "No execution session can currently be safely released. Please retry later.",
+  "mutation.reason.session_close_failed":
+    "The session for task “{task}” could not close. Resolve that task before retrying.",
   "mutation.reason.execution_changed":
     "Your execution settings changed. Review them and try again.",
   "mutation.reason.execution_unavailable":
