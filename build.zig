@@ -64,6 +64,10 @@ pub fn build(b: *std.Build) void {
         wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)
     else
         modules;
+    const update_tests = b.addTest(.{ .name = "metawork-updates", .root_module = test_modules.product_update });
+    const run_update_tests = b.addRunArtifact(update_tests);
+    b.step("test-updates", "Run bounded Product update policy tests").dependOn(&run_update_tests.step);
+    artifacts.tests.step.dependOn(&run_update_tests.step);
     const office_publish_tests = b.addTest(.{
         .name = "metawork-office-resource-publish",
         .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
@@ -614,6 +618,7 @@ fn addLifecycleTests(
 }
 
 const WiredModules = struct {
+    product_update: *std.Build.Module,
     storage: *std.Build.Module,
     storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
@@ -1310,6 +1315,11 @@ fn wireAgentCore(
     agent_provider_probe.addImport("agent_completion", agent_completion);
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
+    const product_update = b.createModule(.{
+        .root_source_file = b.path("src/product/update.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const models_contract = b.createModule(.{
         .root_source_file = b.path("src/product/models/contract.zig"),
         .target = target,
@@ -2234,6 +2244,7 @@ fn wireAgentCore(
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;
     return .{
+        .product_update = product_update,
         .storage = storage,
         .storage_sql = storage_sql,
         .product_control_history_schema = product_control_history_schema,
