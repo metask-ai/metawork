@@ -32,10 +32,12 @@ pub const Store = struct {
     pending: ?product.PreparedHistoryCommit = null,
     pending_publication: ?[32]u8 = null,
     incompatible: bool = false,
-    restore_failed: bool = false,
+    restore_failed: bool = true,
     credentials: *[128]Credential,
     credential_capacity_failed: bool = false,
     publish_sync_fault: bool = false,
+    security_epoch: u64 = 1,
+    requires_reopen: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, directory: []const u8) !Store {
         var legacy = try wire.FileStore.init(io, directory);
@@ -87,7 +89,9 @@ pub const Store = struct {
     /// silently fall back to legacy history after an SQL failure.
     pub fn loadAlloc(self: *Store, allocator: std.mem.Allocator) !?[]u8 {
         self.restore_failed = true;
+        errdefer self.restore_failed = true;
         if (!try self.exists(file_name)) {
+            if (try self.hasSqlRecoveryEvidence()) return error.RecoveryPending;
             const original = try self.legacy.loadAlloc(allocator);
             defer if (original) |bytes| allocator.free(bytes);
             if (original) |bytes| {
@@ -103,6 +107,8 @@ pub const Store = struct {
         defer arena.deinit();
         const loaded = try product.loadHistory(arena.allocator(), self.database.?.capability(), self.limits);
         try self.repository.?.seed(loaded.value, loaded.preserved);
+        if (self.database.?.capability().maintain(.confirm) != .ok) return error.ReadFailed;
+        try self.syncPublished();
         const bytes = try wire.encodeAlloc(allocator, loaded.value, loaded.preserved, self.limits);
         self.restore_failed = false;
         return bytes;
@@ -127,13 +133,41 @@ pub const Store = struct {
         };
     }
 
+    fn hasSqlRecoveryEvidence(self: *Store) !bool {
+        if (try self.exists(file_name ++ "-wal") or try self.exists(file_name ++ "-shm")) return true;
+        var directory = try self.legacy.dir.openDir(self.io, ".", .{ .iterate = true, .follow_symlinks = false });
+        defer directory.close(self.io);
+        var iterator = directory.iterate();
+        while (try iterator.next(self.io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, ".workbench-history.recovery.")) continue;
+            if (std.mem.endsWith(u8, entry.name, ".tmp") or std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite.bak") or
+                std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite-wal.bak") or std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite-shm.bak") or
+                std.mem.endsWith(u8, entry.name, ".workbench-history.store.bak")) return true;
+        }
+        return false;
+    }
+
     /// A closed, checkpointed private candidate is the only publication input.
     fn publish(self: *Store, state: wire.StateWire, preserved: wire.PreservedFrames, recovering: bool, digest: [32]u8) !void {
         if (self.incompatible or self.pending != null) return error.WriteBlocked;
-        try self.removeImport();
+        if (!recovering) try self.removeImport();
         const directory = std.fs.path.dirname(self.path).?;
-        const temporary = try std.fs.path.join(self.allocator, &.{ directory, import_name });
+        var nonce: [8]u8 = undefined;
+        try std.Io.randomSecure(self.io, &nonce);
+        const stage_name = if (recovering)
+            try std.fmt.allocPrint(self.allocator, ".workbench-history.recovery.{s}.tmp", .{std.fmt.bytesToHex(nonce, .lower)})
+        else
+            import_name;
+        defer if (recovering) self.allocator.free(stage_name);
+        const temporary = try std.fs.path.join(self.allocator, &.{ directory, stage_name });
         defer self.allocator.free(temporary);
+        const private_file = try self.legacy.dir.createFile(self.io, stage_name, .{
+            .exclusive = true,
+            .permissions = if (builtin.os.tag == .windows) .default_file else .fromMode(0o600),
+            .resolve_beneath = true,
+        });
+        private_file.close(self.io);
+        errdefer if (!recovering) self.removeImport() catch {};
         const candidate = try storage.sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, product.history_migrations);
         var candidate_open = true;
         defer if (candidate_open) candidate.destroy() catch unreachable;
@@ -165,7 +199,7 @@ pub const Store = struct {
             }
         }
         if (try self.exists(file_name)) return error.PublishConflict;
-        try self.legacy.dir.rename(import_name, self.legacy.dir, file_name, self.io);
+        try self.legacy.dir.rename(stage_name, self.legacy.dir, file_name, self.io);
         self.pending_publication = digest;
         self.syncPublished() catch return error.PublishOutcomeUnknown;
         if (self.repository) |*old| old.deinit();
@@ -177,19 +211,25 @@ pub const Store = struct {
     }
 
     pub fn commit(self: *Store, bytes: []const u8, confirmed: bool) wire.Commit {
+        return self.commitGeneration(bytes, self.security_epoch, confirmed);
+    }
+
+    pub fn commitGeneration(self: *Store, bytes: []const u8, epoch: u64, confirmed: bool) wire.Commit {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.security_epoch == 0 or epoch != self.security_epoch) return .failed;
         return self.commitLocked(bytes, confirmed);
     }
 
     fn commitLocked(self: *Store, bytes: []const u8, confirmed: bool) wire.Commit {
+        if (self.pending_publication != null) return .outcome_unknown;
         if (self.incompatible or self.restore_failed) return .failed;
         if (self.pending != null and self.resolvePending() == .outcome_unknown) return .outcome_unknown;
+        if (self.requires_reopen and !self.refreshConfirmed()) return .failed;
         if (self.credential_capacity_failed) return .failed;
         for (self.credentials) |slot| if (slot.length != 0 and std.mem.indexOf(u8, bytes, slot.bytes[0..slot.length]) != null) return .failed;
         var candidate = wire.decodeRecovering(self.allocator, bytes, self.limits) catch return .failed;
         defer candidate.deinit();
-        if (candidate.degraded) return .failed;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         var prepared = self.repository.?.prepare(candidate.value, candidate.preserved, digest) catch return .failed;
@@ -199,6 +239,7 @@ pub const Store = struct {
             return if (confirmed) self.resolveLocked(bytes) else .outcome_unknown;
         }
         prepared.deinit();
+        if (outcome != .committed) self.requires_reopen = true;
         return if (outcome == .committed) .committed else .failed;
     }
 
@@ -218,6 +259,15 @@ pub const Store = struct {
 
     fn resolvePending(self: *Store) wire.Commit {
         const pending = if (self.pending) |*value| value else return .outcome_unknown;
+        // A successful business commit may be waiting only for security
+        // maintenance. Its authority is known; never replay its mutations.
+        if (pending.next_index == null) {
+            if (self.requires_reopen and !self.refreshConfirmed()) return .outcome_unknown;
+            if (!self.sanitizePending()) return .outcome_unknown;
+            pending.deinit();
+            self.pending = null;
+            return .committed;
+        }
         self.close();
         self.open() catch return .outcome_unknown;
         const result = self.repository.?.resolve(pending);
@@ -271,11 +321,11 @@ pub const Store = struct {
         if (!self.incompatible and self.pending == null and self.database != null) _ = self.sanitizePending();
     }
 
-    pub fn syncCredentials(self: *Store, values: []const []const u8, complete: bool) bool {
+    pub fn syncCredentials(self: *Store, values: []const []const u8, complete: bool) wire.CredentialStatus {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.credential_capacity_failed = !complete;
-        if (!complete) return false;
+        if (!complete) return .{ .epoch = self.security_epoch, .ready = false };
         for (self.credentials) |*slot| {
             if (slot.length == 0) continue;
             slot.retained = for (values) |value| {
@@ -284,8 +334,7 @@ pub const Store = struct {
             if (!slot.retained and !slot.pending) self.clearCredential(slot);
         }
         for (values) |value| if (value.len != 0) self.registerCredential(value, true);
-        if (self.incompatible or self.pending != null or self.database == null) return false;
-        return self.sanitizePending();
+        return .{ .epoch = self.security_epoch, .ready = !self.incompatible and self.pending == null and self.database != null and self.sanitizePending() };
     }
 
     fn registerCredential(self: *Store, value: []const u8, retained: bool) void {
@@ -305,6 +354,7 @@ pub const Store = struct {
             slot.length = value.len;
             slot.retained = retained;
             slot.pending = true;
+            if (self.security_epoch != 0) self.security_epoch = std.math.add(u64, self.security_epoch, 1) catch 0;
             // Only first discovery performs disk maintenance. Repeated bearer
             // acquisition/release above is constant bounded in-memory work.
             return;
@@ -318,15 +368,31 @@ pub const Store = struct {
     }
 
     fn sanitizePending(self: *Store) bool {
-        if (self.incompatible or self.credential_capacity_failed) return false;
+        if (self.incompatible or self.credential_capacity_failed or self.security_epoch == 0) return false;
+        if (self.requires_reopen and !self.refreshConfirmed()) return false;
         for (self.credentials) |*slot| {
             if (!slot.pending) continue;
             const value = slot.bytes[0..slot.length];
-            self.repository.?.sanitize(value) catch return false;
+            self.repository.?.sanitize(value) catch {
+                self.requires_reopen = true;
+                return false;
+            };
             self.sanitizeLegacy(value) catch return false;
             slot.pending = false;
             if (!slot.retained) self.clearCredential(slot);
         }
+        return true;
+    }
+
+    fn refreshConfirmed(self: *Store) bool {
+        self.close();
+        self.open() catch return false;
+        if (self.database.?.capability().maintain(.confirm) != .ok) return false;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const loaded = product.loadHistory(arena.allocator(), self.database.?.capability(), self.limits) catch return false;
+        self.repository.?.seed(loaded.value, loaded.preserved) catch return false;
+        self.requires_reopen = false;
         return true;
     }
 
@@ -463,6 +529,7 @@ test "SQLite history confirms unknown without replay and backfills failed unrela
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
     try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
     store.database.?.test_hooks.fail_before_commit = false;
+    try std.testing.expect(store.refreshConfirmed());
     state.tasks[1].title = "unrelated change";
     store.database.?.test_hooks.lose_ack_after_commit = true;
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
@@ -505,6 +572,7 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
     store.credential("newly-discovered-value", false);
     for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    try std.testing.expectEqual(wire.Commit.failed, store.commitGeneration(bytes, 1, true));
 }
 
 test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive restart" {
@@ -515,7 +583,9 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
     defer a.free(directory);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var state = try testHistory(arena.allocator(), 100, 256, "history capacity ");
+    const body = "history capacity " ** 2;
+    try std.testing.expect(100 * 256 * 2 * body.len > 1536 * 1024);
+    var state = try testHistory(arena.allocator(), 100, 256, body);
     {
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
@@ -595,4 +665,100 @@ test "SQLite history recovery publication unknown is confirmed before a newer ca
     try std.testing.expect(store.pending_publication == null);
     const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("newer in-memory change", loaded.value.tasks[0].title);
+}
+
+test "SQLite history preserves opaque records while saving unrelated Task changes" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var state = try testHistory(arena.allocator(), 1, 1, "message");
+    state.next_task_id = 301;
+    state.next_task_recent_order = 301;
+    const retained: wire.PreservedFrames = .{ .retained = &.{.{ .kind = .task, .id = 300, .order = 300, .payload = "{\"future\":true}" }} };
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    const original = try wire.encodeAlloc(arena.allocator(), state, retained, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(original, true));
+    state.tasks[0].title = "updated";
+    const changed = try wire.encodeAlloc(arena.allocator(), state, retained, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(changed, true));
+    const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings("updated", loaded.value.tasks[0].title);
+    try std.testing.expectEqualStrings(retained.retained[0].payload, loaded.preserved.retained[0].payload);
+}
+
+test "SQLite history credential rotation releases retired owned copies" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    for (0..140) |generation| {
+        var buffer: [64]u8 = undefined;
+        const value = try std.fmt.bufPrint(&buffer, "rotating-owned-credential-{d}", .{generation});
+        try std.testing.expect(store.syncCredentials(&.{value}, true).ready);
+        var retained: usize = 0;
+        for (store.credentials) |slot| if (slot.length != 0) {
+            retained += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), retained);
+    }
+    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+}
+
+test "SQLite history partial quarantine prevents reimport and preserves the old WAL" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "memory facts");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try store.legacy.commit(bytes);
+    const evidence = ".workbench-history.recovery.interrupted.workbench-history.sqlite.bak";
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = evidence, .data = "old database evidence" });
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = file_name ++ "-wal", .data = "old WAL evidence" });
+    try std.testing.expectError(error.RecoveryPending, store.loadAlloc(a));
+    try std.testing.expect(!try store.exists(file_name));
+    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expect(try store.exists(evidence));
+    const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings("memory facts", loaded.value.tasks[0].runs[0].assistant);
+}
+
+test "SQLite history reopens a poisoned maintenance connection before retry" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "late-known-value");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    var bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    store.database.?.test_hooks.fail_maintenance_sync = true;
+    try std.testing.expect(!store.syncCredentials(&.{"late-known-value"}, true).ready);
+    try std.testing.expect(store.requires_reopen);
+    state.tasks[0].runs[0].assistant = "***";
+    state.tasks[0].runs[0].input.text = "***";
+    bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expect(!store.requires_reopen);
 }

@@ -18,7 +18,7 @@ pub const RestoreText = task_state.TrackedText;
 // contract: the fixed frame layout and magic identify the sole active format.
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
 /// Bounded in-process handoff; this is not a database file-size limit.
-pub const max_snapshot_bytes: usize = 512 * 1024 * 1024;
+pub const max_snapshot_bytes: usize = 2 * 1024 * 1024 * 1024;
 pub const max_failure_records: usize = 1024;
 pub const max_failure_reason_bytes: usize = 256;
 pub const file_name = "workbench-history.store";
@@ -54,6 +54,8 @@ pub const Commit = enum {
     outcome_unknown,
 };
 
+pub const CredentialStatus = struct { epoch: u64, ready: bool };
+
 pub const RecoveryFault = enum {
     none,
     install_failed,
@@ -87,7 +89,9 @@ pub const Capability = struct {
     restore_incompatible: bool = false,
     // Callback-scoped acquisition/retirement notice. Concrete history storage
     // owns any bounded copy needed until sanitizing retired disk versions.
-    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool) bool = null,
+    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool) CredentialStatus = null,
+    security_epoch: u64 = 1,
+    generation_commit_fn: ?*const fn (?*anyopaque, []const u8, u64, bool) Commit = null,
 
     commit_fn: *const fn (
         context: ?*anyopaque,
@@ -100,17 +104,19 @@ pub const Capability = struct {
         bytes: []const u8,
     ) Commit = unsupportedCommit,
 
-    pub fn credentials(self: Capability, values: []const []const u8, complete: bool) bool {
-        return if (self.credentials_fn) |notify| notify(self.context, values, complete) else true;
+    pub fn credentials(self: Capability, values: []const []const u8, complete: bool) CredentialStatus {
+        return if (self.credentials_fn) |notify| notify(self.context, values, complete) else .{ .epoch = self.security_epoch, .ready = true };
     }
 
     pub fn commit(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, false);
         return self.commit_fn(self.context, bytes);
     }
 
     pub fn commitConfirmed(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, true);
         return self.confirmed_commit_fn(self.context, bytes);
     }
 
@@ -2508,12 +2514,13 @@ pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFai
 
 pub fn encodeAlloc(allocator: std.mem.Allocator, state: StateWire, preserved: PreservedFrames, limits: Limits) (Error || std.mem.Allocator.Error)![]u8 {
     if (validateCandidate(&state, limits) != null) return error.TaskStoreEncodeFailed;
+    if (state.failures.len > max_failure_records) return error.TaskStoreTooLarge;
     var capacity: usize = 64 * 1024;
     while (true) {
         const output = try allocator.alloc(u8, capacity);
         const encoded = encodeUncheckedImpl(output, state, preserved) catch |err| {
             allocator.free(output);
-            if (err != error.TaskStoreEncodeFailed or capacity == max_snapshot_bytes) return err;
+            if ((err != error.TaskStoreEncodeFailed and err != error.TaskStoreTooLarge) or capacity == max_snapshot_bytes) return err;
             capacity = @min(capacity * 2, max_snapshot_bytes);
             continue;
         };

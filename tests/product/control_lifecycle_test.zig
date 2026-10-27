@@ -48,50 +48,59 @@ test "history capacity executes more than sixteen Runs through worker retirement
 }
 
 test "history capacity creates one hundred Tasks with one live Session" {
-    fake_core.reset();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(home);
-    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
-    defer checkpoints.deinit();
-    var history: TaskPersistenceProbe = .{};
-    var configuration = productControlConfiguration();
-    configuration.directories.canonical_user_home = home;
-    configuration.task_persistence = history.capability();
-    configuration.checkpoint_store = .{ .file_store = &checkpoints };
-    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
+    for ([_]bool{ false, true }) |automatic| {
+        fake_core.reset();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoints.deinit();
+        var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, home);
+        defer automatic_root.deinit();
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.directories.testing_automatic_workspace_root = if (automatic) &automatic_root else null;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoints };
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        for (0..100) |_| {
+            for (0..5000) |_| {
+                const created = if (automatic)
+                    control.createTaskForWorkspace(.automatic, control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .manual })
+                else
+                    control.createTask(input);
+                if (created) |id| {
+                    try waitInitialTaskCatalog(&control, id);
+                    break;
+                } else |err| switch (err) {
+                    error.SessionReleasing => {
+                        control.syncLifecycle();
+                        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                    },
+                    else => return err,
+                }
+            } else return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqual(@as(usize, 100), control.task_runtime.taskCount());
+        var attached: usize = 0;
+        for (control.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.hasAttachedSession()) attached += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), attached);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 1 }, configuration);
-    defer control.deinit();
-    try installControlExecution(&control);
-    var input = productControlTaskInput();
-    input.workspace_root = home;
-    input.trust = .explicitly_trusted;
-    input.approval_mode = .manual;
-    for (0..100) |_| {
-        for (0..5000) |_| {
-            if (control.createTask(input)) |id| {
-                try waitInitialTaskCatalog(&control, id);
-                break;
-            } else |err| switch (err) {
-                error.SessionReleasing => {
-                    control.syncLifecycle();
-                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-                },
-                else => return err,
-            }
-        } else return error.TestUnexpectedResult;
-    }
-    try std.testing.expectEqual(@as(usize, 100), control.task_runtime.taskCount());
-    var attached: usize = 0;
-    for (control.task_runtime.tasks) |entry| if (entry) |task| {
-        if (task.runtime.hasAttachedSession()) attached += 1;
-    };
-    try std.testing.expectEqual(@as(usize, 1), attached);
 }
 
 fn scheduledBinding(

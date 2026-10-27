@@ -432,7 +432,7 @@ Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普
 
 completion receipt 是上述 best-effort Task projection 的低频视图事实。acknowledgement 只修改当前内存 Task 并发布 revision，不得为每个前台完成额外强制重写完整 history store；它随下一次既有 Task durable commit 或 clean shutdown 的最终 commit 合并写入。异常强杀可以丢失尚未进入 durable boundary 的最后一条 receipt，但不得损坏或回滚 Task/Run 历史。旧 Task record 缺少 receipt 字段时，必须在恢复出 canonical Task 并完成无 live owner 的 interrupted normalization 后，把当时最新 terminal `completed` Run 初始化为已读；当前 writer 始终写出明确数字，避免升级后把全部历史完成误报为新提醒。
 
-store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
+旧 framed 导入源仍遵守其原有读取边界，正式 SQL 不继承整库 16 MiB 上限。普通提交通过 SQL 原子事务确认，区分 `committed | failed | outcome_unknown`；临时候选仅用于首次导入及显式恢复，关闭后同目录发布。具体额度、帧布局与 SQL 字段由唯一实现与测试拥有，不在本文镜像。
 
 Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；所有在进程终止时仍为 `pending` 的 Run/compact 都原子转为 `excluded`，terminal operation 保留原 phase/outcome，non-terminal operation 再收口为 interrupted。其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 Run 提交时间或 File Changes 字段时恢复为 `null`，不能伪造时间或空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
@@ -446,7 +446,7 @@ DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；J
 
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 
-生产使用单个串行写入者。每次提交将已确认行摘要与完整候选事实比较，只写变化及删除；此前失败、TaskBusy 跳过和被动已读回执都必须随后续候选补齐，只有整个候选被确认才恢复 ready。共享业务原子组不拆分，超出 Storage 单事务额度时明确失败。最后提交 witness 与变化同事务保存；结果不确定时保留精确候选、重开并读回 witness，再完成 Storage 同步确认，不重放业务 effect。凭据首次获知时清洗当前及保留历史，清除旧 WAL 版本；重复借用不重复触发维护，未完成清洗的有界凭据副本不得提前释放。历史 Task 数不消耗 Session 名额，Task、Run 和 Compact 集合按需增长；借用中的记录地址必须稳定，Run/Compact 仅在全部 worker lease 静止后移动容器。历史额度与 Renderer 单次快照、catalog 额度分开，达到历史额度保留既有历史并拒绝新增占用，不删除旧记录。
+生产使用单个串行写入者。每次提交将已确认行摘要与完整候选事实比较，只写变化及删除；此前失败、TaskBusy 跳过和被动已读回执都必须随后续候选补齐，只有整个候选被确认才恢复 ready。共享业务原子组不拆分，超出 Storage 单事务额度时明确失败。最后提交 witness 与变化同事务保存；结果不确定时保留精确候选、重开并读回 witness，再完成 Storage 同步确认，不重放业务 effect。凭据首次获知时清洗当前及保留历史，清除旧 WAL 版本；重复借用不重复触发维护，未完成清洗的有界凭据副本不得提前释放。历史写入 capability 冻结凭据安全代次；首次获知凭据后，旧代次候选即使尚未派发、且凭据后来已释放，也不得再写入。未确认事务只能读回原 witness，不能借换代重放；冻结缓冲释放时清零。历史 Task 数不消耗 Session 名额，Task、Run 和 Compact 集合按需增长；借用中的记录地址必须稳定，Run/Compact 仅在全部 worker lease 静止后移动容器。历史额度与 Renderer 单次快照、catalog 额度分开，达到历史额度保留既有历史并拒绝新增占用，不删除旧记录。
 
 ### 4.4 File Changes artifact transaction
 

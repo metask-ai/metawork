@@ -677,7 +677,7 @@ pub const Runtime = struct {
         if (slot == null and self.count(.manual) >= self.max_manual)
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
-        const target = slot orelse return error.WorkspaceCapacity;
+        const target = slot orelse try self.reserveSlot();
         if (!authority.allocation_allowed) return error.WorkspaceIdentityUntrusted;
         if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
             return error.WorkspaceIdentityExhausted;

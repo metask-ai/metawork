@@ -3592,6 +3592,7 @@ pub const Runtime = struct {
         self: *Runtime,
         input: TaskCreateInput,
     ) Error!u64 {
+        try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
         var preparation = try self.workspace.prepareOpen(
             input.workspace_root,
             switch (input.trust) {
@@ -8642,6 +8643,7 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        try self.skill.reserveWorkspaceCapacity(recovered.value.workspaces.len);
         // Defaults are a preference, not history; an unreadable value falls
         // back instead of discarding every restorable record.
         const default_profile = task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse profile: {
@@ -9328,6 +9330,7 @@ pub const Runtime = struct {
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
     fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
+        try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
         var preparation = self.workspace.prepareAutomatic(
             self.execution_state.credential(),
             self.workspaceStorage(),
@@ -9613,7 +9616,9 @@ pub const Runtime = struct {
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
-        if (!self.task_persistence.credentials(collected.values[0..collected.count], complete)) self.markTaskPersistenceWriteFailed();
+        const status = self.task_persistence.credentials(collected.values[0..collected.count], complete);
+        self.task_persistence.security_epoch = status.epoch;
+        if (!status.ready) self.markTaskPersistenceWriteFailed();
     }
 
     fn invalidateProjectionSecurity(self: *Runtime) void {
