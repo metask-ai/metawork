@@ -16,6 +16,7 @@
 - 真实 Product 生命周期：同一 Task 连续 21 个 Run；仅一个 Session 名额时连续创建 100 个 Task，分别覆盖手动与自动 Workspace。
 - 写失败后一次无关提交补写、提交回执丢失确认、恢复发布结果未知、部分 quarantine 中断、维护连接故障后重开、未知 schema 拒绝恢复、opaque 记录保留、凭据轮换和旧安全代次拒绝。
 - 正式 Native 测试图 233/233 步骤成功，1,446 项测试通过、7 项跳过；架构边界测试 32/32 通过，Zig 格式检查与 `git diff --check` 通过。
+- 当前 Windows MSVC 目标的正式 Native Debug 桌面产物构建通过，产物为 `zig-out/bin/metawork.exe`；没有把构建成功记作人工桌面验收。
 - 同轮完整 Node suite：984 项，976 通过、8 跳过、0 失败；Renderer typecheck 通过。该次聚合命令随后在 Native 阶段失败；修复后使用正式 Native 入口单独复验，不把前一次聚合命令记作成功。
 
 ## 保留的限制
