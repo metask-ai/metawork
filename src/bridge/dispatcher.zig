@@ -6069,9 +6069,11 @@ test "file preview native grants bind authority and cancellation and expire with
     const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
     @memcpy(bytes[0..jpeg.len], jpeg);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
-    var control = try product_control.TestSupport.filePreviewFixture(root);
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.filePreviewFixture(control, root);
     defer control.deinit();
-    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
         .context = null,
         .wake_fn = Host.wake,
         .emit_fn = Host.emit,
@@ -6089,9 +6091,9 @@ test "file preview native grants bind authority and cancellation and expire with
     defer boundary.deinit();
     _ = try boundary.delivery.connect(3, boundary.transport());
     const native = boundary.register(@import("policy.zig").product(.release));
-    var opened: Capture = .{ .control = &control };
+    var opened: Capture = .{ .control = control };
     defer opened.deinit();
-    var released: Capture = .{ .control = &control, .released_check = true };
+    var released: Capture = .{ .control = control, .released_check = true };
     defer released.deinit();
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"1\"}");
     try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
@@ -6117,7 +6119,7 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.base64.standard.Decoder.decode(decoded, encoded);
     try std.testing.expectEqualSlices(u8, bytes[0..decoded.len], decoded);
     try std.testing.expect(result.len < native_sdk.bridge.max_result_bytes);
-    product_control.TestSupport.invalidatePreviewSecurity(&control);
+    product_control.TestSupport.invalidatePreviewSecurity(control);
     const stale = try reader.invoke_fn(reader.context, .{ .request = .{ .id = "read", .command = commands.read_preview_image, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } }, output);
     try std.testing.expectEqualStrings("{\"state\":\"stale_security\"}", stale);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"2\"}");
@@ -6129,7 +6131,7 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expect(!control.hasFilePreviews());
     try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
     try opened.wait(&boundary, 4);
-    product_control.TestSupport.expirePreview(&control, boundary.preview_grants[0].?.image.id);
+    product_control.TestSupport.expirePreview(control, boundary.preview_grants[0].?.image.id);
     try std.testing.expect(boundary.onTimer(preview_timer_id));
     try std.testing.expect(!control.hasFilePreviews());
     for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
@@ -8188,11 +8190,13 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     var effect: product_control.TestSupport.OutputFileEffect = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2 };
     var capture: Capture = .{};
     defer if (capture.response) |bytes| std.testing.allocator.free(bytes);
-    var control = try product_control.TestSupport.filePreviewFixture("/tmp/metawork-test");
-    try product_control.TestSupport.recordDeliveredOutputFixture(&control);
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.filePreviewFixture(control, "/tmp/metawork-test");
+    try product_control.TestSupport.recordDeliveredOutputFixture(control);
     defer control.deinit();
-    product_control.TestSupport.bindOutputFileEffect(&control, &effect);
-    var boundary = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
+    product_control.TestSupport.bindOutputFileEffect(control, &effect);
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .show_open_dialog_fn = undefined, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
     defer boundary.deinit();
     defer {
         control.shutdownOutputChecks();
@@ -8209,7 +8213,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
     try std.testing.expectEqual(@as(usize, 0), effect.prepares);
     try capture.invoke(native, request, 3);
-    try capture.wait(&control, &boundary, 2);
+    try capture.wait(control, &boundary, 2);
     var response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
     defer response.deinit();
     const result = try std.json.Stringify.valueAlloc(std.testing.allocator, response.value.object.get("result").?, .{});
@@ -8227,19 +8231,19 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     const cancel = native.registry.find(commands.output_action_cancel).?;
     const ack = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-output", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"2\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
     try std.testing.expect(std.mem.indexOf(u8, ack, "\"cancelled\":true") != null);
-    try capture.wait(&control, &boundary, 4);
+    try capture.wait(control, &boundary, 4);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 0), effect.reveals);
     const third = "{\"generation\":\"1\",\"operationId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
     effect.blocked.store(false, .release);
     try capture.invoke(native, third, 3);
-    try capture.wait(&control, &boundary, 5);
+    try capture.wait(control, &boundary, 5);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"revealed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     var save_effect: product_control.TestSupport.OutputSaveEffect = .{ .main_thread_id = std.Thread.getCurrentId() };
     save_effect.publishing_blocked.store(true, .release);
     defer save_effect.publishing_blocked.store(false, .release);
-    product_control.TestSupport.bindOutputSaveEffect(&control, &save_effect);
+    product_control.TestSupport.bindOutputSaveEffect(control, &save_effect);
     var save_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_save, .{});
     defer save_wire.deinit();
     const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
@@ -8255,7 +8259,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     defer std.testing.allocator.free(expected_cancel);
     try std.testing.expectEqualStrings(expected_cancel, late_cancel);
     save_effect.publishing_blocked.store(false, .release);
-    try capture.wait(&control, &boundary, 6);
+    try capture.wait(control, &boundary, 6);
     var saved = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
     defer saved.deinit();
     const actual_save = try std.json.Stringify.valueAlloc(std.testing.allocator, saved.value.object.get("result").?, .{});
@@ -8269,7 +8273,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(&control, &boundary, 7);
+    try capture.wait(control, &boundary, 7);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());

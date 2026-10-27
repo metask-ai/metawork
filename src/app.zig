@@ -139,6 +139,7 @@ const App = struct {
     single_instance: ?*app_single_instance.Coordinator = null,
     update_transport: ?update_http.Adapter = null,
     updates: ?update_coordinator.Coordinator = null,
+    history_restore_owner: ?*app_stores.Stores = null,
 
     fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         const self: *App = @ptrCast(@alignCast(context));
@@ -240,6 +241,7 @@ const App = struct {
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
                 .max_tasks = 50,
+                .max_history_bytes = 256 * 1024 * 1024,
                 .max_pending_ui_json_bytes = pending_ui_json_capacity,
                 .max_pending_ui_requests = host_worker_count,
                 .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
@@ -251,6 +253,9 @@ const App = struct {
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
+        self.control_configuration.task_persistence.restored_bytes = null;
+        if (self.history_restore_owner) |stores| stores.releaseTaskRestore();
+        self.history_restore_owner = null;
 
         try self.platform.installScheduleHost(control_storage.scheduleHost());
         self.mcp_management = mcp_management_coordinator.Coordinator.init(
@@ -644,6 +649,7 @@ pub fn run(init: std.process.Init) !void {
     // then opens ingress, before the first Renderer window is loaded.
     var control: product_control.Runtime = undefined;
     app.control_storage = &control;
+    app.history_restore_owner = &stores_state;
     app.control_configuration = .{
         .change_notifier = .{
             .context = &app.platform,
@@ -689,8 +695,9 @@ pub fn run(init: std.process.Init) !void {
             .enabled = stores_state.task != null,
             .restored_bytes = stores_state.task_restored_bytes,
             .restore_failed = stores_state.task_restore_failed,
-            .commit_fn = app_stores.commitTaskStore,
-            .confirmed_commit_fn = app_stores.commitConfirmedTaskStore,
+            .restore_incompatible = if (stores_state.task) |store| store.incompatible else false,
+            .credentials_fn = app_stores.taskStoreCredentials,
+            .generation_commit_fn = app_stores.commitTaskStoreGeneration,
             .resolve_commit_fn = app_stores.resolveTaskStoreCommit,
             .recover_fn = app_stores.recoverTaskStore,
         },
@@ -980,4 +987,8 @@ test "Application file delivery freezes Workspace root and keeps all file reads 
 // Compiled only by the explicit account-evaluation build entry.
 pub fn runPermissionReviewEvaluation(init: std.process.Init) !void {
     return @import("app/permission_review_account_eval.zig").run(init);
+}
+
+test {
+    _ = @import("app/history_store.zig");
 }

@@ -129,7 +129,10 @@ pub const Job = struct {
                 work.access.deinit();
                 self.allocator.free(work.model);
             },
-            .history => |work| self.allocator.free(work.bytes),
+            .history => |work| {
+                std.crypto.secureZero(u8, work.bytes);
+                self.allocator.free(work.bytes);
+            },
             .retire => {},
         }
         self.lease.deinit();

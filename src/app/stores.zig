@@ -7,13 +7,14 @@ const skill_management = @import("metawork_product_skill").management;
 const skill_sources = @import("metawork_product_skill").sources;
 const SourceRestore = @import("metawork_product_skill").runtime.SourceRestore;
 const product_task = @import("metawork_product_task");
+const history_store = @import("history_store.zig");
 const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
     automatic_workspace_configuration: ?product_control.AutomaticWorkspaceRootConfigurationFileStore = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
-    task: ?product_task.history.FileStore = null,
+    task: ?history_store.Store = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
     checkpoint: ?product_task.checkpoint_store.FileStore = null,
@@ -50,7 +51,7 @@ pub const Stores = struct {
             paths.mcpDir(),
         ) catch null;
 
-        self.task = product_task.history.FileStore.init(io, paths.workbenchDir()) catch null;
+        self.task = history_store.Store.init(io, allocator, paths.workbenchDir()) catch null;
         self.task_restore_failed = self.task == null;
         self.task_restored_bytes = if (self.task) |*store|
             store.loadAlloc(allocator) catch failed: {
@@ -138,6 +139,14 @@ pub const Stores = struct {
         if (self.automatic_workspace_configuration) |*store| store.deinit();
         self.* = .{ .allocator = allocator };
     }
+
+    pub fn releaseTaskRestore(self: *Stores) void {
+        if (self.task_restored_bytes) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+            self.task_restored_bytes = null;
+        }
+    }
 };
 
 pub fn commitScheduledTaskStore(
@@ -168,40 +177,27 @@ pub fn recoverScheduledTaskStore(
     return .committed;
 }
 
-pub fn commitTaskStore(
-    context: ?*anyopaque,
-    bytes: []const u8,
-) product_task.history.Commit {
-    const store: *product_task.history.FileStore = @ptrCast(
-        @alignCast(context orelse return .failed),
-    );
-    store.commit(bytes) catch |err| return switch (err) {
-        error.PersistenceOutcomeUnknown => .outcome_unknown,
-        else => .failed,
-    };
-    return .committed;
+pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool) product_task.history.CredentialStatus {
+    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .{ .epoch = 0, .ready = false }));
+    return store.syncCredentials(values, complete);
+}
+
+pub fn commitTaskStoreGeneration(context: ?*anyopaque, bytes: []const u8, epoch: u64, confirmed: bool) product_task.history.Commit {
+    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .failed));
+    return store.commitGeneration(bytes, epoch, confirmed);
 }
 
 pub fn resolveTaskStoreCommit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-    const store: *product_task.history.FileStore = @ptrCast(@alignCast(context orelse return .outcome_unknown));
-    return store.resolveCommit(std.heap.c_allocator, bytes);
-}
-
-pub fn commitConfirmedTaskStore(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-    const store: *product_task.history.FileStore = @ptrCast(@alignCast(context orelse return .failed));
-    return store.commitConfirmed(std.heap.c_allocator, bytes);
+    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .outcome_unknown));
+    return store.resolve(bytes);
 }
 
 pub fn recoverTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
 ) product_task.history.Commit {
-    const store: *product_task.history.FileStore = @ptrCast(
+    const store: *history_store.Store = @ptrCast(
         @alignCast(context orelse return .failed),
     );
-    store.recover(bytes) catch |err| return switch (err) {
-        error.PersistenceOutcomeUnknown => .outcome_unknown,
-        else => .failed,
-    };
-    return .committed;
+    return store.recover(bytes);
 }

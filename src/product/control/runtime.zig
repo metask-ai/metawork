@@ -163,6 +163,32 @@ pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
     };
 }
 
+pub fn persistenceLimits(limits: Limits, max_workspaces: usize) task_persistence.Limits {
+    return .{
+        .max_workspaces = @max(max_workspaces, std.math.maxInt(u32)),
+        .max_tasks = std.math.maxInt(u32),
+        .max_runs_per_task = std.math.maxInt(u32),
+        .max_pending_inputs_per_task = limits.max_pending_inputs_per_task,
+        .max_compacts_per_task = std.math.maxInt(u32),
+        .max_tools_per_run = limits.max_tools_per_run,
+        .max_commentary_segments_per_run = limits.max_commentary_segments_per_run,
+        .max_file_refs_per_tool = limits.max_file_refs_per_tool,
+        .max_file_changes_per_run = limits.max_file_changes_per_run,
+        .max_ui_history_per_task = std.math.maxInt(u32),
+        .max_workspace_bytes = limits.max_workspace_bytes,
+        .max_task_title_bytes = limits.max_task_title_bytes,
+        .max_user_message_bytes = limits.max_user_message_bytes,
+        .max_attachments_per_run = limits.max_attachments_per_draft,
+        .max_assistant_message_bytes = limits.max_assistant_message_bytes,
+        .max_tool_field_bytes = limits.max_tool_field_bytes,
+        .max_file_ref_field_bytes = limits.max_file_ref_field_bytes,
+        .max_file_change_field_bytes = limits.max_file_change_field_bytes,
+        .max_file_change_diff_bytes = limits.max_file_change_diff_bytes,
+        .max_execution_model_bytes = models_contract.Limits.model_id_bytes,
+        .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
+    };
+}
+
 pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
@@ -179,6 +205,7 @@ pub const Limits = struct {
     // at capacity, including their eager terminal diagnostics) plus one full
     // assistant message; the budget test binds this floor exactly.
     max_projection_bytes: usize = 1536 * 1024,
+    max_history_bytes: ?usize = null,
     max_workspace_bytes: usize = 16 * 1024,
     max_catalog_projection_bytes: usize = 64 * 1024,
     max_scheduled_task_projection_bytes: usize = 256 * 1024,
@@ -1285,6 +1312,7 @@ pub const Runtime = struct {
     preview_executor_shutdown: bool = false,
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
+    catalog_projection_bytes: usize = 0,
     revision: u64 = 0,
     projection_security_epoch: u64 = 1,
     encoded_views: view_cache.Cache = .{},
@@ -1665,6 +1693,7 @@ pub const Runtime = struct {
                 control.automatic_root_configuration.health = .path_unavailable;
             };
         }
+        control.task_persistence.restored_bytes = null;
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
         // Skill records name Workspace ids; the allocator must never hand out
@@ -3570,6 +3599,7 @@ pub const Runtime = struct {
         self: *Runtime,
         input: TaskCreateInput,
     ) Error!u64 {
+        try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
         var preparation = try self.workspace.prepareOpen(
             input.workspace_root,
             switch (input.trust) {
@@ -3635,17 +3665,17 @@ pub const Runtime = struct {
 
     fn skillBudgetAvailable(context: *anyopaque, reclaimable: usize) usize {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        std.debug.assert(self.projection_bytes <= self.limits.max_projection_bytes);
-        std.debug.assert(reclaimable <= self.projection_bytes);
-        return self.limits.max_projection_bytes - self.projection_bytes + reclaimable;
+        std.debug.assert(self.catalog_projection_bytes <= self.limits.max_projection_bytes);
+        std.debug.assert(reclaimable <= self.catalog_projection_bytes);
+        return self.limits.max_projection_bytes - self.catalog_projection_bytes + reclaimable;
     }
 
     fn skillBudgetReplace(context: *anyopaque, old: usize, new: usize) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        std.debug.assert(old <= self.projection_bytes);
-        const retained = self.projection_bytes - old;
+        std.debug.assert(old <= self.catalog_projection_bytes);
+        const retained = self.catalog_projection_bytes - old;
         std.debug.assert(new <= self.limits.max_projection_bytes - retained);
-        self.projection_bytes = retained + new;
+        self.catalog_projection_bytes = retained + new;
     }
 
     fn skillProjectionBudget(self: *Runtime) skill_runtime.ProjectionBudget {
@@ -3878,7 +3908,7 @@ pub const Runtime = struct {
         var replacement = try current.clone(
             self.allocator,
             catalogSnapshotLimits(self.limits),
-            self.limits.max_projection_bytes - self.projection_bytes,
+            self.historyByteLimit() - self.projection_bytes,
         );
         errdefer replacement.deinit();
         var granted_skill_ids: std.ArrayList([]const u8) = .empty;
@@ -4175,7 +4205,7 @@ pub const Runtime = struct {
                 pinned_catalog = try current.clone(
                     self.allocator,
                     catalogSnapshotLimits(self.limits),
-                    self.limits.max_projection_bytes - self.projection_bytes,
+                    self.historyByteLimit() - self.projection_bytes,
                 );
                 self.projection_bytes += pinned_catalog.?.projected_bytes;
                 catalog_lease = authority.lease;
@@ -4711,9 +4741,11 @@ pub const Runtime = struct {
     fn encodeTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error![]u8 {
         var scratch = try self.buildTaskStateWireWithCheckpoint(checkpoint);
         defer scratch.deinit();
-        const output = try self.allocator.alloc(u8, task_persistence.max_store_bytes);
-        defer self.allocator.free(output);
-        const bytes = try task_persistence.encodePreserving(output, scratch.state, scratch.preserved, self.taskPersistenceLimits());
+        const bytes = try task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, self.taskPersistenceLimits());
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
         return self.allocator.dupe(u8, bytes);
     }
@@ -4912,7 +4944,7 @@ pub const Runtime = struct {
             restore.binding_commit = .failed;
         };
         for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             const change = task.approval_change orelse continue;
             if (self.task_runtime.approvalJobFor(task.durable.id)) continue;
             if (self.shutting_down) continue;
@@ -5732,6 +5764,7 @@ pub const Runtime = struct {
     }
 
     pub fn taskHistoryRecoveryAvailable(self: *const Runtime) bool {
+        if (self.task_persistence.restore_incompatible) return false;
         if (!self.task_persistence.enabled) return false;
         if (self.task_runtime.approvalHistoryWorkerActive()) return false;
         return switch (self.task_persistence_health) {
@@ -5788,16 +5821,17 @@ pub const Runtime = struct {
         };
         var scratch = self.buildTaskStateWire() catch return .failed;
         defer scratch.deinit();
-        const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch
-            return .failed;
-        defer self.allocator.free(output);
-        const bytes = task_persistence.encodePreserving(
-            output,
+        const bytes = task_persistence.encodeAlloc(
+            self.allocator,
             scratch.state,
             scratch.preserved,
             self.taskPersistenceLimits(),
         ) catch
             return .failed;
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) return .failed;
         return switch (self.task_persistence.recover(bytes)) {
             .committed => recovered: {
@@ -6099,7 +6133,7 @@ pub const Runtime = struct {
         defer self.advancing_task_inputs = false;
         defer self.reapTaskInputResources();
         for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (self.shutting_down) {
                 _ = self.task_runtime.cancelWaitingInputs(task.durable.id, .shutting_down);
                 _ = self.task_runtime.cancelInputContinuation(task.durable.id, null, .shutting_down);
@@ -8558,29 +8592,7 @@ pub const Runtime = struct {
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
-        return .{
-            .max_workspaces = self.workspace.slotCount(),
-            .max_tasks = self.limits.max_tasks,
-            .max_runs_per_task = self.limits.max_runs_per_task,
-            .max_pending_inputs_per_task = self.limits.max_pending_inputs_per_task,
-            .max_compacts_per_task = self.limits.max_compacts_per_task,
-            .max_tools_per_run = self.limits.max_tools_per_run,
-            .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
-            .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
-            .max_file_changes_per_run = self.limits.max_file_changes_per_run,
-            .max_ui_history_per_task = self.limits.max_ui_history_per_task,
-            .max_workspace_bytes = self.limits.max_workspace_bytes,
-            .max_task_title_bytes = self.limits.max_task_title_bytes,
-            .max_user_message_bytes = self.limits.max_user_message_bytes,
-            .max_attachments_per_run = self.limits.max_attachments_per_draft,
-            .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
-            .max_tool_field_bytes = self.limits.max_tool_field_bytes,
-            .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
-            .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
-            .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
-            .max_execution_model_bytes = models_contract.Limits.model_id_bytes,
-            .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
-        };
+        return persistenceLimits(self.limits, self.workspace.slotCount());
     }
 
     fn taskRestoreProjection(self: *Runtime) task_persistence.RestoreProjection {
@@ -8648,6 +8660,7 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        try self.skill.reserveWorkspaceCapacity(recovered.value.workspaces.len);
         // Defaults are a preference, not history; an unreadable value falls
         // back instead of discarding every restorable record.
         const default_profile = task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse profile: {
@@ -8895,7 +8908,7 @@ pub const Runtime = struct {
 
     fn reserveTaskRuntimeBytes(context: *anyopaque, bytes: usize) error{ProjectionCapacity}!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (bytes > self.limits.max_projection_bytes - self.projection_bytes)
+        if (bytes > self.historyByteLimit() - self.projection_bytes)
             return error.ProjectionCapacity;
         self.projection_bytes += bytes;
     }
@@ -9300,15 +9313,14 @@ pub const Runtime = struct {
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
         }
-        const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch |err| {
+        const bytes = task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, persistence_limits) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
-        defer self.allocator.free(output);
-        const bytes = task_persistence.encodePreserving(output, scratch.state, scratch.preserved, persistence_limits) catch |err| {
-            self.markTaskPersistenceWriteFailed();
-            return err;
-        };
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) {
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
@@ -9338,6 +9350,7 @@ pub const Runtime = struct {
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
     fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
+        try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
         var preparation = self.workspace.prepareAutomatic(
             self.execution_state.credential(),
             self.workspaceStorage(),
@@ -9516,6 +9529,7 @@ pub const Runtime = struct {
         source.visit(self, scrubAccountCredential) catch unreachable;
         self.account_credentials = null;
         self.account_credential_generation = 0;
+        self.syncHistoryCredentials(null, null);
         self.invalidateProjectionSecurity();
     }
 
@@ -9526,6 +9540,7 @@ pub const Runtime = struct {
         self.account_credential_generation = generation;
         self.invalidateProjectionSecurity();
         source.visit(self, scrubAccountCredential) catch unreachable;
+        self.syncHistoryCredentials(null, null);
     }
 
     fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
@@ -9580,6 +9595,7 @@ pub const Runtime = struct {
         if (credential.len == 0) return;
         if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
         self.redactAllProductProjectionsNoFail(credential);
+        self.syncHistoryCredentials(credential, null);
     }
 
     fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
@@ -9588,6 +9604,41 @@ pub const Runtime = struct {
         // copies of the exact value still protect the same projection boundary.
         if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
         self.redactAllProductProjectionsNoFail(credential);
+        self.syncHistoryCredentials(null, credential.ptr);
+    }
+
+    fn syncHistoryCredentials(self: *Runtime, extra: ?[]const u8, retiring: ?[*]const u8) void {
+        if (self.task_persistence.credentials_fn == null) return;
+        const Collection = struct {
+            values: [128][]const u8 = undefined,
+            count: usize = 0,
+            retiring: ?[*]const u8,
+            fn visit(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
+                const c: *@This() = @ptrCast(@alignCast(context));
+                if (value.len == 0 or (c.retiring != null and value.ptr == c.retiring.?)) return;
+                for (c.values[0..c.count]) |existing| if (std.mem.eql(u8, existing, value)) return;
+                if (c.count == c.values.len) return error.OutOfMemory;
+                c.values[c.count] = value;
+                c.count += 1;
+            }
+        };
+        var collected: Collection = .{ .retiring = retiring };
+        var complete = true;
+        if (extra) |value| Collection.visit(&collected, value) catch {
+            complete = false;
+        };
+        Collection.visit(&collected, self.execution_state.credential()) catch {
+            complete = false;
+        };
+        if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
+            complete = false;
+        };
+        self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
+            complete = false;
+        };
+        const status = self.task_persistence.credentials(collected.values[0..collected.count], complete);
+        self.task_persistence.security_epoch = status.epoch;
+        if (!status.ready) self.markTaskPersistenceWriteFailed();
     }
 
     fn invalidateProjectionSecurity(self: *Runtime) void {
@@ -9691,7 +9742,7 @@ pub const Runtime = struct {
         const reservation = try control.allocTrackedCapacity(remaining);
         defer control.freeTracked(reservation);
 
-        const task = &control.task_runtime.tasks[0].?;
+        const task = control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         run.execution.?.automatic_title.state.store(.ready, .release);
         const sync = control.task_runtime.syncAutomaticTitles(
@@ -9706,7 +9757,7 @@ pub const Runtime = struct {
         var control = try testRuntime();
         defer control.deinit();
 
-        const task = &control.task_runtime.tasks[0].?;
+        const task = control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         try control.replaceTracked(
             &task.durable.title,
@@ -9799,8 +9850,12 @@ pub const Runtime = struct {
         );
     }
 
+    fn historyByteLimit(self: *const Runtime) usize {
+        return self.limits.max_history_bytes orelse self.limits.max_projection_bytes;
+    }
+
     fn copyBounded(self: *Runtime, value: []const u8, max: usize) Error![]u8 {
-        if (value.len > max or value.len > self.limits.max_projection_bytes - self.projection_bytes)
+        if (value.len > max or value.len > self.historyByteLimit() - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.dupe(u8, value);
         self.projection_bytes += result.len;
@@ -9813,7 +9868,7 @@ pub const Runtime = struct {
     }
 
     fn allocTrackedCapacity(self: *Runtime, capacity: usize) Error![]u8 {
-        if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
+        if (capacity > self.historyByteLimit() - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.alloc(u8, capacity);
         self.projection_bytes += result.len;
@@ -9827,7 +9882,7 @@ pub const Runtime = struct {
             const growth = @max(@as(usize, 1024), target.list.capacity / 2);
             const desired = @min(max, @max(needed, target.list.capacity + growth));
             const added_capacity = desired - target.list.capacity;
-            if (added_capacity > self.limits.max_projection_bytes - self.projection_bytes)
+            if (added_capacity > self.historyByteLimit() - self.projection_bytes)
                 return error.ProjectionCapacity;
             try target.list.ensureTotalCapacityPrecise(self.allocator, desired);
             self.projection_bytes += added_capacity;
@@ -10219,7 +10274,7 @@ pub const Runtime = struct {
     }
 
     fn replaceTracked(self: *Runtime, target: *[]u8, value: []const u8, max: usize) Error!void {
-        if (value.len > max or value.len > self.limits.max_projection_bytes - (self.projection_bytes - target.len))
+        if (value.len > max or value.len > self.historyByteLimit() - (self.projection_bytes - target.len))
             return error.ProjectionCapacity;
         const next = try self.allocator.dupe(u8, value);
         self.projection_bytes = self.projection_bytes - target.len + next.len;
@@ -10480,8 +10535,8 @@ pub const TestSupport = if (builtin.is_test) struct {
         try recordTestOutput(control, @splat(3), "results/年度报告.docx");
     }
 
-    pub fn filePreviewFixture(root: []const u8) !Runtime {
-        return testImagePreviewRuntime(root);
+    pub fn filePreviewFixture(control: *Runtime, root: []const u8) !void {
+        try testImagePreviewRuntime(control, root);
     }
 
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
@@ -11984,19 +12039,26 @@ fn testRuntimeWith(configuration: Configuration) !Runtime {
 }
 
 fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime {
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try initTestRuntimeWithLimits(control, limits, configuration);
+    return control.*;
+}
+
+fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: Configuration) !void {
     test_agent_runtime.io = std.testing.io;
     // This fixture models a known default source configuration. Source-store
     // recovery tests supply their own Runtime and explicit restore evidence.
     var fixture_configuration = configuration;
     fixture_configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
-    var control = try Runtime.init(
+    control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         limits,
         fixture_configuration,
     );
-    try installTestExecution(&control);
+    try installTestExecution(control);
     var task_execution = try control.cloneCurrentTaskExecution(control.allocator);
     errdefer task_execution.deinit();
     control.revision = 0;
@@ -12082,7 +12144,8 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
         .redaction_secret = control.execution_state.credential(),
     };
-    control.task_runtime.tasks[0] = .{
+    control.task_runtime.tasks[0] = try control.allocator.create(TestTask);
+    control.task_runtime.tasks[0].?.* = .{
         .durable = .{
             .id = 3,
             .recent_order = 1,
@@ -12109,7 +12172,6 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
             .active_operation = .{ .run = 7 },
         },
     };
-    return control;
 }
 
 const TestScheduleClock = struct {
@@ -12802,7 +12864,7 @@ test "hidden Workspace record with Task history cannot be reused" {
     control.limits.max_workspaces = 1;
     product_workspace.testing.setManualLimit(&control.workspace, 1);
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
@@ -12883,7 +12945,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 1), failed[0].signals.failed_or_interrupted);
 
     const task_root = control.task_runtime.tasks[0].?.durable.workspace_root;
-    control.releaseTaskAttachmentNoFail(&control.task_runtime.tasks[0].?, .cold_start);
+    control.releaseTaskAttachmentNoFail(control.task_runtime.tasks[0].?, .cold_start);
     try control.removeWorkspace(1);
     try std.testing.expect(control.task_runtime.tasks[0] != null);
     try std.testing.expectEqualStrings(task_root, control.task_runtime.tasks[0].?.durable.workspace_root);
@@ -13057,7 +13119,7 @@ test "Task completion receipt is identity-bound idempotent and order-neutral" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&control);
@@ -13166,7 +13228,9 @@ test "Task state round trip restores product history without fabricating a Sessi
     var source_history_len: usize = 0;
 
     {
-        var source = try testRuntime();
+        const source = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(source);
+        try initTestRuntimeWithLimits(source, testLimits(), .{});
         defer source.deinit();
         try source.replaceTracked(
             &source.task_runtime.tasks[0].?.durable.workspace_root,
@@ -13497,7 +13561,9 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     try restored.setTaskArchived(3, true);
     try restored.deleteTask(3);
-    var deleted_restore = try Runtime.init(
+    const deleted_restore = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(deleted_restore);
+    deleted_restore.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -13795,7 +13861,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     task.runtime.active_run_id = 0;
     const completed = &task.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
@@ -14083,7 +14149,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     var control = try testRuntime();
     defer control.deinit();
     try replaceTaskCredentialForTest(
-        &control.task_runtime.tasks[0].?,
+        control.task_runtime.tasks[0].?,
         "TASK-SECRET",
     );
     var automatic_tmp = std.testing.tmpDir(.{});
@@ -14923,7 +14989,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     workspace_catalog = undefined;
     control.projection_bytes += task_catalog.projected_bytes;
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     task.runtime.attached().?.pinned_catalog = task_catalog;
     const run = &task.durable.runs[0].?;
     const history_input: RunInputRecord = history: {
@@ -15066,7 +15132,7 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
     try control.setTaskArchived(3, false);
     try std.testing.expectEqual(task_test_deletion.State.idle, control.task_runtime.tasks[0].?.deletion);
     try control.setTaskArchived(3, true);
-    control.releaseTaskAttachmentNoFail(&control.task_runtime.tasks[0].?, .cold_start);
+    control.releaseTaskAttachmentNoFail(control.task_runtime.tasks[0].?, .cold_start);
     var deletion_lease = try control.task_runtime.tasks[0].?.runtime.worker_leases.acquire();
     try control.deleteTask(3);
     try std.testing.expect(control.task_runtime.tasks[0] != null);
@@ -15084,7 +15150,7 @@ test "Product view reads preserve Task deletion lifecycle guards and projection 
 test "Run admission reserves a stable generation and rolls back every fallible allocation" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const tracked_before = control.projection_bytes;
     const generation_before = task.durable.next_run_generation;
     var oversized_prompt: [1025]u8 = undefined;
@@ -15144,10 +15210,9 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     );
     try std.testing.expectEqual(slot, reused_slot);
     try std.testing.expect(task.durable.runs[reused_slot].?.generation > first_generation);
-    try std.testing.expectError(
-        error.RunCapacity,
-        control.reserveRunRecord(task, .{ .text = "overflow" }),
-    );
+    const grown_slot = try control.reserveRunRecord(task, .{ .text = "grows beyond initial slots" });
+    try std.testing.expect(grown_slot != reused_slot);
+    control.discardRunRecord(task, grown_slot);
     control.discardRunRecord(task, reused_slot);
 }
 
@@ -15831,7 +15896,7 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expect(control.executionReplacementPending());
     try std.testing.expect(!control.canCreateTask());
     control.endExecutionReplacementNoFail();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
     try control.beginExecutionReplacement();
@@ -15870,7 +15935,7 @@ test "default replacement preserves Task generation and installs the next admiss
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     try control.replaceTracked(
         &task.durable.title,
         "review future metawork credential",
@@ -15994,7 +16059,7 @@ test "busy Task model selection commits the last intent without changing install
         .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
     };
     try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const binding_epoch = task.durable.binding_epoch;
     var cross_source = testTaskModelSelectionInput(
         &control,
@@ -16095,7 +16160,7 @@ test "same-source default model change preserves execution generation and advanc
             .{ .interactive = null },
         ),
     );
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(control.newTaskModelSelectionAuthorized(.{
         .target = .{ .source_id = after.active_model_ref.?.source_id, .model_id = "fixture-model-2" },
@@ -16126,7 +16191,7 @@ test "Product Control publishes Task model selection availability from cross-own
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     var query: task_runtime.ProjectionAuthorityQuery = .{
         .task_id = task.durable.id,
         .workspace_id = task.durable.workspace_id,
@@ -16286,7 +16351,7 @@ test "Task model selection does not depend on the global Custom Provider binding
     defer control.deinit();
     var binding = try PreparedCustomProviderBinding.init(std.testing.allocator, "provider-1", "fixture-model");
     execution_state.testing.installCustomProviderBinding(&control.execution_state, &binding);
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     try std.testing.expectEqualStrings("metask", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
@@ -16296,7 +16361,7 @@ test "clearing the admission default preserves active Task execution" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const task_execution = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
 
@@ -16318,7 +16383,7 @@ test "clearing the admission default preserves active Task execution" {
 test "released Task credential is permanently scrubbed from every product projection" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
 
     try control.replaceTracked(
@@ -16595,7 +16660,7 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
 
     const slot = try control.reserveRunRecord(task, .{ .text = "café" });
@@ -16665,7 +16730,7 @@ test "assistant redaction withholds a UTF-8 codepoint across credential chunks" 
 test "product Task identity is independent from Agent Session route identity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
@@ -16748,7 +16813,7 @@ test "Run elapsed projection samples an injected clock without publishing revisi
 test "thinking and assistant chunks update distinct safe projections" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16797,7 +16862,7 @@ test "thinking and assistant chunks update distinct safe projections" {
 test "output segments commit commentary and a continued final while discarding rollback" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -16854,7 +16919,7 @@ test "output segments commit commentary and a continued final while discarding r
 test "output segment byte mismatch fails the dependency protocol" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var begin = try testEnvelope(
@@ -16883,7 +16948,7 @@ test "commentary boundary capacity fails before canonical output mutation" {
     var control = try testRuntime();
     defer control.deinit();
     control.limits.max_commentary_segments_per_run = 1;
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const accepted = [_][]const u8{
@@ -16914,7 +16979,7 @@ test "commentary boundary capacity fails before canonical output mutation" {
 test "output segment close is atomic when the destination reserve fails" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -16947,7 +17012,7 @@ test "output segment close is atomic when the destination reserve fails" {
 test "assistant output budget is aggregate across committed and open segments" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     control.limits.max_assistant_message_bytes = 8;
@@ -16975,7 +17040,7 @@ test "assistant output budget is aggregate across committed and open segments" {
 test "partial output stays provisional until the segment is classified" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17024,7 +17089,7 @@ test "partial output stays provisional until the segment is classified" {
 test "provisional output exposes only credential-safe committed bytes" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17063,7 +17128,7 @@ test "provisional output exposes only credential-safe committed bytes" {
 test "output partition redacts a known credential across commentary boundaries" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     run.redaction_secret = &.{};
@@ -17098,7 +17163,7 @@ test "output partition redacts a known credential across commentary boundaries" 
 test "event projection preserves commentary groups split by its credential suffix" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -17133,7 +17198,7 @@ test "event projection preserves commentary groups split by its credential suffi
 test "discarded output requires an in-group retry without committing bytes" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -17165,7 +17230,7 @@ test "discarded output requires an in-group retry without committing bytes" {
 test "AgentCore RunState refines typed activity without owning RunPhase and rejects stale transitions" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var starting = try testEnvelope(
@@ -17227,7 +17292,7 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
 test "protocol retry is replaced by the next forward activity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17263,7 +17328,7 @@ test "protocol retry is replaced by the next forward activity" {
 test "Conversation context observation survives Runs and clears with attachment" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -17322,7 +17387,7 @@ test "Conversation context observation survives Runs and clears with attachment"
 test "AgentCore RunState accepts a zero first transition sequence" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
     var first = try testEnvelope(
         route,
@@ -17339,7 +17404,7 @@ test "AgentCore RunState accepts a zero first transition sequence" {
 test "event projection failure routes by Agent Session identity not product Task identity" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     control.recordEventProjectionFailure(task.durable.id, 7);
@@ -17389,7 +17454,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
 test "terminal publication is allocation-free write-once bounded history" {
     var control = try testRuntime();
     defer control.deinit();
-    defer detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
+    defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
@@ -17487,7 +17552,7 @@ test "compact terminal publication is write-once and outranks late cancellation"
 test "terminal disposition folds exactly once without reopening a closing Task" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     defer detachTaskForTest(&control, task);
 
     foldTerminalDisposition(task, .poisoned);
@@ -17538,7 +17603,7 @@ test "poisoned Session close preserves ownership until successful release" {
     for (cases) |case| {
         var control = try testRuntime();
         defer control.deinit();
-        const task = &control.task_runtime.tasks[0].?;
+        const task = control.task_runtime.tasks[0].?;
         defer detachTaskForTest(&control, task);
         task.runtime.active_operation = .none;
         task.runtime.discarding_restore = case.discarding_restore;
@@ -17711,7 +17776,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
 
     try control.renameTask(task.durable.id, "Review SECRET-KEY usage");
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "SECRET-KEY") == null);
@@ -17768,7 +17833,7 @@ test "Renderer transport failures never own Agent Run termination" {
 test "Task deletion scrubs retained projections before releasing its credential" {
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     product_workspace.testing.overwriteProjectedRoot(
         &control.workspace,
         1,
@@ -17906,7 +17971,9 @@ fn maximumProjectionFixture() !Runtime {
 
 fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime {
     test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -17914,7 +17981,7 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
         .{},
     );
     errdefer control.deinit();
-    try installMaximumAccountProjection(&control);
+    try installMaximumAccountProjection(control);
 
     for (0..limits.max_tasks) |task_index| {
         var root_storage: [64]u8 = undefined;
@@ -18068,7 +18135,8 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
                 ),
             };
         }
-        control.task_runtime.tasks[task_index] = .{
+        control.task_runtime.tasks[task_index] = try control.allocator.create(TestTask);
+        control.task_runtime.tasks[task_index].?.* = .{
             .durable = .{
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
@@ -18140,12 +18208,14 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
     );
     if (limits.max_tasks == (Limits{}).max_tasks) try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
-    return control;
+    return control.*;
 }
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
-    var control = try maximumProjectionFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try maximumProjectionFixture();
     defer control.deinit();
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
@@ -19310,7 +19380,7 @@ test "Task deletion waits for FileChange workers before removing retained artifa
     defer envelope.deinit();
     try control.applyEvent(&envelope);
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const change_order = run.file_changes[0].?.order;
     var digest: [file_change_store.digest_bytes]u8 = undefined;
@@ -19501,8 +19571,8 @@ test "file preview redaction protects credentials that cross a truncation bounda
     );
 }
 
-fn testImagePreviewRuntime(root: []const u8) !Runtime {
-    var control = try testRuntime();
+fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
+    try initTestRuntimeWithLimits(control, testLimits(), .{});
     errdefer control.deinit();
     product_workspace.testing.installOwned(&control.workspace, 1, .{
         .id = 2,
@@ -19513,13 +19583,12 @@ fn testImagePreviewRuntime(root: []const u8) !Runtime {
         .display_name_len = 7,
         .recent_order = 2,
     });
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     task.durable.workspace_id = 2;
     try control.replaceTracked(&task.durable.workspace_root, root, control.limits.max_workspace_bytes);
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"preview-tool\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"image.jpg\"},\"title\":\"image\",\"kind\":\"text\"}]}}");
     defer event.deinit();
     try control.applyEvent(&event);
-    return control;
 }
 
 const PreviewTestCapture = struct {
@@ -19550,7 +19619,9 @@ test "file preview scans all original bytes including a credential across the sc
     @memcpy(bytes[0..jpeg.len], jpeg);
     @memcpy(bytes[file_preview_scan_bytes - 4 ..][0..10], "SECRET-KEY");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
-    var control = try testImagePreviewRuntime(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
     try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, 3, 7, "file-3-1-1-1"));
@@ -19576,7 +19647,9 @@ test "file preview immutable original transfer is sequential and revoked by secu
     const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
     @memcpy(bytes[0..jpeg.len], jpeg);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = bytes });
-    var control = try testImagePreviewRuntime(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
     _ = control.beginFilePreview(72, 3, 7, "file-3-1-1-1");
@@ -19833,7 +19906,7 @@ test "event capacity causes serialize to the shared Renderer fixture" {
         try std.testing.expect(commitTerminal(run, .failed, .failed, std.meta.stringToEnum(RunCause, expected.cause).?, .reusable, "", false));
         control.markTerminalRunsBeforeEventDrain();
         control.finalizeMarkedTerminalRunsAfterEventDrain();
-        detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
+        detachTaskForTest(&control, control.task_runtime.tasks[0].?);
         var storage: [96 * 1024]u8 = undefined;
         const snapshot = try control.writeAggregateFixture(&storage);
         const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
@@ -19885,7 +19958,7 @@ test "event drain barrier atomically publishes terminal product state" {
     // asynchronous Agent Session close path. Detach before snapshot lifecycle
     // reconciliation so the terminal-publication assertion stays scoped to
     // its event-drain barrier instead of starting a fake close worker.
-    detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
+    detachTaskForTest(&control, control.task_runtime.tasks[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
@@ -19908,7 +19981,7 @@ test "close and delete wait for terminal event drain" {
 
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
@@ -19969,7 +20042,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
 
     var control = try testRuntime();
     defer control.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.runtime.close_completion.store(.running, .release);
@@ -20023,7 +20096,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
 
-    const view = &control.task_runtime.tasks[0].?;
+    const view = control.task_runtime.tasks[0].?;
     for (1..11) |request_id| {
         var record = UiRecord{
             .request_id = request_id,
@@ -21535,7 +21608,9 @@ test "Product view duplicate credential ownership preserves reads while exact ne
 }
 
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
-    var control = try maximumProjectionFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try maximumProjectionFixture();
     defer control.deinit();
     const epoch = control.projection_history_epoch;
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
@@ -21696,6 +21771,28 @@ test "Account image token protects Custom Provider views between Runs and rotati
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
 }
 
+test "rejected credential-bearing history frees the encoded candidate on every attempt" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            // A wire field name is deliberately also a known credential, so
+            // even perfectly scrubbed runtime values must reject this encoding.
+            try callback(context, "default_permission_profile");
+        }
+    };
+    var owner: u8 = 0;
+    var storage: [96 * 1024]u8 = undefined;
+    var history: TestTaskPersistence = .{ .storage = &storage };
+    var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+    defer control.deinit();
+    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    const before = history.commits;
+    for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
+    try std.testing.expectEqual(before, history.commits);
+}
+
 test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
     var control = try testRuntime();
     defer control.deinit();
@@ -21741,9 +21838,11 @@ test "transport cancellation cannot revoke a replacement Product read" {
 }
 
 test "Product view cached large body moves into frozen read without a body-sized begin copy" {
-    var control = try TestSupport.maximumSmallFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try TestSupport.maximumSmallFixture();
     defer control.deinit();
-    try TestSupport.installResultFixture(&control, true);
+    try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const request: ViewRequest = .{ .task_id = 1 };
@@ -21837,7 +21936,9 @@ test "Product view cached ownership returns through allocation failures and secu
 test "Product view partial encoded cache fill is discarded on cancellation invalidation or allocation failure" {
     var reached_success = false;
     for (0..16) |fail_index| {
-        var control = try testRuntime();
+        const control = try std.testing.allocator.create(Runtime);
+        defer std.testing.allocator.destroy(control);
+        try initTestRuntimeWithLimits(control, testLimits(), .{});
         defer control.deinit();
         var output: [96 * 1024]u8 = undefined;
         var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
@@ -21860,9 +21961,11 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
     }
     try std.testing.expect(reached_success);
 
-    var control = try TestSupport.maximumSmallFixture();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try TestSupport.maximumSmallFixture();
     defer control.deinit();
-    try TestSupport.installResultFixture(&control, true);
+    try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const task_slot = @intFromEnum(view_cache.Kind.taskPage);
@@ -21971,7 +22074,7 @@ test "late credential discovery revokes Output locators in current and durable p
     defer envelope.deinit();
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "late-secret/report.docx", 42, @splat(2));
     try control.applyEvent(&envelope);
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(!run.outputs[0].?.redacted);
     control.redactAllProductProjectionsNoFail("late-secret");
@@ -22042,7 +22145,7 @@ test "Output file target requires an explicit receipt in the exact owning Task a
     try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(0)));
     try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(4)));
 
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
     try std.testing.expect(target.relative_path.ptr != record.locator.ptr);
     try std.testing.expect(target.workspace_root.ptr != task.durable.workspace_root.ptr);
@@ -22069,7 +22172,7 @@ test "Output file target rechecks revocation deletion redaction and security bef
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
     defer target.deinit();
-    const task = &control.task_runtime.tasks[0].?;
+    const task = control.task_runtime.tasks[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
     try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
@@ -22563,4 +22666,38 @@ test "Product view queued recovery failure preserves the shared Session blocker 
     try std.testing.expectEqualStrings(wanted, writer.buffered());
     try std.testing.expectEqual(.session_releasing, sendInputRejection(error.SessionReleasing));
     try std.testing.expectEqual(.session_capacity, sendInputRejection(error.SessionCapacity));
+}
+
+test "history allowance admits more than sixteen Runs beyond the old shared projection budget" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_history_bytes = 8 * 1024 * 1024;
+    control.limits.max_user_message_bytes = 256 * 1024;
+    const task = control.task_runtime.find(3).?;
+    const body = try control.allocator.alloc(u8, 128 * 1024);
+    defer control.allocator.free(body);
+    @memset(body, 'x');
+    for (0..24) |index| {
+        const slot = try control.reserveRunRecord(task, .{ .text = body });
+        const run = &task.durable.runs[slot].?;
+        run.id = index + 8;
+        _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+        run.file_change_observation = .complete;
+        run.event_stream_finalized = true;
+        run.terminal_observed = true;
+        run.agent_handoff.store(.finishing, .release);
+        control.task_runtime.releaseQuiescentRunEffects(control.taskRuntimeReleaseEffects());
+    }
+    try std.testing.expect(control.projection_bytes > 1536 * 1024);
+    var count: usize = 0;
+    for (task.durable.runs) |entry| {
+        if (entry != null) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+    const encoded = try control.encodeTaskHistoryCandidate(null);
+    defer control.allocator.free(encoded);
+    var recovered = try task_persistence.decodeRecovering(control.allocator, encoded, control.taskPersistenceLimits());
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 25), recovered.value.tasks[0].runs.len);
+    try std.testing.expect(!recovered.degraded);
 }

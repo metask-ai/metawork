@@ -91,6 +91,12 @@ pub const Mutation = struct {
 
 `Database.query` 只接受一个只读 statement。`Database.mutate` 将非空 mutation array 放入一个 `BEGIN IMMEDIATE` transaction；每条 statement 必须是无返回 row 的 DML。`exactly` 使用该 statement 的 `sqlite3_changes64` 结果校验，任一 mismatch 返回 `conflict` 并回滚完整 batch。
 
+`Database.mutateChunks` 接受有界的 mutation 分块；每块仍遵守普通 batch 的语句及参数额度，所有块在进入数据库前完成校验，并在同一调用门、同一个 `BEGIN IMMEDIATE` transaction 内执行，只返回一次最终结果。后块失败必须回滚前块，取消、unknown 与 shutdown 规则不变；不暴露事务句柄，也不允许部分确认。此入口用于 Product 历史积压补写及大库恢复，不以普通 batch 额度充当累计历史上限。分块数量由 SQL 合同唯一常量约束。
+
+`Database.maintain` 只接受 `confirm` 或 `purge`，不改变逻辑行，也不接受 SQL。它与 query/mutate 共用串行调用门、重入拒绝、取消及 shutdown 生命周期；memory target 拒绝持久确认。`confirm` 要求完整 FULL checkpoint 后同步 SQLite 自有 journal/database descriptor；`purge` 使用 TRUNCATE 并确认无旧 WAL 帧，再同步这些 descriptor。未执行的 checkpoint（负计数）、不完整复制、BUSY 或同步失败不能返回 `ok`；IO/损坏会 poison instance。成功只确认当前存储状态，Product 仍须在禁写屏障内核对原 witness、持有凭据及资源，不据此重放业务 effect。
+
+文件初始化固定开启并核实 `secure_delete=ON`。清理已知凭据须先由 Product 更新全部受影响的逻辑单位，再取得 `purge` 成功；单凭 UPDATE 或 checkpoint 可读不能宣称旧版本清除。descriptor 通过 SQLite 所有的 VFS file-control pointer 使用，不另开/关 OS 文件句柄，不向 caller 暴露。
+
 Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA、DDL mutation、ATTACH/DETACH 或临时 schema。增加这些能力必须由真实 consumer 和对应失败模式证明，而不是预留抽象。
 
 ### 3.2 Row 与 streaming
@@ -99,7 +105,7 @@ Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA
 
 列数、列名和值必须对应本次实际执行的结果，所有返回列都参与值校验和结果预算。其他 instance 对同一文件完成迁移后，查询不能继续使用执行前的旧结果形状；零行查询返回 `ok` 且不产生 callback。
 
-query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以最多 8 MiB 的内部深拷贝伪造原子结果。
+query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以内部整份深拷贝伪造原子结果。
 
 ### 3.3 Outcomes
 
@@ -126,9 +132,9 @@ statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入
 ### 3.4 Limits
 
 - ordinary SQL text：64 KiB；migration SQL：1 MiB；
-- 单 statement params：64；单 mutation batch：64 statements；
-- 单 query parameters：1 MiB；单 mutation batch parameters：8 MiB；
-- 单 query：最多 8K rows、8 MiB result bytes；
+- 单 statement params：64；单 mutation batch：128 statements；
+- 单 query parameters：1 MiB；单 mutation batch parameters：32 MiB；
+- 单 query：最多 8K rows、32 MiB result bytes；
 - SQLite engine 同步设置 `LENGTH`、`SQL_LENGTH`、`VARIABLE_NUMBER`、`ATTACHED=0` 和 `WORKER_THREADS=0` limits。
 
 超限返回 `resource_exhausted` 或在 backend dispatch 前返回 `rejected`，不得截断后伪装成功。

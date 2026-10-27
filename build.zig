@@ -480,6 +480,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
+    const app_history_tests = b.addTest(.{ .name = "metawork-app-history", .root_module = test_modules.app, .filters = &.{"SQLite history"} });
+    b.step("test-app-history", "Verify Application SQLite history lifecycle").dependOn(&b.addRunArtifact(app_history_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
         .root_module = test_modules.storage,
@@ -511,6 +513,54 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&storage_tests_run.step);
+    // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
+    const sqlite_a_module = b.createModule(.{
+        .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+        .link_libc = true,
+    });
+    sqlite_a_module.addImport("product_task_persistence", test_modules.product_task_persistence);
+    sqlite_a_module.addImport("product_task_runtime", test_modules.product_task_runtime);
+    sqlite_a_module.addImport("product_task_state", test_modules.product_task_state);
+    sqlite_a_module.addImport("storage", test_modules.storage);
+    const sqlite_a_memory = b.addTest(.{ .name = "sqlite-history-a-memory", .root_module = sqlite_a_module, .filters = &.{"stage A"} });
+    const sqlite_a_sql_module = b.createModule(.{
+        .root_source_file = b.path("tests/probes/sqlite_history_a_backend.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+        .link_libc = true,
+    });
+    sqlite_a_sql_module.addImport("storage", test_modules.storage);
+    const sqlite_a_backend = b.addTest(.{ .name = "sqlite-history-a-backend", .root_module = sqlite_a_sql_module, .filters = &.{"stage A"} });
+    const sqlite_a_step = b.step("build-sqlite-history-a-probes", "Build isolated SQLite stage A memory and existing-backend measurements");
+    sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_memory, .{}).step);
+    sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_backend, .{}).step);
+    const sqlite_a_primitives_module = b.createModule(.{
+        .root_source_file = b.path("tests/probes/sqlite_history_a_primitives.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+        .link_libc = true,
+    });
+    sqlite_a_primitives_module.addImport("storage", test_modules.storage);
+    sqlite_a_primitives_module.addIncludePath(b.dependency("sqlite", .{}).path("."));
+    sqlite_a_primitives_module.addCSourceFile(.{ .file = b.path("tests/probes/sqlite_history_a_primitives.c"), .flags = &.{"-std=c11"} });
+    const sqlite_a_primitives = b.addTest(.{ .name = "sqlite-history-a-primitives", .root_module = sqlite_a_primitives_module, .filters = &.{"stage A"} });
+    sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_primitives, .{}).step);
+    for ([_]bool{ false, true }) |engine| {
+        const sqlite_a_size_options = b.addOptions();
+        sqlite_a_size_options.addOption(bool, "engine", engine);
+        const sqlite_a_size_module = b.createModule(.{
+            .root_source_file = b.path("tests/probes/sqlite_history_a_size.zig"),
+            .target = test_modules.storage.resolved_target,
+            .optimize = test_modules.storage.optimize,
+            .link_libc = true,
+        });
+        sqlite_a_size_module.addOptions("stage_a_size_options", sqlite_a_size_options);
+        if (engine) sqlite_a_size_module.addImport("storage", test_modules.storage);
+        const sqlite_a_size = b.addExecutable(.{ .name = if (engine) "sqlite-history-a-size-engine" else "sqlite-history-a-size-base", .root_module = sqlite_a_size_module });
+        sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_size, .{}).step);
+    }
     const history_schema_fixture_module = b.createModule(.{
         .root_source_file = b.path("tests/support/history_schema.zig"),
         .target = test_modules.storage.resolved_target,
@@ -1819,6 +1869,7 @@ fn wireAgentCore(
     task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
     task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
     task_persistence.addImport("product_task_state", task_state);
+    product_control_history_schema.addImport("product_task_persistence", task_persistence);
     const task_policy = b.createModule(.{
         .root_source_file = b.path("src/product/task/policy.zig"),
         .target = target,
@@ -2216,6 +2267,8 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control.addImport("product_control_history_schema", product_control_history_schema);
+    app.addImport("storage", storage);
     app.addImport("runner", runner);
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));

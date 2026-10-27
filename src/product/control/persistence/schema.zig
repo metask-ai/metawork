@@ -1,40 +1,15 @@
 //! Product Control's ordered history migrations. No runtime or I/O ownership.
 const std = @import("std");
-const sql = @import("metawork_storage_sql");
+pub const sql = @import("metawork_storage_sql");
 
-pub const migrations: []const sql.Migration = &.{ .{
+pub const migrations: []const sql.Migration = &.{.{
     .version = 1,
-    .name = "task_history",
+    .name = "product_history",
     .sql = @embedFile("migrations/0001_task_history.sql"),
-}, .{
-    .version = 2,
-    .name = "permission_review_delegation",
-    .sql = @embedFile("migrations/0002_permission_review_delegation.sql"),
-}, .{
-    .version = 3,
-    .name = "approval_mode",
-    .sql = @embedFile("migrations/0003_approval_mode.sql"),
-}, .{
-    .version = 4,
-    .name = "task_approval_revision",
-    .sql = @embedFile("migrations/0004_task_approval_revision.sql"),
-}, .{
-    .version = 5,
-    .name = "task_model_intent",
-    .sql = @embedFile("migrations/0005_task_model_intent.sql"),
-}, .{
-    .version = 6,
-    .name = "run_additional_inputs",
-    .sql = @embedFile("migrations/0006_run_additional_inputs.sql"),
-}, .{
-    .version = 7,
-    .name = "task_input_submissions",
-    .sql = @embedFile("migrations/0007_task_input_submissions.sql"),
-}, .{
-    .version = 8,
-    .name = "presentation_anchors",
-    .sql = @embedFile("migrations/0008_presentation_anchors.sql"),
-} };
+}};
+
+pub const codec = @import("codec.zig");
+pub const repository = @import("repository.zig");
 
 comptime {
     @setEvalBranchQuota(4_000_000);

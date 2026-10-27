@@ -133,6 +133,30 @@ pub fn initialize(connection: *Connection, durable: bool) OpenError!void {
         "PRAGMA busy_timeout;",
         250,
     );
+    try setIntegerPragma(
+        connection,
+        "PRAGMA secure_delete=ON;",
+        "PRAGMA secure_delete;",
+        1,
+    );
+}
+
+/// Sync SQLite-owned descriptors while the backend owns its operation lease.
+/// Never open/close an independent OS descriptor alongside SQLite's handles.
+pub fn syncFile(connection: *Connection, journal: bool) SqlError!void {
+    var file: [*c]c.sqlite3_file = null;
+    const opcode = if (journal) c.SQLITE_FCNTL_JOURNAL_POINTER else c.SQLITE_FCNTL_FILE_POINTER;
+    const result = c.sqlite3_file_control(connection.handle, "main", opcode, @ptrCast(&file));
+    if (result != c.SQLITE_OK) return sqlFailure(result);
+    if (file == null) {
+        if (journal) return;
+        return error.Rejected;
+    }
+    const methods = file.*.pMethods;
+    if (methods == null) return error.Rejected;
+    const sync = methods.*.xSync orelse return error.Rejected;
+    const synced = sync(file, c.SQLITE_SYNC_FULL);
+    if (synced != c.SQLITE_OK) return sqlFailure(synced);
 }
 
 fn configureDatabase(connection: *Connection, operation: c_int, expected: c_int) SqlError!void {

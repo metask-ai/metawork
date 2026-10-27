@@ -17,6 +17,8 @@ pub const RestoreText = task_state.TrackedText;
 // Hard-cut persistence format. This deliberately has no migration/version
 // contract: the fixed frame layout and magic identify the sole active format.
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
+/// Bounded in-process handoff; this is not a database file-size limit.
+pub const max_snapshot_bytes: usize = 2 * 1024 * 1024 * 1024;
 pub const max_failure_records: usize = 1024;
 pub const max_failure_reason_bytes: usize = 256;
 pub const file_name = "workbench-history.store";
@@ -52,6 +54,8 @@ pub const Commit = enum {
     outcome_unknown,
 };
 
+pub const CredentialStatus = struct { epoch: u64, ready: bool };
+
 pub const RecoveryFault = enum {
     none,
     install_failed,
@@ -82,6 +86,13 @@ pub const Capability = struct {
     enabled: bool = false,
     restored_bytes: ?[]const u8 = null,
     restore_failed: bool = false,
+    restore_incompatible: bool = false,
+    // Callback-scoped acquisition/retirement notice. Concrete history storage
+    // owns any bounded copy needed until sanitizing retired disk versions.
+    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool) CredentialStatus = null,
+    security_epoch: u64 = 1,
+    generation_commit_fn: ?*const fn (?*anyopaque, []const u8, u64, bool) Commit = null,
+
     commit_fn: *const fn (
         context: ?*anyopaque,
         bytes: []const u8,
@@ -93,13 +104,19 @@ pub const Capability = struct {
         bytes: []const u8,
     ) Commit = unsupportedCommit,
 
+    pub fn credentials(self: Capability, values: []const []const u8, complete: bool) CredentialStatus {
+        return if (self.credentials_fn) |notify| notify(self.context, values, complete) else .{ .epoch = self.security_epoch, .ready = true };
+    }
+
     pub fn commit(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, false);
         return self.commit_fn(self.context, bytes);
     }
 
     pub fn commitConfirmed(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, true);
         return self.confirmed_commit_fn(self.context, bytes);
     }
 
@@ -1606,7 +1623,7 @@ pub fn restoreTask(
 
     const runs = try projection.allocator.alloc(
         ?task_state.RunRecord,
-        projection.limits.max_runs_per_task,
+        wire.runs.len,
     );
     errdefer projection.allocator.free(runs);
     @memset(runs, null);
@@ -1624,7 +1641,7 @@ pub fn restoreTask(
 
     const compacts = try projection.allocator.alloc(
         ?task_state.CompactRecord,
-        projection.limits.max_compacts_per_task,
+        wire.compacts.len,
     );
     errdefer projection.allocator.free(compacts);
     @memset(compacts, null);
@@ -1640,7 +1657,7 @@ pub fn restoreTask(
 
     const ui_history = try projection.allocator.alloc(
         ?task_state.UiRecord,
-        projection.limits.max_ui_history_per_task,
+        wire.ui_history.len,
     );
     errdefer projection.allocator.free(ui_history);
     @memset(ui_history, null);
@@ -1691,7 +1708,7 @@ pub fn restoreTask(
             .next_run_generation = wire.next_run_generation,
             .ui_history = ui_history,
             .ui_history_count = wire.ui_history.len,
-            .ui_history_next = wire.ui_history.len % ui_history.len,
+            .ui_history_next = wire.ui_history.len,
             .checkpoint = checkpoint,
             .checkpoint_anchor = checkpoint_anchor,
             .checkpoint_attempt = checkpoint_attempt,
@@ -2102,7 +2119,7 @@ fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_
         return error.TaskStoreCorrupt;
     const file_refs = try projection.allocator.alloc(
         ?task_state.FileReferenceView,
-        projection.limits.max_file_refs_per_tool,
+        if (wire.file_refs) |references| references.len else 0,
     );
     errdefer {
         for (file_refs) |*entry|
@@ -2495,6 +2512,27 @@ pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFai
     return null;
 }
 
+pub fn encodeAlloc(allocator: std.mem.Allocator, state: StateWire, preserved: PreservedFrames, limits: Limits) (Error || std.mem.Allocator.Error)![]u8 {
+    if (validateCandidate(&state, limits) != null) return error.TaskStoreEncodeFailed;
+    if (state.failures.len > max_failure_records) return error.TaskStoreTooLarge;
+    var capacity: usize = 64 * 1024;
+    while (true) {
+        const output = try allocator.alloc(u8, capacity);
+        const encoded = encodeUncheckedImpl(output, state, preserved) catch |err| {
+            std.crypto.secureZero(u8, output);
+            allocator.free(output);
+            if (err == error.TaskStoreTooLarge or capacity == max_snapshot_bytes) return err;
+            capacity = @min(capacity * 2, max_snapshot_bytes);
+            continue;
+        };
+        defer {
+            std.crypto.secureZero(u8, output);
+            allocator.free(output);
+        }
+        return allocator.dupe(u8, encoded);
+    }
+}
+
 pub fn encode(output: []u8, state: StateWire, limits: Limits) Error![]const u8 {
     return encodePreserving(output, state, .{}, limits);
 }
@@ -2544,7 +2582,7 @@ fn encodeUncheckedImpl(output: []u8, state: StateWire, preserved: PreservedFrame
         appendRecord(output, &offset, record_task_failure, failure.task_id, failure.recent_order, failure) catch |err|
             return err;
     }
-    if (offset > max_store_bytes) return error.TaskStoreTooLarge;
+    if (offset > max_snapshot_bytes) return error.TaskStoreTooLarge;
     return output[0..offset];
 }
 
@@ -2607,7 +2645,7 @@ pub fn decodeRecovering(
     limits: Limits,
 ) RecoveryError!RecoveredState {
     if (input.len == 0) return error.TaskStoreEmpty;
-    if (input.len > max_store_bytes) return error.TaskStoreTooLarge;
+    if (input.len > max_snapshot_bytes) return error.TaskStoreTooLarge;
 
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -2685,7 +2723,7 @@ pub fn decodeRecovering(
             offset = findNextFrame(input, offset + 1) orelse break;
             continue;
         };
-        if (header[4] != 0 or payload_len > max_store_bytes or payload_end > input.len) {
+        if (header[4] != 0 or payload_len > max_snapshot_bytes or payload_end > input.len) {
             degraded = true;
             if (payload_end <= input.len) offset = payload_end else offset = findNextFrame(input, offset + 1) orelse break;
             continue;
@@ -2988,13 +3026,13 @@ fn appendRecord(
     order: u64,
     value: anytype,
 ) Error!void {
-    if (output.len -| offset.* < frame_header_bytes) return error.TaskStoreTooLarge;
+    if (output.len -| offset.* < frame_header_bytes) return error.TaskStoreEncodeFailed;
     const header_start = offset.*;
     offset.* += frame_header_bytes;
     var writer = std.Io.Writer.fixed(output[offset.*..]);
     std.json.Stringify.value(value, .{}, &writer) catch return error.TaskStoreEncodeFailed;
     const payload = writer.buffered();
-    if (payload.len > max_store_bytes or payload.len > std.math.maxInt(u32))
+    if (payload.len > max_snapshot_bytes or payload.len > std.math.maxInt(u32))
         return error.TaskStoreTooLarge;
     writeFrameHeader(output[header_start .. header_start + frame_header_bytes], kind, id, order, payload);
     offset.* += payload.len;
@@ -3010,9 +3048,9 @@ fn appendRawRecord(
     order: u64,
     payload: []const u8,
 ) Error!void {
-    if (payload.len > max_store_bytes or payload.len > std.math.maxInt(u32))
+    if (payload.len > max_snapshot_bytes or payload.len > std.math.maxInt(u32))
         return error.TaskStoreTooLarge;
-    if (output.len -| offset.* < frame_header_bytes + payload.len) return error.TaskStoreTooLarge;
+    if (output.len -| offset.* < frame_header_bytes + payload.len) return error.TaskStoreEncodeFailed;
     writeFrameHeader(output[offset.* .. offset.* + frame_header_bytes], kind, id, order, payload);
     offset.* += frame_header_bytes;
     @memcpy(output[offset.* .. offset.* + payload.len], payload);

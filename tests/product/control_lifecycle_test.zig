@@ -22,6 +22,87 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "history capacity executes more than sixteen Runs through worker retirement" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    defer fake_core.releaseControlled();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    for (0..20) |_| {
+        fake_core.rearmControlled();
+        fake_core.setNextPlan(.controlled);
+        _ = try scenario.control.runTask(scenario.task_id, .{ .text = "continue the same history" });
+        try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        try std.testing.expectEqual(task, scenario.control.task_runtime.find(scenario.task_id).?);
+    }
+    var count: usize = 0;
+    for (task.durable.runs) |entry| if (entry) |run| {
+        count += 1;
+        try std.testing.expect(run.execution == null);
+        try std.testing.expect(run.terminal_publication.load(.acquire) == .published);
+    };
+    try std.testing.expectEqual(@as(usize, 21), count);
+}
+
+test "history capacity creates one hundred Tasks with one live Session" {
+    for ([_]bool{ false, true }) |automatic| {
+        fake_core.reset();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoints.deinit();
+        var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, home);
+        defer automatic_root.deinit();
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.directories.testing_automatic_workspace_root = if (automatic) &automatic_root else null;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoints };
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        for (0..100) |_| {
+            for (0..5000) |_| {
+                const created = if (automatic)
+                    control.createTaskForWorkspace(.automatic, control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .manual })
+                else
+                    control.createTask(input);
+                if (created) |id| {
+                    try waitInitialTaskCatalog(&control, id);
+                    break;
+                } else |err| switch (err) {
+                    error.SessionReleasing => {
+                        control.syncLifecycle();
+                        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                    },
+                    else => return err,
+                }
+            } else return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqual(@as(usize, 100), control.task_runtime.taskCount());
+        var attached: usize = 0;
+        for (control.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.hasAttachedSession()) attached += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), attached);
+    }
+}
+
 fn scheduledBinding(
     workbench: *product_control.Runtime,
 ) product_control.ScheduledTaskBindingInput {
@@ -3299,7 +3380,7 @@ test "Task permission profile is immutable and successful interactive create rem
     var capacity_rejected_input = productControlTaskInput();
     capacity_rejected_input.approval_mode = .manual;
     try std.testing.expectError(
-        error.TaskCapacity,
+        error.SessionCapacity,
         workbench.createTask(capacity_rejected_input),
     );
     try std.testing.expectEqual(
@@ -4665,7 +4746,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
         ),
     );
     try std.testing.expectEqual(revision_before_rejection, restored.currentRevision());
-    const recovered_task = &restored.task_runtime.tasks[0].?;
+    const recovered_task = restored.task_runtime.tasks[0].?;
     try std.testing.expectEqual(task_id, recovered_task.durable.id);
     try std.testing.expect(recovered_task.runtime.active_operation == .none);
     try std.testing.expect(recovered_task.runtime.restore_job == null);
@@ -7384,10 +7465,8 @@ test "Product Control manual compact uses the active operation lane and appends 
         "\"operationId\":\"2\"",
         "\"phase\":\"compacted\"",
     );
-    try std.testing.expectError(
-        error.CompactCapacity,
-        workbench.compactTaskAtBinding(task_id, 1),
-    );
+    _ = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitTaskSnapshot(&workbench, "\"operationId\":\"3\"", "\"phase\":\"compacted\"");
 
     var storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeAggregateFixture(&storage);
@@ -7397,7 +7476,7 @@ test "Product Control manual compact uses the active operation lane and appends 
         "\"activeOperation\":null",
     ) != null);
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         std.mem.count(u8, snapshot, "\"afterRunId\":\"1\""),
     );
     try std.testing.expect(std.mem.indexOf(
@@ -9213,6 +9292,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     input.trust = .explicitly_trusted;
     input.approval_mode = .manual;
     const task_id = try control.createTask(input);
+    try waitInitialTaskCatalog(&control, task_id);
     _ = try control.runTask(task_id, .{ .text = "fail without covering Conversation history" });
     try waitTaskSnapshot(&control, "\"id\":\"1\"", "\"continuationRecoveryAvailable\":true");
     const task = control.task_runtime.find(task_id).?;
@@ -10477,26 +10557,28 @@ test "active input Stop before terminal never continues and releases the payload
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
 }
 
-test "active input continuation capacity failure is final and does not create a target" {
+test "active input continuation grows history and oversized input failure is final" {
     for ([_]bool{ false, true }) |too_large| {
         const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), if (too_large) 2 else 1, .controlled, true);
         defer scenario.deinit();
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source_id = task.durable.runs[0].?.id;
         const source = &task.durable.runs[0].?;
         _ = try scenario.control.testSendInput("one", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "12345" });
         _ = try scenario.control.testSendInput("two", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "67890" });
         if (too_large) scenario.control.limits.max_user_message_bytes = 11;
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
-        try std.testing.expect(source.input_continuation_attempted);
-        try std.testing.expectEqual(if (too_large) task_state.SendInputReason.combined_input_too_large else .capacity_reached, source.input_continuation_failure.?);
-        for (source.additional_inputs[0..2]) |entry| {
-            try std.testing.expectEqual(.unadopted, entry.?.state);
-            try std.testing.expect(entry.?.transferred_to_run_id == null and entry.?.raw_text == null);
+        const settled_source = task_state.findRun(task.durable.runs, source_id).?;
+        try std.testing.expect(settled_source.input_continuation_attempted);
+        if (too_large) try std.testing.expectEqual(task_state.SendInputReason.combined_input_too_large, settled_source.input_continuation_failure.?) else try std.testing.expect(settled_source.input_continuation_failure == null);
+        for (settled_source.additional_inputs[0..2]) |entry| {
+            try std.testing.expectEqual(if (too_large) task_state.AdditionalInputState.unadopted else .transferred, entry.?.state);
+            try std.testing.expect((entry.?.transferred_to_run_id == null) == too_large and entry.?.raw_text == null);
         }
         scenario.control.limits.max_user_message_bytes = 256 * 1024;
         for (0..5) |_| scenario.control.syncLifecycle();
-        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+        try std.testing.expectEqual(@as(usize, if (too_large) 1 else 2), fake_core.run_calls);
     }
 }
 

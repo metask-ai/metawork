@@ -516,6 +516,14 @@ pub const Runtime = struct {
         self.* = undefined;
     }
 
+    /// Reserve before publishing Workspace authority; registration stays no-fail.
+    pub fn reserveWorkspaceCapacity(self: *Runtime, count: usize) std.mem.Allocator.Error!void {
+        if (count <= self.workspaces.len) return;
+        const old = self.workspaces.len;
+        self.workspaces = try self.allocator.realloc(self.workspaces, @max(count, @max(4, old * 2)));
+        @memset(self.workspaces[old..], null);
+    }
+
     pub fn registerWorkspaceOwned(
         self: *Runtime,
         binding: WorkspaceBinding,
