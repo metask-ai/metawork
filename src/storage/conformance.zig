@@ -162,6 +162,7 @@ const FakeBackend = struct {
             .context = self,
             .query_fn = query,
             .mutate_fn = mutate,
+            .maintain_fn = maintain,
         };
     }
 
@@ -183,6 +184,10 @@ const FakeBackend = struct {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         self.mutate_calls += 1;
         return self.mutation_outcome;
+    }
+
+    fn maintain(_: *anyopaque, _: sql.Maintenance) sql.QueryOutcome {
+        return .ok;
     }
 };
 

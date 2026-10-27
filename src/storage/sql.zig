@@ -103,6 +103,11 @@ pub const MutationOutcome = enum {
     unavailable,
 };
 
+/// Physical durability/cleanup only. Neither operation changes logical rows.
+/// `confirm` synchronizes the current committed state; `purge` additionally
+/// removes older WAL frames. Callers still own witness checks and secret leases.
+pub const Maintenance = enum { confirm, purge };
+
 /// Borrowed capability. The concrete backend instance and every resource it
 /// owns must outlive this value and all synchronous calls made through it.
 ///
@@ -122,6 +127,7 @@ pub const Database = struct {
         context: *anyopaque,
         mutations: []const Mutation,
     ) MutationOutcome,
+    maintain_fn: *const fn (context: *anyopaque, operation: Maintenance) QueryOutcome,
 
     pub fn query(
         self: Database,
@@ -141,6 +147,10 @@ pub const Database = struct {
     pub fn mutate(self: Database, mutations: []const Mutation) MutationOutcome {
         if (!validMutations(mutations)) return .rejected;
         return self.mutate_fn(self.context, mutations);
+    }
+
+    pub fn maintain(self: Database, operation: Maintenance) QueryOutcome {
+        return self.maintain_fn(self.context, operation);
     }
 };
 

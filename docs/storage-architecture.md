@@ -91,6 +91,10 @@ pub const Mutation = struct {
 
 `Database.query` 只接受一个只读 statement。`Database.mutate` 将非空 mutation array 放入一个 `BEGIN IMMEDIATE` transaction；每条 statement 必须是无返回 row 的 DML。`exactly` 使用该 statement 的 `sqlite3_changes64` 结果校验，任一 mismatch 返回 `conflict` 并回滚完整 batch。
 
+`Database.maintain` 只接受 `confirm` 或 `purge`，不改变逻辑行，也不接受 SQL。它与 query/mutate 共用串行调用门、重入拒绝、取消及 shutdown 生命周期；memory target 拒绝持久确认。`confirm` 要求完整 FULL checkpoint 后同步 SQLite 自有 journal/database descriptor；`purge` 使用 TRUNCATE 并确认无旧 WAL 帧，再同步这些 descriptor。未执行的 checkpoint（负计数）、不完整复制、BUSY 或同步失败不能返回 `ok`；IO/损坏会 poison instance。成功只确认当前存储状态，Product 仍须在禁写屏障内核对原 witness、持有凭据及资源，不据此重放业务 effect。
+
+文件初始化固定开启并核实 `secure_delete=ON`。清理已知凭据须先由 Product 更新全部受影响的逻辑单位，再取得 `purge` 成功；单凭 UPDATE 或 checkpoint 可读不能宣称旧版本清除。descriptor 通过 SQLite 所有的 VFS file-control pointer 使用，不另开/关 OS 文件句柄，不向 caller 暴露。
+
 Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA、DDL mutation、ATTACH/DETACH 或临时 schema。增加这些能力必须由真实 consumer 和对应失败模式证明，而不是预留抽象。
 
 ### 3.2 Row 与 streaming
