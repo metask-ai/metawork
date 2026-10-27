@@ -332,6 +332,10 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeInput(writer, input.text, record.input, null);
         writer.print(",\"state\":\"{s}\",\"reason\":", .{@tagName(record.state)}) catch return error.SnapshotTooLarge;
         if (record.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        if (record.blocking_task_id) |id| {
+            std.debug.assert(record.state == .failed and record.reason == .session_close_failed and id != 0);
+            writer.print(",\"blockingTaskId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;
+        }
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
     writer.writeByte(']') catch return error.SnapshotTooLarge;

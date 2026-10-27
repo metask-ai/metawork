@@ -142,6 +142,9 @@ pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
         error.ExecutionUnavailable, error.ExecutionGenerationMismatch => .binding_unavailable,
         error.UnknownTask, error.TaskClosing => .task_unavailable,
         error.TaskBusy => .task_busy,
+        error.SessionReleasing => .session_releasing,
+        error.SessionCapacity => .session_capacity,
+        error.SessionReleaseFailed => .session_close_failed,
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => .workspace_unavailable,
         error.WorkspaceEpochMismatch => .workspace_changed,
         error.WorkspaceRemovalInProgress => .workspace_removing,
@@ -4588,7 +4591,10 @@ pub const Runtime = struct {
             var target = try self.resolveTaskRunModel(task_id);
             defer if (target) |*value| value.deinit();
             if (task.runtime.attachment == .detached) {
-                _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
+                _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+                    error.SessionCapacity => return self.sessionPressureError(task_id),
+                    else => return err,
+                };
                 if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
                     return self.sessionPressureError(task_id);
                 }
@@ -6094,7 +6100,7 @@ pub const Runtime = struct {
                 switch (self.task_runtime.inputAction(task.durable.id)) {
                     .none, .wait => break,
                     .fail => |action| {
-                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason);
+                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason, null);
                         self.bumpRevision();
                     },
                     .continuation => {
@@ -6102,14 +6108,14 @@ pub const Runtime = struct {
                     },
                     .submit => |action| {
                         _ = self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch) catch |err| {
-                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err));
+                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null);
                             self.bumpRevision();
                             continue;
                         };
                         const receipt = self.task_runtime.submitWaitingInput(task.durable.id, action.index, action.run_id, self.taskRuntimeOperationEffects()) catch |err| {
                             switch (err) {
                                 error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
-                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err)),
+                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null),
                             }
                             self.bumpRevision();
                             continue;
@@ -6141,15 +6147,15 @@ pub const Runtime = struct {
         if (task.model_intent_prepared or task.approval_change != null or self.approvalHistoryBlocked()) return false;
         if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) {
             const capability = self.task_runtime.continuationProjection(task_id, self.taskRuntimeProjectionEffects());
-            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed) and self.task_runtime.beginInputPreparation(task_id, index)) {
+            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed or capability.?.unavailable == .runtime_unavailable) and self.task_runtime.beginInputPreparation(task_id, index)) {
                 _ = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch |err| {
-                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err));
+                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null);
                     self.bumpRevision();
                     return true;
                 };
                 return false;
             }
-            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable);
+            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable, null);
             self.bumpRevision();
             return true;
         }
@@ -6165,7 +6171,7 @@ pub const Runtime = struct {
             };
             switch (err) {
                 error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => return false,
-                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err)),
+                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), null),
             }
             self.bumpRevision();
             return true;
@@ -8046,7 +8052,7 @@ pub const Runtime = struct {
                 (if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
                 .available
             else
-                .unavailable,
+                .capacity_reached,
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
@@ -22430,4 +22436,31 @@ test "Product view search continues across unrelated Product revisions and expir
     var changed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
     defer changed.deinit();
     try std.testing.expect(changed.value.object.get("searchIndex").?.object.get("stale").?.bool);
+}
+
+test "Product view queued recovery failure preserves the shared Session blocker fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const index = control.task_runtime.find(3).?.input_submissions.items.len;
+    _ = try control.task_runtime.receiveInput(3, "pressure-send", .{ .text = "Keep my draft" }, control.taskRuntimeOperationEffects());
+    const record = control.task_runtime.pendingInput(3, index).?;
+    record.submission.received_at_unix_ms = null;
+    record.submission.presentation_order = null;
+    record.submission.anchor_run_id = null;
+    record.submission.after_output_count = 0;
+    control.task_runtime.failWaitingInput(3, index, sendInputRejection(error.SessionReleaseFailed), 7);
+    var output: [96 * 1024]u8 = undefined;
+    const encoded = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+    defer parsed.deinit();
+    const submission = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("inputSubmissions").?.array.items[0];
+    var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.session_pressure, .{});
+    defer expected.deinit();
+    const wanted = try std.json.Stringify.valueAlloc(std.testing.allocator, expected.value.object.get("submission").?, .{});
+    defer std.testing.allocator.free(wanted);
+    var writer = std.Io.Writer.fixed(&output);
+    try std.json.Stringify.value(submission, .{}, &writer);
+    try std.testing.expectEqualStrings(wanted, writer.buffered());
+    try std.testing.expectEqual(.session_releasing, sendInputRejection(error.SessionReleasing));
+    try std.testing.expectEqual(.session_capacity, sendInputRejection(error.SessionCapacity));
 }

@@ -2021,11 +2021,14 @@ pub const Runtime = struct {
         return changed or continuation_changed;
     }
 
-    pub fn failWaitingInput(self: *Runtime, task_id: u64, index: usize, reason: SendInputReason) void {
+    pub fn failWaitingInput(self: *Runtime, task_id: u64, index: usize, reason: SendInputReason, blocking_task_id: ?u64) void {
+        std.debug.assert((reason == .session_close_failed) == (blocking_task_id != null));
+        std.debug.assert(blocking_task_id == null or blocking_task_id.? != 0);
         const record = self.pendingInput(task_id, index) orelse return;
         if (record.state != .waiting) return;
         record.state = .failed;
         record.reason = reason;
+        record.blocking_task_id = blocking_task_id;
         self.releaseSubmissionPayload(record);
     }
 
@@ -2085,7 +2088,7 @@ pub const Runtime = struct {
             .submitted, .unknown => self.finishWaitingInput(task_id, index, run_id, result.input_id, effects.release),
             .rejected => switch (result.reason orelse .invalid_input) {
                 .run_changed, .run_not_ready, .run_stopping, .too_late, .task_busy => {},
-                else => self.failWaitingInput(task_id, index, result.reason orelse .invalid_input),
+                else => self.failWaitingInput(task_id, index, result.reason orelse .invalid_input, null),
             },
             .started => unreachable,
         }
@@ -4909,7 +4912,7 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
         effects: RecoveryAdmissionEffects,
-    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable }!RecoveryStartFacts {
+    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity }!RecoveryStartFacts {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -4919,7 +4922,11 @@ pub const Runtime = struct {
             self.recoveryAdmissionFacts(task, external),
         )) {
             .admitted => {},
-            .denied => return error.RecoveryUnavailable,
+            .denied => |reason| {
+                if (reason == .runtime_unavailable and external.runtime_admission == .capacity_reached and external.authority_stable)
+                    return error.SessionCapacity;
+                return error.RecoveryUnavailable;
+            },
         }
         return .{
             .mode = if (freshConversationAllowed(task)) .fresh else .checkpoint,
@@ -9411,7 +9418,7 @@ test "Task receives ordered owned messages during maintenance and stop only canc
     try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
     lease.deinit();
     try std.testing.expectEqual(InputAction{ .start = 2 }, runtime.inputAction(1));
-    runtime.failWaitingInput(1, 2, .admission_failed);
+    runtime.failWaitingInput(1, 2, .admission_failed, null);
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
 }
@@ -9500,7 +9507,7 @@ test "Task first root resolves only later unanchored messages without moving old
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     _ = try runtime.receiveInput(1, "earlier-failed", .{ .text = "old failure" }, projection.effects());
-    runtime.failWaitingInput(1, 0, .admission_failed);
+    runtime.failWaitingInput(1, 0, .admission_failed, null);
     _ = try runtime.receiveInput(1, "first-root", .{ .text = "root" }, projection.effects());
     _ = try runtime.receiveInput(1, "later-message", .{ .text = "later" }, projection.effects());
     // Only identity and submission are observed by this ownership move.
@@ -9529,7 +9536,7 @@ test "Task known Session close failure ends the message instead of waiting forev
     task.runtime.close_failed = true;
     const failure = runtime.inputAction(1).fail;
     try std.testing.expectEqual(.binding_unavailable, failure.reason);
-    runtime.failWaitingInput(1, failure.index, failure.reason);
+    runtime.failWaitingInput(1, failure.index, failure.reason, null);
     try std.testing.expectEqual(.failed, task.input_submissions.items[0].state);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);

@@ -5301,7 +5301,6 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.ModelSelectionChanged => "model_selection_changed",
         error.StaleCatalog => "stale_catalog",
         error.TaskCapacity, error.ProjectionCapacity => "capacity_reached",
-        error.TaskBusy => "execution_unavailable",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
@@ -8191,4 +8190,5 @@ test "Product view Session pressure rejection fixture preserves exact reason and
     try std.testing.expectEqualStrings("session_releasing", taskCreateRejection(error.SessionReleasing).?);
     try std.testing.expectEqualStrings("session_close_failed", taskRestoreRejection(error.SessionReleaseFailed).?);
     try std.testing.expectEqualStrings("session_capacity", taskCreateRejection(error.SessionCapacity).?);
+    try std.testing.expect(taskCreateRejection(error.TaskBusy) == null);
 }

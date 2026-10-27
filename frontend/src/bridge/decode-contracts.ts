@@ -3812,7 +3812,15 @@ function decodeTask(
     item.inputSubmissions,
     `${path}.inputSubmissions`,
     (raw, p): WaitingInputView => {
-      const entry = object(raw, p, ["submission", "input", "state", "reason"]);
+      const entry = object(raw, p, [
+        "submission",
+        "input",
+        "state",
+        "reason",
+        ...(record(raw, p).reason === "session_close_failed"
+          ? ["blockingTaskId"]
+          : []),
+      ]);
       const state = enumValue(entry.state, `${p}.state`, [
         "waiting",
         "failed",
@@ -3825,7 +3833,10 @@ function decodeTask(
           : enumValue(entry.reason, `${p}.reason`, sendInputReasons);
       if ((state === "waiting" || state === "interrupted") && reason !== null)
         fail(p, "waiting or restored input has no failure reason");
+      if (reason === "session_close_failed" && state !== "failed")
+        fail(p, "Session blocker requires failed input");
       return {
+        ...decodeSessionBlocker(entry, reason, p),
         submission: decodeInputSubmission(entry.submission, `${p}.submission`),
         input: decodeRunInput(entry.input, `${p}.input`),
         state,
@@ -6314,16 +6325,17 @@ export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
 function decodeSessionBlocker(
   item: Record<string, unknown>,
   reason: string | null,
+  path = "$",
 ): { blockingTaskId?: string } {
   if (reason === "session_close_failed")
     return {
       blockingTaskId: positiveU64WireId(
         item.blockingTaskId,
-        "$.blockingTaskId",
+        `${path}.blockingTaskId`,
       ),
     };
   if (item.blockingTaskId !== undefined)
-    fail("$.blockingTaskId", "unexpected Session blocker");
+    fail(`${path}.blockingTaskId`, "unexpected Session blocker");
   return {};
 }
 export function decodeTaskCreateResult(value: unknown): TaskCreateResult {

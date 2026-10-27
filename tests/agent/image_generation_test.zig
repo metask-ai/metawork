@@ -1922,12 +1922,21 @@ test "Session pressure canonical Product preserves checkpoint history with one l
         if (control.task_runtime.catalogProjection(second).?.availability != .loading) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
-    try std.testing.expectError(error.SessionReleasing, control.restoreTaskConversation(first, old_epoch));
+    // Actual UI resume path: accepted input fails visibly while capacity is released.
+    const accepted = try control.sendInput("pressure-send", first, .{ .text = "Keep my draft" });
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    const failed = task.input_submissions.items[0];
+    try std.testing.expectEqual(.failed, failed.state);
+    try std.testing.expectEqual(.session_releasing, failed.reason.?);
+    try std.testing.expect(failed.blocking_task_id == null);
+    try std.testing.expect(failed.payload == null);
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.find(second).?.runtime.attachment == .detached) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
+    // Closing the other Session must not replay the failed message.
+    try std.testing.expect(task.durable.runs[1] == null);
     _ = try control.restoreTaskConversation(first, old_epoch);
     for (0..5000) |_| {
         control.syncLifecycle();

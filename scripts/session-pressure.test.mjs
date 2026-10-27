@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   decodeTaskCreateResult,
   decodeTaskRestoreResult,
+  decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 import { TaskSubmissionSession } from "../frontend/src/features/composer/submitTaskInstruction.ts";
 
@@ -171,4 +172,46 @@ test("Messages already waiting on one rejected creation are never automatically 
   );
   assert.equal(creates, 2);
   assert.deepEqual(sent, ["C"]);
+});
+
+test("Queued recovery failure preserves the blocking Task with strict conditional shape", () => {
+  const snapshot = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/product-view.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const submission = structuredClone(fixture.submission);
+  snapshot.taskPage.task.inputSubmissions = [submission];
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(snapshot).taskPage.task.inputSubmissions[0],
+    submission,
+  );
+  for (const reason of ["session_releasing", "session_capacity"]) {
+    const { blockingTaskId, ...withoutBlocker } = submission;
+    snapshot.taskPage.task.inputSubmissions = [{ ...withoutBlocker, reason }];
+    assert.equal(
+      decodeWorkbenchSnapshot(snapshot).taskPage.task.inputSubmissions[0].reason,
+      reason,
+    );
+    snapshot.taskPage.task.inputSubmissions[0].blockingTaskId = "7";
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot));
+  }
+  for (const blockingTaskId of [
+    undefined,
+    null,
+    "0",
+    "07",
+    "18446744073709551616",
+  ]) {
+    snapshot.taskPage.task.inputSubmissions = [{ ...submission, blockingTaskId }];
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot));
+  }
+  for (const state of ["waiting", "cancelled", "interrupted"]) {
+    snapshot.taskPage.task.inputSubmissions = [{ ...submission, state }];
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot));
+  }
 });

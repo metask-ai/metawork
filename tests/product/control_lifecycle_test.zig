@@ -10929,6 +10929,36 @@ test "Session pressure never cancels busy work or automatically retries a failed
         if (task.runtime.attachment == .detached) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
-    _ = try control.createTask(input);
+    fake_core.setNextPlan(.controlled);
+    const second = try control.createTask(input);
+    try waitInitialTaskCatalog(&control, second);
+    _ = try control.runTask(second, .{ .text = "Occupy the only live Session." });
+    try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+    try std.testing.expectEqual(.accepted, (try control.sendInput("busy-capacity", id, .{ .text = "Keep the unavailable draft." })).outcome);
+    try std.testing.expectEqual(.session_capacity, task.input_submissions.items[0].reason.?);
+    try std.testing.expect(task.input_submissions.items[0].blocking_task_id == null);
+    fake_core.releaseControlled();
+    const other = control.task_runtime.find(second).?;
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (other.durable.runs[0].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
+    try std.testing.expectEqual(.accepted, (try control.sendInput("start-release", id, .{ .text = "Try releasing capacity." })).outcome);
+    try std.testing.expectEqual(.session_releasing, task.input_submissions.items[1].reason.?);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (other.runtime.close_failed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.accepted, (try control.sendInput("failed-release", id, .{ .text = "Keep the blocked draft." })).outcome);
+    const failed = task.input_submissions.items[2];
+    try std.testing.expectEqual(.failed, failed.state);
+    try std.testing.expectEqual(.session_close_failed, failed.reason.?);
+    try std.testing.expectEqual(second, failed.blocking_task_id.?);
+    try std.testing.expect(failed.payload == null);
     try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
+    try std.testing.expect(task.durable.runs[1] == null);
 }

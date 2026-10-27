@@ -964,6 +964,9 @@ export type TaskApprovalResult = TaskApprovalResultWire &
       }
   );
 export const sendInputReasons = [
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "binding_changed",
   "binding_unavailable",
   "task_unavailable",
@@ -1021,6 +1024,7 @@ export type WaitingInputView = {
   input: RunInputView;
   state: "waiting" | "failed" | "cancelled" | "interrupted";
   reason: SendInputReason | null;
+  blockingTaskId?: string;
 };
 export type AdditionalInputView = {
   submission: InputSubmission | null;

@@ -531,6 +531,7 @@ pub const InputSubmission = struct {
     state: enum { waiting, failed, cancelled, interrupted } = .waiting,
     /// Runtime-only explanation; history only retains the safe terminal state.
     reason: ?SendInputReason = null,
+    blocking_task_id: ?u64 = null,
     /// A required preparation is attempted once for this accepted message.
     preparation_attempted: bool = false,
 };
@@ -568,6 +569,9 @@ pub const AdditionalInput = struct {
 };
 
 pub const SendInputReason = enum {
+    session_releasing,
+    session_capacity,
+    session_close_failed,
     binding_changed,
     binding_unavailable,
     task_unavailable,
