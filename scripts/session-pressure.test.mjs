@@ -120,3 +120,55 @@ test("An unknown creation is never replayed on a later submit", async () => {
     );
   assert.equal(creates, 1);
 });
+
+test("Messages already waiting on one rejected creation are never automatically retried", async () => {
+  let rejectCreation;
+  let creates = 0;
+  const sent = [];
+  const first = new Promise((resolve) => {
+    rejectCreation = resolve;
+  });
+  const session = new TaskSubmissionSession({
+    taskId: null,
+    current: () => true,
+    onCreated() {},
+    stop: async () => {},
+    create: () =>
+      ++creates === 1
+        ? first
+        : Promise.resolve({
+            accepted: true,
+            taskId: "8",
+            bindingEpoch: "1",
+            mcpAuthority: { kind: "unavailable", selection: null },
+            reason: null,
+          }),
+    send: async (operationId, taskId) => {
+      sent.push(operationId);
+      return { outcome: "accepted", taskId, operationId, reason: null };
+    },
+  });
+  const a = session.submit("A", { kind: "text", text: "first" }, () => {});
+  const b = session.submit("B", { kind: "text", text: "second" }, () => {});
+  assert.equal(creates, 1);
+  rejectCreation({
+    accepted: false,
+    taskId: null,
+    bindingEpoch: null,
+    mcpAuthority: null,
+    reason: "session_releasing",
+  });
+  assert.deepEqual(
+    (await Promise.all([a, b])).map((result) => result.kind),
+    ["create_rejected", "create_rejected"],
+  );
+  assert.equal(creates, 1);
+  assert.deepEqual(sent, []);
+  await session.submit(
+    "C",
+    { kind: "text", text: "new explicit intent" },
+    () => {},
+  );
+  assert.equal(creates, 2);
+  assert.deepEqual(sent, ["C"]);
+});

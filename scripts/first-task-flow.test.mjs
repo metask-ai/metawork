@@ -151,7 +151,7 @@ test("stop during creation cancels only earlier messages and precedes later send
   f.receipts.get("B").resolve(accept("B"));
   await Promise.all([stopping, b]);
 });
-test("failed or unknown creation never recreates or replays submitted messages", async () => {
+test("definite rejection allows a new explicit creation while unknown creation never replays", async () => {
   for (const refused of [true, false]) {
     const f = sessionFixture();
     const a = f.session.submit("A", text("A"), () => {});
@@ -161,7 +161,7 @@ test("failed or unknown creation never recreates or replays submitted messages",
     assert.equal((await a).kind, refused ? "create_rejected" : "unknown");
     const b = await f.session.submit("B", text("B"), () => {});
     assert.equal(b.kind, refused ? "create_rejected" : "unknown");
-    assert.equal(f.creates(), 1);
+    assert.equal(f.creates(), refused ? 2 : 1);
     assert.deepEqual(f.calls, []);
   }
 });
