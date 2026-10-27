@@ -293,12 +293,14 @@ pub const Runtime = struct {
             .timeout => .timeout,
         };
         if (self.download_error != .none) return null;
-        // The caller must record the actual handler result before publishing.
-        self.download_error = .browser_unavailable;
+        // Preflight success is not a browser outcome. Keep the operation
+        // pending until the synchronous handler actually accepts or fails.
+        self.download_state = .checking;
         return url;
     }
 
     pub fn browserResult(self: *Runtime, opened: bool) void {
+        if (!self.available) return;
         self.download_state = if (opened) .opened else .failed;
         self.download_error = if (opened) .none else .browser_unavailable;
     }
@@ -420,6 +422,8 @@ test "updates reject stale download intent and consume browser authorization onc
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);
     try std.testing.expect(runtime.completeDownload(pending.id + 1, .accessible) == null);
     try std.testing.expect(runtime.completeDownload(pending.id, .accessible) != null);
+    try std.testing.expectEqual(DownloadState.checking, runtime.view().downloadState);
+    try std.testing.expectEqual(DownloadError.none, runtime.view().downloadError);
     try std.testing.expect(runtime.completeDownload(pending.id, .accessible) == null);
     runtime.browserResult(true);
     try std.testing.expectEqual(DownloadState.opened, runtime.view().downloadState);
@@ -461,6 +465,8 @@ test "updates disconnect and shutdown revoke pending browser effects and stale c
     try std.testing.expect(runtime.completeDownload(pending.id, .accessible) == null);
     const check = runtime.beginCheck(70_000).?;
     runtime.stop();
+    runtime.browserResult(true);
+    try std.testing.expectEqual(DownloadState.idle, runtime.view().downloadState);
     try std.testing.expect(!runtime.completeCheck(check, .{ .failed = .network }));
     try std.testing.expect(runtime.beginCheck(80_000) == null);
     try std.testing.expect(runtime.beginDownload("0.2.10") == null);

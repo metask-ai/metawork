@@ -434,6 +434,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-MAC-UPDATE-REMINDER-20261027
+
+macOS arm64 的版本提醒已通过 Product/Control/Bridge 与实际 Renderer decoder 的关联回归，以及真实回环 HTTP 的 GET/HEAD、容量、重定向、超时和取消收口验证；同一 Application HTTP adapter 对官方 manifest 的实际 HTTPS GET 成功，匹配包的 HEAD 成功且未读取安装包正文。启用后台检查的隔离 ReleaseFast artifact 构建及 automation isolation 通过，automation 与后台检查同时启用的实际构建被明确拒绝。
+
+实际 macOS Application 的共享外链 capability 已经由既有 `metawork.host.links.openExternal` 路径把固定官网下载页交给系统 Chrome，并通过浏览器可访问性确认页面已打开；Update 专用命令、预检策略和断连撤销由确定性 owner/Bridge 回归负责。该次 SDK automation 的单一 response artifact 被 React eventAck 覆盖，外链命令回执视为 unknown，未重放外链动作，不能把浏览器观察冒充该回执。组件浏览器检查覆盖中文浅色、390 px 英文深色、长名称省略、独立角落入口、操作换行及失效链接提示；不宣称实际安装、应用内下载完成或 Windows 桌面通过。
+
+证据与具体运行结果位于 `.zig-cache/updates-{final-review-tests,node-qualified-all,check,live-manifest,release-final}.log`、`.zig-cache/updates-native-browser-evidence.json`。完整 Native graph 的唯一失败为用户已有未提交的凭据 wake 用例；同一测试字节在变更前 Git 基线上复现相同失败，定位见 `.zig-cache/updates-baseline.json` 与 `.zig-cache/updates-baseline-native.log`，不能报告整个仓库测试全绿。Windows 的本功能真实桌面/TLS/浏览器交接仍未验收，已有共享平台能力证据不替代该项。
+
 ### E-WIN-MSVC-20261017
 
 2026-10-17，Windows 10 x64 `10.0.19045`、Native SDK `0.11.0-fork.3`、Visual C++ 14.44 与 Windows SDK 10.0.26100。两种 Windows architecture 均使用各自 exact MSVC lock，AgentCore source 与 ABI revision 未改变。受测源码绑定 MetaWork revision `039d30995c537d1292b1906f6b67e47a39869de6` 加 diff SHA-256 `197a994383765dafb84ccb1f7feebeb51f41fb0f0726dbb5011d4dc9d6f384fe`；后续补充定向 reload 诊断入口和本文证据，未修改受测 Application/Renderer 源码。原始 patch、artifact identity 与各入口日志保存在本地 `.zig-cache/msvc-migration-evidence/` 和 `.zig-cache/msvc-migration-*.log`。

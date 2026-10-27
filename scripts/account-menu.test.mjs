@@ -414,6 +414,8 @@ test("new version uses a separate corner button without a dropdown arrow or acci
     name: "View new version 0.2.10",
   });
   assert.equal(updateTrigger.parentElement, accountTrigger.parentElement);
+  await user.click(accountTrigger);
+  assert.ok(await screen.findByRole("menu"));
   await user.click(updateTrigger);
   assert.equal(screen.queryByRole("menu"), null);
   const dialog = await screen.findByRole("dialog", { name: "MetaWork" });

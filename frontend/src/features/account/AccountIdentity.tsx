@@ -171,7 +171,7 @@ export function AccountIdentity({
               disabled={updateControls.disabled}
               onClick={(event) => {
                 aboutReturnFocus.current = event.currentTarget;
-                setAboutOpen(true);
+                choose(() => setAboutOpen(true));
               }}
             >
               {t("updates.available")}

@@ -128,7 +128,12 @@ pub const Coordinator = struct {
     pub fn requestDownload(self: *Coordinator, expected_version: []const u8) Outcome {
         self.assertMain();
         if (self.stopped) return .unavailable;
-        if (self.download) |job| return if (std.mem.eql(u8, expected_version, job.work.download.version.text.slice())) .accepted else .rejected;
+        if (self.download) |job| {
+            // A new document cannot coalesce onto a revoked old document's
+            // job, even while that job is finishing its cancellation drain.
+            if (job.cancellation.state.load(.acquire) != 0) return .unavailable;
+            return if (std.mem.eql(u8, expected_version, job.work.download.version.text.slice())) .accepted else .rejected;
+        }
         const input = self.management.begin_download_fn(self.management.context, expected_version) orelse return .rejected;
         self.download = self.startJob(.{ .download = input }) catch {
             _ = self.management.complete_download_fn(self.management.context, input.id, .network);
@@ -389,6 +394,7 @@ test "updates disconnect cancels only the pending download, while shutdown joins
     _ = coordinator.requestDownload("0.2.8");
     try host.awaitRequests(2);
     coordinator.cancelDownload();
+    try std.testing.expectEqual(Outcome.unavailable, coordinator.requestDownload("0.2.8"));
     try TestHost.settle(&coordinator);
     try std.testing.expectEqual(@as(usize, 0), host.opened);
     try std.testing.expectEqual(update.DownloadState.idle, host.state.view().downloadState);
