@@ -6,7 +6,7 @@ const history = @import("product_task_persistence");
 const task_runtime = @import("product_task_runtime");
 const state = @import("product_task_state");
 const storage = @import("storage");
-const sql = @import("metawork_storage_sql");
+const sql = storage.sql;
 
 const Config = struct { tasks: usize = 20, runs: usize = 16, body_bytes: usize = 4096, tools: usize = 0, escaped: bool = false, budget_bytes: usize = 1536 * 1024, samples: usize = 5, approvals: usize = 8, compacts: usize = 16 };
 const usage: history.UsageWire = .{ .input_tokens = 1, .output_tokens = 1, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 };

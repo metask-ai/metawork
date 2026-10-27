@@ -510,7 +510,6 @@ pub fn build(b: *std.Build) void {
     sqlite_a_module.addImport("product_task_runtime", test_modules.product_task_runtime);
     sqlite_a_module.addImport("product_task_state", test_modules.product_task_state);
     sqlite_a_module.addImport("storage", test_modules.storage);
-    sqlite_a_module.addImport("metawork_storage_sql", test_modules.storage_sql);
     const sqlite_a_memory = b.addTest(.{ .name = "sqlite-history-a-memory", .root_module = sqlite_a_module, .filters = &.{"stage A"} });
     const sqlite_a_sql_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_backend.zig"),
@@ -519,7 +518,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     sqlite_a_sql_module.addImport("storage", test_modules.storage);
-    sqlite_a_sql_module.addImport("metawork_storage_sql", test_modules.storage_sql);
     const sqlite_a_backend = b.addTest(.{ .name = "sqlite-history-a-backend", .root_module = sqlite_a_sql_module, .filters = &.{"stage A"} });
     const sqlite_a_step = b.step("build-sqlite-history-a-probes", "Build isolated SQLite stage A memory and existing-backend measurements");
     sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_memory, .{}).step);

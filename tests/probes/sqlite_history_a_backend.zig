@@ -1,7 +1,7 @@
 //! Isolated Stage A measurement of the existing public backend, not a history adapter.
 const std = @import("std");
 const storage = @import("storage");
-const sql = @import("metawork_storage_sql");
+const sql = storage.sql;
 const migrations = [_]sql.Migration{.{ .version = 1, .name = "stage_a_sample", .sql = "CREATE TABLE sample_root(id INTEGER PRIMARY KEY,witness INTEGER);" ++
     "INSERT INTO sample_root VALUES(1,0);" ++
     "CREATE TABLE sample_tasks(id INTEGER PRIMARY KEY,seen INTEGER);" ++
