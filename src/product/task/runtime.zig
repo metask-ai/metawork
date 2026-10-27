@@ -3758,7 +3758,10 @@ pub const Runtime = struct {
                 if (value.task_id == wire.id) break value;
             } else null;
             const payload = if (original) |value| try self.allocator.dupe(u8, value.payload) else null;
-            const record = try self.allocator.create(task_state.Task);
+            const record = self.allocator.create(task_state.Task) catch |err| {
+                if (payload) |bytes| self.allocator.free(bytes);
+                return err;
+            };
             var restored = task_persistence.restoreTask(projection, wire) catch |err| {
                 self.allocator.destroy(record);
                 if (payload) |bytes| self.allocator.free(bytes);
@@ -8943,6 +8946,25 @@ test "Task model intent transaction uses its own revision and rolls back without
     task.durable.model_intent.?.revision = std.math.maxInt(u64);
     try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, std.math.maxInt(u64), target));
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+}
+
+test "restoring a read-only Task frees its payload when record allocation fails" {
+    const a = std.testing.allocator;
+    var runtime = try Runtime.init(a, 1);
+    defer runtime.deinitStorage();
+    var task_fixture = testModelIntentTask();
+    const projected = try task_persistence.projectTask(a, &task_fixture, null);
+    var wires = [_]task_persistence.TaskWire{projected};
+    defer task_persistence.deinitTaskWires(a, &wires);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    runtime.allocator = failing.allocator();
+    defer runtime.allocator = a;
+    // Payload duplication succeeds; the immediately following Task allocation
+    // fails, before the RestoreProjection is ever consumed.
+    try std.testing.expectError(error.OutOfMemory, runtime.restoreTasks(&wires, &.{.{ .kind = .task, .id = 1, .order = 1, .payload = "original" }}, &.{.{ .task_id = 1, .recent_order = 1, .payload = "future payload" }}, undefined));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
 }
 
 test "Task model intent allocation failure preserves the exact committed identity" {

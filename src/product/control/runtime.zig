@@ -4735,7 +4735,10 @@ pub const Runtime = struct {
         var scratch = try self.buildTaskStateWireWithCheckpoint(checkpoint);
         defer scratch.deinit();
         const bytes = try task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, self.taskPersistenceLimits());
-        defer self.allocator.free(bytes);
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
         return self.allocator.dupe(u8, bytes);
     }
@@ -5817,7 +5820,10 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         ) catch
             return .failed;
-        defer self.allocator.free(bytes);
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) return .failed;
         return switch (self.task_persistence.recover(bytes)) {
             .committed => recovered: {
@@ -9300,11 +9306,14 @@ pub const Runtime = struct {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
+        defer {
+            std.crypto.secureZero(u8, bytes);
+            self.allocator.free(bytes);
+        }
         if (self.containsKnownCredential(bytes)) {
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
         }
-        defer self.allocator.free(bytes);
         switch (self.task_persistence.commit(bytes)) {
             .committed => {
                 self.approval_history_dirty = false;
@@ -21641,6 +21650,28 @@ test "Account image token protects Custom Provider views between Runs and rotati
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
     control.syncAccountProjectionCredentialNoFail();
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+}
+
+test "rejected credential-bearing history frees the encoded candidate on every attempt" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            // A wire field name is deliberately also a known credential, so
+            // even perfectly scrubbed runtime values must reject this encoding.
+            try callback(context, "default_permission_profile");
+        }
+    };
+    var owner: u8 = 0;
+    var storage: [96 * 1024]u8 = undefined;
+    var history: TestTaskPersistence = .{ .storage = &storage };
+    var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+    defer control.deinit();
+    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    const before = history.commits;
+    for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
+    try std.testing.expectEqual(before, history.commits);
 }
 
 test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
