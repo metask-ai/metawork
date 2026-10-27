@@ -140,7 +140,7 @@ def main():
                                                   "commits": sorted(set(r["commits"] for r in values))})
         output = args.output.resolve() if args.output else destination/"results.json"
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+        output.write_bytes((json.dumps(result, ensure_ascii=False, indent=2)+"\n").encode("utf-8"))
         print(f"Evidence: {output}", flush=True)
     return 0
 
