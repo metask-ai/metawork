@@ -381,6 +381,24 @@ pub const Runtime = struct {
         self.automatic_allocator = null;
     }
 
+    fn reserveSlot(self: *Runtime) std.mem.Allocator.Error!usize {
+        if (findEmpty(self.records)) |slot| return slot;
+        const old = self.records.len;
+        const grown_capacity = @max(4, old * 2);
+        const records = try self.allocator.alloc(?Record, grown_capacity);
+        errdefer self.allocator.free(records);
+        const pending = try self.allocator.alloc(?automatic_root.Allocation, grown_capacity);
+        @memcpy(records[0..old], self.records);
+        @memset(records[old..], null);
+        @memcpy(pending[0..old], self.pending_automatic);
+        @memset(pending[old..], null);
+        self.allocator.free(self.records);
+        self.allocator.free(self.pending_automatic);
+        self.records = records;
+        self.pending_automatic = pending;
+        return old;
+    }
+
     pub fn slotCount(self: *const Runtime) usize {
         return self.records.len;
     }
@@ -395,7 +413,7 @@ pub const Runtime = struct {
     }
 
     pub fn automaticCapacityAvailable(self: *const Runtime) bool {
-        return self.count(.automatic) < self.max_automatic;
+        return self.next_id != std.math.maxInt(u64);
     }
 
     pub fn historyCount(self: *const Runtime) usize {
@@ -867,8 +885,7 @@ pub const Runtime = struct {
     ) Error!PreparedAutomaticWorkspace {
         if (!allocation_allowed) return error.WorkspaceIdentityUntrusted;
         const allocator = if (self.automatic_allocator) |*value| value else return error.WorkspaceUnavailable;
-        if (self.count(.automatic) >= self.max_automatic) return error.WorkspaceCapacity;
-        const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
+        const target = try self.reserveSlot();
         std.debug.assert(self.pending_automatic[target] == null);
         var allocation = allocator.allocate() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1042,7 +1059,7 @@ pub const Runtime = struct {
         fact: RestoreFact,
         storage: Storage,
     ) Error!void {
-        const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
+        const target = try self.reserveSlot();
         const authorization = try self.restoredAuthorization(fact);
         const canonical_root = try storage.copy(fact.canonical_root, self.max_workspace_bytes);
         errdefer storage.free(canonical_root);

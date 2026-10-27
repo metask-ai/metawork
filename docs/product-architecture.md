@@ -418,13 +418,13 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 ### 4.3 `workbench-history.store`
 
-`<MetaWork data dir>/workbench/workbench-history.store` 是 Workspace 与 Task 产品历史的 canonical 本地 store，不是 AgentCore checkpoint、缓存或通用 Storage SQL backend。Application 在 restore 前取得其进程级 OS writer lock，并把有界 load 与 atomic commit capability 注入 Product；Product 拥有 codec、跨记录校验、恢复 policy 和 persistence health。
+`<MetaWork data dir>/workbench/workbench-history.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
 
-Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普通工具文字、文件引用和 File Changes 不构成成果。记录归属其 Task/Run 与 Workspace，只保存非零成果身份、Workspace 相对 locator、交付时的大小和 SHA-256，不保存文件字节或组件版本。相同身份与相同内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合沿既有 Run frame 保存，旧记录缺少 `outputs` 时恢复为空；不切换历史存储或重放交付动作。记录随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
+Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普通工具文字、文件引用和 File Changes 不构成成果。记录归属其 Task/Run 与 Workspace，只保存非零成果身份、Workspace 相对 locator、交付时的大小和 SHA-256，不保存文件字节或组件版本。相同身份与相同内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。记录随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
 
 成果文件操作由 Product Control 按 Task/Run 与成果身份解析当前可信记录，拒绝尚未退出删除事务的 Task、失效 Workspace 以及脱敏或含已知 credential 的 locator。进入异步文件工作前须复制根路径、相对 locator、交付摘要和大小、Workspace 身份及安全代次；不得借用 Task 内部指针。该 owned 输入只是一次操作的冻结事实，不是持续授权：在 worker 返回后、发布内容或执行系统动作前，必须重新核对 Task/Run/成果、Workspace 根与代次、locator、交付内容身份和安全代次。文件读取还须独立证明实际字节；两项检查不能互相代替，也不替代 Bridge connection/window 的有效性检查。当前字节校验消费 Application 冻结的文件读取能力，使用独立、懒启动且有界的 worker，不占 File Preview lane；校验结果只包含状态，不持有文件内容。请求期限、取消与 shutdown 都须先停止执行并观测物理静止，再由主线程释放 effect 和冻结输入。定位源文件只在当前读取字节与交付大小、摘要一致、当前 Product authority 通过且 Bridge 请求仍有效之后，在主线程通过 Application 注入的窄 effect 调用 Native SDK Runtime；读取校验、显示路径或先前 ready 结果不能单独触发定位。取消、断连或安全代次变化不得在 worker 返回后补发系统动作。另存由 Application 的系统保存对话框选择目标，并返回只持有冻结源身份及所选目标的 owned effect；Product 和 Renderer 不接收该目标路径。worker 将实际读取的同一份字节校验后暂存，再等待主线程核对当前 Product authority 和 Bridge 请求；主线程的一次性发布决定是保存提交点。提交前撤销会唤醒 worker 丢弃，提交后取消须被拒绝，shutdown 等待已提交的发布完成。保存终态据实际 I/O 返回，不因之后的 Task、连接或安全代次变化虚构 cancelled；该结果不授予未来读取权限。失败保留已有目标，暂存清理失败必须单独报告。
 
-当前合同只接受 canonical framed store，不读取、不迁移、不双写旧 JSON envelope、被替代的开发期 frame shape，或仍以 `provider` 表达 execution binding 的 record；Task 与 Run 只接受 `protocol` / `execution_protocol`。只有 canonical store 与唯一 recovery/quarantine artifact 都不存在时才表示首次启动；canonical 缺失但 recovery artifact 存在是未完成恢复，不能初始化成新的空历史。Workspace 与 Task record 独立校验；单条可隔离损坏进入 `degraded` 并保留其他有效历史。当前版本无法恢复但 frame 完整的 Workspace/Task record 不得在后续 commit 中丢失：仅因含未知字段而严格解码失败、忽略未知字段后能通过校验与 restore 的 Task 以只读历史恢复，可阅读但不得继续、恢复 Conversation 或修改，commit 写回其原 payload；其余记录（含 owner 无法恢复的 Automatic Workspace）不进入投影，按原字节写回，直到能理解它的版本读取。metadata 只承载计数与默认偏好，未知字段被忽略，无法读取时计数取 record 高水位、偏好取默认值，不使整份 store 失效。store 无法打开或全局结构不可信时不得覆盖原文件，Product 从空的内存历史继续运行并发布诊断；明确写失败或 commit outcome unknown 只表示当前内存历史尚未可靠保存，后续 mutation 必须重新尝试完整 snapshot。上述状态都不是 Product Task、Workspace 或 Renderer 的全局 admission gate。
+正式 SQL 不存在时，单向导入旧 canonical framed store，保留合法事实、只读 payload、无法解释的完整记录及身份高水位；不读取更早的 JSON envelope 或开发期废弃格式。导入在同目录临时库中完成，经完整 loader 校验、WAL TRUNCATE 和连接关闭后才 rename 发布。原 framed 文件保留为受管迁移材料，仅安全维护可以清洗它。正式 SQL 一旦存在就不退回旧 store。缺 canonical 但存在恢复证据不是首次启动；未知 schema 版本不得保存、quarantine 或替换正式库，即使显式恢复也必须拒绝。损坏或不可读的当前版本历史不自动覆盖，沿既有显式恢复入口保全原件和现存 DB/WAL/SHM 组件，再发布经验证的关闭候选。
 
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
@@ -444,9 +444,9 @@ Product Control 统一拥有同一个 history 数据库的结构和有序迁移�
 
 DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；JSON 内的数量、字段、唯一性、引用以及跨记录语义由 Product 校验，不能把 SQL 写入成功视作历史有效。Product 继续校验 UTF-8 与字节预算，加载还须覆盖原编码器的恢复失败记录限制和实际 Task 恢复中的 checkpoint 校验，不能仅凭局部 candidate 校验或字段往返宣称可恢复。合并或移除物理表不能丢失恢复诊断，历史权限仍不具有当前授权效力。
 
-schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；未来 loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
+schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 
-当前 schema 由隔离测试消费，现有 framed history 仍是生产持久化路径。生产接入前须明确开库与借用生命周期、跨查询的一致观察、业务原子提交单位、完整恢复和保存失败后的补齐，以及旧数据和关联 artifact 的处理。Storage 单批语句、参数、结果预算不等于旧 history 文件容量；小历史往返或超限拒绝验证不证明所有有效历史均能一次原子提交，也不授权拆分业务事务。未解决这些条件前不切换用户数据或冻结面向用户的 SQL 格式。
+生产使用单个串行写入者。每次提交将已确认行摘要与完整候选事实比较，只写变化及删除；此前失败、TaskBusy 跳过和被动已读回执都必须随后续候选补齐，只有整个候选被确认才恢复 ready。共享业务原子组不拆分，超出 Storage 单事务额度时明确失败。最后提交 witness 与变化同事务保存；结果不确定时保留精确候选、重开并读回 witness，再完成 Storage 同步确认，不重放业务 effect。凭据首次获知时清洗当前及保留历史，清除旧 WAL 版本；重复借用不重复触发维护，未完成清洗的有界凭据副本不得提前释放。历史 Task 数不消耗 Session 名额，Task、Run 和 Compact 集合按需增长；借用中的记录地址必须稳定，Run/Compact 仅在全部 worker lease 静止后移动容器。历史额度与 Renderer 单次快照、catalog 额度分开，达到历史额度保留既有历史并拒绝新增占用，不删除旧记录。
 
 ### 4.4 File Changes artifact transaction
 

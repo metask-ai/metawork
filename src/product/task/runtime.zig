@@ -696,11 +696,12 @@ pub const PreparedCreate = struct {
 
     pub fn rollback(self: *PreparedCreate) void {
         std.debug.assert(self.active);
-        var removed = self.runtime.tasks[self.slot].?;
+        const removed = self.runtime.tasks[self.slot].?;
         self.runtime.tasks[self.slot] = null;
         self.runtime.next_task_id = self.task_id;
         self.runtime.next_recent_order = self.previous_next_recent_order;
-        deinitTask(self.runtime, &removed, self.release);
+        deinitTask(self.runtime, removed, self.release);
+        self.runtime.allocator.destroy(removed);
         self.active = false;
     }
 };
@@ -1165,7 +1166,7 @@ pub const FailureRecord = struct {
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
-    tasks: []?task_state.Task,
+    tasks: []?*task_state.Task,
     failures: std.ArrayList(FailureRecord) = .empty,
     /// History frames this build cannot restore; payloads are owned and are
     /// written back unchanged by every commit.
@@ -1568,7 +1569,7 @@ pub const Runtime = struct {
         capacity: usize,
     ) std.mem.Allocator.Error!Runtime {
         std.debug.assert(capacity != 0);
-        const tasks = try allocator.alloc(?task_state.Task, capacity);
+        const tasks = try allocator.alloc(?*task_state.Task, capacity);
         @memset(tasks, null);
         return .{ .allocator = allocator, .tasks = tasks };
     }
@@ -1591,7 +1592,7 @@ pub const Runtime = struct {
     pub fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.durable.id == task_id) return task;
         }
         return null;
@@ -1600,7 +1601,7 @@ pub const Runtime = struct {
     pub fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
         if (task_id == 0) return null;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.durable.id == task_id) return task;
         }
         return null;
@@ -1609,10 +1610,24 @@ pub const Runtime = struct {
     fn findByRouteId(self: *Runtime, route_id: u64) ?*task_state.Task {
         if (route_id == 0) return null;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.routeId() == route_id) return task;
         }
         return null;
+    }
+
+    fn ensureTaskSlots(self: *Runtime, count: usize) std.mem.Allocator.Error!void {
+        if (count <= self.tasks.len) return;
+        const old = self.tasks.len;
+        self.tasks = try self.allocator.realloc(self.tasks, @max(count, old * 2));
+        @memset(self.tasks[old..], null);
+    }
+
+    fn reserveTaskSlot(self: *Runtime) std.mem.Allocator.Error!usize {
+        if (self.emptyIndex()) |slot| return slot;
+        const slot = self.tasks.len;
+        try self.ensureTaskSlots(slot + 1);
+        return slot;
     }
 
     pub fn emptyIndex(self: *const Runtime) ?usize {
@@ -1628,7 +1643,7 @@ pub const Runtime = struct {
     }
 
     pub fn hasCapacity(self: *const Runtime) bool {
-        return self.emptyIndex() != null;
+        return self.next_task_id != std.math.maxInt(u64);
     }
 
     pub fn openTask(
@@ -1779,7 +1794,7 @@ pub const Runtime = struct {
         candidate.* = undefined;
         var owned_live = true;
         errdefer if (owned_live) deinitCreateCandidate(self, &owned, release);
-        const slot = self.emptyIndex() orelse return error.TaskCapacity;
+        const slot = try self.reserveTaskSlot();
         const runs = try self.allocator.alloc(?task_state.RunRecord, max_runs);
         var runs_owned = true;
         errdefer if (runs_owned) self.allocator.free(runs);
@@ -1794,7 +1809,8 @@ pub const Runtime = struct {
         @memset(ui_history, null);
         const task_id = try self.takeTaskId();
         const previous_next_recent_order = self.next_recent_order;
-        self.tasks[slot] = .{
+        const record = try self.allocator.create(task_state.Task);
+        record.* = .{
             .durable = .{
                 .id = task_id,
                 .recent_order = self.takeRecentOrder(),
@@ -1823,6 +1839,7 @@ pub const Runtime = struct {
                 } },
             },
         };
+        self.tasks[slot] = record;
         runs_owned = false;
         compacts_owned = false;
         ui_history_owned = false;
@@ -2516,8 +2533,10 @@ pub const Runtime = struct {
             checkpointMutationPending(task, effects.worker.checkpoint.store_health) or
             task_state.hasUnfinalizedTerminalEvents(task))
             return error.TaskBusy;
-        const slot = findEmptyCompact(task.durable.compacts) orelse
-            return error.CompactCapacity;
+        const slot = findEmptyCompact(task.durable.compacts) orelse growth: {
+            if (task.runtime.worker_leases.hasLive()) return error.TaskBusy;
+            break :growth try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
+        };
         const after_run_id = task_policy.lastConversationRunId(task) orelse
             return error.NoSuchRun;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
@@ -2629,6 +2648,7 @@ pub const Runtime = struct {
         if (task_state.terminalPayload(run_record) != null) return continuation_cancelled;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         defer access.deinit();
+        try ensureUiHistory(self.allocator, task);
         const record = prepareCancelledUiRecord(
             self,
             &access,
@@ -2691,6 +2711,7 @@ pub const Runtime = struct {
             response,
             &run_record.redactionSecrets(),
         );
+        try ensureUiHistory(self.allocator, task);
         const history_slot = task.durable.ui_history_next;
         const previous_history_record = task.durable.ui_history[history_slot];
         const previous_history_next = task.durable.ui_history_next;
@@ -2820,7 +2841,7 @@ pub const Runtime = struct {
 
     pub fn prepareNextPermissionReview(self: *Runtime, text: TextProjection) ?PreparedPermissionReview {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (self.preparePermissionReview(task.durable.id, text) catch null) |prepared| return prepared;
         }
         return null;
@@ -2979,7 +3000,7 @@ pub const Runtime = struct {
 
     pub fn idleReleaseRouteId(self: *const Runtime, except_task_id: ?u64) ?u64 {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (except_task_id != task.durable.id and idleSessionReleasable(task)) return task.runtime.routeId();
         }
         return null;
@@ -2993,7 +3014,7 @@ pub const Runtime = struct {
         };
         var candidate: ?*task_state.Task = null;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (except_task_id == task.durable.id or !idleSessionReleasable(task)) continue;
             if (candidate == null or task.durable.recent_order < candidate.?.durable.recent_order)
                 candidate = task;
@@ -3030,6 +3051,7 @@ pub const Runtime = struct {
         const retrying = task.runtime.close_failed and
             task.runtime.hasClosingSession();
         if (task.runtime.live() == null) return false;
+        try ensureUiHistory(self.allocator, task);
         _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         if (task.runtime.active_operation == .compact) {
             const compact_id = switch (task.runtime.active_operation) {
@@ -3441,7 +3463,7 @@ pub const Runtime = struct {
     ) DeletionSync {
         var result: DeletionSync = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.deletion != .deleting) continue;
             const session: task_deletion.Session = if (task.runtime.hasAttachedSession())
                 .attached
@@ -3477,14 +3499,15 @@ pub const Runtime = struct {
                         if (!quiescent(effects.context, task.durable.id, task.durable.workspace_id)) continue;
                     const task_id = task.durable.id;
                     const workspace_id = task.durable.workspace_id;
-                    var removed = task.*;
+                    const removed = task;
                     entry.* = null;
                     switch (effects.commitWithoutTask(workspace_id)) {
                         .committed => {
                             effects.deleteCheckpointTask(task_id);
                             effects.deleteFileChangeTask(task_id);
                             effects.deleteAttachmentTask(task_id);
-                            deinitTask(self, &removed, effects.release);
+                            deinitTask(self, removed, effects.release);
+                            self.allocator.destroy(removed);
                             self.noteSearchChange();
                             result.changed = true;
                         },
@@ -3521,7 +3544,7 @@ pub const Runtime = struct {
         effect: SessionReleaseEffect,
     ) bool {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id) continue;
             _ = self.cancelWaitingInputs(task.durable.id, .workspace_removing);
             _ = self.cancelInputContinuation(task.durable.id, null, .workspace_removing);
@@ -3536,7 +3559,7 @@ pub const Runtime = struct {
             const task = entry orelse continue;
             if (workspace_id) |expected|
                 if (task.durable.workspace_id != expected) continue;
-            if (task_policy.hasActiveOperation(&task)) return true;
+            if (task_policy.hasActiveOperation(task)) return true;
         }
         return false;
     }
@@ -3561,7 +3584,7 @@ pub const Runtime = struct {
     ) WorkspaceRemovalState {
         var pending = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id) continue;
             if (task.runtime.close_failed) return .close_failed;
             if (task.runtime.hasAttachedSession() or
@@ -3580,7 +3603,7 @@ pub const Runtime = struct {
     ) WorkspaceSignals {
         var signals: WorkspaceSignals = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
             if (task_policy.currentRunPhase(task)) |phase| {
                 switch (phase) {
@@ -3622,7 +3645,7 @@ pub const Runtime = struct {
         var task_index: usize = 0;
         errdefer task_persistence.deinitTaskWires(self.allocator, tasks[0..task_index]);
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             tasks[task_index] = try task_persistence.projectTask(
                 self.allocator,
                 task,
@@ -3727,6 +3750,7 @@ pub const Runtime = struct {
     ) RestoreError!usize {
         std.debug.assert(wires.len == frames.len);
         for (self.tasks) |entry| std.debug.assert(entry == null);
+        try self.ensureTaskSlots(wires.len);
         var restored_count: usize = 0;
         var retained: usize = 0;
         for (wires, frames) |wire, frame| {
@@ -3734,7 +3758,9 @@ pub const Runtime = struct {
                 if (value.task_id == wire.id) break value;
             } else null;
             const payload = if (original) |value| try self.allocator.dupe(u8, value.payload) else null;
+            const record = try self.allocator.create(task_state.Task);
             var restored = task_persistence.restoreTask(projection, wire) catch |err| {
+                self.allocator.destroy(record);
                 if (payload) |bytes| self.allocator.free(bytes);
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -3749,8 +3775,8 @@ pub const Runtime = struct {
                 .recent_order = value.recent_order,
                 .payload = payload.?,
             };
-            std.debug.assert(restored_count < self.tasks.len);
-            self.tasks[restored_count] = restored;
+            record.* = restored;
+            self.tasks[restored_count] = record;
             self.noteSearchChange();
             restored_count += 1;
         }
@@ -3966,7 +3992,7 @@ pub const Runtime = struct {
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             changed = task_state.markTerminalRunsBeforeEventDrain(task) or changed;
         }
         return changed;
@@ -3979,7 +4005,7 @@ pub const Runtime = struct {
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(
                 task,
                 finished_at_ms,
@@ -4003,7 +4029,7 @@ pub const Runtime = struct {
     ) LifecycleSync {
         var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 const execution = run.execution orelse continue;
@@ -4065,7 +4091,7 @@ pub const Runtime = struct {
     /// and event drain. Worker leases also cover automatic title production.
     pub fn releaseQuiescentRunEffects(self: *Runtime, effects: ReleaseEffects) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
@@ -4103,7 +4129,7 @@ pub const Runtime = struct {
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 if (!run.event_stream_finalized) continue;
@@ -4129,7 +4155,7 @@ pub const Runtime = struct {
         effects: CheckpointEffects,
     ) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             const record = task.durable.checkpoint orelse continue;
             store.verify(record.blob) catch |err| {
                 const anchor: task_state.CheckpointAnchor = switch (err) {
@@ -4304,7 +4330,7 @@ pub const Runtime = struct {
     /// references without performing persistence or file effects.
     pub fn settleCheckpointTransactionsForShutdown(self: *Runtime) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&run.checkpoint);
@@ -4327,7 +4353,7 @@ pub const Runtime = struct {
         };
         self.permission_reviews_closed = true;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             _ = self.cancelInputContinuation(task.durable.id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             cancelTaskAutomaticTitles(task);
@@ -4375,7 +4401,7 @@ pub const Runtime = struct {
     /// Product history that the final checkpoint did not cover.
     pub fn excludePendingConversationTailAfterShutdown(self: *Runtime) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             std.debug.assert(!task.runtime.worker_leases.hasLive());
             _ = excludePendingConversationTail(task);
         }
@@ -4383,7 +4409,7 @@ pub const Runtime = struct {
 
     pub fn relinquishSessionsAfterRuntimeShutdown(self: *Runtime) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.close_thread) |thread| {
                 thread.join();
                 task.runtime.close_thread = null;
@@ -4400,7 +4426,7 @@ pub const Runtime = struct {
 
     pub fn abandonSessionsForRuntimeDeinit(self: *Runtime) void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.close_thread) |thread| {
                 thread.join();
                 task.runtime.close_thread = null;
@@ -4418,12 +4444,13 @@ pub const Runtime = struct {
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
         if (self.taskCount() != 0) self.noteSearchChange();
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.close_thread) |thread| {
                 thread.join();
                 task.runtime.close_thread = null;
             }
             deinitTask(self, task, effects);
+            self.allocator.destroy(task);
             entry.* = null;
         }
     }
@@ -4492,8 +4519,10 @@ pub const Runtime = struct {
     ) CompactError!usize {
         std.debug.assert(@import("builtin").is_test);
         const task = self.find(task_id) orelse return error.UnknownTask;
-        const slot = findEmptyCompact(task.durable.compacts) orelse
-            return error.CompactCapacity;
+        const slot = findEmptyCompact(task.durable.compacts) orelse growth: {
+            if (task.runtime.worker_leases.hasLive()) return error.TaskBusy;
+            break :growth try growHistory(self.allocator, task_state.CompactRecord, &task.durable.compacts);
+        };
         const diagnostic = try effects.text.allocateCapacity(
             effects.limits.max_terminal_diagnostic_bytes,
         );
@@ -4551,7 +4580,7 @@ pub const Runtime = struct {
         value: []const u8,
     ) bool {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (credential.len != 0 and
@@ -4567,7 +4596,7 @@ pub const Runtime = struct {
     pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (releasing != null and credential.ptr == releasing.?) continue;
@@ -4582,7 +4611,7 @@ pub const Runtime = struct {
     /// it must not retain pointers into Task attachments or Run bindings.
     pub fn visitExecutionCredentials(self: *const Runtime, context: *anyopaque, visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (credential.len != 0) try visit_fn(context, credential);
@@ -4601,7 +4630,7 @@ pub const Runtime = struct {
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (credential.len != 0)
@@ -4617,7 +4646,7 @@ pub const Runtime = struct {
     ) usize {
         var longest: usize = 0;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (credential.len > longest and
@@ -4634,7 +4663,7 @@ pub const Runtime = struct {
     ) bool {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
                 if (value.len < credential.len and
@@ -4651,7 +4680,7 @@ pub const Runtime = struct {
     ) void {
         if (credential.len == 0) return;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.runtime.pinnedCatalog()) |snapshot| {
                 if (snapshot.identityContainsCredential(credential)) {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
@@ -4683,7 +4712,7 @@ pub const Runtime = struct {
         };
         var count: usize = 0;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             count += 1;
@@ -4713,7 +4742,7 @@ pub const Runtime = struct {
     pub fn writeSummaryList(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
         var count: usize = 0;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             count += 1;
             try task_view.writeSummary(writer, task, text);
@@ -4739,7 +4768,7 @@ pub const Runtime = struct {
         var remaining_work: usize = search_work_limit;
         var units: usize = 0;
         while (!stale and query.len != 0 and cursor.task < self.tasks.len and count < search_result_limit and remaining_work != 0 and units < search_unit_limit) {
-            const task = if (self.tasks[cursor.task]) |*value| value else {
+            const task = if (self.tasks[cursor.task]) |value| value else {
                 cursor.task += 1;
                 cursor.run = 0;
                 cursor.part = 0;
@@ -5266,7 +5295,7 @@ pub const Runtime = struct {
     pub fn syncOperationRecords(self: *Runtime) LifecycleSync {
         var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             var observation_access = if (task.runtime.worker_leases.hasLive() and
                 task.runtime.active_run_id != 0)
                 task.runtime.acquireAccess() catch null
@@ -5419,7 +5448,7 @@ pub const Runtime = struct {
     pub fn requestPermissionStops(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (!task.runtime.worker_leases.hasLive() or
                 task.runtime.active_run_id == 0 or
                 task.runtime.cancel_requested)
@@ -5461,7 +5490,7 @@ pub const Runtime = struct {
     ) LifecycleSync {
         var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             const completion = task.runtime.close_completion.load(.acquire);
             if (completion == .none or completion == .running or
                 task_state.hasUnfinalizedTerminalEvents(task))
@@ -5527,7 +5556,7 @@ pub const Runtime = struct {
     pub fn requestPoisonedSessionCloses(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (task.deletion == .deleting or
                 task.runtime.close_requested or
                 task.runtime.close_failed or
@@ -5547,7 +5576,7 @@ pub const Runtime = struct {
     ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             if (!task.runtime.close_requested or !closeReady(task)) continue;
             const retrying = task.runtime.hasClosingSession();
             startCloseWorker(task, notifier, retrying) catch {
@@ -5819,7 +5848,7 @@ pub const Runtime = struct {
     ) RecoverySync {
         var result: RecoverySync = .{};
         for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
+            const task = entry.* orelse continue;
             const job = task.runtime.restore_job orelse continue;
             if (!job.completionReady()) continue;
             if (job.rebind != null) switch (self.syncRebindPreparation(task, job, effects, release, notifier)) {
@@ -7686,7 +7715,11 @@ fn reserveRun(
     effects: OperationEffects,
 ) RunError!usize {
     const execution = try taskExecutionInput(task);
-    const slot = findEmptyRun(task.durable.runs) orelse return error.RunCapacity;
+    const slot = findEmptyRun(task.durable.runs) orelse growth: {
+        // Every worker pointer into this array is protected by a Task lease.
+        if (task.runtime.worker_leases.hasLive()) return error.TaskBusy;
+        break :growth try growHistory(self.allocator, task_state.RunRecord, &task.durable.runs);
+    };
     if (task.durable.next_run_generation == std.math.maxInt(u64))
         return error.RunGenerationExhausted;
     var input_record = try copyRunInput(self, task, input, &.{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} }, effects);
@@ -7751,6 +7784,13 @@ fn reserveRun(
         .execution = run_execution,
     };
     return slot;
+}
+
+fn growHistory(allocator: std.mem.Allocator, comptime T: type, records: *[]?T) std.mem.Allocator.Error!usize {
+    const old = records.len;
+    records.* = try allocator.realloc(records.*, @max(4, old * 2));
+    @memset(records.*[old..], null);
+    return old;
 }
 
 fn findEmptyRun(entries: []?task_state.RunRecord) ?usize {
@@ -8538,6 +8578,11 @@ fn classifyUiRecordIdentity(
     return .inserted;
 }
 
+fn ensureUiHistory(allocator: std.mem.Allocator, task: *task_state.Task) std.mem.Allocator.Error!void {
+    if (task.durable.ui_history_next < task.durable.ui_history.len) return;
+    _ = try growHistory(allocator, task_state.UiRecord, &task.durable.ui_history);
+}
+
 fn pushUiRecord(
     task: *task_state.Task,
     record: task_state.UiRecord,
@@ -8583,8 +8628,7 @@ fn pushUiRecord(
         stored.order = takeActivityOrder(run_record);
     }
     task.durable.ui_history[task.durable.ui_history_next] = stored;
-    task.durable.ui_history_next =
-        (task.durable.ui_history_next + 1) % task.durable.ui_history.len;
+    task.durable.ui_history_next += 1;
     task.durable.ui_history_count = @min(
         task.durable.ui_history_count + 1,
         task.durable.ui_history.len,
@@ -8834,7 +8878,8 @@ fn testModelIntentTask() task_state.Task {
 test "Task model intent transaction uses its own revision and rolls back without Session effects" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     const task = runtime.find(1).?;
     defer {
         if (task.durable.model_intent) |*intent| intent.deinit(runtime.allocator);
@@ -8895,7 +8940,8 @@ test "Task model intent allocation failure preserves the exact committed identit
         fn run(allocator: std.mem.Allocator) !void {
             var runtime = try Runtime.init(allocator, 1);
             defer runtime.deinitStorage();
-            runtime.tasks[0] = testModelIntentTask();
+            var task_fixture = testModelIntentTask();
+            runtime.tasks[0] = &task_fixture;
             const task = runtime.find(1).?;
             defer {
                 if (task.durable.model_intent) |*intent| intent.deinit(allocator);
@@ -8935,7 +8981,7 @@ test "Runtime owns bounded Task collection and monotonic process facts" {
 test "permission review delegation defaults off is revocable and is independent of profile" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = .{
+    var task_fixture: task_state.Task = .{
         .durable = .{
             .id = 1,
             .recent_order = 1,
@@ -8957,6 +9003,7 @@ test "permission review delegation defaults off is revocable and is independent 
             .pinned_catalog = null,
         } } },
     };
+    runtime.tasks[0] = &task_fixture;
     defer runtime.tasks[0] = null;
     const task = runtime.find(1).?;
     try std.testing.expect(!task.durable.permission_review_delegated);
@@ -9195,7 +9242,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     };
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = .{
+    var task_fixture: task_state.Task = .{
         .durable = .{
             .id = 1,
             .recent_order = 1,
@@ -9217,6 +9264,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
             .pinned_catalog = null,
         } } },
     };
+    runtime.tasks[0] = &task_fixture;
     defer runtime.tasks[0] = null;
 
     const task = runtime.find(1).?;
@@ -9388,7 +9436,8 @@ const InputTestProjection = struct {
 test "Task receives ordered owned messages during maintenance and stop only cancels the existing batch" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     const effects = projection.effects();
@@ -9426,7 +9475,8 @@ test "Task receives ordered owned messages during maintenance and stop only canc
 test "Task message acceptance rejects real limits atomically without depending on a Session" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     var effects = projection.effects();
@@ -9453,7 +9503,8 @@ test "Task message acceptance allocation failures leave no payload or projection
         fn run(allocator: std.mem.Allocator) !void {
             var runtime = try Runtime.init(allocator, 1);
             defer runtime.deinitStorage();
-            runtime.tasks[0] = testModelIntentTask();
+            var task_fixture = testModelIntentTask();
+            runtime.tasks[0] = &task_fixture;
             var projection: InputTestProjection = .{ .allocator = allocator };
             defer projection.clear(&runtime);
             _ = try runtime.receiveInput(1, "operation", .{ .text = "owned message" }, projection.effects());
@@ -9488,7 +9539,8 @@ test "Task authority removal ends waiting input even when the Session is detache
     };
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     _ = try runtime.receiveInput(1, "detached-intent", .{ .text = "pending restore" }, projection.effects());
@@ -9503,7 +9555,8 @@ test "Task authority removal ends waiting input even when the Session is detache
 test "Task first root resolves only later unanchored messages without moving older failures" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     _ = try runtime.receiveInput(1, "earlier-failed", .{ .text = "old failure" }, projection.effects());
@@ -9526,7 +9579,8 @@ test "Task first root resolves only later unanchored messages without moving old
 test "Task known Session close failure ends the message instead of waiting forever" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     const task = runtime.find(1).?;
@@ -9557,7 +9611,8 @@ test "image Run incremental projection keeps a credential prefix private across 
 test "generated image acceptance shares submission order and refresh preserves its anchor" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     var runs = [_]?task_state.RunRecord{.{ .id = 1, .generation = 1, .execution_generation = 1, .execution_protocol = .anthropic_messages, .execution_model = "m", .permission_profile = .approval_required, .permission_interaction = .interactive, .input = .{ .text = .{ .value = &.{} } }, .commentary_ends = &.{}, .tools = &.{}, .terminal_diagnostic = &.{} }};
@@ -9587,7 +9642,8 @@ test "generated image acceptance shares submission order and refresh preserves i
 test "direct deletion preserves archive and cancels waiting inputs without accepting new messages" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     const task = runtime.find(1).?;
@@ -9612,7 +9668,8 @@ test "direct deletion preserves archive and cancels waiting inputs without accep
 test "archive abandons failed direct deletion only after admission" {
     var runtime = try Runtime.init(std.testing.allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     defer runtime.tasks[0] = null;
     const task = runtime.find(1).?;
     task.deletion = .failed;
@@ -9630,7 +9687,8 @@ test "Run execution reclamation waits for every publication and lease then prese
     const allocator = std.testing.allocator;
     var runtime = try Runtime.init(allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     defer runtime.tasks[0] = null;
     const task = runtime.find(1).?;
     var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "retained input")};
@@ -9700,7 +9758,7 @@ test "Host search pages bounded matching work without copying history or exposin
     @memcpy(input[input.len - 12 ..][0..12], "needle尾部");
     var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, input)};
     task.durable.runs = &runs;
-    runtime.tasks[0] = task;
+    runtime.tasks[0] = &task;
     defer runtime.tasks[0] = null;
     const run = &runtime.tasks[0].?.durable.runs[0].?;
     run.assistant.list = .{ .items = @constCast("live-only needle"), .capacity = 0 };
@@ -9790,9 +9848,10 @@ test "Host search retains readable Skill attachment and paragraph boundaries acr
     const allocator = std.testing.allocator;
     var runtime = try Runtime.init(allocator, 1);
     defer runtime.deinitStorage();
-    runtime.tasks[0] = testModelIntentTask();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
     defer runtime.tasks[0] = null;
-    const task = &runtime.tasks[0].?;
+    const task = runtime.tasks[0].?;
     var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "unrelated")};
     task.durable.runs = &runs;
     const run = &runs[0].?;
@@ -9868,6 +9927,7 @@ test "Host search traverses more than one full result page exactly once includin
     defer @memset(runtime.tasks, null);
     const histories = try allocator.alloc([16]?task_state.RunRecord, 4);
     defer allocator.free(histories);
+    var task_records: [4]task_state.Task = undefined;
     for (histories, 0..) |*runs, t| {
         for (runs, 1..) |*entry, id| entry.* = reviewHistoryTestRun(id, "needle");
         var task = testModelIntentTask();
@@ -9875,7 +9935,8 @@ test "Host search traverses more than one full result page exactly once includin
         task.durable.title = @constCast("unrelated");
         task.durable.archived = t == 3;
         task.durable.runs = runs;
-        runtime.tasks[t] = task;
+        task_records[t] = task;
+        runtime.tasks[t] = &task_records[t];
     }
     histories[1][3] = null;
     var additional = [_]?task_state.AdditionalInput{ null, .{ .id = 1, .after_output_count = 0, .operation_id_len = 0, .text = @constCast("needle extra"), .redacted = false, .state = .adopted } };
@@ -9933,7 +9994,7 @@ test "Host search matches Unicode case variants and preserves raw UTF-8 through 
     task.durable.title = @constCast("unrelated");
     var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "")};
     task.durable.runs = &runs;
-    runtime.tasks[0] = task;
+    runtime.tasks[0] = &task;
     const run = &runtime.tasks[0].?.durable.runs[0].?;
     for ([_]struct { source: []const u8, query: []const u8, expected: usize }{
         .{ .source = "CAFÉ", .query = "café", .expected = 1 },

@@ -100,3 +100,11 @@ pub const decideTransportFailure = runtime_impl.decideTransportFailure;
 pub const SendInputResult = runtime_impl.SendInputResult;
 pub const SendInputReason = runtime_impl.SendInputReason;
 pub const InputTarget = runtime_impl.InputTarget;
+
+const history_impl = @import("product_control_history_schema");
+pub const HistoryRepository = history_impl.repository.Repository;
+pub const PreparedHistoryCommit = history_impl.repository.Prepared;
+pub const history_migrations = history_impl.migrations;
+pub const loadHistory = history_impl.codec.loadPreserving;
+pub const redactHistory = history_impl.repository.redact;
+pub const persistenceLimits = runtime_impl.persistenceLimits;

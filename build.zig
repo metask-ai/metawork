@@ -468,6 +468,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
+    const app_history_tests = b.addTest(.{ .name = "metawork-app-history", .root_module = test_modules.app, .filters = &.{"SQLite history"} });
+    b.step("test-app-history", "Verify Application SQLite history lifecycle").dependOn(&b.addRunArtifact(app_history_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
         .root_module = test_modules.storage,
@@ -2241,6 +2243,8 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control.addImport("product_control_history_schema", product_control_history_schema);
+    app.addImport("storage", storage);
     app.addImport("runner", runner);
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));

@@ -235,6 +235,7 @@ const App = struct {
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
                 .max_tasks = 50,
+                .max_history_bytes = 256 * 1024 * 1024,
                 .max_pending_ui_json_bytes = pending_ui_json_capacity,
                 .max_pending_ui_requests = host_worker_count,
                 .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
@@ -647,6 +648,7 @@ pub fn run(init: std.process.Init) !void {
             .restored_bytes = stores_state.task_restored_bytes,
             .restore_failed = stores_state.task_restore_failed,
             .commit_fn = app_stores.commitTaskStore,
+            .credential_fn = app_stores.taskStoreCredential,
             .confirmed_commit_fn = app_stores.commitConfirmedTaskStore,
             .resolve_commit_fn = app_stores.resolveTaskStoreCommit,
             .recover_fn = app_stores.recoverTaskStore,
@@ -935,4 +937,8 @@ test "Application file delivery freezes Workspace root and keeps all file reads 
 // Compiled only by the explicit account-evaluation build entry.
 pub fn runPermissionReviewEvaluation(init: std.process.Init) !void {
     return @import("app/permission_review_account_eval.zig").run(init);
+}
+
+test {
+    _ = @import("app/history_store.zig");
 }

@@ -17,6 +17,8 @@ pub const RestoreText = task_state.TrackedText;
 // Hard-cut persistence format. This deliberately has no migration/version
 // contract: the fixed frame layout and magic identify the sole active format.
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
+/// Bounded in-process handoff; this is not a database file-size limit.
+pub const max_snapshot_bytes: usize = 512 * 1024 * 1024;
 pub const max_failure_records: usize = 1024;
 pub const max_failure_reason_bytes: usize = 256;
 pub const file_name = "workbench-history.store";
@@ -82,6 +84,10 @@ pub const Capability = struct {
     enabled: bool = false,
     restored_bytes: ?[]const u8 = null,
     restore_failed: bool = false,
+    // Callback-scoped acquisition/retirement notice. Concrete history storage
+    // owns any bounded copy needed until sanitizing retired disk versions.
+    credential_fn: ?*const fn (?*anyopaque, []const u8, bool) void = null,
+
     commit_fn: *const fn (
         context: ?*anyopaque,
         bytes: []const u8,
@@ -92,6 +98,10 @@ pub const Capability = struct {
         context: ?*anyopaque,
         bytes: []const u8,
     ) Commit = unsupportedCommit,
+
+    pub fn credential(self: Capability, value: []const u8, retained: bool) void {
+        if (self.credential_fn) |notify| notify(self.context, value, retained);
+    }
 
     pub fn commit(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
@@ -1606,7 +1616,7 @@ pub fn restoreTask(
 
     const runs = try projection.allocator.alloc(
         ?task_state.RunRecord,
-        projection.limits.max_runs_per_task,
+        wire.runs.len,
     );
     errdefer projection.allocator.free(runs);
     @memset(runs, null);
@@ -1624,7 +1634,7 @@ pub fn restoreTask(
 
     const compacts = try projection.allocator.alloc(
         ?task_state.CompactRecord,
-        projection.limits.max_compacts_per_task,
+        wire.compacts.len,
     );
     errdefer projection.allocator.free(compacts);
     @memset(compacts, null);
@@ -1640,7 +1650,7 @@ pub fn restoreTask(
 
     const ui_history = try projection.allocator.alloc(
         ?task_state.UiRecord,
-        projection.limits.max_ui_history_per_task,
+        wire.ui_history.len,
     );
     errdefer projection.allocator.free(ui_history);
     @memset(ui_history, null);
@@ -1691,7 +1701,7 @@ pub fn restoreTask(
             .next_run_generation = wire.next_run_generation,
             .ui_history = ui_history,
             .ui_history_count = wire.ui_history.len,
-            .ui_history_next = wire.ui_history.len % ui_history.len,
+            .ui_history_next = wire.ui_history.len,
             .checkpoint = checkpoint,
             .checkpoint_anchor = checkpoint_anchor,
             .checkpoint_attempt = checkpoint_attempt,
@@ -2102,7 +2112,7 @@ fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_
         return error.TaskStoreCorrupt;
     const file_refs = try projection.allocator.alloc(
         ?task_state.FileReferenceView,
-        projection.limits.max_file_refs_per_tool,
+        if (wire.file_refs) |references| references.len else 0,
     );
     errdefer {
         for (file_refs) |*entry|
@@ -2495,6 +2505,22 @@ pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFai
     return null;
 }
 
+pub fn encodeAlloc(allocator: std.mem.Allocator, state: StateWire, preserved: PreservedFrames, limits: Limits) (Error || std.mem.Allocator.Error)![]u8 {
+    if (validateCandidate(&state, limits) != null) return error.TaskStoreEncodeFailed;
+    var capacity: usize = 64 * 1024;
+    while (true) {
+        const output = try allocator.alloc(u8, capacity);
+        const encoded = encodeUncheckedImpl(output, state, preserved) catch |err| {
+            allocator.free(output);
+            if (err != error.TaskStoreEncodeFailed or capacity == max_snapshot_bytes) return err;
+            capacity = @min(capacity * 2, max_snapshot_bytes);
+            continue;
+        };
+        defer allocator.free(output);
+        return allocator.dupe(u8, encoded);
+    }
+}
+
 pub fn encode(output: []u8, state: StateWire, limits: Limits) Error![]const u8 {
     return encodePreserving(output, state, .{}, limits);
 }
@@ -2544,7 +2570,7 @@ fn encodeUncheckedImpl(output: []u8, state: StateWire, preserved: PreservedFrame
         appendRecord(output, &offset, record_task_failure, failure.task_id, failure.recent_order, failure) catch |err|
             return err;
     }
-    if (offset > max_store_bytes) return error.TaskStoreTooLarge;
+    if (offset > max_snapshot_bytes) return error.TaskStoreTooLarge;
     return output[0..offset];
 }
 
@@ -2607,7 +2633,7 @@ pub fn decodeRecovering(
     limits: Limits,
 ) RecoveryError!RecoveredState {
     if (input.len == 0) return error.TaskStoreEmpty;
-    if (input.len > max_store_bytes) return error.TaskStoreTooLarge;
+    if (input.len > max_snapshot_bytes) return error.TaskStoreTooLarge;
 
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(allocator);

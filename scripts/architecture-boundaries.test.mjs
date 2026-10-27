@@ -1634,7 +1634,12 @@ test("Product Task kernels have one physical home without taking the executor", 
     /\b(?:TaskFileStore|CheckpointFileStore|CheckpointStoreHealth|CheckpointBlobIdentity|task_store_max_bytes)\b/,
   );
   assert.match(appStores, /@import\("metawork_product_task"\)/);
-  assert.match(appStores, /product_task\.history\.FileStore/);
+  assert.match(appStores, /history_store\.Store/);
+  const appHistory = read("src/app/history_store.zig");
+  assert.match(appHistory, /legacy: wire\.FileStore/);
+  const businessWrites = appHistory.slice(appHistory.indexOf("    pub fn commit("), appHistory.indexOf("    pub fn credential("));
+  assert.doesNotMatch(businessWrites, /self\.legacy\.(?:commit|recover)\(/);
+  assert.doesNotMatch(appHistory, /self\.legacy\.recover\(/);
   assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
   assert.doesNotMatch(
     recoveryJob,
@@ -1893,7 +1898,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     /\.closing => \|value\| closing: \{[\s\S]*?std\.debug\.assert\(self\.close_thread == null\);[\s\S]*?\.owned, \.closed, \.fixture => closing_value\.live\.binding =[\s\S]*?closing_value\.worker_binding\.take\(\)/,
   );
   assert.match(taskRuntime, /pub const Runtime = struct/);
-  assert.match(taskRuntime, /tasks: \[\]\?task_state\.Task/);
+  assert.match(taskRuntime, /tasks: \[\]\?\*task_state\.Task/);
   assert.match(taskRuntime, /failures: std\.ArrayList\(FailureRecord\)/);
   assert.match(taskRuntime, /next_task_id: u64/);
   assert.match(taskRuntime, /next_restore_attempt_id: u64/);
@@ -2420,7 +2425,7 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
         /\b([A-Za-z_]\w*)\.addImport\("product_control_history_schema",/g,
       ),
     ].map((match) => match[1]),
-    ["history_schema_tests_module"],
+    ["history_schema_tests_module", "product_control"],
   );
   assert.match(build, /"test-product-history-schema"/);
   assert.match(

@@ -245,6 +245,23 @@ pub const Repository = struct {
         return result;
     }
 
+    pub fn sanitize(self: *Repository, credential: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const loaded = try codec.loadPreserving(a, self.database, self.limits);
+        const cleaned = try redact(a, loaded, credential);
+        const rows = try codec.rowsFor(a, cleaned.value, cleaned.preserved, self.limits);
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        for (rows) |row| hash.update(&row.digest);
+        var prepared = try self.prepare(cleaned.value, cleaned.preserved, hash.finalResult());
+        defer prepared.deinit();
+        if (prepared.changed_rows != 0 or prepared.deleted_rows != 0) {
+            if (self.commit(&prepared) != .committed) return error.SanitizationFailed;
+        }
+        if (self.database.maintain(.purge) != .ok) return error.SanitizationFailed;
+    }
+
     pub fn resolve(self: *Repository, prepared: *Prepared) wire.Commit {
         const observed = readWitness(self.database) catch return .outcome_unknown;
         if (!Witness.eql(observed, prepared.next) and !Witness.eql(observed, prepared.previous)) return .outcome_unknown;
@@ -259,12 +276,53 @@ pub const Repository = struct {
     }
 
     fn accept(self: *Repository, prepared: *Prepared) void {
+        if (prepared.next_index == null) {
+            std.debug.assert(Witness.eql(self.witness, prepared.next));
+            return;
+        }
         if (self.index) |old| old.deinit();
         self.index = prepared.next_index;
         prepared.next_index = null;
         self.witness = prepared.next;
     }
 };
+
+/// Operates on an owned provisional history. It never edits borrowed live
+/// Product data, and also sanitizes retained payloads before they are encoded.
+pub fn redact(a: std.mem.Allocator, value: anytype, credential: []const u8) std.mem.Allocator.Error!@TypeOf(value) {
+    const T = @TypeOf(value);
+    if (credential.len == 0) return value;
+    return switch (@typeInfo(T)) {
+        .pointer => |p| if (p.size == .slice) result: {
+            if (p.child == u8) {
+                if (std.mem.indexOf(u8, value, credential) == null) break :result value;
+                const bytes = try a.dupe(u8, value);
+                var start: usize = 0;
+                while (std.mem.indexOfPos(u8, bytes, start, credential)) |position| {
+                    @memset(bytes[position..][0..credential.len], '*');
+                    start = position + credential.len;
+                }
+                break :result bytes;
+            }
+            const items = try a.dupe(p.child, value);
+            for (items) |*item| item.* = try redact(a, item.*, credential);
+            break :result items;
+        } else value,
+        .@"struct" => |info| result: {
+            var output = value;
+            inline for (info.fields) |field| @field(output, field.name) = try redact(a, @field(value, field.name), credential);
+            break :result output;
+        },
+        .optional => if (value) |item| try redact(a, item, credential) else null,
+        .@"union" => |info| if (info.tag_type != null) result: {
+            inline for (info.fields) |field| if (@intFromEnum(std.meta.activeTag(value)) == @intFromEnum(@field(info.tag_type.?, field.name))) {
+                break :result @unionInit(T, field.name, try redact(a, @field(value, field.name), credential));
+            };
+            unreachable;
+        } else value,
+        else => value,
+    };
+}
 
 fn cloneValues(a: std.mem.Allocator, values: []const sql.Value) ![]const sql.Value {
     const result = try a.alloc(sql.Value, values.len);
