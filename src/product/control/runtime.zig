@@ -1290,7 +1290,6 @@ pub const Runtime = struct {
     view_blocks: [7]?struct { key: view_cache.Key, version: u64, start: usize, end: usize, encoding: ?[]u8 = null } = @splat(null),
     view_cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
     projection_history_epoch: u64 = 1,
-    search_revision: u64 = 1,
     view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
@@ -6937,7 +6936,7 @@ pub const Runtime = struct {
         var request = request_input;
         @memcpy(self.view_preparation.search_query[0..request.search_query.len], request.search_query);
         request.search_query = self.view_preparation.search_query[0..request.search_query.len];
-        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.search_revision == 0) return error.InvalidViewRequest;
+        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.task_runtime.searchRevision() == 0) return error.InvalidViewRequest;
         std.debug.assert(self.view_credentials == null and self.capture_view == null);
         self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
         self.view_read.id = self.next_view_read_id;
@@ -7269,7 +7268,7 @@ pub const Runtime = struct {
             },
             .searchIndex => {
                 if (request.search) {
-                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text, request.search_query, request.search_cursor, self.search_revision, self.projection_security_epoch);
+                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text, request.search_query, request.search_cursor, self.task_runtime.searchRevision(), self.projection_security_epoch);
                 } else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
         }
@@ -10346,7 +10345,6 @@ pub const Runtime = struct {
     }
 
     fn bumpRevision(self: *Runtime) void {
-        self.search_revision = std.math.add(u64, self.search_revision, 1) catch 0;
         self.encoded_views.invalidateAll();
         if (self.view_read.id != 0) for (&self.view_preparation.blocks) |*block| {
             block.current = false;
@@ -22382,4 +22380,54 @@ test "Product view bounded Host search matches the independent Renderer fixture 
     try std.testing.expectEqualStrings(expected, writer.buffered());
     try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "inspect" }, .searchIndex)) != null);
     try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "another" }, .searchIndex)) == null);
+}
+
+test "Product view search continues across unrelated Product revisions and expires on content edits" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    const run = &task.durable.runs[0].?;
+    var input: [1024]u8 = @splat('a');
+    input[input.len - 1] = 'b';
+    const retained = try control.copyBounded(&input, control.limits.max_user_message_bytes);
+    control.freeTracked(run.input.text.value);
+    run.input.text.value = retained;
+    var storage: [96 * 1024]u8 = undefined;
+    var cursor: ?product_task.SearchCursor = null;
+    var first_cursor: ?product_task.SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    const revision = control.task_runtime.searchRevision();
+    while (pages < 16) : (pages += 1) {
+        const bytes = try control.writeViewFixture(&storage, .{ .search = true, .search_query = "a" ** 255 ++ "b", .search_cursor = cursor });
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        const page = parsed.value.object.get("searchIndex").?.object;
+        try std.testing.expect(!page.get("stale").?.bool);
+        hits += page.get("results").?.array.items.len;
+        const next = page.get("nextCursor").?;
+        if (next == .null) break;
+        const fields = next.object;
+        cursor = .{
+            .revision = try std.fmt.parseInt(u64, fields.get("revision").?.string, 10),
+            .security_epoch = try std.fmt.parseInt(u64, fields.get("securityEpoch").?.string, 10),
+            .task = try std.fmt.parseInt(usize, fields.get("task").?.string, 10),
+            .run = try std.fmt.parseInt(usize, fields.get("run").?.string, 10),
+            .part = try std.fmt.parseInt(usize, fields.get("part").?.string, 10),
+            .offset = try std.fmt.parseInt(usize, fields.get("offset").?.string, 10),
+        };
+        if (first_cursor == null) first_cursor = cursor;
+        // Management, receipts and execution observations still notify readers,
+        // but must not discard already completed search work.
+        for (0..10) |_| control.bumpRevision();
+        try std.testing.expectEqual(revision, control.task_runtime.searchRevision());
+    }
+    try std.testing.expect(pages > 1 and pages < 16);
+    try std.testing.expectEqual(@as(usize, 1), hits);
+    try control.renameTask(3, "Changed searchable title");
+    try std.testing.expect(control.task_runtime.searchRevision() > revision);
+    const bytes = try control.writeViewFixture(&storage, .{ .search = true, .search_query = "a" ** 255 ++ "b", .search_cursor = first_cursor });
+    var changed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer changed.deinit();
+    try std.testing.expect(changed.value.object.get("searchIndex").?.object.get("stale").?.bool);
 }

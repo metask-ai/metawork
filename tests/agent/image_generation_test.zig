@@ -1885,14 +1885,20 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
     control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
     const input: image_product.control_api.TaskCreateInput = .{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual };
+    const initial_search = control.task_runtime.searchRevision();
     const first = try control.createTask(input);
+    try std.testing.expect(control.task_runtime.searchRevision() > initial_search);
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.catalogProjection(first).?.availability != .loading) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
+    const before_run_search = control.task_runtime.searchRevision();
     const run_id = try control.runTask(first, .{ .text = "Deliver the finished file before releasing this Session." });
+    try std.testing.expect(control.task_runtime.searchRevision() > before_run_search);
+    const streaming_search = control.task_runtime.searchRevision();
     try image_product.finish(&control, first, run_id, null);
+    try std.testing.expect(control.task_runtime.searchRevision() > streaming_search);
     const task = control.task_runtime.find(first).?;
     for (0..5000) |_| {
         control.syncLifecycle();
@@ -1901,6 +1907,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     } else return error.TestUnexpectedResult;
     const receipt = task.durable.runs[0].?.outputs[0].?.id;
     const old_epoch = task.durable.binding_epoch;
+    const before_close_search = control.task_runtime.searchRevision();
     try std.testing.expectError(error.SessionReleasing, control.createTask(input));
     for (0..5000) |_| {
         control.syncLifecycle();
@@ -1908,6 +1915,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     try std.testing.expect(task.runtime.parked_capabilities != null);
+    try std.testing.expectEqual(before_close_search, control.task_runtime.searchRevision());
     const second = try control.createTask(input);
     for (0..5000) |_| {
         control.syncLifecycle();

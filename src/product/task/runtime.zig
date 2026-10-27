@@ -688,6 +688,7 @@ pub const PreparedCreate = struct {
 
     pub fn complete(self: *PreparedCreate) u64 {
         std.debug.assert(self.active);
+        self.runtime.noteSearchChange();
         self.active = false;
         return self.task_id;
     }
@@ -751,6 +752,7 @@ pub const PreparedRun = struct {
         if (self.provisional_title_applied)
             self.effects.text.discardPrevious(self.previous_title);
         self.effects.run_acceptance.accept();
+        self.runtime.noteSearchChange();
         const run_record = &self.task.durable.runs[self.slot].?;
         run_record.admitted_at_ms = self.effects.run_clock.now();
         self.effects.executor.enqueue(
@@ -1170,6 +1172,8 @@ pub const Runtime = struct {
     next_task_id: u64 = 1,
     next_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
+    /// Search positions follow retained title/input/completion content, not Product UI state.
+    search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
     late_terminal_event_count: u64 = 0,
@@ -1547,6 +1551,15 @@ pub const Runtime = struct {
             task.approval_change = null;
         }
         return old_identity;
+    }
+
+    pub fn searchRevision(self: *const Runtime) u64 {
+        return self.search_revision;
+    }
+
+    fn noteSearchChange(self: *Runtime) void {
+        if (self.search_revision != 0)
+            self.search_revision = std.math.add(u64, self.search_revision, 1) catch 0;
     }
 
     pub fn init(
@@ -2135,6 +2148,7 @@ pub const Runtime = struct {
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
+                self.noteSearchChange();
                 run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
@@ -2146,6 +2160,7 @@ pub const Runtime = struct {
                 result.sequence = sequence;
             },
             .unknown => {
+                self.noteSearchChange();
                 run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
@@ -3326,6 +3341,7 @@ pub const Runtime = struct {
             &.{sensitive},
             previous_title.len,
         );
+        if (!std.mem.eql(u8, previous_title, projected.value)) self.noteSearchChange();
         task.durable.title = projected.value;
         task.durable.title_redacted = projected.redacted;
         task.durable.recent_order = self.takeRecentOrder();
@@ -3465,6 +3481,7 @@ pub const Runtime = struct {
                             effects.deleteFileChangeTask(task_id);
                             effects.deleteAttachmentTask(task_id);
                             deinitTask(self, &removed, effects.release);
+                            self.noteSearchChange();
                             result.changed = true;
                         },
                         .failed => {
@@ -3730,6 +3747,7 @@ pub const Runtime = struct {
             };
             std.debug.assert(restored_count < self.tasks.len);
             self.tasks[restored_count] = restored;
+            self.noteSearchChange();
             restored_count += 1;
         }
         return retained;
@@ -3963,6 +3981,7 @@ pub const Runtime = struct {
                 finished_at_ms,
                 finished_at_unix_ms,
             )) continue;
+            self.noteSearchChange();
             _ = self.settleActiveRunTerminal(task);
             task.durable.recent_order = self.takeRecentOrder();
             changed = true;
@@ -4018,6 +4037,7 @@ pub const Runtime = struct {
                             projection.discardCandidate(title.value);
                             projection.restorePrevious(reclaimable);
                         } else {
+                            if (!std.mem.eql(u8, task.durable.title, title.value)) self.noteSearchChange();
                             projection.discardPrevious(task.durable.title);
                             task.durable.title = title.value;
                             task.durable.title_redacted = redacted;
@@ -4392,6 +4412,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
+        if (self.taskCount() != 0) self.noteSearchChange();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.close_thread) |thread| {
@@ -9885,4 +9906,14 @@ test "Host search traverses more than one full result page exactly once includin
     try std.testing.expectEqual(@as(usize, 64), total);
     try std.testing.expect(!seen[1][3][0]);
     try std.testing.expect(seen[0][0][1] and seen[3][15][0]);
+}
+
+test "search revision exhaustion cannot wrap into a reusable cursor identity" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.search_revision = std.math.maxInt(u64);
+    runtime.noteSearchChange();
+    try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
+    runtime.noteSearchChange();
+    try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
 }
