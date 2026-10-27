@@ -132,6 +132,25 @@ fn deleteGroup(a: std.mem.Allocator, entries: []const Entry) !sql.Mutation {
     return .{ .statement = .{ .sql = text, .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, encoded, .{}) }}) } };
 }
 
+// Ordinals describe a projection, not identity. Free the affected positions
+// before an upsert can reuse one; the temporary range is above every live
+// ordinal and is never visible outside this transaction.
+fn vacateOrder(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
+    const first = rows[0];
+    const keys = try a.alloc([]const Cell, rows.len);
+    for (rows, 0..) |row, i| {
+        const primary = try a.alloc(sql.Value, row.primary.len);
+        for (row.primary, 0..) |field, j| primary[j] = row.values[field];
+        keys[i] = try cells(a, primary);
+    }
+    const predicates = try a.alloc([]const u8, first.primary.len);
+    for (first.primary, 0..) |field, i| predicates[i] = try std.fmt.allocPrint(a, "t.{s}={s}", .{ first.columns[field], try expression(a, i) });
+    return .{ .statement = .{
+        .sql = try std.fmt.allocPrint(a, "WITH shift AS MATERIALIZED(SELECT coalesce(max(ordinal),-1)+1 AS delta FROM {s}) UPDATE {s} AS t SET ordinal=ordinal+(SELECT delta FROM shift) WHERE EXISTS(SELECT 1 FROM json_each(?1) AS j WHERE {s})", .{ first.table, first.table, try join(a, predicates, " AND ") }),
+        .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, keys, .{}) }}),
+    } };
+}
+
 // Parent order is also the inverse physical-delete order.
 const tables = [_][]const u8{ "history_state", "workspaces", "tasks", "runs", "run_tools", "run_file_changes", "task_compacts", "task_ui_history", "task_input_submissions", "run_additional_inputs", "retained_records" };
 
@@ -222,6 +241,7 @@ pub const Repository = struct {
                 } else try group.append(a, row);
             }
             if (group.items.len != 0) {
+                if (!std.mem.eql(u8, table, "history_state")) try mutations.append(a, try vacateOrder(a, group.items));
                 try mutations.append(a, try insertGroup(a, group.items));
                 changed += group.items.len;
             }

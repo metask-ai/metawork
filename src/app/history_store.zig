@@ -540,6 +540,63 @@ test "SQLite history confirms unknown without replay and backfills failed unrela
     try std.testing.expect(store.pending == null);
 }
 
+test "SQLite history delete then slot reuse preserves Task and Workspace order on restart" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var state = try testHistory(aa, 3, 1, "message");
+    const workspaces = try aa.alloc(wire.WorkspaceWire, 3);
+    for (workspaces, 0..) |*workspace, i| {
+        workspace.* = state.workspaces[0];
+        workspace.id = i + 1;
+        workspace.canonical_root = try std.fmt.allocPrint(aa, "C:/workspace-{d}", .{i});
+        state.tasks[i].workspace_id = workspace.id;
+        state.tasks[i].workspace_root = workspace.canonical_root;
+    }
+    state.workspaces = workspaces;
+    state.next_workspace_id = 4;
+    {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        const original_tasks = state.tasks;
+        state.tasks = try aa.dupe(wire.TaskWire, &.{ original_tasks[0], original_tasks[2] });
+        state.workspaces = try aa.dupe(wire.WorkspaceWire, &.{ workspaces[0], workspaces[2] });
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        var inserted_task = original_tasks[1];
+        inserted_task.id = 4;
+        inserted_task.recent_order = 4;
+        inserted_task.workspace_id = 4;
+        var inserted_workspace = workspaces[1];
+        inserted_workspace.id = 4;
+        state.tasks = try aa.dupe(wire.TaskWire, &.{ original_tasks[0], inserted_task, original_tasks[2] });
+        state.workspaces = try aa.dupe(wire.WorkspaceWire, &.{ workspaces[0], inserted_workspace, workspaces[2] });
+        state.next_task_id = 5;
+        state.next_task_recent_order = 5;
+        state.next_workspace_id = 5;
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        state.tasks[2].title = "subsequent save";
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+    }
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const bytes = (try store.loadAlloc(a)).?;
+    defer a.free(bytes);
+    var loaded = try wire.decodeRecovering(a, bytes, store.limits);
+    defer loaded.deinit();
+    for ([_]u64{ 1, 4, 3 }, 0..) |id, i| {
+        try std.testing.expectEqual(id, loaded.value.tasks[i].id);
+        try std.testing.expectEqual(id, loaded.value.workspaces[i].id);
+    }
+    try std.testing.expectEqualStrings("subsequent save", loaded.value.tasks[2].title);
+}
+
 test "SQLite history newly learned credential is removed and repeated borrows do not rewrite" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
