@@ -147,15 +147,16 @@ SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional ca
 | 正式 SQL、旧 canonical 和恢复证据都不存在 | 以同一临时库流程初始化当前空历史 | 初始化失败保留 typed health，应用内重试；没有发布就不宣称保存可用 |
 | 正式 SQL 不存在，旧 `.store` 可读但无法识别/解码，或仅有既有 quarantine/未完成恢复证据 | 不自动清空；从当前可用的内存事实运行，显示 history 诊断，不冻结所有交互 | **开放既有 `recoverTaskHistory` 显式入口**，校验 revision 后按 §6.3 保全原件并发布当前内存历史；初始内存为空时即初始化空 SQL，不要求手动删文件 |
 | 正式 SQL 不存在，只有本程序普通导入临时库 | 它从未发布，不作为历史真相 | 清理后从当前旧来源重做；来源变更不阻止重做；若当前来源也不能分类，转上一行的显式恢复 |
-| 正式 SQL 存在但无法识别、schema 过新/不匹配、缺 root 或数据损坏 | 分别发布观察，保留原件；可信局部数据仍按现有隔离规则保留，不把它当首次启动或偷偷退回 `.store` | 支持版本可打开时提示使用该版本；没有进程内待定确认屏障时，也允许用户通过既有显式恢复，将当前可信内存历史发布为新 SQL，原 SQL/sidecar 保全到 quarantine |
+| 正式 SQL 的 schema 过新（`VersionUnknown`） | 当前版本无法解释，不等于数据损坏；保留正式库及 sidecar，不退回 `.store` 或把空内存当可信历史 | 只提示使用支持该 schema 的新版本；本进程不持久化历史，不迁移、quarantine 或替换正式库；不开放显式恢复，直接调用恢复命令也须拒绝 |
+| 正式 SQL 被本版本判定为不可信：格式损坏、缺 root、迁移身份/校验不匹配（`MigrationMismatch`）或数据损坏 | 分别发布观察，保留原件；可信局部数据仍按现有隔离规则保留，不把它当首次启动或偷偷退回 `.store` | 没有进程内待定确认屏障时，允许用户通过既有显式恢复，将当前可信内存历史发布为新 SQL，原 SQL/sidecar 保全到 quarantine；不能把 `VersionUnknown` 归入本行 |
 | 路径/权限/磁盘/文件读取等物理 IO 失败 | 不假定为空，不回滚当前有效内存事实，不伪造保存正常 | 应用内重试打开/保存；可以可靠执行保全 effect 时允许显式恢复，否则明确报告失败，空间/权限可用后重试 |
 | runtime commit 或恢复发布 outcome unknown | 保留原候选及资源，阻止新的数据库写入 | 入口优先做原 witness/目标读回及同步，不得直接 quarantine 进程内待确认事务或另建空库；确认结果后才继续补写或恢复。读不出时提示重试；按既有 shutdown 收敛并重启后，再由正式文件观察进入对应显式恢复分支，不能伪称已确认，也不要求删证据 |
 
-“普通保存不可用”和“恢复 effect 不可用”必须分开。即使正式 Database 尚未能打开，Application 仍可提供受限的临时库、保全和发布 effect，让 Product 发布既有恢复动作；不能因为没有 `sql.Database` 就把恢复按钮一并关掉。真正无法执行文件 effect 时给出可重试的物理失败，不承诺绕过权限。
+“普通保存不可用”和“恢复 effect 不可用”必须分开。即使正式 Database 尚未能打开，Application 仍可提供受限的临时库、保全和发布 effect，让 Product 发布符合上表资格的恢复动作；不能仅因为没有 `sql.Database` 就把合法恢复入口一并关掉。`VersionUnknown` 的禁写资格同时约束普通保存、退出补写、凭据维护和恢复 effect，不能通过另一个入口替换正式库。真正无法执行文件 effect 时给出可重试的物理失败，不承诺绕过权限。
 
 ### 6.3 复用现有显式恢复语义，不要求用户操作文件
 
-沿用 `recoverTaskHistory(expected_revision)` 的用户动作、revision 检查和 typed 结果，以及 [FileStore.recover](../../src/product/task/persistence.zig) 当前“先准备 replacement，再 quarantine 原件，再 durable publish”的保全顺序。复用的是入口与语义，不能把 SQLite bytes 原样交给旧 framed `FileStore.recover`，也不为过渡先生成一个新的旧格式 canonical。
+沿用 `recoverTaskHistory(expected_revision)` 的用户动作、revision 检查和 typed 结果，以及 [FileStore.recover](../../src/product/task/persistence.zig) 当前“先准备 replacement，再 quarantine 原件，再 durable publish”的保全顺序。先按 §6.2 校验恢复资格；`VersionUnknown` 即使用户点击恢复也拒绝，不准备 replacement、不移动原件。复用的是入口与语义，不能把 SQLite bytes 原样交给旧 framed `FileStore.recover`，也不为过渡先生成一个新的旧格式 canonical。
 
 - 先处理原 unknown：优先读回原 witness，不得把未确认事务当损坏重置。可进行显式恢复时，冻结**点击恢复时的可信内存状态**；若用户已经在保存不可用期间创建了有效 Task，恢复须保存这些事实，不能一律清空。
 - 当前内存为空才形成空 SQL；在独立的恢复候选临时库中构建、完整校验、结算 WAL 并关闭。准备失败时不移动原件。
@@ -165,7 +166,7 @@ SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional ca
 
 ### 6.4 旧版本、normalization 和 artifact
 
-普通导入发布前旧文件保持原样；成功后它只是受管迁移证据，不再是 active authority，也不是永久未脱敏备份。凭据维护覆盖它；确认全部事实导入后才允许受控退休，未分类的 quarantine 不自动删除。旧构建看不到新历史，但不能覆盖新 SQL；新版本返回仍读可信正式 SQL，不承诺合并降级期间的旧历史。
+普通导入发布前旧文件保持原样；成功后它只是受管迁移证据，不再是 active authority，也不是永久未脱敏备份。凭据维护覆盖它；确认全部事实导入后才允许受控退休，未分类的 quarantine 不自动删除。仅消费 framed store 的旧构建看不到新历史，但不能覆盖新 SQL；已接入 SQLite 的旧构建遇到较新 schema 时，必须按 §6.2 禁写，不能借显式恢复把新库移入 quarantine。新版本返回仍读可信正式 SQL，不承诺合并降级期间的旧历史。
 
 正常启动 normalization 继续保存 pending→excluded、interrupted、未完成 File Change 的 incomplete 与消息降级，再取得后续恢复/清理所需的确认，不重放模型输入。checkpoint、附件和 artifact 目录/身份保持；只有完整可信历史及引用集合成立才清理 orphan，unknown、degraded 或未分类证据仍在时禁止冒险清理。
 
@@ -209,7 +210,7 @@ B/C 以最终 schema/SQL builder 复核原子组额度、读回同步、安全�
 4. **原子性逐项命中**：T11–T19 每条确认路径注入提交前失败、COMMIT unknown、返回后崩溃和读回失败；checkpoint 在途叠加普通保存后失败，重启仍能恢复；coverage/reference、审批/profile 和跨 Run 转入关系不出现一半。增加“新 witness 可读，但后续同步屏障失败”：仍须保留 unknown，不交付权限、不释放受保护文件；同步并复核成功后才确认。自动审批 unknown 后用户人工拒绝，旧确认不得补发许可或覆盖新决定；删除 unknown 后尝试取消归档/发送/改名须被该 Task 的确认屏障拒绝，读回后原历史或删除结果保持一致。
 5. **补写**：分别制造 TaskBusy、写失败、仅改已读状态；只触发一次无关 Task 的正常 durable boundary，待补写完成后正常退出和强杀重启。故意漏标触发独立完整对照失败；版本已变化不能被旧 worker 清掉；同一 request 的候选 rollback 后重建也不能复用确认版本；两个 Task/多个事件共享同一 root/父 header 时只写一次且不丢事实。创建写入失败后删除该 Task，不补建它，不重插 dirty 子项。
 6. **接纳与外部 effect**：自动审批确认失败/unknown 不交付权限；人工响应沿原语义；Schedule 候选未知保留目录且不重放；Task 删除未确认不删 blob/附件/artifact；no-fail 终态、拒绝权限和取消的控制空间始终可用。
-7. **迁移/恢复**：普通导入发布前旧文件不变；每个临时库导入批次、checkpoint、关闭、rename/sync 与 quarantine 中间点强杀。完整复现“导入中崩溃 → 旧 release 改写 `.store` → 新版重启”：未发布导入自动按最新来源重做，不永久报来源变更。可读但无法分类的旧 store、仅有 quarantine、正式 SQL 缺 root/过新/损坏、IO 失败分别在应用内重试或显式恢复，均不要求手动删文件；恢复保存当前有效内存事实，准备失败不移动原件，unknown 不重放。旧构建使用旧文件后已发布 SQL 不被覆盖或重复导入；不只测试小历史往返。
+7. **迁移/恢复**：普通导入发布前旧文件不变；每个临时库导入批次、checkpoint、关闭、rename/sync 与 quarantine 中间点强杀。完整复现“导入中崩溃 → 旧 release 改写 `.store` → 新版重启”：未发布导入自动按最新来源重做，不永久报来源变更。可读但无法分类的旧 store、仅有 quarantine、正式 SQL 缺 root/校验不匹配/损坏、IO 失败分别在应用内重试或合法显式恢复，均不要求手动删文件；恢复保存当前有效内存事实，准备失败不移动原件，unknown 不重放。另测 SQL schema N+1 → release N → N+1：旧 release 报 `VersionUnknown` 并提示使用新版本，普通保存、退出补写和直接调用恢复命令都不能发布 replacement 或移动正式库及 sidecar 到 quarantine；返回新版后原历史完整，不需手动恢复文件。旧构建使用旧文件后已发布 SQL 不被覆盖或重复导入；不只测试小历史往返。
 8. **凭据**：新建后未知值写入、改写后仅留旧 WAL、长文本跨页/JSON 转义/多个字段、retained payload 和迁移源分别命中；可安全改写的正例在首次获知后受管文件不残留该已知值，无法理解/安全改写的 retained payload 必须明确保持维护未完成，不能通过丢弃它来通过测试。清理失败保持未完成。连续 64 个图像 Run 的重复借用/释放不新增全库扫描、WAL 安全清理或重写；测试与日志不记录凭据原文。
 9. **性能与体积**：实际测每次必须确认的提交 P50/P99/最大值、10 次审批的整轮附加等待、启动/重放时间、常驻和峰值内存、DB/WAL 维护及单位 Run/持续负载的实际 I/O。另测 1/10/100 个 dirty Task 的整轮排空尾延迟及连续主线程停顿，分别覆盖审批期间积压、磁盘满/写失败恢复、首次凭据清洗与启动 normalization；报告完整组合并前后的 COMMIT 数、批次额度、准备与 SQL 耗时和实际 I/O，不按组数固定做 N 次 COMMIT。注明 logical 参数量、进程 I/O 与物理写入的口径，不把预设事件数乘文件大小冒充实测，不为采样造产品 VFS。生产 SQLite 编译增量按相同构建配置实测。既有 Debug 32.9481 ms、Release 16.8729 ms 的视图失败保留，SQLite 不自动解决；新增持久化及原视图成本分开归因，既有 Gate 不放宽。峰值须包含一个最大冻结批次与 SQLite 参数/页缓存分配，不用只统计安全正文的数字冒充进程总量。
 
