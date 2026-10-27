@@ -98,12 +98,12 @@ test "stage A public backend latency and limits" {
         }
     }
     // Existing admission limits are observed without changing them.
-    const over = try std.testing.allocator.alloc(sql.Mutation, 65);
+    const over = try std.testing.allocator.alloc(sql.Mutation, sql.Limits.exec_statements + 1);
     defer std.testing.allocator.free(over);
     @memset(over, .{ .statement = .{ .sql = "UPDATE sample_root SET witness=witness+1" } });
     try std.testing.expectEqual(sql.MutationOutcome.rejected, db.mutate(over));
     database.test_hooks.lose_ack_after_commit = true;
     try std.testing.expectEqual(sql.MutationOutcome.outcome_unknown, db.mutate(&.{.{ .statement = .{ .sql = "UPDATE sample_root SET witness=999999" } }}));
     try std.testing.expectEqual(sql.MutationOutcome.unavailable, db.mutate(&.{.{ .statement = .{ .sql = "UPDATE sample_root SET witness=0" } }}));
-    try emit(.{ .kind = "limits_unknown", .statements_65 = "rejected", .lost_commit_ack = "outcome_unknown", .poisoned_write = "unavailable", .note = "reopen/sync primitive is measured separately; no public maintenance method added" });
+    try emit(.{ .kind = "limits_unknown", .statements_over_limit = sql.Limits.exec_statements + 1, .lost_commit_ack = "outcome_unknown", .poisoned_write = "unavailable", .note = "reopen/sync primitive is measured separately; no public maintenance method added" });
 }

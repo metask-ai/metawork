@@ -7,11 +7,11 @@ const std = @import("std");
 pub const Limits = struct {
     pub const sql_bytes: usize = 64 * 1024;
     pub const parameters: usize = 64;
-    pub const exec_statements: usize = 64;
+    pub const exec_statements: usize = 128;
     pub const query_parameter_bytes: usize = 1024 * 1024;
-    pub const exec_parameter_bytes: usize = 8 * 1024 * 1024;
+    pub const exec_parameter_bytes: usize = 32 * 1024 * 1024;
     pub const result_rows: usize = 8 * 1024;
-    pub const result_bytes: usize = 8 * 1024 * 1024;
+    pub const result_bytes: usize = 32 * 1024 * 1024;
     pub const migrations: usize = 9999;
     pub const migration_bytes: usize = 1024 * 1024;
 };

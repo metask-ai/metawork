@@ -103,7 +103,7 @@ Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA
 
 列数、列名和值必须对应本次实际执行的结果，所有返回列都参与值校验和结果预算。其他 instance 对同一文件完成迁移后，查询不能继续使用执行前的旧结果形状；零行查询返回 `ok` 且不产生 callback。
 
-query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以最多 8 MiB 的内部深拷贝伪造原子结果。
+query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以内部整份深拷贝伪造原子结果。
 
 ### 3.3 Outcomes
 
@@ -130,9 +130,9 @@ statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入
 ### 3.4 Limits
 
 - ordinary SQL text：64 KiB；migration SQL：1 MiB；
-- 单 statement params：64；单 mutation batch：64 statements；
-- 单 query parameters：1 MiB；单 mutation batch parameters：8 MiB；
-- 单 query：最多 8K rows、8 MiB result bytes；
+- 单 statement params：64；单 mutation batch：128 statements；
+- 单 query parameters：1 MiB；单 mutation batch parameters：32 MiB；
+- 单 query：最多 8K rows、32 MiB result bytes；
 - SQLite engine 同步设置 `LENGTH`、`SQL_LENGTH`、`VARIABLE_NUMBER`、`ATTACHED=0` 和 `WORKER_THREADS=0` limits。
 
 超限返回 `resource_exhausted` 或在 backend dispatch 前返回 `rejected`，不得截断后伪装成功。

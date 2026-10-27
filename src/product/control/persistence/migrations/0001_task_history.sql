@@ -9,6 +9,9 @@ CREATE TABLE history_state (
     next_task_id BLOB NOT NULL CHECK(typeof(next_task_id)='blob' AND length(next_task_id)=8 AND next_task_id<>X'0000000000000000'),
     next_task_recent_order BLOB NOT NULL CHECK(typeof(next_task_recent_order)='blob' AND length(next_task_recent_order)=8 AND next_task_recent_order<>X'0000000000000000'),
     failures_json TEXT NOT NULL CHECK(typeof(failures_json)='text'),
+    default_approval_mode TEXT,
+    witness_generation BLOB NOT NULL DEFAULT X'0000000000000000' CHECK(typeof(witness_generation)='blob' AND length(witness_generation)=8),
+    witness_digest BLOB NOT NULL DEFAULT (zeroblob(32)) CHECK(typeof(witness_digest)='blob' AND length(witness_digest)=32),
     PRIMARY KEY(singleton)
 );
 CREATE TABLE workspaces (
@@ -56,8 +59,13 @@ CREATE TABLE tasks (
     checkpoint_terminal_kind TEXT CHECK(checkpoint_terminal_kind IS NULL OR (typeof(checkpoint_terminal_kind)='text' AND checkpoint_terminal_kind IN ('run','compact'))),
     checkpoint_terminal_id BLOB CHECK(checkpoint_terminal_id IS NULL OR (typeof(checkpoint_terminal_id)='blob' AND length(checkpoint_terminal_id)=8 AND checkpoint_terminal_id<>X'0000000000000000')),
     checkpoint_binding_epoch BLOB CHECK(checkpoint_binding_epoch IS NULL OR (typeof(checkpoint_binding_epoch)='blob' AND length(checkpoint_binding_epoch)=8 AND checkpoint_binding_epoch<>X'0000000000000000')),
-    ui_history_json TEXT NOT NULL CHECK(typeof(ui_history_json)='text'),
-    compacts_json TEXT NOT NULL CHECK(typeof(compacts_json)='text'),
+    permission_review_delegated INTEGER NOT NULL DEFAULT 0,
+    approval_revision BLOB NOT NULL DEFAULT X'0000000000000001',
+    checkpoint_approval_revision BLOB,
+    checkpoint_approval_json TEXT,
+    model_intent_json TEXT,
+    presentation_format INTEGER,
+    next_presentation_order BLOB,
     PRIMARY KEY(id),
     UNIQUE(ordinal),
     FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
@@ -76,6 +84,7 @@ CREATE TABLE runs (
     permission_profile TEXT NOT NULL CHECK(typeof(permission_profile)='text' AND permission_profile IN ('approval_required','full_access')),
     permission_interaction TEXT NOT NULL CHECK(typeof(permission_interaction)='text' AND permission_interaction IN ('interactive','noninteractive')),
     input_json TEXT NOT NULL CHECK(typeof(input_json)='text'),
+    submission_json TEXT CHECK(submission_json IS NULL OR (typeof(submission_json)='text' AND json_valid(submission_json))),
     assistant BLOB NOT NULL CHECK(typeof(assistant)='blob'),
     assistant_redacted INTEGER NOT NULL CHECK(typeof(assistant_redacted)='integer' AND assistant_redacted IN (0,1)),
     commentary_ends_json TEXT NOT NULL CHECK(typeof(commentary_ends_json)='text'),
@@ -97,10 +106,11 @@ CREATE TABLE runs (
     diagnostic_redacted INTEGER NOT NULL CHECK(typeof(diagnostic_redacted)='integer' AND diagnostic_redacted IN (0,1)),
     event_projection_failure TEXT CHECK(event_projection_failure IS NULL OR (typeof(event_projection_failure)='text' AND event_projection_failure IN ('consumer_rejected','dependency_contract_failure'))),
     next_activity_order BLOB NOT NULL CHECK(typeof(next_activity_order)='blob' AND length(next_activity_order)=8 AND next_activity_order<>X'0000000000000000'),
+    outputs_json TEXT NOT NULL CHECK(typeof(outputs_json)='text' AND json_valid(outputs_json)),
     PRIMARY KEY(task_id,id),
     UNIQUE(task_id,generation),
     UNIQUE(task_id,ordinal),
-    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
     CHECK((assistant_output_kind IS NULL AND assistant_output_start IS NULL) OR (assistant_output_kind IS NOT NULL AND assistant_output_start IS NOT NULL))
 );
 CREATE TABLE run_tools (
@@ -124,7 +134,7 @@ CREATE TABLE run_tools (
     PRIMARY KEY(task_id,run_id,id),
     UNIQUE(task_id,run_id,ordinal),
     UNIQUE(task_id,run_id,activity_order),
-    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id),
+    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id) ON DELETE CASCADE,
     CHECK((state='failed')=is_error)
 );
 CREATE TABLE run_file_changes (
@@ -148,10 +158,102 @@ CREATE TABLE run_file_changes (
     PRIMARY KEY(task_id,run_id,id),
     UNIQUE(task_id,run_id,ordinal),
     UNIQUE(task_id,run_id,activity_order),
-    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id),
+    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id) ON DELETE CASCADE,
     CHECK((artifact_run_generation IS NULL AND artifact_change_order IS NULL AND artifact_digest IS NULL AND artifact_byte_size IS NULL) OR (artifact_run_generation IS NOT NULL AND artifact_change_order IS NOT NULL AND artifact_digest IS NOT NULL AND artifact_byte_size IS NOT NULL)),
     CHECK((kind='moved')=(from_display_path IS NOT NULL))
 );
 
 CREATE INDEX tasks_recent ON tasks(recent_order,id);
 CREATE INDEX tasks_workspace_recent ON tasks(workspace_id,archived,recent_order,id);
+
+CREATE TRIGGER history_approval_mode_insert BEFORE INSERT ON history_state
+WHEN NEW.default_approval_mode IS NOT NULL AND (typeof(NEW.default_approval_mode)<>'text' OR NEW.default_approval_mode NOT IN ('manual','auto_review','full_access'))
+BEGIN SELECT RAISE(ABORT,'invalid approval mode'); END;
+CREATE TRIGGER history_approval_mode_update BEFORE UPDATE OF default_approval_mode ON history_state
+WHEN NEW.default_approval_mode IS NOT NULL AND (typeof(NEW.default_approval_mode)<>'text' OR NEW.default_approval_mode NOT IN ('manual','auto_review','full_access'))
+BEGIN SELECT RAISE(ABORT,'invalid approval mode'); END;
+CREATE TRIGGER task_approval_anchor_insert BEFORE INSERT ON tasks
+WHEN typeof(NEW.approval_revision)<>'blob' OR length(NEW.approval_revision)<>8 OR NEW.approval_revision=X'0000000000000000' OR
+    (NEW.checkpoint_approval_revision IS NULL)<>(NEW.checkpoint_approval_json IS NULL) OR
+    (NEW.checkpoint_approval_revision IS NOT NULL AND
+      (typeof(NEW.checkpoint_approval_revision)<>'blob' OR length(NEW.checkpoint_approval_revision)<>8 OR
+       NEW.checkpoint_approval_revision=X'0000000000000000' OR NEW.checkpoint_approval_revision>NEW.approval_revision OR
+       typeof(NEW.checkpoint_approval_json)<>'text' OR NOT json_valid(NEW.checkpoint_approval_json) OR
+       NEW.checkpoint_generation IS NOT NULL))
+BEGIN SELECT RAISE(ABORT,'invalid approval checkpoint anchor'); END;
+CREATE TRIGGER task_approval_anchor_update BEFORE UPDATE ON tasks
+WHEN typeof(NEW.approval_revision)<>'blob' OR length(NEW.approval_revision)<>8 OR NEW.approval_revision=X'0000000000000000' OR
+    (NEW.checkpoint_approval_revision IS NULL)<>(NEW.checkpoint_approval_json IS NULL) OR
+    (NEW.checkpoint_approval_revision IS NOT NULL AND
+      (typeof(NEW.checkpoint_approval_revision)<>'blob' OR length(NEW.checkpoint_approval_revision)<>8 OR
+       NEW.checkpoint_approval_revision=X'0000000000000000' OR NEW.checkpoint_approval_revision>NEW.approval_revision OR
+       typeof(NEW.checkpoint_approval_json)<>'text' OR NOT json_valid(NEW.checkpoint_approval_json) OR
+       NEW.checkpoint_generation IS NOT NULL))
+BEGIN SELECT RAISE(ABORT,'invalid approval checkpoint anchor'); END;
+CREATE TRIGGER task_model_intent_insert BEFORE INSERT ON tasks
+WHEN NEW.model_intent_json IS NOT NULL AND typeof(NEW.model_intent_json)<>'text'
+BEGIN SELECT RAISE(ABORT,'invalid Task model intent'); END;
+CREATE TRIGGER task_model_intent_update BEFORE UPDATE OF model_intent_json ON tasks
+WHEN NEW.model_intent_json IS NOT NULL AND typeof(NEW.model_intent_json)<>'text'
+BEGIN SELECT RAISE(ABORT,'invalid Task model intent'); END;
+CREATE TRIGGER task_presentation_insert BEFORE INSERT ON tasks
+WHEN ((NEW.presentation_format IS NULL AND NEW.next_presentation_order IS NULL) OR
+ (NEW.presentation_format=1 AND typeof(NEW.next_presentation_order)='blob' AND length(NEW.next_presentation_order)=8)) IS NOT TRUE
+BEGIN SELECT RAISE(ABORT,'invalid presentation header'); END;
+CREATE TRIGGER task_presentation_update BEFORE UPDATE OF presentation_format,next_presentation_order ON tasks
+WHEN ((NEW.presentation_format IS NULL AND NEW.next_presentation_order IS NULL) OR
+ (NEW.presentation_format=1 AND typeof(NEW.next_presentation_order)='blob' AND length(NEW.next_presentation_order)=8)) IS NOT TRUE
+BEGIN SELECT RAISE(ABORT,'invalid presentation header'); END;
+
+CREATE TABLE task_compacts (
+    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8),
+    id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0),
+    payload TEXT NOT NULL CHECK(typeof(payload)='text' AND json_valid(payload)),
+    PRIMARY KEY(task_id,id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE task_ui_history (
+    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8),
+    request_id BLOB NOT NULL CHECK(typeof(request_id)='blob' AND length(request_id)=8),
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0),
+    payload TEXT NOT NULL CHECK(typeof(payload)='text' AND json_valid(payload)),
+    PRIMARY KEY(task_id,request_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE task_input_submissions (
+    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8),
+    operation_id BLOB NOT NULL CHECK(typeof(operation_id)='blob' AND length(operation_id)>0),
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0),
+    payload TEXT NOT NULL CHECK(typeof(payload)='text' AND json_valid(payload)),
+    PRIMARY KEY(task_id,operation_id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE run_additional_inputs (
+    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8),
+    run_id BLOB NOT NULL CHECK(typeof(run_id)='blob' AND length(run_id)=8),
+    id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0),
+    payload TEXT NOT NULL CHECK(typeof(payload)='text' AND json_valid(payload)),
+    PRIMARY KEY(task_id,run_id,id),
+    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id) ON DELETE CASCADE
+);
+
+CREATE TABLE retained_records (
+    kind TEXT NOT NULL CHECK(kind IN ('workspace','task','read_only_task')),
+    id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
+    recent_order BLOB NOT NULL CHECK(typeof(recent_order)='blob' AND length(recent_order)=8),
+    payload BLOB NOT NULL CHECK(typeof(payload)='blob'),
+    PRIMARY KEY(kind,id)
+);
+
+CREATE UNIQUE INDEX task_compacts_order ON task_compacts(task_id,ordinal);
+
+CREATE UNIQUE INDEX task_ui_history_order ON task_ui_history(task_id,ordinal);
+
+CREATE UNIQUE INDEX task_input_submissions_order ON task_input_submissions(task_id,ordinal);
+
+CREATE UNIQUE INDEX run_additional_inputs_order ON run_additional_inputs(task_id,run_id,ordinal);

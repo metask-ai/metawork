@@ -1846,6 +1846,7 @@ fn wireAgentCore(
     task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
     task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
     task_persistence.addImport("product_task_state", task_state);
+    product_control_history_schema.addImport("product_task_persistence", task_persistence);
     const task_policy = b.createModule(.{
         .root_source_file = b.path("src/product/task/policy.zig"),
         .target = target,
