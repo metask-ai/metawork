@@ -3156,7 +3156,7 @@ pub const Dispatcher = struct {
             .{ .interactive = approval_mode },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
-                return encodeTaskCreateResult(output, false, null, null, null, reason);
+                return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null);
             return err;
         };
         const binding_epoch = try workbench.taskBindingEpoch(task_id);
@@ -3168,6 +3168,7 @@ pub const Dispatcher = struct {
             task_id,
             binding_epoch,
             mcp_authority,
+            null,
             null,
         );
     }
@@ -3512,7 +3513,8 @@ pub const Dispatcher = struct {
         const binding_epoch = try handlers.parseWireId(
             parsed.value.expectedBindingEpoch,
         );
-        const attempt_id = (try self.requireProductControl()).restoreTaskConversation(
+        const workbench = try self.requireProductControl();
+        const attempt_id = workbench.restoreTaskConversation(
             task_id,
             binding_epoch,
         ) catch |err| {
@@ -3523,6 +3525,7 @@ pub const Dispatcher = struct {
                     task_id,
                     null,
                     reason,
+                    if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null,
                 );
             return err;
         };
@@ -3532,6 +3535,7 @@ pub const Dispatcher = struct {
             true,
             task_id,
             attempt_id,
+            null,
             null,
         );
     }
@@ -5284,6 +5288,9 @@ fn encodeExecutionResult(
 
 fn taskCreateRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.SessionReleasing => "session_releasing",
+        error.SessionReleaseFailed => "session_close_failed",
+        error.SessionCapacity => "session_capacity",
         error.ExecutionGenerationMismatch => "execution_changed",
         error.ExecutionUnavailable, error.ExecutionInUse => "execution_unavailable",
         error.WorkspaceEpochMismatch => "workspace_changed",
@@ -5373,9 +5380,12 @@ fn taskCompactRejection(err: anyerror) ?[]const u8 {
 
 fn taskRestoreRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.SessionReleasing => "session_releasing",
+        error.SessionReleaseFailed => "session_close_failed",
+        error.SessionCapacity => "session_capacity",
         error.BindingEpochMismatch => "binding_changed",
         error.UnknownTask => "task_unavailable",
-        error.RecoveryUnavailable => "recovery_unavailable",
+        error.RecoveryUnavailable, error.TaskBusy => "recovery_unavailable",
         error.RestoreAttemptExhausted,
         error.QueueFull,
         error.ProjectionCapacity,
@@ -5488,6 +5498,11 @@ fn skillMutationMayHaveCommitted(err: anyerror) bool {
     };
 }
 
+fn validSessionBlocker(accepted: bool, reason: ?[]const u8, task_id: ?u64) bool {
+    const failed = if (reason) |value| std.mem.eql(u8, value, "session_close_failed") else false;
+    return if (failed) !accepted and task_id != null and task_id.? != 0 else task_id == null;
+}
+
 fn encodeTaskCreateResult(
     output: []u8,
     accepted: bool,
@@ -5495,6 +5510,7 @@ fn encodeTaskCreateResult(
     binding_epoch: ?u64,
     mcp_authority: ?product_control.TaskMcpAuthorityAtCreation,
     reason: ?[]const u8,
+    blocking_task_id: ?u64,
 ) ![]const u8 {
     const valid = if (accepted)
         task_id != null and task_id.? != 0 and
@@ -5505,6 +5521,7 @@ fn encodeTaskCreateResult(
             mcp_authority == null and reason != null;
     if (!valid)
         return error.InvalidTaskCreateResult;
+    if (!validSessionBlocker(accepted, reason, blocking_task_id)) return error.InvalidSessionPressureResult;
     var writer = std.Io.Writer.fixed(output);
     writer.print("{{\"accepted\":{},\"taskId\":", .{accepted}) catch
         return error.NoSpaceLeft;
@@ -5534,6 +5551,7 @@ fn encodeTaskCreateResult(
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    if (blocking_task_id) |id| writer.print(",\"blockingTaskId\":\"{d}\"", .{id}) catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -5682,12 +5700,14 @@ fn encodeTaskRestoreResult(
     task_id: u64,
     attempt_id: ?u64,
     reason: ?[]const u8,
+    blocking_task_id: ?u64,
 ) ![]const u8 {
     const valid = task_id != 0 and if (accepted)
         attempt_id != null and attempt_id.? != 0 and reason == null
     else
         attempt_id == null and reason != null;
     if (!valid) return error.InvalidTaskRestoreResult;
+    if (!validSessionBlocker(accepted, reason, blocking_task_id)) return error.InvalidSessionPressureResult;
     var writer = std.Io.Writer.fixed(output);
     writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"attemptId\":", .{
         accepted,
@@ -5702,6 +5722,7 @@ fn encodeTaskRestoreResult(
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    if (blocking_task_id) |id| writer.print(",\"blockingTaskId\":\"{d}\"", .{id}) catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -6347,27 +6368,27 @@ test "mutation response encoders reject every inconsistent success and rejection
     var output: [256]u8 = undefined;
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, 1, null, null, "task_unavailable"),
+        encodeTaskCreateResult(&output, false, 1, null, null, "task_unavailable", null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, null, null, null, null),
+        encodeTaskCreateResult(&output, false, null, null, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 1, .ready_without_selection, "unexpected"),
+        encodeTaskCreateResult(&output, true, 1, 1, .ready_without_selection, "unexpected", null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 0, 1, .ready_without_selection, null),
+        encodeTaskCreateResult(&output, true, 0, 1, .ready_without_selection, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 0, .ready_without_selection, null),
+        encodeTaskCreateResult(&output, true, 1, 0, .ready_without_selection, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 1, null, null),
+        encodeTaskCreateResult(&output, true, 1, 1, null, null, null),
     );
     const task_create = try encodeTaskCreateResult(
         &output,
@@ -6375,6 +6396,7 @@ test "mutation response encoders reject every inconsistent success and rejection
         1,
         1,
         .unavailable,
+        null,
         null,
     );
     try std.testing.expectEqualStrings(
@@ -6415,19 +6437,19 @@ test "mutation response encoders reject every inconsistent success and rejection
     );
     try std.testing.expectError(
         error.InvalidTaskRestoreResult,
-        encodeTaskRestoreResult(&output, false, 1, 9, "recovery_unavailable"),
+        encodeTaskRestoreResult(&output, false, 1, 9, "recovery_unavailable", null),
     );
     try std.testing.expectError(
         error.InvalidTaskRestoreResult,
-        encodeTaskRestoreResult(&output, false, 1, null, null),
+        encodeTaskRestoreResult(&output, false, 1, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskRestoreResult,
-        encodeTaskRestoreResult(&output, true, 0, 9, null),
+        encodeTaskRestoreResult(&output, true, 0, 9, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskRestoreResult,
-        encodeTaskRestoreResult(&output, true, 1, 0, null),
+        encodeTaskRestoreResult(&output, true, 1, 0, null, null),
     );
 }
 
@@ -7977,7 +7999,7 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     defer std.testing.allocator.free(response);
     const connected = native.dispatch("{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, response);
     try std.testing.expect(std.mem.indexOf(u8, connected, "\"accepted\":true") != null);
-    const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
+    const begin = "{\"id\":\"s\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{\"taskId\":\"1\",\"beforeRunId\":\"5\",\"runLimit\":4,\"management\":\"none\",\"search\":false,\"searchQuery\":\"\",\"searchCursor\":null,\"receipts\":[],\"known\":{\"securityEpoch\":\"0\",\"versions\":{\"context\":\"0\",\"workspaces\":\"0\",\"taskIndex\":\"0\",\"taskPage\":\"0\",\"historyPage\":\"0\",\"management\":\"0\",\"searchIndex\":\"0\"}}}}";
     var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, native.dispatch(begin, source, response), .{});
     defer descriptor.deinit();
     var result = descriptor.value.object.get("result").?.object;
@@ -8150,4 +8172,23 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasOutputChecks());
+}
+
+test "Product view Session pressure rejection fixture preserves exact reason and blocking Task" {
+    const allocator = std.testing.allocator;
+    const fixture = try std.json.parseFromSlice(std.json.Value, allocator, @import("contract_fixture").session_pressure, .{});
+    defer fixture.deinit();
+    var output: [1024]u8 = undefined;
+    const create = try std.json.Stringify.valueAlloc(allocator, fixture.value.object.get("create").?, .{});
+    defer allocator.free(create);
+    try std.testing.expectEqualStrings(create, try encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", 7));
+    const restore = try std.json.Stringify.valueAlloc(allocator, fixture.value.object.get("restore").?, .{});
+    defer allocator.free(restore);
+    try std.testing.expectEqualStrings(restore, try encodeTaskRestoreResult(&output, false, 3, null, "session_close_failed", 7));
+    try std.testing.expectError(error.InvalidSessionPressureResult, encodeTaskCreateResult(&output, false, null, null, null, "session_close_failed", null));
+    try std.testing.expectError(error.InvalidSessionPressureResult, encodeTaskRestoreResult(&output, false, 3, null, "session_releasing", 7));
+    try std.testing.expectEqualStrings("session_releasing", taskCreateRejection(error.SessionReleasing).?);
+    try std.testing.expectEqualStrings("session_close_failed", taskRestoreRejection(error.SessionReleaseFailed).?);
+    try std.testing.expectEqualStrings("session_capacity", taskCreateRejection(error.SessionCapacity).?);
+    try std.testing.expect(taskCreateRejection(error.TaskBusy) == null);
 }

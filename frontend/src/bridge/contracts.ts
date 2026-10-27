@@ -964,6 +964,9 @@ export type TaskApprovalResult = TaskApprovalResultWire &
       }
   );
 export const sendInputReasons = [
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "binding_changed",
   "binding_unavailable",
   "task_unavailable",
@@ -1021,6 +1024,7 @@ export type WaitingInputView = {
   input: RunInputView;
   state: "waiting" | "failed" | "cancelled" | "interrupted";
   reason: SendInputReason | null;
+  blockingTaskId?: string;
 };
 export type AdditionalInputView = {
   submission: InputSubmission | null;
@@ -1124,12 +1128,34 @@ export type TaskView = {
   pendingUi: PendingUi | null;
   uiHistory: UiRecord[];
 };
+export type SearchCursor = {
+  revision: string;
+  securityEpoch: string;
+  task: string;
+  run: string;
+  part: string;
+  offset: string;
+};
+export type SearchHit = {
+  taskId: string;
+  runId: string | null;
+  part: string;
+  kind: "task" | "instruction" | "completion";
+  detail: string;
+};
+export type SearchPage = {
+  stale: boolean;
+  results: SearchHit[];
+  nextCursor: SearchCursor | null;
+};
 export type ViewScope = {
   taskId: string | null;
   beforeRunId: string | null;
   runLimit: number;
   management: "none" | "skills" | "mcp" | "schedules";
   search: boolean;
+  searchQuery: string;
+  searchCursor: SearchCursor | null;
   receipts: {
     taskId: string;
     operationId: string;
@@ -1141,6 +1167,8 @@ export const initialViewScope: ViewScope = {
   runLimit: 4,
   management: "none",
   search: false,
+  searchQuery: "",
+  searchCursor: null,
   receipts: [],
 };
 export function sameViewPageScope(a: ViewScope, b: ViewScope): boolean {
@@ -1149,7 +1177,9 @@ export function sameViewPageScope(a: ViewScope, b: ViewScope): boolean {
     a.beforeRunId === b.beforeRunId &&
     a.runLimit === b.runLimit &&
     a.management === b.management &&
-    a.search === b.search
+    a.search === b.search &&
+    a.searchQuery === b.searchQuery &&
+    JSON.stringify(a.searchCursor) === JSON.stringify(b.searchCursor)
   );
 }
 export function sameViewScope(a: ViewScope, b: ViewScope): boolean {
@@ -1164,7 +1194,11 @@ export function sameViewScope(a: ViewScope, b: ViewScope): boolean {
   );
 }
 export function cloneViewScope(scope: ViewScope): ViewScope {
-  return { ...scope, receipts: scope.receipts.map((query) => ({ ...query })) };
+  return {
+    ...scope,
+    searchCursor: scope.searchCursor ? { ...scope.searchCursor } : null,
+    receipts: scope.receipts.map((query) => ({ ...query })),
+  };
 }
 export type RunManifest = Pick<
   RunView,
@@ -1226,14 +1260,7 @@ export type WorkbenchSnapshot = {
     operationId: string;
     observed: boolean;
   }[];
-  searchIndex:
-    | {
-        taskId: string;
-        runId: string;
-        input: RunInputView;
-        output: RunView["output"] | null;
-      }[]
-    | null;
+  searchIndex: SearchPage | null;
   taskPage: {
     beforeRunId: string | null;
     nextBeforeRunId: string | null;
@@ -1731,6 +1758,9 @@ export type TaskCreateReason =
   | "model_selection_changed"
   | "stale_catalog"
   | "capacity_reached"
+  | "session_releasing"
+  | "session_capacity"
+  | "session_close_failed"
   | "shutting_down";
 export type TaskCreateResult =
   | {
@@ -1746,6 +1776,7 @@ export type TaskCreateResult =
       bindingEpoch: null;
       mcpAuthority: null;
       reason: TaskCreateReason;
+      blockingTaskId?: string;
     };
 export type TaskWorkspaceIntent =
   | {
@@ -1872,6 +1903,9 @@ export type TaskRestoreReason =
   | "task_unavailable"
   | "recovery_unavailable"
   | "capacity_reached"
+  | "session_releasing"
+  | "session_capacity"
+  | "session_close_failed"
   | "shutting_down";
 export type TaskRestoreResult =
   | {
@@ -1885,6 +1919,7 @@ export type TaskRestoreResult =
       taskId: string;
       attemptId: null;
       reason: TaskRestoreReason;
+      blockingTaskId?: string;
     };
 export type CatalogRefreshReason =
   | "workspace_changed"

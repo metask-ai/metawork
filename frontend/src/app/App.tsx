@@ -181,6 +181,7 @@ import type {
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
+  boundedSearchQuery,
   selectActiveTask,
   pendingInputContinuation,
   taskDisplayState,
@@ -295,6 +296,7 @@ type LocalTaskSubmission = {
   draft: ComposerDraft;
   state: "submitting" | "accepted" | "unknown" | "failed" | "cancelled";
   reason?: MutationReason;
+  blockingTaskId?: string;
 };
 import {
   ArchiveNotice,
@@ -342,6 +344,18 @@ export default function App() {
     setCompletionAcknowledgementFailure,
   ] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchHostQuery, setSearchHostQuery] = useState("");
+  const [searchCursor, setSearchCursor] = useState<
+    import("../bridge/contracts.ts").SearchCursor | null
+  >(null);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchHostQuery(searchQuery.trim());
+      setSearchCursor(null);
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const [skillsQuery, setSkillsQuery] = useState("");
   const [mcpQuery, setMcpQuery] = useState("");
   const [renameEditor, setRenameEditor] = useState<{
@@ -508,6 +522,8 @@ export default function App() {
                   runLimit: 4,
                   management: "none",
                   search: false,
+                  searchQuery: "",
+                  searchCursor: null,
                   receipts: [],
                 });
                 if (
@@ -998,10 +1014,34 @@ export default function App() {
     () => navigableTasks(snapshot),
     [snapshot],
   );
+  useEffect(() => {
+    setSearchCursor(null);
+  }, [snapshot.securityEpoch, bridgeGeneration]);
+  useEffect(() => {
+    if (snapshot.searchIndex?.stale) setSearchCursor(null);
+  }, [snapshot.searchIndex]);
+  const searchCurrent =
+    snapshot.scope.searchQuery === searchHostQuery &&
+    searchQuery.trim() === searchHostQuery &&
+    JSON.stringify(snapshot.scope.searchCursor) ===
+      JSON.stringify(searchCursor);
   const searchResults = useMemo(
-    () => searchWorkbench(snapshot, searchQuery),
-    [searchQuery, snapshot],
+    () => (searchCurrent ? searchWorkbench(snapshot, searchHostQuery) : []),
+    [searchHostQuery, snapshot, searchCurrent],
   );
+  // Empty work quanta continue automatically; only pages with visible hits
+  // require a user's next-page action. No result corpus accumulates here.
+  useEffect(() => {
+    if (
+      searchOpen &&
+      searchCurrent &&
+      snapshot.searchIndex &&
+      !snapshot.searchIndex.stale &&
+      snapshot.searchIndex.results.length === 0 &&
+      snapshot.searchIndex.nextCursor
+    )
+      setSearchCursor(snapshot.searchIndex.nextCursor);
+  }, [searchOpen, searchCurrent, snapshot.searchIndex]);
   const taskDrafts = useTaskDrafts(workbench.activeTaskId);
   const newTaskDraftActive =
     workbench.draftOpen || workbench.activeTaskId === null;
@@ -1633,6 +1673,8 @@ export default function App() {
         runLimit: 4,
         management,
         search: searchOpen,
+        searchQuery: searchOpen ? searchHostQuery : "",
+        searchCursor: searchOpen ? searchCursor : null,
         receipts: localSubmissions.flatMap((entry) =>
           entry.taskId &&
           (entry.state === "submitting" ||
@@ -1650,6 +1692,8 @@ export default function App() {
     searchOpen,
     localSubmissions,
     historyCursor,
+    searchHostQuery,
+    searchCursor,
   ]);
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
@@ -2428,6 +2472,8 @@ export default function App() {
               ...entry,
               state,
               reason: "reason" in result ? result.reason : undefined,
+              blockingTaskId:
+                "blockingTaskId" in result ? result.blockingTaskId : undefined,
             }
           : entry,
       ),
@@ -3441,7 +3487,14 @@ export default function App() {
             </p>
             {entry.reason && (
               <p className="projection-note">
-                {t(mutationReasonMessageId(entry.reason))}
+                {t(mutationReasonMessageId(entry.reason), {
+                  task:
+                    snapshot.taskIndex.find(
+                      (task) => task.id === entry.blockingTaskId,
+                    )?.title ||
+                    entry.blockingTaskId ||
+                    "",
+                })}
               </p>
             )}
             {(entry.state === "failed" ||
@@ -4528,7 +4581,26 @@ export default function App() {
         open={searchOpen}
         query={searchQuery}
         results={searchResults}
-        onQuery={setSearchQuery}
+        loading={
+          Boolean(searchQuery.trim()) &&
+          (!searchCurrent ||
+            snapshot.searchIndex === null ||
+            snapshot.searchIndex.stale ||
+            (snapshot.searchIndex.results.length === 0 &&
+              snapshot.searchIndex.nextCursor !== null))
+        }
+        hasMore={searchCurrent && snapshot.searchIndex?.nextCursor != null}
+        onMore={() => {
+          if (searchCurrent && snapshot.searchIndex?.nextCursor)
+            setSearchCursor(snapshot.searchIndex.nextCursor);
+        }}
+        onFirst={
+          searchCursor === null ? undefined : () => setSearchCursor(null)
+        }
+        onQuery={(query) => {
+          setSearchQuery(boundedSearchQuery(query));
+          setSearchCursor(null);
+        }}
         onClose={() => {
           setSearchOpen(false);
           setSearchQuery("");

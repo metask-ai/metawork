@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -214,6 +215,7 @@ function renderCompletedSurface(
   compacts = [],
   {
     pendingUi = null,
+    inputSubmissions = [],
     uiHistory = [],
     conversationCoverage = "included",
     outputs = [],
@@ -224,7 +226,7 @@ function renderCompletedSurface(
 ) {
   const task = {
     id: "3",
-    inputSubmissions: [],
+    inputSubmissions,
     runs: [
       {
         id: "9",
@@ -1311,4 +1313,21 @@ test("Task passes the continue-edit action to its delivered files only when prep
     onPrepareOutputEdit: () => "edit_prepared",
   });
   assert.match(available, />Continue editing</);
+});
+
+test("A failed queued resume names the Task blocking its Session", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/session-pressure.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const markup = renderCompletedSurface("Release is ready", undefined, [], {
+    inputSubmissions: [fixture.submission],
+  });
+  assert.match(markup, /task.*7.*could not close/);
+  assert.match(markup, /Keep my draft/);
 });

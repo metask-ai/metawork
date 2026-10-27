@@ -92,6 +92,101 @@ try {
     })()`),
     "dismiss first-run dialog in the isolated profile",
   );
+  // Exercise the production App -> scoped Bridge -> Host search before
+  // replacing the reading surface with deterministic Conversation fixtures.
+  await poll(
+    () =>
+      webview.evaluate(`(() => {
+      const intro=[...document.querySelectorAll('[role=dialog]')].find(dialog=>!dialog.classList.contains('search-dialog'));
+      const skip=intro && [...intro.querySelectorAll('button')].find(button=>/暂时跳过|Skip for now/i.test(button.textContent));
+      if(skip){skip.click();return false;}
+      if(document.querySelector('.search-dialog'))return document.activeElement?.getAttribute('role')==='combobox';
+      const button=[...document.querySelectorAll('button[aria-label]')].find(button=>/^(搜索|Search)$/.test(button.getAttribute('aria-label')));
+      button?.click();return false;
+    })()`),
+    "production global search opens after first-run admission and receives focus",
+  );
+  await webview.send("Input.insertText", {
+    text: "no matching history in this isolated profile",
+  });
+  await poll(
+    () =>
+      webview.evaluate(
+        `!!document.querySelector('.search-dialog input')?.value && !document.querySelector('.search-dialog [role=status]') && document.querySelectorAll('.search-dialog [role=option]').length===0`,
+      ),
+    "bounded Host search completes without a synchronization failure",
+  );
+  await webview.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "a",
+    code: "KeyA",
+    modifiers: 2,
+    windowsVirtualKeyCode: 65,
+  });
+  await webview.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "a",
+    code: "KeyA",
+    modifiers: 2,
+    windowsVirtualKeyCode: 65,
+  });
+  await webview.send("Input.insertText", { text: "界".repeat(200) });
+  await poll(
+    () =>
+      webview.evaluate(
+        `(() => { const input=document.querySelector('.search-dialog input');return input?.value.startsWith('界') && new TextEncoder().encode(input.value).length<=256 && !document.querySelector('.search-dialog [role=status]'); })()`,
+      ),
+    "production query preserves its Unicode byte bound",
+  );
+  for (const width of [1320, 390]) {
+    await webview.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: 812,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    for (const theme of ["light", "dark"]) {
+      await webview.evaluate(
+        `document.documentElement.dataset.theme=${JSON.stringify(theme)}`,
+      );
+      assert.equal(
+        await webview.evaluate(
+          `(() => {const r=document.querySelector('.search-dialog').getBoundingClientRect();return r.left>=-1 && r.right<=innerWidth+1;})()`,
+        ),
+        true,
+      );
+      const png = await webview.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        path.join(evidence, `search-${width}-${theme}.png`),
+        Buffer.from(png.data, "base64"),
+      );
+    }
+  }
+  await webview.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+  });
+  await webview.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+  });
+  await poll(
+    () => webview.evaluate(`!document.querySelector('.search-dialog')`),
+    "production global search closes without retaining an old page",
+  );
+  await webview.send("Emulation.setDeviceMetricsOverride", {
+    width: 1320,
+    height: 812,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await webview.evaluate(code);
   await poll(
     () =>
@@ -202,6 +297,8 @@ try {
       {
         image:
           "stable assistant; one decode/load across later output and terminal",
+        productionBoundedSearchBridge: true,
+        unicodeSearchByteBound: true,
         selectionAndFocus: true,
         historyReadingAnchor: true,
         terminalDetailsBeforeContinuation: true,

@@ -278,8 +278,12 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
             b.step("test-product-skill-policy", "Run Product Skill authority policy tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_persistence)
+            b.step("test-product-task-persistence", "Run Product Task history codec and restore tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_control_runtime)
+            b.step("test-product-control", "Run the complete Product Control test root").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
@@ -2072,6 +2076,8 @@ fn wireAgentCore(
     product_control_contract_fixture.addOption([]const u8, "output_action", @embedFile("frontend/src/bridge/__fixtures__/output-action.fixture"));
     product_control_contract_fixture.addOption([]const u8, "delivered_output", @embedFile("frontend/src/bridge/__fixtures__/delivered-output.fixture"));
     product_control_contract_fixture.addOption([]const u8, "product_view", @embedFile("frontend/src/bridge/__fixtures__/product-view.fixture"));
+    product_control_contract_fixture.addOption([]const u8, "session_pressure", @embedFile("frontend/src/bridge/__fixtures__/session-pressure.fixture"));
+    product_control_contract_fixture.addOption([]const u8, "search_page", @embedFile("frontend/src/bridge/__fixtures__/search-page.fixture"));
     product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));
     product_control_contract_fixture.addOption(

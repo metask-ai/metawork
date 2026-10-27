@@ -1129,6 +1129,10 @@ export const enUS = {
   "operation.workspace_remove": "Removing the workspace",
   "operation.skill_catalog_refresh": "Refreshing the Skill catalog",
   "search.open": "Search",
+  "search.loading": "Searching…",
+  "search.no_more": "No more matches.",
+  "search.more": "Continue search",
+  "search.first": "Back to first page",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
   "search.hint":
@@ -1493,6 +1497,12 @@ export const enUS = {
   "account.options_updated":
     "Available options were updated. Review them and choose again.",
   "mutation.transport_failed": "MetaWork could not confirm the change.",
+  "mutation.reason.session_releasing":
+    "Releasing an idle session. Please retry shortly.",
+  "mutation.reason.session_capacity":
+    "No execution session can currently be safely released. Please retry later.",
+  "mutation.reason.session_close_failed":
+    "The session for task “{task}” could not close. Resolve that task before retrying.",
   "mutation.reason.execution_changed":
     "Your execution settings changed. Review them and try again.",
   "mutation.reason.execution_unavailable":

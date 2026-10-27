@@ -116,7 +116,10 @@ fn measureFixture(comptime fixture: Fixture) !void {
                     request.task_id = 1;
                     request.before_run_id = if (sparse) 1 else 5;
                 },
-                .search_cold => request.search = true,
+                .search_cold => {
+                    request.search = true;
+                    request.search_query = "a" ** 255 ++ "b";
+                },
                 .skills_cold => request.management = .skills,
                 .mcp_cold => request.management = .mcp,
                 .schedules_cold => request.management = .schedules,

@@ -417,7 +417,9 @@ export function TaskContent({
             )}
             {record.reason && record.state === "failed" && (
               <p className="projection-note">
-                {t(`mutation.reason.${record.reason}` as MessageId)}
+                {t(`mutation.reason.${record.reason}` as MessageId, {
+                  task: record.blockingTaskId ?? "",
+                })}
               </p>
             )}
           </>

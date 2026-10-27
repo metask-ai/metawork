@@ -186,3 +186,40 @@ test("security notification invalidates captured delivery before any new snapsho
     /security epoch was revoked/,
   );
 });
+
+test("Product search reuse is bound to exact query, cursor and security epoch", () => {
+  const cache = new ViewCache();
+  const wire = structuredClone(fixture);
+  Object.assign(wire.scope, {
+    search: true,
+    searchQuery: "needle",
+    searchCursor: null,
+  });
+  wire.searchIndex = { stale: false, results: [], nextCursor: null };
+  const candidate = cache.materialize(
+    wire,
+    wire.scope,
+    cache.capture(wire.scope),
+  );
+  candidate.install(decodeWorkbenchSnapshot(candidate.wire));
+  assert.notEqual(cache.capture(wire.scope).known.versions.searchIndex, "0");
+  assert.equal(
+    cache.capture({ ...wire.scope, searchQuery: "other" }).known.versions
+      .searchIndex,
+    "0",
+  );
+  const next = {
+    ...wire.scope,
+    searchCursor: {
+      revision: "1",
+      securityEpoch: "2",
+      task: "0",
+      run: "1",
+      part: "0",
+      offset: "65536",
+    },
+  };
+  assert.equal(cache.capture(next).known.versions.searchIndex, "0");
+  cache.observeSecurityEpoch("3");
+  assert.equal(cache.capture(wire.scope).known.versions.searchIndex, "0");
+});

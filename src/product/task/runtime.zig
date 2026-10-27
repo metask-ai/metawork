@@ -4,6 +4,7 @@
 //! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
+const search_casefold = @import("search_casefold.zig");
 const agent = @import("metawork_agent");
 const models_contract = @import("metawork_product_models_contract");
 const task_state = @import("product_task_state");
@@ -455,6 +456,29 @@ pub const CloseError = ControlError || std.Thread.SpawnError || error{
     TaskBusy,
 };
 
+/// Process-local, version-bound search position; never a history identifier.
+pub const SearchCursor = struct {
+    revision: u64,
+    security_epoch: u64,
+    task: usize = 0,
+    run: usize = 0,
+    part: usize = 0,
+    offset: usize = 0,
+};
+pub const search_query_bytes = 256;
+pub const search_result_limit = 50;
+pub const search_snippet_bytes = 512;
+pub const search_work_limit = 64 * 1024;
+pub const search_unit_limit = 128;
+
+pub fn writeSearchCursor(writer: *std.Io.Writer, cursor: ?SearchCursor) task_view.Error!void {
+    const value = cursor orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"task\":\"{d}\",\"run\":\"{d}\",\"part\":\"{d}\",\"offset\":\"{d}\"}}", .{ value.revision, value.security_epoch, value.task, value.run, value.part, value.offset }) catch return error.SnapshotTooLarge;
+}
+
 pub const RecoveryMode = enum { checkpoint, fresh };
 
 pub const RecoveryStartFacts = struct {
@@ -665,6 +689,7 @@ pub const PreparedCreate = struct {
 
     pub fn complete(self: *PreparedCreate) u64 {
         std.debug.assert(self.active);
+        self.runtime.noteSearchChange();
         self.active = false;
         return self.task_id;
     }
@@ -728,6 +753,7 @@ pub const PreparedRun = struct {
         if (self.provisional_title_applied)
             self.effects.text.discardPrevious(self.previous_title);
         self.effects.run_acceptance.accept();
+        self.runtime.noteSearchChange();
         const run_record = &self.task.durable.runs[self.slot].?;
         run_record.admitted_at_ms = self.effects.run_clock.now();
         self.effects.executor.enqueue(
@@ -1147,6 +1173,8 @@ pub const Runtime = struct {
     next_task_id: u64 = 1,
     next_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
+    /// Search positions follow retained title/input/completion content, not Product UI state.
+    search_revision: u64 = 1,
     /// Runtime-wide execution-only input ownership, separate from safe projection.
     pending_input_bytes: usize = 0,
     late_terminal_event_count: u64 = 0,
@@ -1526,6 +1554,15 @@ pub const Runtime = struct {
         return old_identity;
     }
 
+    pub fn searchRevision(self: *const Runtime) u64 {
+        return self.search_revision;
+    }
+
+    fn noteSearchChange(self: *Runtime) void {
+        if (self.search_revision != 0)
+            self.search_revision = std.math.add(u64, self.search_revision, 1) catch 0;
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         capacity: usize,
@@ -1898,7 +1935,7 @@ pub const Runtime = struct {
                     break;
                 };
                 if (!has_slot) return .wait;
-                var lease = run.run_control.tryAcquireLease() orelse return .wait;
+                var lease = run.execution.?.run_control.tryAcquireLease() orelse return .wait;
                 defer lease.deinit();
                 if (!lease.inputObservation().ready) return .wait;
                 return .{ .submit = .{ .index = index, .run_id = id } };
@@ -1984,11 +2021,14 @@ pub const Runtime = struct {
         return changed or continuation_changed;
     }
 
-    pub fn failWaitingInput(self: *Runtime, task_id: u64, index: usize, reason: SendInputReason) void {
+    pub fn failWaitingInput(self: *Runtime, task_id: u64, index: usize, reason: SendInputReason, blocking_task_id: ?u64) void {
+        std.debug.assert((reason == .session_close_failed) == (blocking_task_id != null));
+        std.debug.assert(blocking_task_id == null or blocking_task_id.? != 0);
         const record = self.pendingInput(task_id, index) orelse return;
         if (record.state != .waiting) return;
         record.state = .failed;
         record.reason = reason;
+        record.blocking_task_id = blocking_task_id;
         self.releaseSubmissionPayload(record);
     }
 
@@ -1999,7 +2039,7 @@ pub const Runtime = struct {
         const run = task_state.findRun(task.durable.runs, run_id) orelse return;
         const record = &task.input_submissions.items[index];
         if (input_id) |id| {
-            for (&run.additional_inputs) |*entry| if (entry.*) |*additional| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*additional| {
                 if (additional.id == id) additional.submission = record.submission;
             };
         } else {
@@ -2048,7 +2088,7 @@ pub const Runtime = struct {
             .submitted, .unknown => self.finishWaitingInput(task_id, index, run_id, result.input_id, effects.release),
             .rejected => switch (result.reason orelse .invalid_input) {
                 .run_changed, .run_not_ready, .run_stopping, .too_late, .task_busy => {},
-                else => self.failWaitingInput(task_id, index, result.reason orelse .invalid_input),
+                else => self.failWaitingInput(task_id, index, result.reason orelse .invalid_input, null),
             },
             .started => unreachable,
         }
@@ -2070,7 +2110,7 @@ pub const Runtime = struct {
         if (task.runtime.cancel_requested or run.pending_termination.load(.acquire) != .none) return error.RunStopping;
         if (task_state.terminalPayload(run) != null) return error.RunChanged;
         if (run.agent_handoff.load(.acquire) != .running) return error.RunNotReady;
-        var lease = run.run_control.tryAcquireLease() orelse return error.RunNotReady;
+        var lease = run.execution.?.run_control.tryAcquireLease() orelse return error.RunNotReady;
         defer lease.deinit();
         if (!lease.inputObservation().ready) return error.RunNotReady;
         if (!std.unicode.utf8ValidateSlice(text) or std.mem.trim(u8, text, " \t\r\n").len == 0) return error.MissingInstruction;
@@ -2112,6 +2152,7 @@ pub const Runtime = struct {
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
+                self.noteSearchChange();
                 run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
@@ -2123,6 +2164,7 @@ pub const Runtime = struct {
                 result.sequence = sequence;
             },
             .unknown => {
+                self.noteSearchChange();
                 run.noteProjectionChange();
                 raw_owned = false;
                 if (queued_index) |queued| self.transferQueuedText(task, queued);
@@ -2171,7 +2213,7 @@ pub const Runtime = struct {
     }
 
     pub fn discardInputPayloads(self: *Runtime, run: *task_state.RunRecord) void {
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.raw_text) |raw| self.releaseInputPayload(raw);
             record.raw_text = null;
         };
@@ -2199,7 +2241,7 @@ pub const Runtime = struct {
             run.input_continuation_cancelled = true;
             run.input_continuation_pending = false;
             run.input_continuation_failure = reason;
-            for (&run.additional_inputs) |*input| if (input.*) |*record| {
+            for (run.additional_inputs) |*input| if (input.*) |*record| {
                 if (record.raw_text != null) record.continuation_cancel_reason = reason;
             };
             self.discardInputPayloads(run);
@@ -2294,7 +2336,7 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse unreachable;
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
         run.noteProjectionChange();
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .unadopted and record.state != .transferred) continue;
             if (record.continuation_cancel_reason != null) continue;
             record.state = if (target_id != null) .transferred else .unadopted;
@@ -2398,15 +2440,15 @@ pub const Runtime = struct {
         };
         run_lease_owned = false;
         checkpoint_lease_owned = false;
-        if (run_record.automatic_title.state.load(.acquire) == .pending) {
+        if (run_record.execution.?.automatic_title.state.load(.acquire) == .pending) {
             job.title_execution = owned_task_execution.OwnedTaskExecution.clone(
                 self.allocator,
                 execution,
             ) catch null;
             if (job.title_execution == null)
-                run_record.automatic_title.state.store(.ready, .release);
+                run_record.execution.?.automatic_title.state.store(.ready, .release);
         }
-        run_record.checkpoint_export_context = .{
+        run_record.execution.?.checkpoint_export_context = .{
             .task_id = task.durable.id,
             .binding_epoch = task.durable.binding_epoch,
             .terminal_kind = .run,
@@ -2425,7 +2467,7 @@ pub const Runtime = struct {
             effects.text,
             execution.api_key,
         );
-        run_record.automatic_title.provisional_applied = provisional_title_applied;
+        run_record.execution.?.automatic_title.provisional_applied = provisional_title_applied;
         const previous_active_run_id = task.runtime.active_run_id;
         const previous_active_operation = task.runtime.active_operation;
         const previous_recent_order = task.durable.recent_order;
@@ -2935,6 +2977,48 @@ pub const Runtime = struct {
         return prepared;
     }
 
+    pub fn idleReleaseRouteId(self: *const Runtime, except_task_id: ?u64) ?u64 {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (except_task_id != task.durable.id and idleSessionReleasable(task)) return task.runtime.routeId();
+        }
+        return null;
+    }
+
+    /// Pressure release uses the ordinary close owner, but never cancels work.
+    /// The caller retries admission after completion; no operation is replayed.
+    pub fn releaseIdleSession(self: *Runtime, except_task_id: ?u64, notifier: task_execution.Notifier) (agent.Error || std.mem.Allocator.Error || std.Thread.SpawnError)!bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_thread != null or task.runtime.close_requested) return false;
+        };
+        var candidate: ?*task_state.Task = null;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (except_task_id == task.durable.id or !idleSessionReleasable(task)) continue;
+            if (candidate == null or task.durable.recent_order < candidate.?.durable.recent_order)
+                candidate = task;
+        }
+        const task = candidate orelse return false;
+        var access = try task.runtime.acquireAccess();
+        const capabilities = access.captureRestoreInputs() catch |err| {
+            access.deinit();
+            return err;
+        };
+        access.deinit();
+        task.runtime.parked_capabilities = capabilities;
+        const attached = task.runtime.attached().?;
+        task.runtime.restore_catalog = attached.pinned_catalog;
+        attached.pinned_catalog = null;
+        startCloseWorker(task, notifier, false) catch |err| {
+            task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+            task.runtime.restore_catalog = null;
+            task.runtime.parked_capabilities.?.deinit() catch {};
+            task.runtime.parked_capabilities = null;
+            return err;
+        };
+        return true;
+    }
+
     pub fn beginDetach(
         self: *Runtime,
         task_id: u64,
@@ -3261,6 +3345,7 @@ pub const Runtime = struct {
             &.{sensitive},
             previous_title.len,
         );
+        if (!std.mem.eql(u8, previous_title, projected.value)) self.noteSearchChange();
         task.durable.title = projected.value;
         task.durable.title_redacted = projected.redacted;
         task.durable.recent_order = self.takeRecentOrder();
@@ -3400,6 +3485,7 @@ pub const Runtime = struct {
                             effects.deleteFileChangeTask(task_id);
                             effects.deleteAttachmentTask(task_id);
                             deinitTask(self, &removed, effects.release);
+                            self.noteSearchChange();
                             result.changed = true;
                         },
                         .failed => {
@@ -3665,6 +3751,7 @@ pub const Runtime = struct {
             };
             std.debug.assert(restored_count < self.tasks.len);
             self.tasks[restored_count] = restored;
+            self.noteSearchChange();
             restored_count += 1;
         }
         return retained;
@@ -3729,7 +3816,7 @@ pub const Runtime = struct {
         };
         if (application_result == .applied) {
             const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state != .adopted) continue;
                 if (record.raw_text) |raw| self.releaseInputPayload(raw);
                 record.raw_text = null;
@@ -3898,6 +3985,7 @@ pub const Runtime = struct {
                 finished_at_ms,
                 finished_at_unix_ms,
             )) continue;
+            self.noteSearchChange();
             _ = self.settleActiveRunTerminal(task);
             task.durable.recent_order = self.takeRecentOrder();
             changed = true;
@@ -3918,21 +4006,22 @@ pub const Runtime = struct {
             const task = &(entry.* orelse continue);
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (run.automatic_title.state.load(.acquire) != .ready) continue;
+                const execution = run.execution orelse continue;
+                if (execution.automatic_title.state.load(.acquire) != .ready) continue;
                 result.changed = true;
-                const candidate = if (run.automatic_title.generated)
+                const candidate = if (run.execution.?.automatic_title.generated)
                     task_policy.generatedAutomaticTitleCandidate(
-                        run.automatic_title.result[0..run.automatic_title.result_len],
+                        run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
                     )
                 else
                     null;
                 const selected = candidate orelse
                     task_policy.automaticTitleCandidate(&run.input);
                 const may_replace = run.generation == 1 and
-                    !run.automatic_title.user_overrode and
+                    !run.execution.?.automatic_title.user_overrode and
                     (task.durable.title.len == 0 or
-                        run.automatic_title.provisional_applied);
-                const keep_provisional = run.automatic_title.provisional_applied and
+                        run.execution.?.automatic_title.provisional_applied);
+                const keep_provisional = run.execution.?.automatic_title.provisional_applied and
                     candidate == null;
                 if (may_replace and !keep_provisional) if (selected) |value| {
                     const reclaimable = task.durable.title.len;
@@ -3944,7 +4033,7 @@ pub const Runtime = struct {
                     ) catch null;
                     if (projected) |title| {
                         const redacted = title.redacted or
-                            run.automatic_title.generated_redacted;
+                            run.execution.?.automatic_title.generated_redacted;
                         if (title.value.len == 0 or
                             (std.mem.eql(u8, title.value, task.durable.title) and
                                 redacted == task.durable.title_redacted))
@@ -3952,6 +4041,7 @@ pub const Runtime = struct {
                             projection.discardCandidate(title.value);
                             projection.restorePrevious(reclaimable);
                         } else {
+                            if (!std.mem.eql(u8, task.durable.title, title.value)) self.noteSearchChange();
                             projection.discardPrevious(task.durable.title);
                             task.durable.title = title.value;
                             task.durable.title_redacted = redacted;
@@ -3961,11 +4051,11 @@ pub const Runtime = struct {
                         projection.restorePrevious(reclaimable);
                     }
                 };
-                std.crypto.secureZero(u8, &run.automatic_title.result);
-                run.automatic_title.result_len = 0;
-                run.automatic_title.generated = false;
-                run.automatic_title.generated_redacted = false;
-                run.automatic_title.state.store(.settled, .release);
+                std.crypto.secureZero(u8, &run.execution.?.automatic_title.result);
+                run.execution.?.automatic_title.result_len = 0;
+                run.execution.?.automatic_title.generated = false;
+                run.execution.?.automatic_title.generated_redacted = false;
+                run.execution.?.automatic_title.state.store(.settled, .release);
             }
         }
         return result;
@@ -3979,8 +4069,27 @@ pub const Runtime = struct {
             if (task.runtime.worker_leases.hasLive()) continue;
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
-                if (run.event_stream_finalized and run.automatic_title.state.load(.acquire) != .running)
-                    releaseRunEffects(run, effects);
+                const execution = run.execution orelse continue;
+                if (!run.event_stream_finalized or task_state.productTerminalFacts(run) == null or
+                    run.pending_file_change_artifacts != 0 or run.checkpoint.lease != null) continue;
+                switch (execution.automatic_title.state.load(.acquire)) {
+                    .none, .settled => {},
+                    .pending, .running, .ready => continue,
+                }
+                switch (run.checkpoint.state.load(.acquire)) {
+                    .none, .settled => {},
+                    .exporting, .failure_ready, .candidate_ready => continue,
+                }
+                releaseRunEffects(run, effects);
+                releaseAutomaticTitle(&execution.automatic_title);
+                self.allocator.destroy(execution);
+                run.execution = null;
+                trimHistoryEntries(task_state.AdditionalInput, self.allocator, &run.additional_inputs);
+                trimHistoryEntries(task_state.ToolView, self.allocator, &run.tools);
+                trimHistoryEntries(task_state.FileChangeView, self.allocator, &run.file_changes);
+                run.commentary_ends = self.allocator.realloc(run.commentary_ends, run.commentary_count) catch run.commentary_ends;
+                if (run.output_segment.list.items.len == 0) releaseTrackedText(self, effects, &run.output_segment);
+                if (run.output_continued.list.items.len == 0) releaseTrackedText(self, effects, &run.output_continued);
             }
         }
     }
@@ -4307,6 +4416,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
+        if (self.taskCount() != 0) self.noteSearchChange();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.close_thread) |thread| {
@@ -4616,17 +4726,95 @@ pub const Runtime = struct {
         return task_state.submissionHasExecution(task, operation_id);
     }
 
-    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection) task_view.Error!void {
+    /// Bounds both returned bytes and matching work. Positions visit fields, not
+    /// a copied corpus; live streaming output is never searchable.
+    pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection, query: []const u8, after: ?SearchCursor, revision: u64, security_epoch: u64) (task_view.Error || error{InvalidViewRequest})!void {
+        if (query.len > search_query_bytes or !std.unicode.utf8ValidateSlice(query)) return error.InvalidViewRequest;
+        var query_storage: [search_query_bytes * search_casefold.max_expansion_bytes]u8 = undefined;
+        const folded_query = search_casefold.writeFolded(query, &query_storage) catch return error.InvalidViewRequest;
+        const stale = if (after) |cursor| cursor.revision != revision or cursor.security_epoch != security_epoch else false;
+        var cursor = after orelse SearchCursor{ .revision = revision, .security_epoch = security_epoch };
+        writer.print("{{\"stale\":{},\"results\":[", .{stale}) catch return error.SnapshotTooLarge;
         var count: usize = 0;
-        for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                count += 1;
-                try task_view.writeSearchRun(writer, task, run, text);
+        var remaining_work: usize = search_work_limit;
+        var units: usize = 0;
+        while (!stale and query.len != 0 and cursor.task < self.tasks.len and count < search_result_limit and remaining_work != 0 and units < search_unit_limit) {
+            const task = if (self.tasks[cursor.task]) |*value| value else {
+                cursor.task += 1;
+                cursor.run = 0;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
+            };
+            if (cursor.run > task.durable.runs.len) {
+                cursor.task += 1;
+                cursor.run = 0;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
             }
+            const source = searchSource(task, cursor.run, cursor.part) orelse {
+                cursor.run += 1;
+                cursor.part = 0;
+                cursor.offset = 0;
+                units += 1;
+                continue;
+            };
+            var window_storage: [4 * search_query_bytes * search_casefold.max_expansion_bytes + search_snippet_bytes]u8 = undefined;
+            var match: ?usize = null;
+            while (remaining_work != 0) {
+                // A folded byte can require at most one original UTF-8 codepoint.
+                // Keep raw lookahead plus one window's worth of candidate starts.
+                const capacity = 4 * folded_query.len + search_snippet_bytes;
+                const window = try source.window(cursor.offset, window_storage[0..capacity]);
+                if (cursor.offset > window.total) return error.InvalidViewRequest;
+                if (window.bytes.len == 0) break;
+                const base = cursor.offset;
+                const last_window = window.bytes.len == window.total - base;
+                const safe_end = if (last_window) window.bytes.len else window.bytes.len - 4 * folded_query.len;
+                while (cursor.offset - base < window.bytes.len and (last_window or cursor.offset - base <= safe_end) and remaining_work != 0) {
+                    const relative = cursor.offset - base;
+                    const width = std.unicode.utf8ByteSequenceLength(window.bytes[relative]) catch return error.InvalidViewRequest;
+                    if (width > window.bytes.len - relative) return error.InvalidViewRequest;
+                    switch (search_casefold.prefixMatches(window.bytes[relative..], folded_query, &remaining_work)) {
+                        .match => {
+                            match = cursor.offset;
+                            break;
+                        },
+                        .exhausted => break,
+                        .miss => cursor.offset += width,
+                    }
+                }
+                if (match != null or remaining_work == 0 or last_window) break;
+            }
+            if (match) |at| {
+                if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.print("{{\"taskId\":\"{d}\",\"runId\":", .{task.durable.id}) catch return error.SnapshotTooLarge;
+                if (cursor.run == 0) writer.writeAll("null") catch return error.SnapshotTooLarge else writer.print("\"{d}\"", .{task.durable.runs[cursor.run - 1].?.id}) catch return error.SnapshotTooLarge;
+                writer.print(",\"part\":\"{d}\",\"kind\":\"{s}\",\"detail\":", .{ cursor.part, @tagName(source.kind) }) catch return error.SnapshotTooLarge;
+                const snippet = try source.window(at -| 128, window_storage[0..search_snippet_bytes]);
+                var start: usize = 0;
+                while (start < snippet.bytes.len and snippet.bytes[start] & 0xc0 == 0x80) start += 1;
+                var end = snippet.bytes.len;
+                if (end > start) {
+                    var last = end - 1;
+                    while (last > start and snippet.bytes[last] & 0xc0 == 0x80) last -= 1;
+                    const width = std.unicode.utf8ByteSequenceLength(snippet.bytes[last]) catch return error.SnapshotTooLarge;
+                    if (end - last < width) end = last;
+                }
+                try text.writeJson(writer, snippet.bytes[start..end]);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+                count += 1;
+            } else if (remaining_work == 0) break;
+            cursor.part += 1;
+            cursor.offset = 0;
+            units += 1;
         }
+        writer.writeAll("],\"nextCursor\":") catch return error.SnapshotTooLarge;
+        try writeSearchCursor(writer, if (!stale and query.len != 0 and cursor.task < self.tasks.len) cursor else null);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
     /// Missing Task is explicit null. A history cursor must name a retained
@@ -4724,7 +4912,7 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
         effects: RecoveryAdmissionEffects,
-    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable }!RecoveryStartFacts {
+    ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable, SessionCapacity }!RecoveryStartFacts {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -4734,7 +4922,11 @@ pub const Runtime = struct {
             self.recoveryAdmissionFacts(task, external),
         )) {
             .admitted => {},
-            .denied => return error.RecoveryUnavailable,
+            .denied => |reason| {
+                if (reason == .runtime_unavailable and external.runtime_admission == .capacity_reached and external.authority_stable)
+                    return error.SessionCapacity;
+                return error.RecoveryUnavailable;
+            },
         }
         return .{
             .mode = if (freshConversationAllowed(task)) .fresh else .checkpoint,
@@ -5188,7 +5380,7 @@ pub const Runtime = struct {
             if (terminal.outcome != .completed and !stopped_batch) {
                 _ = self.cancelWaitingInputs(task.durable.id, .admission_failed);
             }
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (record.state == .adopted or record.state == .transferred) continue;
                 record.state = .unknown;
                 if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
@@ -5206,7 +5398,7 @@ pub const Runtime = struct {
                 run.completed_input_counts != null and
                 !run.input_continuation_cancelled and !run.input_continuation_attempted;
             var pending = false;
-            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            for (run.additional_inputs) |*entry| if (entry.*) |*record| {
                 if (eligible and record.state == .unadopted and record.raw_text != null) {
                     pending = true;
                 } else {
@@ -5311,6 +5503,12 @@ pub const Runtime = struct {
                         .failed_closing => {},
                         else => unreachable,
                     }
+                    if (task.runtime.parked_capabilities != null and task.runtime.attached() != null) {
+                        task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+                        task.runtime.restore_catalog = null;
+                        task.runtime.parked_capabilities.?.deinit() catch {};
+                        task.runtime.parked_capabilities = null;
+                    }
                 },
                 .none, .running => unreachable,
             }
@@ -5380,11 +5578,11 @@ pub const Runtime = struct {
                 self.allocator.free(value);
                 rebind.projected_model = null;
             }
-            if (task.runtime.restore_catalog) |*snapshot| {
+            if (task.runtime.parked_capabilities == null) if (task.runtime.restore_catalog) |*snapshot| {
                 release.releaseProjectionBytes(snapshot.projected_bytes);
                 snapshot.deinit();
                 task.runtime.restore_catalog = null;
-            }
+            };
         }
         const continuation = job.continuation_source_id;
         const original_epoch = job.attempt.binding_epoch;
@@ -5813,6 +6011,10 @@ pub const Runtime = struct {
                         .execution = candidate.takeExecution(),
                         .pinned_catalog = pinned,
                     } };
+                    if (task.runtime.parked_capabilities) |*inputs| {
+                        inputs.deinit() catch {};
+                        task.runtime.parked_capabilities = null;
+                    }
                     task.conversation_observation = .{};
                     task.runtime.last_restore_failure = if (job.rebind) |rebind| if (rebind.phase == .restoring_original) rebind.failure else null else null;
                 } else {
@@ -6024,9 +6226,10 @@ fn excludePendingConversationTail(task: *task_state.Task) bool {
 fn markAutomaticTitleUserOverride(task: *task_state.Task) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        if (!run.automatic_title.provisional_applied) continue;
-        switch (run.automatic_title.state.load(.acquire)) {
-            .pending, .running, .ready => run.automatic_title.user_overrode = true,
+        const execution = run.execution orelse continue;
+        if (!execution.automatic_title.provisional_applied) continue;
+        switch (run.execution.?.automatic_title.state.load(.acquire)) {
+            .pending, .running, .ready => run.execution.?.automatic_title.user_overrode = true,
             .none, .settled => {},
         }
     }
@@ -6092,7 +6295,7 @@ fn redactTaskProjection(
         const run = &(entry.* orelse continue);
         redactInputProjection(&run.input, credential, effects);
         if (run.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
-        for (&run.additional_inputs) |*message| if (message.*) |*record| {
+        for (run.additional_inputs) |*message| if (message.*) |*record| {
             record.redacted = effects.redact(record.text, credential) or record.redacted;
             _ = effects.redact(record.operation_id[0..record.operation_id_len], credential);
             if (record.submission) |*submission| _ = effects.redact(submission.operation_id[0..submission.operation_id_len], credential);
@@ -6146,13 +6349,13 @@ fn redactTaskProjection(
                 credential,
             ) or mutable.diagnostic_redacted;
         }
-        if (run.automatic_title.state.load(.acquire) == .ready and
-            run.automatic_title.generated)
+        if (run.execution != null and run.execution.?.automatic_title.state.load(.acquire) == .ready and
+            run.execution.?.automatic_title.generated)
         {
-            run.automatic_title.generated_redacted = effects.redact(
-                run.automatic_title.result[0..run.automatic_title.result_len],
+            run.execution.?.automatic_title.generated_redacted = effects.redact(
+                run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
                 credential,
-            ) or run.automatic_title.generated_redacted;
+            ) or run.execution.?.automatic_title.generated_redacted;
         }
     }
     for (task.durable.compacts) |*entry| {
@@ -7101,7 +7304,8 @@ fn releaseTrackedText(
 ) void {
     effects.releaseProjectionBytes(value.list.capacity);
     value.list.deinit(self.allocator);
-    value.* = undefined;
+    // A reclaimed execution buffer still belongs to a readable history record.
+    value.* = .{};
 }
 
 fn deinitFileReference(
@@ -7515,10 +7719,17 @@ fn reserveRun(
         0,
     )).value;
     errdefer effects.text.discardCandidate(execution_model);
+    const additional = try self.allocator.alloc(?task_state.AdditionalInput, agent.max_submitted_inputs);
+    errdefer self.allocator.free(additional);
+    @memset(additional, null);
+    const run_execution = try self.allocator.create(task_state.RunExecution);
+    errdefer self.allocator.destroy(run_execution);
+    run_execution.* = .{};
     task.durable.next_run_generation += 1;
     var title = task_state.AutomaticTitle{};
     if (task.durable.next_run_generation == 1 and task.durable.title.len == 0)
         title.state.store(.pending, .release);
+    run_execution.automatic_title = title;
     task.durable.runs[slot] = .{
         .submitted_at_unix_ms = effects.run_clock.nowUnixMs(),
         .id = 0,
@@ -7530,13 +7741,14 @@ fn reserveRun(
         .permission_profile = task.durable.permission_profile,
         .permission_interaction = task.durable.permission_interaction,
         .input = input_record,
+        .additional_inputs = additional,
         .commentary_ends = commentary_ends,
         .tools = tools,
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = diagnostic,
         .redaction_secret = execution.api_key,
-        .automatic_title = title,
+        .execution = run_execution,
     };
     return slot;
 }
@@ -7646,7 +7858,8 @@ fn applyModelIntent(
 fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        run.automatic_title.cancel_requested.store(true, .release);
+        const execution = run.execution orelse continue;
+        execution.automatic_title.cancel_requested.store(true, .release);
         task_execution.publishAutomaticTitleFallback(run);
     }
 }
@@ -7674,7 +7887,7 @@ fn requestRunTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse
         return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
@@ -7695,7 +7908,7 @@ fn requestPermissionTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse
         return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
@@ -7764,6 +7977,124 @@ fn failedDeletionCanBeAbandoned(task: *const task_state.Task) bool {
     return task.deletion != .failed or
         (task_policy.taskLifecycle(task) == .open and !task_policy.hasActiveOperation(task) and
             !task.model_intent_prepared and !task.runtime.worker_leases.hasLive());
+}
+
+/// A bounded window over the same readable text shown by the consumer.
+/// Composite Skill/attachment/output text is never flattened into a corpus.
+const SearchSource = struct {
+    content: union(enum) { plain: []const u8, input: *const task_state.RunInputRecord, output: *const task_state.RunRecord },
+    kind: enum { task, instruction, completion },
+
+    const Window = struct { bytes: []const u8, total: usize };
+    const Copy = struct {
+        storage: []u8,
+        skip: usize,
+        filled: usize = 0,
+        total: usize = 0,
+        fn append(self: *@This(), value: []const u8) void {
+            self.total += value.len;
+            if (self.skip >= value.len) {
+                self.skip -= value.len;
+                return;
+            }
+            const count = @min(value.len - self.skip, self.storage.len - self.filled);
+            @memcpy(self.storage[self.filled..][0..count], value[self.skip..][0..count]);
+            self.filled += count;
+            self.skip = 0;
+        }
+    };
+
+    fn window(self: SearchSource, at: usize, storage: []u8) task_view.Error!Window {
+        if (self.content == .plain) {
+            const value = self.content.plain;
+            return .{ .bytes = value[@min(at, value.len)..@min(value.len, @min(at, value.len) + storage.len)], .total = value.len };
+        }
+        var copy: Copy = .{ .storage = storage, .skip = at };
+        switch (self.content) {
+            .plain => unreachable,
+            .input => |input| switch (input.*) {
+                .text => |value| copy.append(value.value),
+                .skill => |value| {
+                    copy.append("/");
+                    copy.append(value.invocation_name);
+                    if (value.argument_values.len > 1 or (value.argument_values.len == 1 and value.argument_values[0].len != 0)) {
+                        copy.append(" ");
+                        for (value.argument_values, 0..) |argument, index| {
+                            if (index != 0) copy.append(" ");
+                            copy.append(argument);
+                        }
+                    }
+                },
+                .multimodal => |value| {
+                    var present = false;
+                    if (value.text) |text| if (text.len != 0) {
+                        copy.append(text);
+                        present = true;
+                    };
+                    for (value.attachments) |attachment| if (attachment.display_name.len != 0) {
+                        if (present) copy.append(" ");
+                        copy.append(attachment.display_name);
+                        present = true;
+                    };
+                },
+            },
+            .output => |run| {
+                if (run.assistant.committed_len > run.assistant.list.items.len or run.commentary_count > run.commentary_ends.len) return error.SnapshotTooLarge;
+                const committed = run.assistant.list.items[0..run.assistant.committed_len];
+                const response_start = run.assistant_output_start orelse committed.len;
+                var previous: usize = 0;
+                for (run.commentary_ends[0..run.commentary_count], 0..) |boundary, index| {
+                    const end = std.math.cast(usize, boundary) orelse return error.SnapshotTooLarge;
+                    if (end < previous or end > committed.len) return error.SnapshotTooLarge;
+                    if (index != 0) copy.append("\n\n");
+                    copy.append(committed[previous..end]);
+                    previous = end;
+                }
+                if (previous != response_start) return error.SnapshotTooLarge;
+                copy.append("\n\n");
+                copy.append(committed[response_start..]);
+            },
+        }
+        return .{ .bytes = storage[0..copy.filled], .total = copy.total };
+    }
+};
+
+fn searchSource(task: *const task_state.Task, run_slot: usize, part: usize) ?SearchSource {
+    if (run_slot == 0) return if (part == 0) .{ .content = .{ .plain = task.durable.title }, .kind = .task } else null;
+    const run = if (task.durable.runs[run_slot - 1]) |*value| value else return null;
+    if (part == 0) return .{ .content = switch (run.input) {
+        .text => |value| .{ .plain = value.value },
+        else => .{ .input = &run.input },
+    }, .kind = .instruction };
+    var index: usize = 1;
+    for (run.additional_inputs) |entry| if (entry) |input| {
+        if (part == index) return .{ .content = .{ .plain = input.text }, .kind = .instruction };
+        index += 1;
+    };
+    if (part == index) if (task_state.productTerminalFacts(run)) |terminal| {
+        if (terminal.outcome == .completed and run.event_stream_finalized)
+            return .{ .content = .{ .output = run }, .kind = .completion };
+    };
+    return null;
+}
+
+fn idleSessionReleasable(task: *const task_state.Task) bool {
+    const attached = task.runtime.attachedConst() orelse return false;
+    if (attached.health != .available or !closeReady(task) or
+        task.runtime.close_failed or task.runtime.close_requested or task.runtime.close_thread != null or
+        task.runtime.restore_job != null or task.runtime.restore_catalog != null or
+        task.runtime.parked_capabilities != null or task.runtime.pending_ui_request_id != 0 or
+        task.model_intent_prepared or task.approval_change != null or task.deletion != .idle or
+        task.read_only_history != null or task.durable.model_intent == null or
+        task.initial_catalog_preparation == .loading) return false;
+    if (task.durable.checkpoint) |record| {
+        if (!task_policy.checkpointMatchesCurrentHistory(task, record)) return false;
+    } else if (!freshConversationAllowed(task)) return false;
+    for (task.durable.runs) |entry| if (entry) |run| {
+        if (run.input_continuation_pending or run.pending_file_change_artifacts != 0 or
+            run.checkpoint.lease != null or run.execution != null) return false;
+    };
+    return true;
 }
 
 fn closeReady(task: *const task_state.Task) bool {
@@ -7928,7 +8259,7 @@ fn reviewIdentity(task: *const task_state.Task, run: *const task_state.RunRecord
 
 fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     if (run.agent_handoff.load(.acquire) != .running) return true;
-    var lease = run.run_control.tryAcquireLease() orelse return true;
+    var lease = run.execution.?.run_control.tryAcquireLease() orelse return true;
     defer lease.deinit();
     return lease.inputObservation().blocksAutomaticAllow();
 }
@@ -7992,7 +8323,7 @@ fn writeReviewHistoryGroup(writer: *std.Io.Writer, run: *const task_state.RunRec
     var previous: u32 = 0;
     for (1..count) |_| {
         var next: ?*const task_state.AdditionalInput = null;
-        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+        for (run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .adopted) continue;
             const sequence = record.sequence orelse return error.ReviewIntentUnavailable;
             if (sequence <= previous) continue;
@@ -8305,6 +8636,14 @@ fn stateForResponse(response: UiResponse) task_state.UiRecordState {
     };
 }
 
+/// Only after all consumers are quiescent. Failed shrinking keeps the owned
+/// allocation and its exact contents; memory pressure never drops history.
+fn trimHistoryEntries(comptime T: type, allocator: std.mem.Allocator, entries: *[]?T) void {
+    var len = entries.len;
+    while (len != 0 and entries.*[len - 1] == null) len -= 1;
+    entries.* = allocator.realloc(entries.*, len) catch entries.*;
+}
+
 fn deinitRun(
     self: *Runtime,
     effects: ReleaseEffects,
@@ -8312,7 +8651,11 @@ fn deinitRun(
 ) void {
     std.debug.assert(run.checkpoint.lease == null);
     releaseRunEffects(run, effects);
-    releaseAutomaticTitle(&run.automatic_title);
+    if (run.execution) |execution| {
+        releaseAutomaticTitle(&execution.automatic_title);
+        self.allocator.destroy(execution);
+        run.execution = null;
+    }
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
     self.allocator.free(run.tools);
@@ -8328,6 +8671,7 @@ fn deinitRun(
         releaseProjectedSlice(self, effects, record.text);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
     };
+    self.allocator.free(run.additional_inputs);
     releaseTrackedText(self, effects, &run.assistant);
     releaseTrackedText(self, effects, &run.output_segment);
     releaseTrackedText(self, effects, &run.output_continued);
@@ -8399,7 +8743,15 @@ fn deinitTask(
 ) void {
     std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
-    std.debug.assert(task.runtime.restore_catalog == null);
+    if (task.runtime.parked_capabilities) |*inputs| {
+        inputs.deinit() catch {};
+        task.runtime.parked_capabilities = null;
+    }
+    if (task.runtime.restore_catalog) |*snapshot| {
+        effects.releaseProjectionBytes(snapshot.projected_bytes);
+        snapshot.deinit();
+        task.runtime.restore_catalog = null;
+    }
     for (task.input_submissions.items) |*record| {
         self.releaseSubmissionPayload(record);
         deinitRunInput(self, effects, &record.input);
@@ -8715,6 +9067,8 @@ fn reviewHistoryTestRun(id: u64, message: []const u8) task_state.RunRecord {
 test "permission review historical groups include only adopted inputs in adoption order" {
     var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(1, "Install package A"), reviewHistoryTestRun(2, "Use its selected source"), reviewHistoryTestRun(3, "Start installing") };
     const states = [_]task_state.AdditionalInputState{ .adopted, .pending, .unadopted, .unknown, .transferred, .adopted };
+    var additional: [states.len]?task_state.AdditionalInput = @splat(null);
+    runs[0].?.additional_inputs = &additional;
     for (states, 0..) |state, index| runs[0].?.additional_inputs[index] = .{
         .id = index + 1,
         .after_output_count = 0,
@@ -9064,7 +9418,7 @@ test "Task receives ordered owned messages during maintenance and stop only canc
     try std.testing.expectEqual(InputAction.wait, runtime.inputAction(1));
     lease.deinit();
     try std.testing.expectEqual(InputAction{ .start = 2 }, runtime.inputAction(1));
-    runtime.failWaitingInput(1, 2, .admission_failed);
+    runtime.failWaitingInput(1, 2, .admission_failed, null);
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
 }
@@ -9153,7 +9507,7 @@ test "Task first root resolves only later unanchored messages without moving old
     var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
     defer projection.clear(&runtime);
     _ = try runtime.receiveInput(1, "earlier-failed", .{ .text = "old failure" }, projection.effects());
-    runtime.failWaitingInput(1, 0, .admission_failed);
+    runtime.failWaitingInput(1, 0, .admission_failed, null);
     _ = try runtime.receiveInput(1, "first-root", .{ .text = "root" }, projection.effects());
     _ = try runtime.receiveInput(1, "later-message", .{ .text = "later" }, projection.effects());
     // Only identity and submission are observed by this ownership move.
@@ -9182,7 +9536,7 @@ test "Task known Session close failure ends the message instead of waiting forev
     task.runtime.close_failed = true;
     const failure = runtime.inputAction(1).fail;
     try std.testing.expectEqual(.binding_unavailable, failure.reason);
-    runtime.failWaitingInput(1, failure.index, failure.reason);
+    runtime.failWaitingInput(1, failure.index, failure.reason, null);
     try std.testing.expectEqual(.failed, task.input_submissions.items[0].state);
     try std.testing.expectEqual(InputAction.none, runtime.inputAction(1));
     try std.testing.expectEqual(@as(usize, 0), runtime.pending_input_bytes);
@@ -9270,4 +9624,367 @@ test "archive abandons failed direct deletion only after admission" {
     try std.testing.expect(try runtime.setArchived(1, true));
     try std.testing.expectEqual(task_deletion.State.idle, task.deletion);
     try std.testing.expect(task.durable.archived);
+}
+
+test "Run execution reclamation waits for every publication and lease then preserves history" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    defer runtime.tasks[0] = null;
+    const task = runtime.find(1).?;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "retained input")};
+    task.durable.runs = &runs;
+    const run = &runs[0].?;
+    run.execution = try allocator.create(task_state.RunExecution);
+    run.execution.?.* = .{};
+    defer if (run.execution) |execution| allocator.destroy(execution);
+    run.additional_inputs = try allocator.alloc(?task_state.AdditionalInput, 8);
+    @memset(run.additional_inputs, null);
+    defer allocator.free(run.additional_inputs);
+    run.additional_inputs[1] = .{ .id = 2, .after_output_count = 0, .operation_id_len = 0, .text = @constCast("retained constraint"), .redacted = false, .state = .adopted };
+    run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    run.terminal_observed = true;
+    var projection: InputTestProjection = .{ .allocator = allocator };
+    const effects = projection.effects().release;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null); // Terminal publication alone is insufficient.
+    run.event_stream_finalized = true;
+    var worker = try task.runtime.worker_leases.acquire();
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    worker.deinit();
+    for ([_]task_state.AutomaticTitleState{ .pending, .running, .ready }) |state| {
+        run.execution.?.automatic_title.state.store(state, .release);
+        runtime.releaseQuiescentRunEffects(effects);
+        try std.testing.expect(run.execution != null);
+    }
+    run.execution.?.automatic_title.state.store(.settled, .release);
+    for ([_]task_state.CheckpointPostprocessState{ .exporting, .failure_ready, .candidate_ready }) |state| {
+        run.checkpoint.state.store(state, .release);
+        runtime.releaseQuiescentRunEffects(effects);
+        try std.testing.expect(run.execution != null);
+    }
+    run.checkpoint.state.store(.settled, .release);
+    run.checkpoint.lease = try task.runtime.worker_leases.acquire();
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    run.checkpoint.lease.?.deinit();
+    run.checkpoint.lease = null;
+    run.pending_file_change_artifacts = 1;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution != null);
+    run.pending_file_change_artifacts = 0;
+    runtime.releaseQuiescentRunEffects(effects);
+    try std.testing.expect(run.execution == null);
+    try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
+    try std.testing.expectEqual(@as(usize, 0), run.output_continued.list.items.len);
+    try std.testing.expectEqual(@as(usize, 2), run.additional_inputs.len);
+    try std.testing.expectEqualStrings("retained constraint", run.additional_inputs[1].?.text);
+    try std.testing.expectEqualStrings("retained input", run.input.text.value);
+    try std.testing.expectEqual(task_state.RunOutcome.completed, task_state.productTerminalFacts(run).?.outcome);
+    runtime.releaseQuiescentRunEffects(effects); // Idempotent, including the retained hole.
+}
+
+test "Host search pages bounded matching work without copying history or exposing live output" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    var task = testModelIntentTask();
+    task.durable.archived = true;
+    task.durable.title = @constCast("archived task");
+    const input = try allocator.alloc(u8, 3 * search_work_limit + 64);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    @memcpy(input[input.len - 12 ..][0..12], "needle尾部");
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, input)};
+    task.durable.runs = &runs;
+    runtime.tasks[0] = task;
+    defer runtime.tasks[0] = null;
+    const run = &runtime.tasks[0].?.durable.runs[0].?;
+    run.assistant.list = .{ .items = @constCast("live-only needle"), .capacity = 0 };
+    const Json = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) task_view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var text: task_view.TextProjection = undefined;
+    text.context = &runtime;
+    text.write_json_fn = Json.write;
+    var storage: [256 * 1024]u8 = undefined;
+    var cursor: ?SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    while (pages < 12) : (pages += 1) {
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, text, "NEEDLE", cursor, 4, 9);
+        try std.testing.expect(writer.end < storage.len);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const page = parsed.value.object;
+        for (page.get("results").?.array.items) |hit| {
+            const detail = hit.object.get("detail").?.string;
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(detail));
+            try std.testing.expect(std.mem.indexOf(u8, detail, "live-only") == null);
+            hits += 1;
+        }
+        const next = page.get("nextCursor").?;
+        if (next == .null) break;
+        const value = next.object;
+        const previous = cursor;
+        cursor = .{ .revision = 4, .security_epoch = 9, .task = try std.fmt.parseInt(usize, value.get("task").?.string, 10), .run = try std.fmt.parseInt(usize, value.get("run").?.string, 10), .part = try std.fmt.parseInt(usize, value.get("part").?.string, 10), .offset = try std.fmt.parseInt(usize, value.get("offset").?.string, 10) };
+        if (previous) |before| try std.testing.expect(!std.meta.eql(before, cursor.?));
+    }
+    try std.testing.expect(pages >= 3 and pages < 12);
+    try std.testing.expectEqual(@as(usize, 1), hits);
+    run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    run.terminal_observed = true;
+    run.event_stream_finalized = true;
+    run.assistant.committed_len = run.assistant.list.items.len;
+    run.assistant_output_start = 0;
+    run.assistant_output_kind = .final;
+    var writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "live-only", .{ .revision = 4, .security_epoch = 9, .run = 1, .part = 1 }, 4, 9);
+    var completed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+    defer completed.deinit();
+    try std.testing.expectEqualStrings("completion", completed.value.object.get("results").?.array.items[0].object.get("kind").?.string);
+    writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "needle", cursor, 5, 9);
+    try std.testing.expectEqualStrings("{\"stale\":true,\"results\":[],\"nextCursor\":null}", writer.buffered());
+    writer = std.Io.Writer.fixed(&storage);
+    try runtime.writeSearchProjection(&writer, text, "needle", cursor, 4, 10);
+    try std.testing.expectEqualStrings("{\"stale\":true,\"results\":[],\"nextCursor\":null}", writer.buffered());
+    writer = std.Io.Writer.fixed(&storage);
+    try std.testing.expectError(error.InvalidViewRequest, runtime.writeSearchProjection(&writer, text, "a" ** 257, null, 4, 9));
+}
+
+fn searchTestProjection(context: *const anyopaque) task_view.TextProjection {
+    const Json = struct {
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) task_view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var text: task_view.TextProjection = undefined;
+    text.context = context;
+    text.write_json_fn = Json.write;
+    return text;
+}
+
+fn searchTestCursor(value: std.json.Value) !?SearchCursor {
+    if (value == .null) return null;
+    const fields = value.object;
+    return .{
+        .revision = try std.fmt.parseInt(u64, fields.get("revision").?.string, 10),
+        .security_epoch = try std.fmt.parseInt(u64, fields.get("securityEpoch").?.string, 10),
+        .task = try std.fmt.parseInt(usize, fields.get("task").?.string, 10),
+        .run = try std.fmt.parseInt(usize, fields.get("run").?.string, 10),
+        .part = try std.fmt.parseInt(usize, fields.get("part").?.string, 10),
+        .offset = try std.fmt.parseInt(usize, fields.get("offset").?.string, 10),
+    };
+}
+
+test "Host search retains readable Skill attachment and paragraph boundaries across windows" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    defer runtime.tasks[0] = null;
+    const task = &runtime.tasks[0].?;
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "unrelated")};
+    task.durable.runs = &runs;
+    const run = &runs[0].?;
+    var tools = [_]?task_state.ToolView{.{ .route_digest = @splat(0), .id = @constCast("tool"), .order = 1, .name = @constCast("Bash"), .input = @constCast("raw-tool-only"), .progress = @constCast("raw-tool-only"), .content = @constCast("raw-tool-only"), .state = .completed }};
+    run.tools = &tools;
+    var arguments = [_][]u8{ @constCast("alpha"), @constCast("beta") };
+    run.input = .{ .skill = .{ .skill_id = @constCast("skill"), .catalog_revision = @constCast("1"), .invocation_name = @constCast("audit"), .display_name = @constCast("Audit"), .argument_values = &arguments } };
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .file, .format = null, .display_name = @constCast(""), .size_bytes = 0, .redacted = true },
+        .{ .kind = .file, .format = null, .display_name = @constCast("report.pdf"), .size_bytes = 1 },
+    };
+    var ends = [_]u64{ 5, 11 };
+    const long = try allocator.alloc(u8, 507);
+    defer allocator.free(long);
+    @memset(long, 'a');
+    const Case = struct { query: []const u8, expected: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .query = "/audit alpha", .expected = "/audit alpha beta" },
+        .{ .query = "alpha beta", .expected = "/audit alpha beta" },
+        .{ .query = "a needle", .expected = null },
+        .{ .query = "Read report.pdf", .expected = "Read report.pdf" },
+        .{ .query = "first\n\nsecond", .expected = "first\n\nsecond\n\nanswer" },
+        .{ .query = "second\n\nanswer", .expected = "first\n\nsecond\n\nanswer" },
+        .{ .query = "firstsecond", .expected = "" },
+        .{ .query = "raw-tool-only", .expected = "" },
+    };
+    for (cases, 0..) |case, index| {
+        if (index == 2) {
+            arguments[0] = long;
+            arguments[1] = @constCast("needle");
+        }
+        if (index == 3) run.input = .{ .multimodal = .{ .text = @constCast("Read"), .attachments = &attachments } };
+        if (index == 4) {
+            run.input = .{ .text = .{ .value = @constCast("unrelated") } };
+            run.assistant.list = .{ .items = @constCast("firstsecondanswer"), .capacity = 0 };
+            run.assistant.committed_len = 17;
+            run.commentary_ends = &ends;
+            run.commentary_count = 2;
+            run.assistant_output_start = 11;
+            run.assistant_output_kind = .final;
+            run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+            run.terminal_publication.store(.published, .release);
+            run.terminal_observed = true;
+            run.event_stream_finalized = true;
+        }
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), case.query, null, 1, 1);
+        var page = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer page.deinit();
+        const hits = page.value.object.get("results").?.array.items;
+        if (case.expected) |expected| {
+            if (expected.len == 0) {
+                try std.testing.expectEqual(@as(usize, 0), hits.len);
+                continue;
+            }
+            try std.testing.expectEqual(@as(usize, 1), hits.len);
+            try std.testing.expectEqualStrings(expected, hits[0].object.get("detail").?.string);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), hits.len);
+            const detail = hits[0].object.get("detail").?.string;
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.mem.indexOf(u8, detail, "a needle") != null);
+        }
+        try std.testing.expect(page.value.object.get("nextCursor").? == .null);
+    }
+}
+
+test "Host search traverses more than one full result page exactly once including sparse and archived history" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 4);
+    defer runtime.deinitStorage();
+    defer @memset(runtime.tasks, null);
+    const histories = try allocator.alloc([16]?task_state.RunRecord, 4);
+    defer allocator.free(histories);
+    for (histories, 0..) |*runs, t| {
+        for (runs, 1..) |*entry, id| entry.* = reviewHistoryTestRun(id, "needle");
+        var task = testModelIntentTask();
+        task.durable.id = t + 1;
+        task.durable.title = @constCast("unrelated");
+        task.durable.archived = t == 3;
+        task.durable.runs = runs;
+        runtime.tasks[t] = task;
+    }
+    histories[1][3] = null;
+    var additional = [_]?task_state.AdditionalInput{ null, .{ .id = 1, .after_output_count = 0, .operation_id_len = 0, .text = @constCast("needle extra"), .redacted = false, .state = .adopted } };
+    histories[0][0].?.additional_inputs = &additional;
+    var seen: [4][16][2]bool = @splat(@splat(@splat(false)));
+    var cursor: ?SearchCursor = null;
+    var total: usize = 0;
+    var pages: usize = 0;
+    while (pages < 8) : (pages += 1) {
+        var storage: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), "needle", cursor, 5, 9);
+        var page = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer page.deinit();
+        const hits = page.value.object.get("results").?.array.items;
+        try std.testing.expect(hits.len <= search_result_limit);
+        if (pages == 0) try std.testing.expectEqual(search_result_limit, hits.len);
+        for (hits) |hit| {
+            const object = hit.object;
+            const t = try std.fmt.parseInt(usize, object.get("taskId").?.string, 10);
+            const r = try std.fmt.parseInt(usize, object.get("runId").?.string, 10);
+            const part = try std.fmt.parseInt(usize, object.get("part").?.string, 10);
+            try std.testing.expect(t >= 1 and t <= 4 and r >= 1 and r <= 16 and part < 2);
+            try std.testing.expect(!seen[t - 1][r - 1][part]);
+            seen[t - 1][r - 1][part] = true;
+            total += 1;
+        }
+        const before = cursor;
+        cursor = try searchTestCursor(page.value.object.get("nextCursor").?);
+        if (cursor == null) break;
+        if (before) |value| try std.testing.expect(!std.meta.eql(value, cursor.?));
+    }
+    try std.testing.expect(pages >= 1 and pages < 8);
+    try std.testing.expectEqual(@as(usize, 64), total);
+    try std.testing.expect(!seen[1][3][0]);
+    try std.testing.expect(seen[0][0][1] and seen[3][15][0]);
+}
+
+test "search revision exhaustion cannot wrap into a reusable cursor identity" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.search_revision = std.math.maxInt(u64);
+    runtime.noteSearchChange();
+    try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
+    runtime.noteSearchChange();
+    try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
+}
+
+test "Host search matches Unicode case variants and preserves raw UTF-8 through continuation" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    defer runtime.tasks[0] = null;
+    var task = testModelIntentTask();
+    task.durable.title = @constCast("unrelated");
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "")};
+    task.durable.runs = &runs;
+    runtime.tasks[0] = task;
+    const run = &runtime.tasks[0].?.durable.runs[0].?;
+    for ([_]struct { source: []const u8, query: []const u8, expected: usize }{
+        .{ .source = "CAFÉ", .query = "café", .expected = 1 },
+        .{ .source = "ПРИВЕТ", .query = "привет", .expected = 1 },
+        .{ .source = "ΟΣ", .query = "ος", .expected = 1 },
+        .{ .source = "𐐀", .query = "𐐨", .expected = 1 },
+        .{ .source = "İ", .query = "i\u{307}", .expected = 1 },
+        .{ .source = "Straße", .query = "STRASSE", .expected = 1 },
+        .{ .source = "ße", .query = "se", .expected = 1 },
+        .{ .source = "K", .query = "k", .expected = 1 },
+        .{ .source = "CAFÉ", .query = "cafe", .expected = 0 },
+    }) |case| {
+        run.input = .{ .text = .{ .value = @constCast(case.source) } };
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), case.query, null, 1, 1);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const hits = parsed.value.object.get("results").?.array.items;
+        try std.testing.expectEqual(case.expected, hits.len);
+        if (hits.len != 0) try std.testing.expectEqualStrings(case.source, hits[0].object.get("detail").?.string);
+    }
+    const input = try allocator.alloc(u8, 4 * search_work_limit - 16);
+    defer allocator.free(input);
+    for (0..input.len / 2) |index| @memcpy(input[2 * index ..][0..2], "Я");
+    @memcpy(input[input.len - " CAFÉ".len ..], " CAFÉ");
+    run.input = .{ .text = .{ .value = input } };
+    var cursor: ?SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    while (pages < 8) : (pages += 1) {
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), "café", cursor, 1, 1);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const page = parsed.value.object.get("results").?.array.items;
+        for (page) |hit| {
+            const detail = hit.object.get("detail").?.string;
+            try std.testing.expect(std.unicode.utf8ValidateSlice(detail));
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.mem.endsWith(u8, detail, "CAFÉ"));
+            hits += 1;
+        }
+        const previous = cursor;
+        cursor = try searchTestCursor(parsed.value.object.get("nextCursor").?);
+        if (cursor == null) break;
+        if (previous) |before| try std.testing.expect(!std.meta.eql(before, cursor.?));
+        if (cursor.?.run == 1 and cursor.?.part == 0)
+            try std.testing.expect(std.unicode.utf8ValidateSlice(input[0..cursor.?.offset]));
+    }
+    try std.testing.expect(pages > 0 and pages < 8);
+    try std.testing.expectEqual(@as(usize, 1), hits);
 }

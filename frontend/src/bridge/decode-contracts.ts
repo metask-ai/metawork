@@ -1,3 +1,4 @@
+import type { SearchCursor } from "./contracts.ts";
 import { outputActionStates } from "./contracts.ts";
 import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
 import {
@@ -389,6 +390,9 @@ const taskCreateReasons = [
   "model_selection_changed",
   "stale_catalog",
   "capacity_reached",
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "shutting_down",
 ] as const;
 const taskRunReasons = [
@@ -435,6 +439,9 @@ const taskRestoreReasons = [
   "task_unavailable",
   "recovery_unavailable",
   "capacity_reached",
+  "session_releasing",
+  "session_capacity",
+  "session_close_failed",
   "shutting_down",
 ] as const;
 const catalogRefreshReasons = [
@@ -3805,7 +3812,15 @@ function decodeTask(
     item.inputSubmissions,
     `${path}.inputSubmissions`,
     (raw, p): WaitingInputView => {
-      const entry = object(raw, p, ["submission", "input", "state", "reason"]);
+      const entry = object(raw, p, [
+        "submission",
+        "input",
+        "state",
+        "reason",
+        ...(record(raw, p).reason === "session_close_failed"
+          ? ["blockingTaskId"]
+          : []),
+      ]);
       const state = enumValue(entry.state, `${p}.state`, [
         "waiting",
         "failed",
@@ -3818,7 +3833,10 @@ function decodeTask(
           : enumValue(entry.reason, `${p}.reason`, sendInputReasons);
       if ((state === "waiting" || state === "interrupted") && reason !== null)
         fail(p, "waiting or restored input has no failure reason");
+      if (reason === "session_close_failed" && state !== "failed")
+        fail(p, "Session blocker requires failed input");
       return {
+        ...decodeSessionBlocker(entry, reason, p),
         submission: decodeInputSubmission(entry.submission, `${p}.submission`),
         input: decodeRunInput(entry.input, `${p}.input`),
         state,
@@ -4753,6 +4771,36 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     servers,
   };
 }
+export function decodeSearchCursor(
+  value: unknown,
+  path: string,
+): SearchCursor | null {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "revision",
+    "securityEpoch",
+    "task",
+    "run",
+    "part",
+    "offset",
+  ]);
+  const bounded = (value: unknown, p: string) => {
+    const id = wireId(value, p);
+    u64WireInteger(value, p);
+    return id;
+  };
+  return {
+    revision: positiveU64WireId(item.revision, `${path}.revision`),
+    securityEpoch: positiveU64WireId(
+      item.securityEpoch,
+      `${path}.securityEpoch`,
+    ),
+    task: bounded(item.task, `${path}.task`),
+    run: bounded(item.run, `${path}.run`),
+    part: bounded(item.part, `${path}.part`),
+    offset: bounded(item.offset, `${path}.offset`),
+  };
+}
 export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
   const item = object(value, path, [
     "taskId",
@@ -4760,6 +4808,8 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
     "runLimit",
     "management",
     "search",
+    "searchQuery",
+    "searchCursor",
     "receipts",
   ]);
   const taskId =
@@ -4788,12 +4838,25 @@ export function decodeViewScope(value: unknown, path = "$scope"): ViewScope {
       .size !== receipts.length
   )
     fail(path, "invalid receipt query bounds");
+  const search = booleanValue(item.search, `${path}.search`);
+  const searchQuery = stringValue(item.searchQuery, `${path}.searchQuery`);
+  const searchCursor = decodeSearchCursor(
+    item.searchCursor,
+    `${path}.searchCursor`,
+  );
+  if (
+    new TextEncoder().encode(searchQuery).length > 256 ||
+    (!search && (searchQuery !== "" || searchCursor !== null))
+  )
+    fail(path, "invalid search bounds");
   return {
     receipts,
     taskId,
     beforeRunId,
     runLimit,
-    search: booleanValue(item.search, `${path}.search`),
+    search,
+    searchQuery,
+    searchCursor,
     management: enumValue(item.management, `${path}.management`, [
       "none",
       "skills",
@@ -5535,39 +5598,69 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const searchIndex =
     view.searchIndex === null
       ? null
-      : arrayValue(view.searchIndex, "$.searchIndex", (value, path) => {
-          const item = object(value, path, [
-            "taskId",
-            "runId",
-            "input",
-            "output",
+      : (() => {
+          const page = object(view.searchIndex, "$.searchIndex", [
+            "stale",
+            "results",
+            "nextCursor",
           ]);
-          const taskId = positiveWireId(item.taskId, `${path}.taskId`);
-          if (!taskIndex.some((task) => task.id === taskId))
-            fail(path, "unknown search Task");
-          const output =
-            item.output === null
-              ? null
-              : decodeRunOutput(item.output, `${path}.output`);
+          const stale = booleanValue(page.stale, "$.searchIndex.stale");
+          const results = arrayValue(
+            page.results,
+            "$.searchIndex.results",
+            (value, path) => {
+              const hit = object(value, path, [
+                "taskId",
+                "runId",
+                "part",
+                "kind",
+                "detail",
+              ]);
+              const taskId = positiveU64WireId(hit.taskId, `${path}.taskId`);
+              if (!taskIndex.some((task) => task.id === taskId))
+                fail(path, "unknown search Task");
+              const runId =
+                hit.runId === null
+                  ? null
+                  : positiveU64WireId(hit.runId, `${path}.runId`);
+              const kind = enumValue(hit.kind, `${path}.kind`, [
+                "task",
+                "instruction",
+                "completion",
+              ] as const);
+              if ((kind === "task") !== (runId === null))
+                fail(path, "search kind mismatch");
+              const detail = stringValue(hit.detail, `${path}.detail`);
+              if (new TextEncoder().encode(detail).length > 512)
+                fail(path, "unbounded search snippet");
+              return {
+                taskId,
+                runId,
+                part: u64WireInteger(hit.part, `${path}.part`),
+                kind,
+                detail,
+              };
+            },
+          );
+          const nextCursor = decodeSearchCursor(
+            page.nextCursor,
+            "$.searchIndex.nextCursor",
+          );
           if (
-            output &&
-            (output.provisional !== "" ||
-              (output.responseKind === null && output.response !== ""))
+            nextCursor &&
+            JSON.stringify(nextCursor) === JSON.stringify(scope.searchCursor)
           )
-            fail(path, "search output must be classified and terminal");
-          return {
-            taskId,
-            runId: positiveWireId(item.runId, `${path}.runId`),
-            input: decodeRunInput(item.input, `${path}.input`),
-            output,
-          };
-        });
-  if (
-    searchIndex &&
-    new Set(searchIndex.map((run) => `${run.taskId}:${run.runId}`)).size !==
-      searchIndex.length
-  )
-    fail("$.searchIndex", "duplicate search Run");
+            fail("$.searchIndex", "non-progressing search cursor");
+          if (
+            results.length > 50 ||
+            (stale && (results.length !== 0 || nextCursor !== null)) ||
+            new Set(
+              results.map((hit) => `${hit.taskId}:${hit.runId}:${hit.part}`),
+            ).size !== results.length
+          )
+            fail("$.searchIndex", "invalid search page");
+          return { stale, results, nextCursor };
+        })();
   const summary = taskIndex.find((task) => task.id === scope.taskId);
   if ((summary !== undefined) !== (taskPage !== null))
     fail("$.taskPage", "Task presence disagrees with index");
@@ -6229,6 +6322,22 @@ export function decodeSkillDetailResult(value: unknown): SkillDetailResult {
     reason: nonEmptyString(item.reason, "$.reason"),
   };
 }
+function decodeSessionBlocker(
+  item: Record<string, unknown>,
+  reason: string | null,
+  path = "$",
+): { blockingTaskId?: string } {
+  if (reason === "session_close_failed")
+    return {
+      blockingTaskId: positiveU64WireId(
+        item.blockingTaskId,
+        `${path}.blockingTaskId`,
+      ),
+    };
+  if (item.blockingTaskId !== undefined)
+    fail(`${path}.blockingTaskId`, "unexpected Session blocker");
+  return {};
+}
 export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
   const item = object(value, "$", [
     "accepted",
@@ -6236,10 +6345,14 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     "bindingEpoch",
     "mcpAuthority",
     "reason",
+    ...(record(value, "$").reason === "session_close_failed"
+      ? ["blockingTaskId"]
+      : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   if (accepted) {
     if (item.reason !== null) fail("$.reason", "expected null");
+    decodeSessionBlocker(item, null);
     return {
       accepted: true,
       taskId: positiveWireId(item.taskId, "$.taskId"),
@@ -6254,12 +6367,14 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     item.mcpAuthority !== null
   )
     fail("$", "a rejected Task creation cannot expose identities");
+  const reason = enumValue(item.reason, "$.reason", taskCreateReasons);
   return {
     accepted: false,
     taskId: null,
     bindingEpoch: null,
     mcpAuthority: null,
-    reason: enumValue(item.reason, "$.reason", taskCreateReasons),
+    reason,
+    ...decodeSessionBlocker(item, reason),
   };
 }
 export function decodeTaskRunResult(
@@ -6409,12 +6524,16 @@ export function decodeTaskRestoreResult(
     "taskId",
     "attemptId",
     "reason",
+    ...(record(value, "$").reason === "session_close_failed"
+      ? ["blockingTaskId"]
+      : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const taskId = positiveWireId(item.taskId, "$.taskId");
   if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
   if (accepted) {
     if (item.reason !== null) fail("$.reason", "expected null");
+    decodeSessionBlocker(item, null);
     return {
       accepted: true,
       taskId,
@@ -6423,11 +6542,13 @@ export function decodeTaskRestoreResult(
     };
   }
   if (item.attemptId !== null) fail("$.attemptId", "expected null");
+  const reason = enumValue(item.reason, "$.reason", taskRestoreReasons);
   return {
     accepted: false,
     taskId,
     attemptId: null,
-    reason: enumValue(item.reason, "$.reason", taskRestoreReasons),
+    reason,
+    ...decodeSessionBlocker(item, reason),
   };
 }
 export function assertCompactCancelAccepted(

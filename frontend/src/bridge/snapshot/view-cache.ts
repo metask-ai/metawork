@@ -52,7 +52,11 @@ function key(name: ViewBlockName, scope: ViewScope) {
     case "management":
       return scope.management;
     case "searchIndex":
-      return String(scope.search);
+      return JSON.stringify([
+        scope.search,
+        scope.searchQuery,
+        scope.searchCursor,
+      ]);
     default:
       return name;
   }

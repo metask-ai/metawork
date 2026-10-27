@@ -3914,6 +3914,8 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     // Product terminal publication must not wait for the same executor job's
     // controlled checkpoint export to be released.
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    const exporting_run = &workbench.task_runtime.find(task_id).?.durable.runs[0].?;
+    try std.testing.expect(exporting_run.execution != null);
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
     try waitControlSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
@@ -6079,7 +6081,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     const revision = workbench.currentRevision();
 
     try std.testing.expectError(
-        error.TaskCapacity,
+        error.SessionCapacity,
         workbench.createTaskForWorkspace(
             .automatic,
             1,
@@ -6942,7 +6944,7 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
     for (0..5000) |_| {
         try workbench.drainAgentEvents();
         if (!task.runtime.worker_leases.hasLive() and
-            task.durable.runs[0].?.automatic_title.state.load(.acquire) == .settled) break;
+            (task.durable.runs[0].?.execution == null or task.durable.runs[0].?.execution.?.automatic_title.state.load(.acquire) == .settled)) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.RunDidNotSettle;
     const revision = workbench.currentRevision();
@@ -10358,7 +10360,7 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         switch (read) {
             .revision => _ = control.currentRevision(),
             .snapshot => _ = try control.writeAggregateFixture(&snapshot),
-            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true }),
+            .view => _ = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true, .search_query = "bounded" }),
             .workspace_catalog => _ = try control.workspaceCatalog(task.durable.workspace_id),
             .personal_catalog => _ = control.skillCatalog(),
             .task_catalog => _ = try control.taskCatalog(task.durable.id),
@@ -10375,18 +10377,22 @@ test "ProductDelivery reads do not advance worker lifecycle" {
         try std.testing.expectEqual(before_revision, control.revision);
         try std.testing.expectEqual(before_phase, task_state.runPhase(run));
         try std.testing.expectEqual(before_commits, history.commits);
-        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) != null);
+        if (read == .view) try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1, .search_query = "bounded" }) != null);
         // Worker completion advances without a Renderer once Application
         // consumes its wake through the explicit Product event boundary.
         try control.drainAgentEvents();
         try std.testing.expect(run.event_stream_finalized);
         try std.testing.expectEqual(.completed, task_state.runPhase(run));
         if (read == .view) {
-            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1 }) == null);
-            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true });
+            try std.testing.expect(control.encoded_views.get(.{ .kind = .searchIndex, .limit = 1, .search_query = "bounded" }) == null);
+            const finalized = try control.writeViewFixture(&snapshot, .{ .task_id = task.durable.id, .search = true, .search_query = "bounded" });
             var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, finalized, .{});
             defer decoded.deinit();
-            try std.testing.expect(decoded.value.object.get("searchIndex").?.array.items[0].object.get("output").? != .null);
+            const hits = decoded.value.object.get("searchIndex").?.object.get("results").?.array.items;
+            try std.testing.expect(hits.len > 0);
+            try std.testing.expect(for (hits) |hit| {
+                if (std.mem.eql(u8, hit.object.get("kind").?.string, "instruction")) break true;
+            } else false);
         }
     }
 }
@@ -10445,6 +10451,7 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     try std.testing.expect(task.runtime.active_operation == .none);
     try std.testing.expect(task.runtime.worker_leases.hasLive());
+    try std.testing.expect(task.durable.runs[0].?.execution != null);
     var result = try scenario.control.sendInput("during-title", scenario.task_id, .{ .text = "cancel this pending message" });
     try std.testing.expectEqual(.accepted, result.outcome);
     try std.testing.expectEqual(@as(usize, 1), task.input_submissions.items.len);
@@ -10477,6 +10484,11 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
     fake_core.releaseCompletion();
     title_released = true;
     try settleInputScenario(scenario);
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        if (task.durable.runs[0].?.execution == null and task.durable.runs[1].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunExecutionNotReclaimed;
     try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
     try std.testing.expect(fake_core.run_text_matches);
     try std.testing.expectEqualStrings("after-stop", task.durable.runs[1].?.submission.?.operationId());
@@ -10838,4 +10850,115 @@ test "file delivery Run authority survives preparation changes until worker and 
     try settleInputScenario(scenario);
     try std.testing.expect(run.file_delivery == null);
     try std.testing.expectEqual(@as(usize, 1), probe.released);
+}
+
+test "Session pressure never cancels busy work or automatically retries a failed close" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    const storage = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    var history = TaskPersistenceProbe{ .storage = storage };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 2 }, configuration);
+    defer control.deinit();
+    defer fake_core.releaseControlled();
+    try installControlExecution(&control);
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    fake_core.setNextPlan(.controlled);
+    const id = try control.createTask(input);
+    try waitInitialTaskCatalog(&control, id);
+    const run_id = try control.runTask(id, .{ .text = "Keep this accepted work running." });
+    try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+    const task = control.task_runtime.find(id).?;
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expect(!task.runtime.cancel_requested);
+    try std.testing.expectEqual(run_id, task.runtime.active_operation.run);
+    fake_core.releaseControlled();
+    try waitCheckpointRecord(&control, &history);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.durable.runs[0].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    // Terminal work still cannot be released while an artifact or continuation owns it.
+    task.durable.runs[0].?.pending_file_change_artifacts = 1;
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    task.durable.runs[0].?.pending_file_change_artifacts = 0;
+    task.durable.runs[0].?.input_continuation_pending = true;
+    try std.testing.expect(control.task_runtime.idleReleaseRouteId(null) == null);
+    task.durable.runs[0].?.input_continuation_pending = false;
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
+    try std.testing.expectError(error.SessionReleasing, control.createTask(input));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.close_failed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(task.runtime.hasClosingSession());
+    try std.testing.expect(task.runtime.parked_capabilities != null);
+    try std.testing.expectEqual(id, control.sessionReleaseFailureTaskId().?);
+    const destroyed = fake_core.session_destroyed;
+    for (0..8) |_| {
+        try std.testing.expectError(error.SessionReleaseFailed, control.createTask(input));
+        control.syncLifecycle();
+    }
+    try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
+    try std.testing.expect(task.runtime.close_thread == null);
+    try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, id));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (task.runtime.attachment == .detached) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    fake_core.setNextPlan(.controlled);
+    const second = try control.createTask(input);
+    try waitInitialTaskCatalog(&control, second);
+    _ = try control.runTask(second, .{ .text = "Occupy the only live Session." });
+    try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
+    try std.testing.expectEqual(.accepted, (try control.sendInput("busy-capacity", id, .{ .text = "Keep the unavailable draft." })).outcome);
+    try std.testing.expectEqual(.session_capacity, task.input_submissions.items[0].reason.?);
+    try std.testing.expect(task.input_submissions.items[0].blocking_task_id == null);
+    fake_core.releaseControlled();
+    const other = control.task_runtime.find(second).?;
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (other.durable.runs[0].?.execution == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
+    try std.testing.expectEqual(.accepted, (try control.sendInput("start-release", id, .{ .text = "Try releasing capacity." })).outcome);
+    try std.testing.expectEqual(.session_releasing, task.input_submissions.items[1].reason.?);
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (other.runtime.close_failed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.accepted, (try control.sendInput("failed-release", id, .{ .text = "Keep the blocked draft." })).outcome);
+    const failed = task.input_submissions.items[2];
+    try std.testing.expectEqual(.failed, failed.state);
+    try std.testing.expectEqual(.session_close_failed, failed.reason.?);
+    try std.testing.expectEqual(second, failed.blocking_task_id.?);
+    try std.testing.expect(failed.payload == null);
+    try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
+    try std.testing.expect(task.durable.runs[1] == null);
 }

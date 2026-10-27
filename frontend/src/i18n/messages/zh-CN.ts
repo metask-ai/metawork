@@ -989,6 +989,10 @@ export const zhCN: Record<MessageId, string> = {
   "operation.workspace_remove": "移除工作区",
   "operation.skill_catalog_refresh": "刷新 Skill 目录",
   "search.open": "搜索",
+  "search.loading": "搜索中…",
+  "search.no_more": "没有更多匹配项。",
+  "search.more": "继续搜索",
+  "search.first": "返回第一页",
   "search.title": "搜索 MetaWork",
   "search.placeholder": "搜索工作区、任务和已完成内容…",
   "search.hint": "跨所有工作区搜索；工具执行细节不会进入结果。",
@@ -1315,6 +1319,11 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.selection_unavailable":
     "该工作区已不可用，请刷新后选择其他工作区。",
   "mutation.transport_failed": "MetaWork 无法确认这次操作。",
+  "mutation.reason.session_releasing": "正在释放空闲会话名额，请稍后重试。",
+  "mutation.reason.session_capacity":
+    "当前没有可安全释放的执行会话名额，请稍后重试。",
+  "mutation.reason.session_close_failed":
+    "任务“{task}”的会话关闭失败，请先处理该任务后重试。",
   "mutation.reason.execution_changed": "执行配置已变化，请确认最新配置后重试。",
   "mutation.reason.execution_unavailable": "当前选择的执行配置暂时不可用。",
   "mutation.reason.workspace_changed":

@@ -1,0 +1,74 @@
+# 历史与执行资源分离实施计划
+
+日期：2026-10-26。分支：`feat/history-runtime-bounds`。TinyKG root：9975。
+
+本计划记录用户已授权的本轮实施范围，不是 decision record。后续考虑 SQLite；本轮保留现有 framed store 的文件名、编码、保存与恢复路径，不实现自定义 V2、追加日志、根索引或 SQLite 接入。
+
+## 1. 目标与边界
+
+本轮实现能在未来存储切换后继续使用的领域改动：历史与执行资源分离、历史 Task 与 live Session 解耦、有界产品视图和 Host 搜索。
+
+- 历史按实际内容分配，避免恢复时为每条 Run 分配完整执行结构和最大附属容量。执行资源只在活跃工作需要时拥有，引用全部静止后释放。
+- Session 独立受执行资源约束；压力下只通过现有生命周期安全释放 idle attachment，保留历史和恢复能力。失败不伪装成历史槽位耗尽。
+- 正文与搜索结果按页续读；导航、manifest、Compact、审批保留当前已接纳的数量上限并完整返回，不因内部重构放开上限或截断。各视图分别执行编码字节上限，查询和缓存正确处理历史版本与安全失效。
+- 保持产品 owner、已确认事务、credential 清洗、checkpoint 恢复资格及现有 worker/event 归还协议。公共视图合同变化随 Native、Bridge、Renderer 和 fixture 一起收口。
+- 不借内部重构直接放开当前持久化数量和字节接受上限，不删除历史或新增运行时 reason 的持久化；不声称本轮完整修复 #12/#25。
+
+资源、恢复与安全合同沿现有 [Product 架构](../product-architecture.md)；视图合同沿 [Renderer Bridge 合同](../renderer-bridge-contract.md)；验证按 [验证规范](../validation.md)。只有实际合同变化才修改对应真源。
+
+## 2. DAG 与提交边界
+
+| 子任务            | TinyKG id | 依赖   | 完成与提交条件                                                                                    |
+| ----------------- | --------- | ------ | ------------------------------------------------------------------------------------------------- |
+| T0 范围与任务控制 | 9976      | 无     | 新分支、goal、DAG 和本计划建立，文档检查通过；独立提交                                            |
+| T1 历史与执行结构 | 9977      | T0     | 按需拥有执行 control/title/context；恢复集合按实际数量分配；OOM、格式往返与内存回归通过           |
+| T2 静止回收       | 9978      | T1     | worker、事件、标题、checkpoint 和 artifact 引用静止后释放执行部分；取消、失败、删除与退出回归通过 |
+| T3 Session 解耦   | 9979      | T2     | 小 Session 预算下多历史 Task 的安全压力回收与真实 Core 恢复；忙碌及关闭失败精确反馈               |
+| T4 Host 有界视图  | 9980      | T1     | typed 请求、有界投影、有限 manifest、Host 分页搜索与 Bridge fixture 验证                          |
+| T5 Renderer 接入  | 9981      | T4     | 分页、搜索 cursor、刷新与安全失效；typecheck 和受影响 suite 通过                                  |
+| T6 联合验收       | 9982      | T3、T5 | 正式 Native graph、Bridge/Renderer、canonical Core lifecycle、相关桌面路径和合同/guard 收口       |
+
+每个子任务完成后立即评估独立提交，记录 SHA 或暂缓理由。跨语言合同只有在生产链路和 fixture 一致时才提交，不能为了提交频率留下不可工作的中间状态。不自动 push 或 merge。
+
+工作开始时已有 `build.zig` 测量入口、容量/写入测量脚本、探针和证据未提交；它们不属于产品实现提交，保留其原内容与职责，不用 `git add .` 混入。
+
+## 3. 验收重点
+
+1. 读取现有 framed 历史并重新编码保持完整事实；恢复终态不分配 worker 执行结构，内存随实际记录/附属内容增长。OOM 不泄漏或发布半个候选。
+2. RunRecord 的 worker 指针与所有权保持稳定；终态不等于可回收，任何在途标题、checkpoint、事件与 artifact 都能阻止提前释放。
+3. 历史 Task 保留，有限 Session 安全 detach/reattach；没有可回收对象时明确拒绝，不删除数据，不自动反复重试关闭失败。
+4. 视图与搜索覆盖最后一页、无命中、超多命中、归档 Task、跨页更新/取消/安全失效；不把未返回解释为删除，不向 Renderer 下发全量搜索语料。
+5. 当前数量/字节边界、旧数据恢复、完整保存失败与 unknown 行为保持，不能以取消 verifier 或扩大限制掩盖本轮不处理的存储问题。
+6. 跑风险对应的最小充分测试，再执行共享 owner 与正式 Native graph；缺 canonical bundle 明确失败，不跳过真实 Core 后报告成功。性能沿现有主线程与展示 Gate 验证。
+
+本轮结束时报告实际提交、完成项、验证结果及剩余存储约束。未来 SQLite 接入另行制定最小方案，不将前期自定义文件存储提案带入本轮代码。
+
+## 4. 主体实现交付（2026-10-27）
+
+按用户“先完成主要任务”的要求，主体实现已经收口。以下是实施记录，不改变上述范围或现有验收 Gate。
+
+| 交付项 | 实现提交 | 已验证的结果 |
+| --- | --- | --- |
+| 历史与执行结构分离 | `cb62c6f1`、`69ab2a2f` | 恢复只按实际历史内容分配；执行结构在 worker、事件、标题、checkpoint 和 artifact 引用全部静止后回收；格式往返、OOM 与生命周期回归通过 |
+| Session 与历史 Task 解耦 | `098c0562`、`50ca7bc9` | 压力下经原生命周期释放安全 idle Session，保留历史、checkpoint 和恢复能力；真实 Core 的小 Session 预算恢复及关闭失败回归通过 |
+| 有界视图与 Host 搜索 | `50ca7bc9`、`562fab02` | Native、Bridge、Renderer 和共享 fixture 一起切换；查询与结果有界，cursor 绑定历史和安全版本；跨页、稀疏/归档历史、可读文本分隔及失效回归通过 |
+| 真实桌面联合验证 | `e6f457a1` | Windows WebView 经生产 Bridge 与 canonical AgentCore 达到配置的 16 个并发 Run；保留 21 条历史，历史加载、切换、停止、管理异步结果、断连恢复与终态检查通过 |
+
+对 `e6f457a1` 的正式 Native test graph 为 233 个步骤成功、1,416 项通过、7 项跳过；Renderer typecheck、生成 wire 校验和完整 Node suite 为 968 项通过、8 项跳过。受影响 Zig 格式及 diff 检查通过。主体交付不包含 push、merge 或发行。
+
+**整体性能验收仍未闭合。** 最新原始基准中，Debug 的 `tool_results/history_copy` 单次为 32.9481 ms（上限 32 ms），ReleaseFast 的 `concentrated_results/task_cold` 单次为 16.8729 ms（上限 16 ms）。两次都是完整 40 场景、各 100 样本的正式运行；不以较早通过的运行覆盖失败，也不以周期计数或未定因的环境解释豁免墙钟 Gate。后续单独定位这两项，未通过前不关闭整体验收及 root goal。
+
+验证记录由 TinyKG root `9975` 的 `verified_by` 证据关联；本地原始日志及带 revision、日志 SHA-256 的汇总位于 `.zig-cache/history-runtime-audit-verification.json`。现有 framed store、保存/恢复路径及数量/字节接受限制保持，#12/#25 的完整容量修复仍属于后续工作。工作开始前已有的容量测量脚本、探针、证据与 `build.zig` 测量入口继续原样保留，不混入主体提交。
+
+## 5. 评审修正与分支收口（2026-10-27）
+
+用户明确将性能定位留作后续工作，本分支按已完成的功能范围收口，不再扩展存储或性能实现。这不改变 §4 的失败证据，不表示性能 Gate 已通过，也不表示 SQLite 会自动消除主线程视图成本。
+
+评审后的三个修正分别提交：`becf1e80` 完善 Session 名额拒绝及显式重试，`9614279b` 将搜索游标绑定到搜索内容版本，`a8ebd59d` 恢复有界 Unicode 大小写匹配；`85fdd7de` 补充明确拒绝与未知结果的不同重试行为。Unicode 数据离线固定并校验，不引入运行时库。
+
+最后一次收尾提交 `bc995828` 补齐发送消息触发内部恢复的实际路径：等待消息分别显示正在释放、无可释放名额或关闭失败；最后一种带运行时阻塞 Task identity。容量拒绝继续经过原恢复资格检查，失败消息不会在名额释放后自动重放，失败原因和阻塞 identity 不写入历史。同时移除创建路径遗留的错误 `TaskBusy` 文案映射。
+
+后续保留事项：主线程性能两项历史超限及非 ASCII 搜索成本应在独立性能工作中定位，并与未来 SQLite 改造分别验证；现有持久化数量/字节上限及 #12/#25 的完整容量修复尚未完成。本轮不 push、merge 或发布，原有测量文件及 `build.zig` 探针改动不纳入提交。
+
+
+最终功能验证：`bc995828` 的正式 Native test graph 233/233 步骤成功，1,423 项通过、7 项跳过，含真实 canonical AgentCore 的发送恢复路径；Renderer typecheck、生成 wire 校验和完整 Node suite 976 项通过、8 项跳过。跨语言 fixture 验证失败记录的条件字段，SSR 验证阻塞 Task 提示，生命周期覆盖没有可释放名额、释放进行中、关闭失败及失败消息不自动重放。受影响 Zig 格式与 diff 检查通过。原始日志和带提交、SHA-256 的本地汇总在 `.zig-cache/branch-closure-verification.json`；性能未重测、未宣称通过。此前评审修正的真实 WebView 验证仍只证明当时的提交，不将其当作本次新测量。

@@ -69,6 +69,8 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
+    SessionReleasing,
+    SessionReleaseFailed,
     TaskReadOnly,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
@@ -140,6 +142,9 @@ pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
         error.ExecutionUnavailable, error.ExecutionGenerationMismatch => .binding_unavailable,
         error.UnknownTask, error.TaskClosing => .task_unavailable,
         error.TaskBusy => .task_busy,
+        error.SessionReleasing => .session_releasing,
+        error.SessionCapacity => .session_capacity,
+        error.SessionReleaseFailed => .session_close_failed,
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => .workspace_unavailable,
         error.WorkspaceEpochMismatch => .workspace_changed,
         error.WorkspaceRemovalInProgress => .workspace_removing,
@@ -1199,6 +1204,7 @@ const ViewPreparation = struct {
     credentials: ?ProjectionCredentials = null,
     tools: std.ArrayList(Tool) = .empty,
     raw_bytes: usize = 0,
+    search_query: [task_runtime.search_query_bytes]u8 = @splat(0),
     tool_limit: usize = 0,
     next_tool: usize = 0,
     blocks: [7]Block = undefined,
@@ -1213,6 +1219,7 @@ const ViewPreparation = struct {
     fn clear(self: *ViewPreparation, allocator: std.mem.Allocator) void {
         for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
         self.tools.deinit(allocator);
+        std.crypto.secureZero(u8, &self.search_query);
         if (self.credentials) |*credentials| credentials.deinit();
         self.tail.clear(allocator);
         self.* = .{};
@@ -4266,7 +4273,7 @@ pub const Runtime = struct {
             .release = self.taskRuntimeReleaseEffects(),
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
-            error.SessionCapacity => return error.TaskCapacity,
+            error.SessionCapacity => return self.sessionPressureError(null),
             error.McpNotRefreshed => retry: {
                 self.recoverExpiredMcpCatalogNoFail();
                 mcp_selection = null;
@@ -4274,7 +4281,7 @@ pub const Runtime = struct {
                 task_input.mcp_selection = mcp_selection;
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
-                    error.SessionCapacity => return error.TaskCapacity,
+                    error.SessionCapacity => return self.sessionPressureError(null),
                     else => return retry_err,
                 };
             },
@@ -4388,6 +4395,33 @@ pub const Runtime = struct {
         };
     }
 
+    fn releaseIdleTaskSession(self: *Runtime, except_task_id: ?u64) Error!bool {
+        if (!self.task_persistence_health.operational() or self.checkpoint_store == null or
+            self.checkpoint_store_health.load(.acquire) != .ready) return false;
+        return self.task_runtime.releaseIdleSession(except_task_id, self.taskRuntimeOperationEffects().worker.notifier);
+    }
+
+    /// Only a Task still owning a live/closing Session can block capacity.
+    pub fn sessionReleaseFailureTaskId(self: *const Runtime) ?u64 {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_failed and task.runtime.liveConst() != null) return task.durable.id;
+        };
+        return null;
+    }
+
+    fn sessionPressureError(self: *Runtime, except_task_id: ?u64) Error {
+        const started = self.releaseIdleTaskSession(except_task_id) catch |err| return err;
+        if (started) {
+            self.bumpRevision();
+            return error.SessionReleasing;
+        }
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (task.runtime.close_thread != null or task.runtime.close_requested) return error.SessionReleasing;
+        };
+        if (self.sessionReleaseFailureTaskId() != null) return error.SessionReleaseFailed;
+        return error.SessionCapacity;
+    }
+
     fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!struct { skill: ?*lifecycle.SkillRestoreInputs, mcp: ?*lifecycle.McpSelection, mcp_catalog_generation: ?u64 } {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         var skill: ?*lifecycle.SkillRestoreInputs = null;
@@ -4488,6 +4522,17 @@ pub const Runtime = struct {
             const filters = try self.prepareTaskRestoreFilters(task_id, &original);
             capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
             original_owned = false;
+        } else if (task.runtime.parked_capabilities) |parked| {
+            var original = parked;
+            original.skill = null;
+            original.mcp = null;
+            var original_owned = true;
+            defer if (original_owned) original.deinit() catch {};
+            if (parked.skill) |skill| original.skill = try skill.clone();
+            if (parked.mcp) |mcp| original.mcp = try mcp.clone(self.allocator);
+            const filters = try self.prepareTaskRestoreFilters(task_id, &original);
+            capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
+            original_owned = false;
         }
         const execution = target.input();
         // A cold restore may reuse an already resolved immutable connection.
@@ -4524,7 +4569,7 @@ pub const Runtime = struct {
             .checkpoint_limits = checkpoint_export_limits,
             .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
-            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (attached) &capabilities else null, .text = self.taskRuntimeTextProjection() },
+            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (capabilities != null) &capabilities else null, .text = self.taskRuntimeTextProjection() },
         });
         self.bumpRevision();
         return attempt;
@@ -4545,6 +4590,15 @@ pub const Runtime = struct {
             if (task.runtime.active_operation != .none) return error.RecoveryUnavailable;
             var target = try self.resolveTaskRunModel(task_id);
             defer if (target) |*value| value.deinit();
+            if (task.runtime.attachment == .detached) {
+                _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+                    error.SessionCapacity => return self.sessionPressureError(task_id),
+                    else => return err,
+                };
+                if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
+                    return self.sessionPressureError(task_id);
+                }
+            }
             if (target) |*value| if (task.runtime.attachment == .detached or
                 (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
                 return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
@@ -6046,7 +6100,7 @@ pub const Runtime = struct {
                 switch (self.task_runtime.inputAction(task.durable.id)) {
                     .none, .wait => break,
                     .fail => |action| {
-                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason);
+                        self.task_runtime.failWaitingInput(task.durable.id, action.index, action.reason, null);
                         self.bumpRevision();
                     },
                     .continuation => {
@@ -6054,14 +6108,14 @@ pub const Runtime = struct {
                     },
                     .submit => |action| {
                         _ = self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch) catch |err| {
-                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err));
+                            self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null);
                             self.bumpRevision();
                             continue;
                         };
                         const receipt = self.task_runtime.submitWaitingInput(task.durable.id, action.index, action.run_id, self.taskRuntimeOperationEffects()) catch |err| {
                             switch (err) {
                                 error.TaskBusy, error.RunChanged, error.RunStopping, error.RunNotReady => break,
-                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err)),
+                                else => self.task_runtime.failWaitingInput(task.durable.id, action.index, sendInputRejection(err), null),
                             }
                             self.bumpRevision();
                             continue;
@@ -6093,15 +6147,15 @@ pub const Runtime = struct {
         if (task.model_intent_prepared or task.approval_change != null or self.approvalHistoryBlocked()) return false;
         if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) {
             const capability = self.task_runtime.continuationProjection(task_id, self.taskRuntimeProjectionEffects());
-            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed) and self.task_runtime.beginInputPreparation(task_id, index)) {
+            if (capability != null and capability.? == .unavailable and (capability.?.unavailable == .session_recovery_required or capability.?.unavailable == .session_recovery_failed or capability.?.unavailable == .runtime_unavailable) and self.task_runtime.beginInputPreparation(task_id, index)) {
                 _ = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch |err| {
-                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err));
+                    self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), if (err == error.SessionReleaseFailed) self.sessionReleaseFailureTaskId() else null);
                     self.bumpRevision();
                     return true;
                 };
                 return false;
             }
-            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable);
+            self.task_runtime.failWaitingInput(task_id, index, .binding_unavailable, null);
             self.bumpRevision();
             return true;
         }
@@ -6117,7 +6171,7 @@ pub const Runtime = struct {
             };
             switch (err) {
                 error.TaskBusy, error.CatalogLoading, error.RestoreBusy, error.TaskPersistenceOutcomeUnknown => return false,
-                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err)),
+                else => self.task_runtime.failWaitingInput(task_id, index, sendInputRejection(err), null),
             }
             self.bumpRevision();
             return true;
@@ -6880,12 +6934,15 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn writeSnapshot(self: *Runtime, output: []u8, request: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
+    pub fn writeSnapshot(self: *Runtime, output: []u8, request_input: ViewRequest) (Error || error{InvalidViewRequest})!SnapshotRead {
         if (builtin.is_test) self.view_step_timing = .{};
         self.cancelSnapshot();
         errdefer self.cancelSnapshot();
-        try request.validate();
-        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0) return error.InvalidViewRequest;
+        try request_input.validate();
+        var request = request_input;
+        @memcpy(self.view_preparation.search_query[0..request.search_query.len], request.search_query);
+        request.search_query = self.view_preparation.search_query[0..request.search_query.len];
+        if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.task_runtime.searchRevision() == 0) return error.InvalidViewRequest;
         std.debug.assert(self.view_credentials == null and self.capture_view == null);
         self.next_view_read_id = std.math.add(u64, self.next_view_read_id, 1) catch return error.ViewVersionExhausted;
         self.view_read.id = self.next_view_read_id;
@@ -6902,12 +6959,19 @@ pub const Runtime = struct {
         self.view_preparation.known_epoch = request.known_epoch;
         self.view_preparation.tool_limit = self.limits.max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
         for (request.receipts) |query| if (self.containsKnownCredential(query.operation_id)) return error.InvalidViewRequest;
+        if (self.containsKnownCredential(request.search_query)) return error.InvalidViewRequest;
         var writer = std.Io.Writer.fixed(output);
         writer.print("{{\"revision\":\"{d}\",\"securityEpoch\":\"{d}\",\"historyEpoch\":\"{d}\",\"scope\":{{\"taskId\":", .{ self.revision, self.projection_security_epoch, self.projection_history_epoch }) catch return error.SnapshotTooLarge;
         if (request.task_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"beforeRunId\":") catch return error.SnapshotTooLarge;
         if (request.before_run_id) |id| writer.print("\"{d}\"", .{id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{},\"receipts\":", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        writer.print(",\"runLimit\":{d},\"management\":\"{s}\",\"search\":{}", .{ request.run_limit, @tagName(request.management), request.search }) catch return error.SnapshotTooLarge;
+        // Query is bounded and copied into this frozen scope; no Bridge borrow survives.
+        writer.writeAll(",\"searchQuery\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(&writer, request.search_query);
+        writer.writeAll(",\"searchCursor\":") catch return error.SnapshotTooLarge;
+        try product_task.writeSearchCursor(&writer, request.search_cursor);
+        writer.writeAll(",\"receipts\":") catch return error.SnapshotTooLarge;
         try self.writeViewReceipts(&writer, request.receipts, false);
         writer.writeByte('}') catch return error.SnapshotTooLarge;
         // Time-dependent execution fields are sampled even without a new CoreEvent.
@@ -7005,11 +7069,8 @@ pub const Runtime = struct {
             const index = self.view_preparation.next_block;
             const block = &self.view_preparation.blocks[index];
             if (block.version == 0) {
+                if ((try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start)) > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
                 const source = try self.view_read.sourceRange(self.allocator, self.limits.max_snapshot_bytes, block.start, block.end);
-                defer {
-                    std.crypto.secureZero(u8, source);
-                    self.allocator.free(source);
-                }
                 block.version = try self.encoded_views.frozenSource(self.allocator, self.limits.max_snapshot_bytes, block.key, source, block.current);
                 var replacement: ?[]const u8 = null;
                 var cached = false;
@@ -7069,6 +7130,13 @@ pub const Runtime = struct {
         self.view_preparation.tail = .{};
         try self.view_read.appendSkeleton(self.allocator, self.limits.max_snapshot_bytes, writer.buffered());
         try self.view_read.finalize(self.limits.max_snapshot_bytes);
+        var block_bytes: usize = 0;
+        for (self.view_preparation.blocks) |block| {
+            const bytes = (try self.view_read.encodedPosition(block.end)) - (try self.view_read.encodedPosition(block.start));
+            if (bytes > view_cache.blockByteLimit(block.key.kind)) return error.SnapshotTooLarge;
+            block_bytes += bytes;
+        }
+        if (self.view_read.total - block_bytes > 768 * 1024) return error.SnapshotTooLarge;
         if (self.view_preparation.credentials) |*credentials| credentials.deinit();
         self.view_preparation.credentials = null;
         self.view_preparation.tools.deinit(self.allocator);
@@ -7167,7 +7235,11 @@ pub const Runtime = struct {
             .taskPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .limit = request.run_limit },
             .historyPage => .{ .kind = kind, .task_id = request.task_id orelse 0, .cursor = request.before_run_id orelse 0, .limit = request.run_limit },
             .management => .{ .kind = kind, .management = @intFromEnum(request.management) },
-            .searchIndex => .{ .kind = kind, .limit = @intFromBool(request.search) },
+            .searchIndex => key: {
+                var key: view_cache.Key = .{ .kind = kind, .limit = @intFromBool(request.search), .search_query = request.search_query };
+                if (request.search_cursor) |cursor| key.search_cursor = .{ cursor.revision, cursor.security_epoch, cursor.task, cursor.run, cursor.part, cursor.offset };
+                break :key key;
+            },
             else => .{ .kind = kind },
         };
     }
@@ -7202,9 +7274,7 @@ pub const Runtime = struct {
             },
             .searchIndex => {
                 if (request.search) {
-                    writer.writeByte('[') catch return error.SnapshotTooLarge;
-                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text);
-                    writer.writeByte(']') catch return error.SnapshotTooLarge;
+                    try self.task_runtime.writeSearchProjection(writer, self.taskRuntimeProjectionEffects().text, request.search_query, request.search_cursor, self.task_runtime.searchRevision(), self.projection_security_epoch);
                 } else writer.writeAll("null") catch return error.SnapshotTooLarge;
             },
         }
@@ -7978,10 +8048,11 @@ pub const Runtime = struct {
             .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
-            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id))
+            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id) or
+                (if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
                 .available
             else
-                .unavailable,
+                .capacity_reached,
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
@@ -9611,7 +9682,7 @@ pub const Runtime = struct {
 
         const task = &control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
-        run.automatic_title.state.store(.ready, .release);
+        run.execution.?.automatic_title.state.store(.ready, .release);
         const sync = control.task_runtime.syncAutomaticTitles(
             control.limits.max_task_title_bytes,
             control.taskRuntimeTextProjection(),
@@ -9631,14 +9702,14 @@ pub const Runtime = struct {
             "Provisional title",
             control.limits.max_task_title_bytes,
         );
-        run.automatic_title.provisional_applied = true;
-        run.automatic_title.state.store(.pending, .release);
+        run.execution.?.automatic_title.provisional_applied = true;
+        run.execution.?.automatic_title.state.store(.pending, .release);
         try control.renameTask(task.durable.id, "User title");
         const generated = "Generated title";
-        @memcpy(run.automatic_title.result[0..generated.len], generated);
-        run.automatic_title.result_len = generated.len;
-        run.automatic_title.generated = true;
-        run.automatic_title.state.store(.ready, .release);
+        @memcpy(run.execution.?.automatic_title.result[0..generated.len], generated);
+        run.execution.?.automatic_title.result_len = generated.len;
+        run.execution.?.automatic_title.generated = true;
+        run.execution.?.automatic_title.state.store(.ready, .release);
 
         const sync = control.task_runtime.syncAutomaticTitles(
             control.limits.max_task_title_bytes,
@@ -9646,10 +9717,10 @@ pub const Runtime = struct {
         );
         try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("User title", task.durable.title);
-        try std.testing.expect(run.automatic_title.user_overrode);
+        try std.testing.expect(run.execution.?.automatic_title.user_overrode);
         try std.testing.expectEqual(
             AutomaticTitleState.settled,
-            run.automatic_title.state.load(.acquire),
+            run.execution.?.automatic_title.state.load(.acquire),
         );
     }
 
@@ -10828,7 +10899,7 @@ fn requestRunTermination(
         .finishing => return .already_finishing,
         .running => {},
     }
-    const lease_value = run.run_control.tryAcquireLease() orelse return .already_finishing;
+    const lease_value = run.execution.?.run_control.tryAcquireLease() orelse return .already_finishing;
     var lease = lease_value;
     defer lease.deinit();
     return switch (lease.requestTermination(pendingTerminationSignal(run))) {
@@ -11077,7 +11148,8 @@ test "approval checkpoint restores before the first Run independently of the Tas
 fn cancelTaskAutomaticTitles(task: *TestTask) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        run.automatic_title.cancel_requested.store(true, .release);
+        const execution = run.execution orelse continue;
+        execution.automatic_title.cancel_requested.store(true, .release);
         publishAutomaticTitleFallback(run);
     }
 }
@@ -11880,7 +11952,13 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         u64,
         control.limits.max_commentary_segments_per_run,
     );
+    const run_execution = try control.allocator.create(task_test_state.RunExecution);
+    run_execution.* = .{};
+    const additional_inputs = try control.allocator.alloc(?task_test_state.AdditionalInput, lifecycle.max_submitted_inputs);
+    @memset(additional_inputs, null);
     runs[0] = .{
+        .execution = run_execution,
+        .additional_inputs = additional_inputs,
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
@@ -16200,13 +16278,13 @@ test "released Task credential is permanently scrubbed from every product projec
         .after_bytes = 2,
         .diff_complete = true,
     };
-    run.automatic_title.state.store(.ready, .release);
+    run.execution.?.automatic_title.state.store(.ready, .release);
     @memcpy(
-        run.automatic_title.result[0.."automatic SECRET-KEY".len],
+        run.execution.?.automatic_title.result[0.."automatic SECRET-KEY".len],
         "automatic SECRET-KEY",
     );
-    run.automatic_title.result_len = "automatic SECRET-KEY".len;
-    run.automatic_title.generated = true;
+    run.execution.?.automatic_title.result_len = "automatic SECRET-KEY".len;
+    run.execution.?.automatic_title.generated = true;
     product_workspace.testing.overwriteProjectedRoot(
         &control.workspace,
         1,
@@ -16264,10 +16342,10 @@ test "released Task credential is permanently scrubbed from every product projec
     @constCast(compactTerminalPayload(compact).?).diagnostic_len =
         "compact SECRET-KEY".len;
     control.redactAllProductProjectionsNoFail("SECRET-KEY");
-    try std.testing.expect(run.automatic_title.generated_redacted);
+    try std.testing.expect(run.execution.?.automatic_title.generated_redacted);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        run.automatic_title.result[0..run.automatic_title.result_len],
+        run.execution.?.automatic_title.result[0..run.execution.?.automatic_title.result_len],
         "SECRET-KEY",
     ) == null);
     run.event_stream_finalized = true;
@@ -22283,4 +22361,106 @@ test "Save As picker cancellation deadline and shutdown preserve the pre-publica
     try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), save.releases);
+}
+
+test "Product view bounded Host search matches the independent Renderer fixture and freezes query ownership" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var query = "inspect".*;
+    var output: [96 * 1024]u8 = undefined;
+    var read = try control.writeSnapshot(&output, .{ .task_id = 3, .search = true, .search_query = &query });
+    @memset(&query, 'x');
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
+    var offset: usize = 0;
+    while (offset < read.bytes) {
+        const length = @min(projection_step_bytes, read.bytes - offset);
+        try control.writeSnapshotRange(read.id, &output, offset, length);
+        offset += length;
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("inspect", parsed.value.object.get("scope").?.object.get("searchQuery").?.string);
+    const expected = std.mem.trim(u8, @import("product_control_contract_fixture").search_page, "\r\n");
+    var writer = std.Io.Writer.fixed(&output);
+    try std.json.Stringify.value(parsed.value.object.get("searchIndex").?, .{}, &writer);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "inspect" }, .searchIndex)) != null);
+    try std.testing.expect(control.encoded_views.get(Runtime.viewKey(.{ .search = true, .search_query = "another" }, .searchIndex)) == null);
+}
+
+test "Product view search continues across unrelated Product revisions and expires on content edits" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    const run = &task.durable.runs[0].?;
+    var input: [1024]u8 = @splat('a');
+    input[input.len - 1] = 'b';
+    const retained = try control.copyBounded(&input, control.limits.max_user_message_bytes);
+    control.freeTracked(run.input.text.value);
+    run.input.text.value = retained;
+    var storage: [96 * 1024]u8 = undefined;
+    var cursor: ?product_task.SearchCursor = null;
+    var first_cursor: ?product_task.SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    const revision = control.task_runtime.searchRevision();
+    while (pages < 16) : (pages += 1) {
+        const bytes = try control.writeViewFixture(&storage, .{ .search = true, .search_query = "a" ** 255 ++ "b", .search_cursor = cursor });
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        const page = parsed.value.object.get("searchIndex").?.object;
+        try std.testing.expect(!page.get("stale").?.bool);
+        hits += page.get("results").?.array.items.len;
+        const next = page.get("nextCursor").?;
+        if (next == .null) break;
+        const fields = next.object;
+        cursor = .{
+            .revision = try std.fmt.parseInt(u64, fields.get("revision").?.string, 10),
+            .security_epoch = try std.fmt.parseInt(u64, fields.get("securityEpoch").?.string, 10),
+            .task = try std.fmt.parseInt(usize, fields.get("task").?.string, 10),
+            .run = try std.fmt.parseInt(usize, fields.get("run").?.string, 10),
+            .part = try std.fmt.parseInt(usize, fields.get("part").?.string, 10),
+            .offset = try std.fmt.parseInt(usize, fields.get("offset").?.string, 10),
+        };
+        if (first_cursor == null) first_cursor = cursor;
+        // Management, receipts and execution observations still notify readers,
+        // but must not discard already completed search work.
+        for (0..10) |_| control.bumpRevision();
+        try std.testing.expectEqual(revision, control.task_runtime.searchRevision());
+    }
+    try std.testing.expect(pages > 1 and pages < 16);
+    try std.testing.expectEqual(@as(usize, 1), hits);
+    try control.renameTask(3, "Changed searchable title");
+    try std.testing.expect(control.task_runtime.searchRevision() > revision);
+    const bytes = try control.writeViewFixture(&storage, .{ .search = true, .search_query = "a" ** 255 ++ "b", .search_cursor = first_cursor });
+    var changed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer changed.deinit();
+    try std.testing.expect(changed.value.object.get("searchIndex").?.object.get("stale").?.bool);
+}
+
+test "Product view queued recovery failure preserves the shared Session blocker fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const index = control.task_runtime.find(3).?.input_submissions.items.len;
+    _ = try control.task_runtime.receiveInput(3, "pressure-send", .{ .text = "Keep my draft" }, control.taskRuntimeOperationEffects());
+    const record = control.task_runtime.pendingInput(3, index).?;
+    record.submission.received_at_unix_ms = null;
+    record.submission.presentation_order = null;
+    record.submission.anchor_run_id = null;
+    record.submission.after_output_count = 0;
+    control.task_runtime.failWaitingInput(3, index, sendInputRejection(error.SessionReleaseFailed), 7);
+    var output: [96 * 1024]u8 = undefined;
+    const encoded = try control.writeViewFixture(&output, .{ .task_id = 3 });
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded, .{});
+    defer parsed.deinit();
+    const submission = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("inputSubmissions").?.array.items[0];
+    var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.session_pressure, .{});
+    defer expected.deinit();
+    const wanted = try std.json.Stringify.valueAlloc(std.testing.allocator, expected.value.object.get("submission").?, .{});
+    defer std.testing.allocator.free(wanted);
+    var writer = std.Io.Writer.fixed(&output);
+    try std.json.Stringify.value(submission, .{}, &writer);
+    try std.testing.expectEqualStrings(wanted, writer.buffered());
+    try std.testing.expectEqual(.session_releasing, sendInputRejection(error.SessionReleasing));
+    try std.testing.expectEqual(.session_capacity, sendInputRejection(error.SessionCapacity));
 }

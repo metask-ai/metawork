@@ -276,10 +276,10 @@ pub fn executeRun(context: *anyopaque) void {
             return;
         },
     };
-    run.run_control = agent_run.control();
+    run.execution.?.run_control = agent_run.control();
     run.agent_handoff.store(.running, .release);
     if (run.pending_termination.load(.acquire) != .none) {
-        if (run.run_control.tryAcquireLease()) |lease_value| {
+        if (run.execution.?.run_control.tryAcquireLease()) |lease_value| {
             var lease = lease_value;
             const result = lease.requestTermination(policy.pendingTerminationSignal(run));
             lease.deinit();
@@ -300,7 +300,7 @@ pub fn executeRun(context: *anyopaque) void {
         job.checkpoint,
         job.sessionAccess(),
         &run.checkpoint,
-        run.checkpoint_export_context,
+        run.execution.?.checkpoint_export_context,
         &job.checkpoint_lease,
     );
     job.releaseSessionAccess();
@@ -404,10 +404,10 @@ pub fn cancelCompact(context: *anyopaque) void {
 
 fn generateAutomaticTitle(job: *RunJob) void {
     const run = job.run;
-    const claimed = run.automatic_title.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire);
+    const claimed = run.execution.?.automatic_title.state.cmpxchgStrong(.pending, .running, .acq_rel, .acquire);
     if (claimed != null) return;
-    defer run.automatic_title.state.store(.ready, .release);
-    if (run.automatic_title.cancel_requested.load(.acquire)) return;
+    defer run.execution.?.automatic_title.state.store(.ready, .release);
+    if (run.execution.?.automatic_title.cancel_requested.load(.acquire)) return;
     const source = automaticTitleCompletionInput(&run.input) orelse return;
     const execution = &(job.title_execution orelse return);
     const config = execution.input();
@@ -425,7 +425,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     var request_cancellation = owner.newCancellation();
     var watchdog = AutomaticTitleWatchdog{
         .io = job.checkpoint.io,
-        .title = &run.automatic_title,
+        .title = &run.execution.?.automatic_title,
         .request_cancellation = &request_cancellation,
     };
     const watchdog_thread = std.Thread.spawn(.{}, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
@@ -439,7 +439,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     watchdog.finished.store(true, .release);
     watchdog_thread.join();
     if (watchdog.timed_out.load(.acquire) or
-        run.automatic_title.cancel_requested.load(.acquire) or
+        run.execution.?.automatic_title.cancel_requested.load(.acquire) or
         request_cancellation.isRequested())
     {
         switch (completion_outcome) {
@@ -457,13 +457,13 @@ fn generateAutomaticTitle(job: *RunJob) void {
         result.text.len > automatic_title_result_capacity)
         return;
     const projected = job.projector.project(
-        &run.automatic_title.result,
+        &run.execution.?.automatic_title.result,
         result.text,
         &run.redactionSecrets(),
     );
-    run.automatic_title.result_len = projected.len;
-    run.automatic_title.generated_redacted = projected.redacted;
-    run.automatic_title.generated = true;
+    run.execution.?.automatic_title.result_len = projected.len;
+    run.execution.?.automatic_title.generated_redacted = projected.redacted;
+    run.execution.?.automatic_title.generated = true;
 }
 
 fn automaticTitleCompletionInput(input: *const state.RunInputRecord) ?[]const u8 {
@@ -482,7 +482,8 @@ fn automaticTitleCompletionInput(input: *const state.RunInputRecord) ?[]const u8
 }
 
 pub fn publishAutomaticTitleFallback(run: *state.RunRecord) void {
-    _ = run.automatic_title.state.cmpxchgStrong(.pending, .ready, .acq_rel, .acquire);
+    const execution = run.execution orelse return;
+    _ = execution.automatic_title.state.cmpxchgStrong(.pending, .ready, .acq_rel, .acquire);
 }
 
 pub fn commitRunTerminal(

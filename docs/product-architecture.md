@@ -509,6 +509,8 @@ Skill 的原 pinned 投影留在 Task attachment，由主线程管理；worker �
 
 关闭必须接纳已确认的 durable binding，即使不再安装 Session；未知结果不能因关闭而重写历史或启动读回。释放 candidate 和 lease 后仍保留未知事务屏障，下一次启动从实际 canonical binding/anchor 恢复。进程若在 durable adoption 后、attachment install 前退出，下次启动同样使用已推进的 binding/anchor，不改写历史 Run provenance。
 
+历史 Task 不占用永久 Session 名额。Session 容量不足时，Product 可以按近期使用顺序选择可恢复且完全静止的 attachment，沿既有异步 close/release owner 释放；不得取消 active operation、输入接续、权限事务、尚未消费的事件或 worker/artifact 引用来腾出名额。释放前保留同进程的 Skill/MCP 能力上限与目录投影，恢复沿现有 authority 收窄和候选提交边界，不保留执行 credential、SDK Session handle 或额外的持久化恢复事实。关闭待决只拒绝本次 admission，调用方显式重试，不接纳虚假的 Task/attempt，也不把 Session 压力映射为历史 Task 容量；关闭失败不得自动重试。未具备精确 checkpoint 或合法空 Conversation 恢复条件的 attachment 不参与压力回收。
+
 graceful close/shutdown 必须先停止 admission，对已进入 AgentCore 的 operation 请求终止并等待真实 terminal/event drain，再等待 checkpoint postprocess 与全部 worker lease settled；只有此后才能把剩余 pending 标为 excluded、持久化最终历史并开始 Session close/release。checkpoint commit 与 pending exclusion 不得并发交错。已提交 history 但尚未进入 Core 的失败直接归为 excluded；尚未提交 history 的 prepared operation 不产生可排除记录。
 
 Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须停止该 Session 的新 admission，并在 terminal event、checkpoint postprocess、Session access 与全部 worker lease 收口后自动进入同一 close/release 路径。只有 Session 已成功 close、Agent Runtime slot 已 release 且 Product 仍持有完整 owner 事实时，Task 才能 detach，并按本节的 checkpoint restore 或 fresh attach 规则继续；close 失败必须保留真实的 attached/closing attachment、execution authority 与资源 owner，不得伪装 detached、开放 recovery 或自动形成无界重试循环。已获接纳 attachment 的可复用 close failure 可以恢复原 admission；poisoned/closing failure 继续不可用，直到已有显式生命周期动作安全重试。
