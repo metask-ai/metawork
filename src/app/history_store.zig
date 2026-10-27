@@ -12,6 +12,7 @@ const Credential = struct {
     length: usize = 0,
     retained: bool = false,
     pending: bool = false,
+    legacy_pending: bool = false,
 };
 
 fn digestBytes(bytes: []const u8) [32]u8 {
@@ -35,6 +36,7 @@ pub const Store = struct {
     restore_failed: bool = true,
     credentials: *[128]Credential,
     credential_capacity_failed: bool = false,
+    legacy_maintenance_failed: bool = false,
     publish_sync_fault: bool = false,
     security_epoch: u64 = 1,
     requires_reopen: bool = false,
@@ -349,7 +351,7 @@ pub const Store = struct {
             slot.retained = for (values) |value| {
                 if (std.mem.eql(u8, value, slot.bytes[0..slot.length])) break true;
             } else false;
-            if (!slot.retained and !slot.pending) self.clearCredential(slot);
+            if (!slot.retained and !slot.pending and !slot.legacy_pending) self.clearCredential(slot);
         }
         for (values) |value| if (value.len != 0) self.registerCredential(value, true);
         return .{ .epoch = self.security_epoch, .ready = !self.incompatible and self.pending == null and self.database != null and self.sanitizePending() };
@@ -359,7 +361,7 @@ pub const Store = struct {
         for (self.credentials) |*slot| {
             if (slot.length != value.len or !std.mem.eql(u8, slot.bytes[0..slot.length], value)) continue;
             slot.retained = retained;
-            if (!slot.pending and !retained) self.clearCredential(slot);
+            if (!slot.pending and !slot.legacy_pending and !retained) self.clearCredential(slot);
             return;
         }
         if (value.len > 4096) {
@@ -372,6 +374,7 @@ pub const Store = struct {
             slot.length = value.len;
             slot.retained = retained;
             slot.pending = true;
+            slot.legacy_pending = true;
             if (self.security_epoch != 0) self.security_epoch = std.math.add(u64, self.security_epoch, 1) catch 0;
             // Only first discovery performs disk maintenance. Repeated bearer
             // acquisition/release above is constant bounded in-memory work.
@@ -388,15 +391,27 @@ pub const Store = struct {
     fn sanitizePending(self: *Store) bool {
         if (self.incompatible or self.credential_capacity_failed or self.security_epoch == 0) return false;
         if (self.requires_reopen and !self.refreshConfirmed()) return false;
+        self.legacy_maintenance_failed = false;
         for (self.credentials) |*slot| {
-            if (!slot.pending) continue;
+            if (slot.length == 0) continue;
             const value = slot.bytes[0..slot.length];
-            self.repository.?.sanitize(value) catch {
-                self.requires_reopen = true;
-                return false;
-            };
-            self.sanitizeLegacy(value) catch return false;
-            slot.pending = false;
+            if (slot.pending) {
+                self.repository.?.sanitize(value) catch {
+                    self.requires_reopen = true;
+                    return false;
+                };
+                slot.pending = false;
+            }
+            if (slot.legacy_pending) {
+                self.sanitizeLegacy(value) catch {
+                    // SQL authority is already confirmed. Keep the bounded
+                    // secret lease and retry import-source maintenance later;
+                    // this is not an unknown business transaction.
+                    self.legacy_maintenance_failed = true;
+                    continue;
+                };
+                slot.legacy_pending = false;
+            }
             if (!slot.retained) self.clearCredential(slot);
         }
         return true;
@@ -894,4 +909,48 @@ test "SQLite explicit recovery retires only the failed legacy import source" {
     try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
     try std.testing.expect(!try store.exists(wire.file_name));
     try std.testing.expect(try store.hasSqlRecoveryEvidence());
+}
+
+test "failed retired-store cleaning retains its secret lease without blocking SQL commits" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var state = try testHistory(aa, 1, 1, "late-known-value");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = wire.file_name, .data = "corrupted import source: late-known-value" });
+    try std.testing.expect(store.syncCredentials(&.{"late-known-value"}, true).ready);
+    try std.testing.expect(store.legacy_maintenance_failed);
+    const clean = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+    try std.testing.expect(std.mem.indexOf(u8, clean.value.tasks[0].runs[0].assistant, "late-known-value") == null);
+    state.tasks[0].runs[0].input.text = "safe input";
+    state.tasks[0].runs[0].assistant = "safe answer";
+    state.tasks[0].title = "confirmed despite legacy failure";
+    const bytes = try wire.encodeAlloc(aa, state, .{}, store.limits);
+    for (0..3) |_| try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expect(store.pending == null);
+    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    try std.testing.expect(store.legacy_maintenance_failed);
+    var retained: usize = 0;
+    for (store.credentials) |slot| if (slot.length != 0 and slot.legacy_pending) {
+        retained += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), retained);
+    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expect(try store.exists(wire.file_name));
+    // Once the source becomes writable/decodable again, maintenance can
+    // finish and retire its owned credential without replaying business work.
+    try store.legacy.commit(bytes);
+    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    try std.testing.expect(!store.legacy_maintenance_failed);
+    for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings("confirmed despite legacy failure", loaded.value.tasks[0].title);
 }
