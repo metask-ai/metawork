@@ -4,6 +4,7 @@
 //! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
+const search_casefold = @import("search_casefold.zig");
 const agent = @import("metawork_agent");
 const models_contract = @import("metawork_product_models_contract");
 const task_state = @import("product_task_state");
@@ -4726,13 +4727,15 @@ pub const Runtime = struct {
     /// a copied corpus; live streaming output is never searchable.
     pub fn writeSearchProjection(self: *const Runtime, writer: *std.Io.Writer, text: task_view.TextProjection, query: []const u8, after: ?SearchCursor, revision: u64, security_epoch: u64) (task_view.Error || error{InvalidViewRequest})!void {
         if (query.len > search_query_bytes or !std.unicode.utf8ValidateSlice(query)) return error.InvalidViewRequest;
+        var query_storage: [search_query_bytes * search_casefold.max_expansion_bytes]u8 = undefined;
+        const folded_query = search_casefold.writeFolded(query, &query_storage) catch return error.InvalidViewRequest;
         const stale = if (after) |cursor| cursor.revision != revision or cursor.security_epoch != security_epoch else false;
         var cursor = after orelse SearchCursor{ .revision = revision, .security_epoch = security_epoch };
         writer.print("{{\"stale\":{},\"results\":[", .{stale}) catch return error.SnapshotTooLarge;
         var count: usize = 0;
-        var work: usize = 0;
+        var remaining_work: usize = search_work_limit;
         var units: usize = 0;
-        while (!stale and query.len != 0 and cursor.task < self.tasks.len and count < search_result_limit and work < search_work_limit and units < search_unit_limit) {
+        while (!stale and query.len != 0 and cursor.task < self.tasks.len and count < search_result_limit and remaining_work != 0 and units < search_unit_limit) {
             const task = if (self.tasks[cursor.task]) |*value| value else {
                 cursor.task += 1;
                 cursor.run = 0;
@@ -4756,43 +4759,39 @@ pub const Runtime = struct {
                 units += 1;
                 continue;
             };
-            var window_storage: [search_snippet_bytes]u8 = undefined;
+            var window_storage: [4 * search_query_bytes * search_casefold.max_expansion_bytes + search_snippet_bytes]u8 = undefined;
             var match: ?usize = null;
-            while (work < search_work_limit) {
-                const window = try source.window(cursor.offset, &window_storage);
+            while (remaining_work != 0) {
+                // A folded byte can require at most one original UTF-8 codepoint.
+                // Keep raw lookahead plus one window's worth of candidate starts.
+                const capacity = 4 * folded_query.len + search_snippet_bytes;
+                const window = try source.window(cursor.offset, window_storage[0..capacity]);
                 if (cursor.offset > window.total) return error.InvalidViewRequest;
-                if (window.bytes.len < query.len) break;
+                if (window.bytes.len == 0) break;
                 const base = cursor.offset;
-                while (cursor.offset - base <= window.bytes.len - query.len and work < search_work_limit) {
-                    var equal = true;
-                    for (query, 0..) |byte, index| {
-                        work += 1;
-                        if (std.ascii.toLower(byte) != std.ascii.toLower(window.bytes[cursor.offset - base + index])) {
-                            equal = false;
+                const last_window = window.bytes.len == window.total - base;
+                const safe_end = if (last_window) window.bytes.len else window.bytes.len - 4 * folded_query.len;
+                while (cursor.offset - base < window.bytes.len and (last_window or cursor.offset - base <= safe_end) and remaining_work != 0) {
+                    const relative = cursor.offset - base;
+                    const width = std.unicode.utf8ByteSequenceLength(window.bytes[relative]) catch return error.InvalidViewRequest;
+                    if (width > window.bytes.len - relative) return error.InvalidViewRequest;
+                    switch (search_casefold.prefixMatches(window.bytes[relative..], folded_query, &remaining_work)) {
+                        .match => {
+                            match = cursor.offset;
                             break;
-                        }
-                        if (work == search_work_limit and index + 1 != query.len) {
-                            equal = false;
-                            break;
-                        }
+                        },
+                        .exhausted => break,
+                        .miss => cursor.offset += width,
                     }
-                    if (equal) {
-                        match = cursor.offset;
-                        break;
-                    }
-                    // Preserve the candidate across a work boundary. Windows
-                    // overlap by query length, so cross-field matches survive.
-                    if (work >= search_work_limit) break;
-                    cursor.offset += 1;
                 }
-                if (match != null or work >= search_work_limit) break;
+                if (match != null or remaining_work == 0 or last_window) break;
             }
             if (match) |at| {
                 if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 writer.print("{{\"taskId\":\"{d}\",\"runId\":", .{task.durable.id}) catch return error.SnapshotTooLarge;
                 if (cursor.run == 0) writer.writeAll("null") catch return error.SnapshotTooLarge else writer.print("\"{d}\"", .{task.durable.runs[cursor.run - 1].?.id}) catch return error.SnapshotTooLarge;
                 writer.print(",\"part\":\"{d}\",\"kind\":\"{s}\",\"detail\":", .{ cursor.part, @tagName(source.kind) }) catch return error.SnapshotTooLarge;
-                const snippet = try source.window(at -| 128, &window_storage);
+                const snippet = try source.window(at -| 128, window_storage[0..search_snippet_bytes]);
                 var start: usize = 0;
                 while (start < snippet.bytes.len and snippet.bytes[start] & 0xc0 == 0x80) start += 1;
                 var end = snippet.bytes.len;
@@ -4805,7 +4804,7 @@ pub const Runtime = struct {
                 try text.writeJson(writer, snippet.bytes[start..end]);
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
                 count += 1;
-            } else if (work >= search_work_limit) break;
+            } else if (remaining_work == 0) break;
             cursor.part += 1;
             cursor.offset = 0;
             units += 1;
@@ -9916,4 +9915,69 @@ test "search revision exhaustion cannot wrap into a reusable cursor identity" {
     try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
     runtime.noteSearchChange();
     try std.testing.expectEqual(@as(u64, 0), runtime.searchRevision());
+}
+
+test "Host search matches Unicode case variants and preserves raw UTF-8 through continuation" {
+    const allocator = std.testing.allocator;
+    var runtime = try Runtime.init(allocator, 1);
+    defer runtime.deinitStorage();
+    defer runtime.tasks[0] = null;
+    var task = testModelIntentTask();
+    task.durable.title = @constCast("unrelated");
+    var runs = [_]?task_state.RunRecord{reviewHistoryTestRun(7, "")};
+    task.durable.runs = &runs;
+    runtime.tasks[0] = task;
+    const run = &runtime.tasks[0].?.durable.runs[0].?;
+    for ([_]struct { source: []const u8, query: []const u8, expected: usize }{
+        .{ .source = "CAFÉ", .query = "café", .expected = 1 },
+        .{ .source = "ПРИВЕТ", .query = "привет", .expected = 1 },
+        .{ .source = "ΟΣ", .query = "ος", .expected = 1 },
+        .{ .source = "𐐀", .query = "𐐨", .expected = 1 },
+        .{ .source = "İ", .query = "i\u{307}", .expected = 1 },
+        .{ .source = "Straße", .query = "STRASSE", .expected = 1 },
+        .{ .source = "ße", .query = "se", .expected = 1 },
+        .{ .source = "K", .query = "k", .expected = 1 },
+        .{ .source = "CAFÉ", .query = "cafe", .expected = 0 },
+    }) |case| {
+        run.input = .{ .text = .{ .value = @constCast(case.source) } };
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), case.query, null, 1, 1);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const hits = parsed.value.object.get("results").?.array.items;
+        try std.testing.expectEqual(case.expected, hits.len);
+        if (hits.len != 0) try std.testing.expectEqualStrings(case.source, hits[0].object.get("detail").?.string);
+    }
+    const input = try allocator.alloc(u8, 4 * search_work_limit - 16);
+    defer allocator.free(input);
+    for (0..input.len / 2) |index| @memcpy(input[2 * index ..][0..2], "Я");
+    @memcpy(input[input.len - " CAFÉ".len ..], " CAFÉ");
+    run.input = .{ .text = .{ .value = input } };
+    var cursor: ?SearchCursor = null;
+    var hits: usize = 0;
+    var pages: usize = 0;
+    while (pages < 8) : (pages += 1) {
+        var storage: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        try runtime.writeSearchProjection(&writer, searchTestProjection(&runtime), "café", cursor, 1, 1);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const page = parsed.value.object.get("results").?.array.items;
+        for (page) |hit| {
+            const detail = hit.object.get("detail").?.string;
+            try std.testing.expect(std.unicode.utf8ValidateSlice(detail));
+            try std.testing.expect(detail.len <= search_snippet_bytes);
+            try std.testing.expect(std.mem.endsWith(u8, detail, "CAFÉ"));
+            hits += 1;
+        }
+        const previous = cursor;
+        cursor = try searchTestCursor(parsed.value.object.get("nextCursor").?);
+        if (cursor == null) break;
+        if (previous) |before| try std.testing.expect(!std.meta.eql(before, cursor.?));
+        if (cursor.?.run == 1 and cursor.?.part == 0)
+            try std.testing.expect(std.unicode.utf8ValidateSlice(input[0..cursor.?.offset]));
+    }
+    try std.testing.expect(pages > 0 and pages < 8);
+    try std.testing.expectEqual(@as(usize, 1), hits);
 }
