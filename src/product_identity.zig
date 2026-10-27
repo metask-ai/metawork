@@ -15,6 +15,7 @@ pub const artifact_kind = std.meta.stringToEnum(
 
 pub const bundle_id = app_manifest.id;
 pub const version = app_manifest.version;
+pub const automatic_update_checks = artifact_options.automatic_update_checks;
 pub const macos_data_directory_name = "MetaWork Dev";
 pub const windows_data_directory_name = "MetaWork";
 pub const automation_data_directory_name = "MetaWork Automation";

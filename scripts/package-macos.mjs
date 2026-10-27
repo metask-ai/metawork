@@ -878,7 +878,11 @@ async function buildPackagedMacosApp(
   appIconArtifact,
   agentCoreBundle,
 ) {
-  runNode("scripts/build.mjs", ["release", distribution.targetId]);
+  runNode("scripts/build.mjs", [
+    "release",
+    distribution.targetId,
+    "--automatic-update-check",
+  ]);
   const executableSections = macosExecutableSections(
     readFileSync(
       path.join(

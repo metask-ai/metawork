@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
         b.resolveInstallPrefix(prefix, .{});
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
+    const automatic_update_checks = b.option(bool, "automatic-update-check", "Enable periodic official version checks for this distribution artifact") orelse false;
+    if (artifact == .automation and automatic_update_checks)
+        @panic("automation artifacts must not enable official update checks");
     // Include the ICO in the generated resource path's cache identity.
     const windows_resources = b.addWriteFiles();
     _ = windows_resources.addCopyFile(b.path("assets/icons/app-icon.ico"), "app-icon.ico");
@@ -59,9 +62,9 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install.step);
         office_skill_shell_step.dependOn(&install.step);
     }
-    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact);
+    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact, automatic_update_checks);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
-        wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)
+        wireAgentCore(b, artifacts.tests.root_module, bundle, artifact, automatic_update_checks)
     else
         modules;
     const update_tests = b.addTest(.{ .name = "metawork-updates", .root_module = test_modules.product_update });
@@ -1097,6 +1100,7 @@ fn wireAgentCore(
     root_module: *std.Build.Module,
     bundle: agentcore_bundle.Bundle,
     artifact: ArtifactOption,
+    automatic_update_checks: bool,
 ) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
     if (bundle.deployment_target) |deployment_target|
@@ -1107,6 +1111,7 @@ fn wireAgentCore(
     const runner = existingImport(root_module, "runner");
     const artifact_options = b.addOptions();
     artifact_options.addOption([]const u8, "kind", @tagName(artifact));
+    artifact_options.addOption(bool, "automatic_update_checks", automatic_update_checks);
     const product_identity = b.createModule(.{
         .root_source_file = b.path("src/product_identity.zig"),
         .target = target,

@@ -356,7 +356,7 @@ const App = struct {
                 .transport = self.update_transport.?.transport(),
                 .host = .{ .context = host.context, .now_ns_fn = host.now_fn, .wake_fn = host.wake_fn, .start_timer_fn = host.start_timer_fn, .cancel_timer_fn = host.cancel_timer_fn, .open_fn = host.open_external_url_fn, .on_main_thread_fn = host.on_main_thread_fn },
             };
-            self.updates.?.start(false);
+            self.updates.?.start(product_identity.automatic_update_checks);
             self.dispatcher.?.setUpdatesHost(.{ .context = self, .check_fn = requestUpdateCheck, .download_fn = requestUpdateDownload, .website_fn = openUpdateWebsite, .cancel_fn = cancelUpdateDownload });
         }
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
