@@ -1825,5 +1825,7 @@ export const enUS = {
     "The app interrupted the previous start. Edit and confirm; it will not retry automatically.",
   "scheduled.reason.permission_required":
     "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
+  "scheduled.notification_unavailable":
+    "The task from this notification is unavailable. Refresh and check your tasks.",
 } as const;
 export type MessageId = keyof typeof enUS;

@@ -267,6 +267,7 @@ pub const Dispatcher = struct {
     updates_host: ?UpdatesHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
+    pending_notification_task: ?u64 = null,
     callbacks: callback_gate.State = .{},
     grants: workspace_grant.State = .{},
     skill_grants: skill_grant.State = .{},
@@ -580,6 +581,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn emitProductChanged(self: *Dispatcher) !void {
+        self.deliverNotificationTask() catch {};
         const workbench = self.control orelse return;
         const revision = workbench.currentRevision();
         _ = self.delivery.deliverRevision(
@@ -602,6 +604,28 @@ pub const Dispatcher = struct {
             },
             else => return err,
         };
+    }
+
+    pub fn openTaskFromNotification(self: *Dispatcher, task_id: u64) !void {
+        const control = self.control orelse return;
+        _ = control.taskWorkspaceId(task_id) catch return;
+        self.pending_notification_task = task_id;
+        try self.deliverNotificationTask();
+    }
+
+    fn deliverNotificationTask(self: *Dispatcher) !void {
+        const task_id = self.pending_notification_task orelse return;
+        const window_id = self.delivery.connectedWindow() orelse return;
+        const generation = self.delivery.connectedGeneration() orelse return;
+        const control = self.control orelse return;
+        _ = control.taskWorkspaceId(task_id) catch {
+            self.pending_notification_task = null;
+            return;
+        };
+        var buffer: [128]u8 = undefined;
+        const detail = try std.fmt.bufPrint(&buffer, "{{\"generation\":\"{d}\",\"taskId\":\"{d}\"}}", .{ generation, task_id });
+        try self.platform.emit_fn(self.platform.context, window_id, "metawork:open-task", detail);
+        self.pending_notification_task = null;
     }
 
     fn ping(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -686,6 +710,7 @@ pub const Dispatcher = struct {
         self.cancelPreviewConnection();
         if (self.updates_host) |host| host.cancel_fn(host.context);
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
+        self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
@@ -8296,4 +8321,63 @@ test "Product view Session pressure rejection fixture preserves exact reason and
     try std.testing.expectEqualStrings("session_close_failed", taskRestoreRejection(error.SessionReleaseFailed).?);
     try std.testing.expectEqualStrings("session_capacity", taskCreateRejection(error.SessionCapacity).?);
     try std.testing.expect(taskCreateRejection(error.TaskBusy) == null);
+}
+
+test "notification navigation retains only a real Task and uses the shared connection fixture" {
+    const Host = struct {
+        calls: usize = 0,
+        fail: bool = false,
+        fn wake(_: ?*anyopaque) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn emit(context: ?*anyopaque, window_id: u64, name: []const u8, detail: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(u64, 3), window_id);
+            try std.testing.expectEqualStrings("metawork:open-task", name);
+            if (self.fail) return error.InjectedEmitFailure;
+            try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @import("contract_fixture").task_open, "\r\n"), detail);
+            self.calls += 1;
+        }
+    };
+    var host: Host = .{};
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try product_control.TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    var dispatcher = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = &host,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer dispatcher.deinit();
+    try dispatcher.openTaskFromNotification(1);
+    try std.testing.expectEqual(@as(usize, 0), host.calls);
+    try std.testing.expectEqual(@as(?u64, 1), dispatcher.pending_notification_task);
+    try dispatcher.openTaskFromNotification(std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(?u64, 1), dispatcher.pending_notification_task);
+    _ = try dispatcher.delivery.connect(3, dispatcher.transport());
+    host.fail = true;
+    try std.testing.expectError(error.InjectedEmitFailure, dispatcher.deliverNotificationTask());
+    try std.testing.expectEqual(@as(?u64, 1), dispatcher.pending_notification_task);
+    host.fail = false;
+    try dispatcher.deliverNotificationTask();
+    try std.testing.expectEqual(@as(usize, 1), host.calls);
+    try std.testing.expectEqual(@as(?u64, null), dispatcher.pending_notification_task);
+    try dispatcher.deliverNotificationTask();
+    try std.testing.expectEqual(@as(usize, 1), host.calls);
 }

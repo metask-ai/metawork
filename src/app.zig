@@ -523,11 +523,18 @@ const App = struct {
                     try self.dispatcher.?.emitProductChanged();
                 }
             },
-            .command => |command| if (command.source == .tray) {
-                const result = self.platform.handleTrayCommand(command.tray_item_id);
-                if (result == .quit_requested) {
-                    if (self.single_instance) |coordinator| coordinator.stopIngress();
-                    try self.platform.requestExplicitQuit();
+            .command => |command| {
+                if (command.source == .tray) {
+                    const result = self.platform.handleTrayCommand(command.tray_item_id);
+                    if (result == .quit_requested) {
+                        if (self.single_instance) |coordinator| coordinator.stopIngress();
+                        try self.platform.requestExplicitQuit();
+                    }
+                } else if (command.source == .notification and command.window_id == app_window.main_window_id) {
+                    if (app_window.notificationTaskId(command.name)) |task_id| {
+                        self.platform.activateMainWindow();
+                        if (self.dispatcher) |dispatcher| try dispatcher.openTaskFromNotification(task_id);
+                    }
                 }
             },
             else => {},

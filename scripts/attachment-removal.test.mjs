@@ -409,6 +409,7 @@ async function fixture(ctx) {
     available: () => true,
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
+    onTaskOpen: () => () => {},
     onWorkbenchRevision: () => () => {},
     onFileDrop: (callback) => {
       drops = callback;

@@ -5982,6 +5982,13 @@ export function decodeHostSignalEvent(value: unknown): HostSignal {
   nonNegativeNumber(item.requestBytes, "$.requestBytes");
   return signal;
 }
+export function decodeTaskOpenEvent(value: unknown) {
+  const item = object(value, "$", ["generation", "taskId"]);
+  return {
+    generation: positiveWireId(item.generation, "$.generation"),
+    taskId: positiveWireId(item.taskId, "$.taskId"),
+  };
+}
 export function decodePingResponse(value: unknown): HostSignal {
   return decodeSignal(value, [
     "sequence",

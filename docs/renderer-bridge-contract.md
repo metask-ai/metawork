@@ -303,6 +303,8 @@ Renderer 在发送及等待 Snapshot 时锁定同 Task 的重复选择；模式�
 
 Scheduled Task create/update mutation 的模型字段精确为 `binding: { modelRef: { sourceId, modelId }, sourceGeneration, selectionRevision, protocol }`，不得携带 `expectedExecutionGeneration`。Renderer 只能从同一 snapshot 的 Models global default 与 `newTaskAdmission` active authority 构造它；`newTaskAdmission.activeProtocol` 是 nullable protocol，必须与 activeModelRef 同时存在或同时为空，表示 Product Control 实际安装的 protocol，Renderer 不从 Provider 类型猜测。source generation 仍取 Models 的 provider 视图，不能采用进程内 activeGeneration。source/model、source generation、selection revision、protocol 或 active authority 任一不一致时禁用保存。Host 在 mutation 和每次 occurrence 前重新做相同精确校验并当次 resolve。Host 不发布或接受缺少完整 source-qualified identity 的旧 binding，也不提供 Renderer 重绑迁移状态。occurrence `taskOutcome` 精确接受 `completed | stopped | cancelled | interrupted | failed | dependency_contract_failure | unavailable | null`；`unavailable` 表示该 occurrence 引用的真实 Task 已不再存在，不得伪装成 Task terminal cause。
 
+系统通知通过 SDK 普通 notification command 请求定位真实 Task。Bridge 的 `metawork:open-task` event 精确为 `{ generation, taskId }`，均为非零 canonical decimal u64，只是当前连接的导航意图，不授予 Task/Run mutation authority。Renderer 先刷新 canonical snapshot，再从真实 Task index 定位；旧 connection generation、未知 Task 或 malformed event 不得定位其他 Task或启动 Run。未连接时 Host 只保留最新一个进程内定位意图，连接后交付；它不进入产品历史或 Schedule store，不承诺跨进程通知重放。
+
 Scheduled Task setEnabled response 的 `enabled` 表示本次提交并完成 timer reconciliation 后的实际状态；恢复时发现 binding 已变化或 timer 不可用，可以返回 false。Renderer 必须刷新 canonical snapshot 解释当前状态，不能把请求值当作恢复成功的证据。
 
 Scheduled Task 的 skipped occurrence 可携带 `taskId`，仅当 reason 为 `previous_task_running` 时表示阻塞它的真实 Task，不代表新建 Task；此前没有记录 blocker 的 null 值仍有效。

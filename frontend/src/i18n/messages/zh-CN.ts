@@ -1601,4 +1601,6 @@ export const zhCN: Record<MessageId, string> = {
     "上次启动被应用中断，请编辑确认；不会自动重试。",
   "scheduled.reason.permission_required":
     "任务因权限不足停止，请核对内容和权限后编辑确认。",
+  "scheduled.notification_unavailable":
+    "通知中的任务当前不可用，请刷新并查看任务列表。",
 };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   BridgeClient,
@@ -15,6 +16,52 @@ function bridgeWith(invoke) {
     },
   };
 }
+
+test("notification navigation decodes an exact connection-scoped Task identity", () => {
+  let consume;
+  let removed = false;
+  const client = new BridgeClient({
+    bridge: {
+      invoke: async () => {},
+      on(name, callback) {
+        assert.equal(name, "metawork:open-task");
+        consume = callback;
+        return () => {
+          removed = true;
+        };
+      },
+    },
+  });
+  const seen = [];
+  const errors = [];
+  const unsubscribe = client.onTaskOpen(
+    (target) => seen.push(target),
+    (error) => errors.push(error),
+  );
+  consume(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../frontend/src/bridge/__fixtures__/task-open.fixture",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+  );
+  assert.deepEqual(seen, [{ generation: "1", taskId: "1" }]);
+  for (const invalid of [
+    { generation: "0", taskId: "1" },
+    { generation: "1", taskId: "01" },
+    { generation: "1", taskId: "0" },
+    { generation: "1", taskId: "1", run: true },
+  ])
+    consume(invalid);
+  assert.equal(errors.length, 4);
+  assert.equal(seen.length, 1);
+  unsubscribe();
+  assert.equal(removed, true);
+});
 
 test("Skill source commands carry only fixed ID intent and exact revision or recovery token", async () => {
   const calls = [];

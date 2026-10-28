@@ -5205,7 +5205,7 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
+        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeProtocol\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

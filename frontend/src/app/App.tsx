@@ -435,6 +435,11 @@ export default function App() {
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
   const client = useMemo(() => new BridgeClient(), []);
+  const [notificationTarget, setNotificationTarget] = useState<{
+    generation: string;
+    taskId: string;
+  } | null>(null);
+  const notificationRequest = useRef(0);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftSource = useRef<{
@@ -1484,6 +1489,77 @@ export default function App() {
       ),
     );
   }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
+  // Subscribe before connection bootstrap, including a queued native click.
+  useEffect(() => {
+    if (!client.available()) return;
+    return client.onTaskOpen(
+      (target) => {
+        notificationRequest.current++;
+        setNotificationTarget(target);
+      },
+      () =>
+        setStatus(
+          attentionStatus("scheduled.notification_unavailable", {
+            scope: "execution",
+          }),
+        ),
+    );
+  }, [client]);
+  useEffect(() => {
+    if (!notificationTarget) return;
+    if (BigInt(notificationTarget.generation) < BigInt(bridgeGeneration)) {
+      setNotificationTarget(null);
+      return;
+    }
+    if (bridgeUnavailable || notificationTarget.generation !== bridgeGeneration)
+      return;
+    const target = notificationTarget;
+    const request = notificationRequest.current;
+    setNotificationTarget(null);
+    setSettingsOpen(false);
+    setModelSetupOpen(false);
+    setSearchOpen(false);
+    setRoute("workbench");
+    pendingTaskSelection.current = target.taskId;
+    void refreshSnapshot()
+      .then(() => {
+        if (
+          request !== notificationRequest.current ||
+          target.generation !== bridgeGenerationRef.current
+        )
+          return;
+        if (
+          !latestSnapshotRef.current?.taskIndex.some(
+            (task) => task.id === target.taskId,
+          )
+        ) {
+          pendingTaskSelection.current = null;
+          setStatus(
+            attentionStatus("scheduled.notification_unavailable", {
+              scope: "execution",
+            }),
+          );
+        }
+      })
+      .catch(() => {
+        if (
+          request === notificationRequest.current &&
+          target.generation === bridgeGenerationRef.current
+        ) {
+          pendingTaskSelection.current = null;
+          setStatus(
+            attentionStatus("scheduled.notification_unavailable", {
+              scope: "execution",
+            }),
+          );
+        }
+      });
+  }, [
+    notificationTarget,
+    bridgeGeneration,
+    bridgeUnavailable,
+    refreshSnapshot,
+  ]);
   useEffect(() => {
     let cancelled = false;
     const current = new WorkbenchConnection(client, {

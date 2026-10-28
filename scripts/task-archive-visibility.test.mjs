@@ -144,6 +144,7 @@ async function renderApp(ctx, { archivedTask = {} } = {}) {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     },
     onHostSignal: () => () => {},
+    onTaskOpen: () => () => {},
     onWorkbenchRevision: (callback) => {
       onRevision = callback;
       return () => {};

@@ -5487,6 +5487,7 @@ async function renderAppFixture(
     available: () => true,
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
+    onTaskOpen: () => () => {},
     onWorkbenchRevision: (callback) => {
       onRevision = callback;
       return () => {};

@@ -15,6 +15,16 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
 };
 
+const schedule_open_prefix = "metawork.schedule.open.";
+
+pub fn notificationTaskId(name: []const u8) ?u64 {
+    if (!std.mem.startsWith(u8, name, schedule_open_prefix)) return null;
+    const value = name[schedule_open_prefix.len..];
+    if (value.len == 0 or value[0] == '0') return null;
+    for (value) |byte| if (byte < '0' or byte > '9') return null;
+    return std.fmt.parseInt(u64, value, 10) catch null;
+}
+
 const tray_icon_path = switch (builtin.os.tag) {
     .windows => "assets/icons/tray-icon.ico",
     else => "assets/icons/tray-icon.png",
@@ -72,10 +82,23 @@ pub const State = struct {
         if (!std.unicode.utf8ValidateSlice(notification.title)) return false;
         var end = @min(notification.title.len, native_sdk.platform.max_notification_subtitle_bytes);
         while (!std.unicode.utf8ValidateSlice(notification.title[0..end])) end -= 1;
+        var command_buffer: [native_sdk.platform.max_notification_action_command_bytes]u8 = undefined;
+        var id_buffer: [native_sdk.platform.max_notification_id_bytes]u8 = undefined;
+        const action = if (notification.task_id != 0)
+            std.fmt.bufPrint(&command_buffer, schedule_open_prefix ++ "{d}", .{notification.task_id}) catch return false
+        else
+            "";
+        const id = if (notification.task_id != 0)
+            std.fmt.bufPrint(&id_buffer, "schedule-{d}-{d}-{s}", .{ notification.scheduled_task_id, notification.task_id, @tagName(notification.kind) }) catch return false
+        else
+            "";
         runtime.showNotification(.{
+            .id = id,
             .title = "MetaWork",
             .subtitle = notification.title[0..end],
             .body = body,
+            .action_label = if (action.len != 0) "View task" else "",
+            .action_command = action,
         }) catch return false;
         return true;
     }
@@ -361,12 +384,16 @@ test "SDK consumption notification bounds presentation without changing Product 
         var seen: [native_sdk.platform.max_notification_subtitle_bytes]u8 = undefined;
         var len: usize = 0;
         var fail = false;
+        var task_id: ?u64 = null;
         fn notify(_: ?*anyopaque, options: native_sdk.platform.NotificationOptions) anyerror!void {
             calls += 1;
             try std.testing.expect(std.unicode.utf8ValidateSlice(options.subtitle));
             try std.testing.expect(options.subtitle.len <= seen.len);
             @memcpy(seen[0..options.subtitle.len], options.subtitle);
             len = options.subtitle.len;
+            task_id = notificationTaskId(options.action_command);
+            try std.testing.expectEqual(options.action_command.len == 0, options.action_label.len == 0);
+            if (task_id != null) try std.testing.expect(options.id.len > 0);
             if (fail) return error.InjectedNotificationFailure;
         }
     };
@@ -387,9 +414,18 @@ test "SDK consumption notification bounds presentation without changing Product 
     try std.testing.expectEqualStrings(long, notification.title);
     try std.testing.expect(window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .title = "界", .kind = .failed }));
     try std.testing.expectEqualStrings("界", Spy.seen[0..Spy.len]);
+    try std.testing.expectEqual(@as(?u64, null), Spy.task_id);
+    try std.testing.expect(window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .task_id = std.math.maxInt(u64), .title = "Task result", .kind = .completed }));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), Spy.task_id);
     Spy.fail = true;
     try std.testing.expect(!window.notifyScheduledTask(&harness.runtime, notification));
-    try std.testing.expectEqual(@as(usize, 3), Spy.calls);
+    try std.testing.expectEqual(@as(usize, 4), Spy.calls);
+}
+
+test "notification command admits only the exact real Task identity syntax" {
+    try std.testing.expectEqual(@as(?u64, 42), notificationTaskId("metawork.schedule.open.42"));
+    for ([_][]const u8{ "metawork.schedule.open.0", "metawork.schedule.open.01", "metawork.schedule.open.-1", "metawork.schedule.open.1.run", "metawork.schedule.open.18446744073709551616", "metawork.tray.open", "metawork.schedule.open." }) |value|
+        try std.testing.expectEqual(@as(?u64, null), notificationTaskId(value));
 }
 
 test "SDK consumption chrome queries enter Runtime recording and replay divergence" {

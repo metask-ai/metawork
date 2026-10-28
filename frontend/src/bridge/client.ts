@@ -50,6 +50,7 @@ import {
   decodeCatalogRefreshResult,
   decodeSkillCatalogRefreshResult,
   decodeHostSignalEvent,
+  decodeTaskOpenEvent,
   decodePingResponse,
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
@@ -194,6 +195,18 @@ export class BridgeClient {
     return this.bridge().on<unknown>(events.hostSignal, (value) => {
       try {
         consume(decodeHostSignalEvent(value));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+  onTaskOpen(
+    consume: (target: ReturnType<typeof decodeTaskOpenEvent>) => void,
+    reject: (error: unknown) => void,
+  ) {
+    return this.bridge().on<unknown>(events.openTask, (value) => {
+      try {
+        consume(decodeTaskOpenEvent(value));
       } catch (error) {
         reject(error);
       }
