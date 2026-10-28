@@ -695,6 +695,7 @@ pub fn run(init: std.process.Init) !void {
             .enabled = stores_state.task != null,
             .restored_bytes = stores_state.task_restored_bytes,
             .restore_failed = stores_state.task_restore_failed,
+            .restore_degraded = if (stores_state.task) |store| store.import_degraded else false,
             .restore_incompatible = if (stores_state.task) |store| store.incompatible else false,
             .credentials_fn = app_stores.taskStoreCredentials,
             .generation_commit_fn = app_stores.commitTaskStoreGeneration,

@@ -11,56 +11,8 @@ fn validateState(allocator: std.mem.Allocator, state: wire.StateWire, limits: wi
     for (state.failures) |failure| {
         if (failure.task_id == 0 or failure.recent_order == 0 or failure.reason.len == 0 or failure.reason.len > wire.max_failure_reason_bytes or !std.unicode.utf8ValidateSlice(failure.reason)) return error.Invalid;
     }
-    for (state.tasks) |task| {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        var restore = Restore{ .allocator = arena.allocator() };
-        // Validation only: do not replace persisted nonterminal facts with the
-        // interrupted records produced by restoration. This test projection
-        // enforces field bounds, not the live Runtime's global admission budget.
-        _ = try wire.restoreTask(.{
-            .context = &restore,
-            .allocator = restore.allocator,
-            .limits = limits,
-            .copy_fn = Restore.copy,
-            .alloc_fn = Restore.alloc,
-            .append_text_fn = Restore.append,
-            .free_fn = Restore.free,
-            .free_text_fn = Restore.freeText,
-            .reserve_bytes_fn = Restore.reserveBytes,
-            .release_bytes_fn = Restore.releaseBytes,
-        }, task);
-    }
+    for (state.tasks) |task| try wire.validateRestorableTask(allocator, task, limits);
 }
-
-const Restore = struct {
-    allocator: std.mem.Allocator,
-
-    fn reserveBytes(_: *anyopaque, _: usize) error{ProjectionCapacity}!void {}
-    fn releaseBytes(_: *anyopaque, _: usize) void {}
-
-    fn from(context: *anyopaque) *@This() {
-        return @ptrCast(@alignCast(context));
-    }
-    fn copy(context: *anyopaque, value: []const u8, max: usize) wire.ProjectionError![]u8 {
-        if (value.len > max) return error.ProjectionCapacity;
-        return from(context).allocator.dupe(u8, value);
-    }
-    fn alloc(context: *anyopaque, capacity: usize) wire.ProjectionError![]u8 {
-        return from(context).allocator.alloc(u8, capacity);
-    }
-    fn append(context: *anyopaque, target: *wire.RestoreText, suffix: []const u8, max: usize) wire.ProjectionError!void {
-        if (target.list.items.len > max or suffix.len > max - target.list.items.len) return error.ProjectionCapacity;
-        try target.list.appendSlice(from(context).allocator, suffix);
-    }
-    fn free(context: *anyopaque, value: []u8) void {
-        from(context).allocator.free(value);
-    }
-    fn freeText(context: *anyopaque, target: *wire.RestoreText) void {
-        target.list.deinit(from(context).allocator);
-        target.* = .{};
-    }
-};
 
 pub const Row = struct {
     table: []const u8,
@@ -69,12 +21,19 @@ pub const Row = struct {
     values: []const sql.Value,
     key: []const u8,
     digest: [32]u8,
+
+    pub fn position(self: Row) ?i64 {
+        for (self.columns, self.values) |name, value| {
+            if (std.mem.eql(u8, name, "ordinal")) return value.integer;
+        }
+        return null;
+    }
 };
 
 fn primaryNames(comptime table: []const u8) []const []const u8 {
     if (std.mem.eql(u8, table, "history_state")) return &.{"singleton"};
     if (std.mem.eql(u8, table, "workspaces") or std.mem.eql(u8, table, "tasks")) return &.{"id"};
-    if (std.mem.eql(u8, table, "retained_records")) return &.{ "kind", "id" };
+    if (std.mem.eql(u8, table, "retained_records")) return &.{ "kind", "id", "occurrence" };
     if (std.mem.eql(u8, table, "task_ui_history")) return &.{ "task_id", "request_id" };
     if (std.mem.eql(u8, table, "task_input_submissions")) return &.{ "task_id", "operation_id" };
     if (std.mem.eql(u8, table, "runs") or std.mem.eql(u8, table, "task_compacts")) return &.{ "task_id", "id" };
@@ -245,6 +204,10 @@ fn boolean(value: bool) sql.Value {
 fn integer(value: u64) !sql.Value {
     return .{ .integer = std.math.cast(i64, value) orelse return error.Invalid };
 }
+fn ordinal(value: usize) !sql.Value {
+    if (value >= 2147483648) return error.Invalid;
+    return integer(value);
+}
 fn oi(value: ?u64) !sql.Value {
     return if (value) |item| try integer(item) else .null_value;
 }
@@ -358,29 +321,49 @@ fn query(allocator: std.mem.Allocator, database: sql.Database, statement: []cons
 }
 
 // A single largest legal row fits the SQL result budget; a whole Task need
-// not. Use indexed ordinal keysets, never OFFSET or partial-result adoption.
+// not. Use indexed identity/position keysets, never partial-result adoption.
 fn ordered(allocator: std.mem.Allocator, database: sql.Database, comptime table: []const u8, parents: []const sql.Value) !Records {
+    const identity = comptime std.mem.eql(u8, table, "workspaces") or std.mem.eql(u8, table, "tasks") or std.mem.eql(u8, table, "run_additional_inputs");
+    const key = if (identity) "id" else "ordinal";
     const condition = switch (parents.len) {
-        0 => "WHERE ordinal>?1",
-        1 => "WHERE task_id=?1 AND ordinal>?2",
-        2 => "WHERE task_id=?1 AND run_id=?2 AND ordinal>?3",
+        0 => "WHERE " ++ key ++ ">?1",
+        1 => "WHERE task_id=?1 AND " ++ key ++ ">?2",
+        2 => "WHERE task_id=?1 AND run_id=?2 AND " ++ key ++ ">?3",
         else => return error.Invalid,
     };
-    const text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY ordinal LIMIT 1", .{ table, condition });
+    const text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s} LIMIT 1", .{ table, condition, key });
+    const initial_condition = switch (parents.len) {
+        0 => "",
+        1 => "WHERE task_id=?1",
+        2 => "WHERE task_id=?1 AND run_id=?2",
+        else => unreachable,
+    };
+    const initial_text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s} LIMIT 1", .{ table, initial_condition, key });
     const params = try allocator.alloc(sql.Value, parents.len + 1);
     @memcpy(params[0..parents.len], parents);
     var result = Records{ .allocator = allocator };
     var cursor: i64 = -1;
+    var last_id: u64 = 0;
+    var identity_bytes: [8]u8 = @splat(0);
+    var first = true;
     while (true) {
-        params[parents.len] = .{ .integer = cursor };
-        const page = try query(allocator, database, text, params);
+        if (identity) std.mem.writeInt(u64, &identity_bytes, last_id, .big);
+        params[parents.len] = if (identity) .{ .blob = &identity_bytes } else .{ .integer = cursor };
+        const page = try query(allocator, database, if (first) initial_text else text, if (first) parents else params);
         if (page.values.items.len == 0) break;
         if (page.values.items.len != 1) return error.Invalid;
-        const next = std.math.cast(i64, try page.row(0).i("ordinal")) orelse return error.Invalid;
-        if (next <= cursor) return error.Invalid;
-        cursor = next;
+        if (identity) {
+            const next = try page.row(0).u("id");
+            if (next <= last_id) return error.Invalid;
+            last_id = next;
+        } else {
+            const next = try page.row(0).i("ordinal");
+            if (next != result.values.items.len or next >= 2147483648) return error.Invalid;
+            cursor = @intCast(next);
+        }
         result.columns = page.columns;
         try result.values.append(allocator, page.values.items[0]);
+        first = false;
     }
     return result;
 }
@@ -421,25 +404,36 @@ fn build(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.Pr
     try validatePreserved(allocator, state, preserved);
     var batch = Batch{ .allocator = allocator, .capture = capture };
     try writeState(&batch, state);
-    for (state.workspaces, 0..) |value, ordinal| try writeWorkspace(&batch, value, ordinal);
-    for (state.tasks, 0..) |task, ordinal| try writeTask(&batch, task, ordinal);
-    for (state.tasks) |task| for (task.runs, 0..) |run, ordinal| {
-        try writeRun(&batch, run, task.id, ordinal);
+    for (state.workspaces) |value| try writeWorkspace(&batch, value);
+    for (state.tasks) |task| try writeTask(&batch, task);
+    for (state.tasks) |task| for (task.runs, 0..) |run, position| {
+        try writeRun(&batch, run, task.id, position);
     };
-    for (state.tasks) |task| for (task.runs) |run| for (run.tools, 0..) |tool, ordinal| {
-        try writeTool(&batch, tool, task.id, run.id, ordinal);
+    for (state.tasks) |task| for (task.runs) |run| for (run.tools, 0..) |tool, position| {
+        try writeTool(&batch, tool, task.id, run.id, position);
     };
     for (state.tasks) |task| for (task.runs) |run| if (run.file_changes) |changes| {
-        for (changes, 0..) |change, ordinal| try writeChange(&batch, change, task.id, run.id, ordinal);
+        for (changes, 0..) |change, position| try writeChange(&batch, change, task.id, run.id, position);
     };
     for (state.tasks) |task| {
-        for (task.compacts, 0..) |v, ordinal| try batch.add("task_compacts", .{ .task_id = try batch.u(task.id), .id = try batch.u(v.id), .ordinal = try integer(ordinal), .payload = try batch.json(v) });
-        for (task.ui_history, 0..) |v, ordinal| try batch.add("task_ui_history", .{ .task_id = try batch.u(task.id), .request_id = try batch.u(v.request_id), .ordinal = try integer(ordinal), .payload = try batch.json(v) });
-        for (task.input_submissions, 0..) |v, ordinal| try batch.add("task_input_submissions", .{ .task_id = try batch.u(task.id), .operation_id = b(v.submission.operation_id), .ordinal = try integer(ordinal), .payload = try batch.json(v) });
-        for (task.runs) |run| for (run.additional_inputs, 0..) |v, ordinal| try batch.add("run_additional_inputs", .{ .task_id = try batch.u(task.id), .run_id = try batch.u(run.id), .id = try batch.u(v.id), .ordinal = try integer(ordinal), .payload = try batch.json(v) });
+        for (task.compacts, 0..) |v, position| try batch.add("task_compacts", .{ .task_id = try batch.u(task.id), .id = try batch.u(v.id), .ordinal = try ordinal(position), .payload = try batch.json(v) });
+        for (task.ui_history, 0..) |v, position| try batch.add("task_ui_history", .{ .task_id = try batch.u(task.id), .request_id = try batch.u(v.request_id), .ordinal = try ordinal(position), .payload = try batch.json(v) });
+        for (task.input_submissions, 0..) |v, position| try batch.add("task_input_submissions", .{ .task_id = try batch.u(task.id), .operation_id = b(v.submission.operation_id), .ordinal = try ordinal(position), .payload = try batch.json(v) });
+        for (task.runs) |run| for (run.additional_inputs) |v| try batch.add("run_additional_inputs", .{ .task_id = try batch.u(task.id), .run_id = try batch.u(run.id), .id = try batch.u(v.id), .payload = try batch.json(v) });
     }
-    for (preserved.retained) |v| try batch.add("retained_records", .{ .kind = t(@tagName(v.kind)), .id = try batch.u(v.id), .recent_order = try batch.u(v.order), .payload = b(v.payload) });
-    for (preserved.read_only_tasks) |v| try batch.add("retained_records", .{ .kind = t("read_only_task"), .id = try batch.u(v.task_id), .recent_order = try batch.u(v.recent_order), .payload = b(v.payload) });
+    // Several original frames may have the same identity. Preserve each one,
+    // including byte-identical repetitions, without inventing a new frame id.
+    var occurrences: std.AutoHashMap(struct { kind: wire.RetainedKind, id: u64 }, usize) = .init(allocator);
+    defer occurrences.deinit();
+    for (preserved.retained) |v| {
+        const entry = try occurrences.getOrPut(.{ .kind = v.kind, .id = v.id });
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        const occurrence = entry.value_ptr.*;
+        if (occurrence >= 2147483648) return error.Invalid;
+        entry.value_ptr.* += 1;
+        try batch.add("retained_records", .{ .kind = t(@tagName(v.kind)), .id = try batch.u(v.id), .occurrence = try integer(occurrence), .recent_order = try batch.u(v.order), .payload = b(v.payload) });
+    }
+    for (preserved.read_only_tasks) |v| try batch.add("retained_records", .{ .kind = t("read_only_task"), .id = try batch.u(v.task_id), .occurrence = try integer(0), .recent_order = try batch.u(v.recent_order), .payload = b(v.payload) });
     try batch.flush();
     return batch;
 }
@@ -457,19 +451,24 @@ pub fn loadPreserving(allocator: std.mem.Allocator, database: sql.Database, limi
     var bindings: Batch = .{ .allocator = allocator };
     for ([_][]const u8{ "workspace", "task", "read_only_task" }) |kind| {
         var cursor: u64 = 0;
+        var last_occurrence: i64 = -1;
         var first = true;
         while (true) {
-            const text = if (first) "SELECT * FROM retained_records WHERE kind=?1 AND id>=?2 ORDER BY id LIMIT 1" else "SELECT * FROM retained_records WHERE kind=?1 AND id>?2 ORDER BY id LIMIT 1";
-            const rows = try query(allocator, database, text, &.{ t(kind), try bindings.u(cursor) });
+            const text = if (first) "SELECT * FROM retained_records WHERE kind=?1 ORDER BY id,occurrence LIMIT 1" else "SELECT * FROM retained_records WHERE kind=?1 AND (id,occurrence)>(?2,?3) ORDER BY id,occurrence LIMIT 1";
+            const rows = try query(allocator, database, text, if (first) &.{t(kind)} else &.{ t(kind), try bindings.u(cursor), .{ .integer = last_occurrence } });
             if (rows.values.items.len == 0) break;
             if (rows.values.items.len != 1) return error.Invalid;
             const row = rows.row(0);
             const id = try row.u("id");
             const order = try row.u("recent_order");
-            if (id == 0 or (!first and id <= cursor)) return error.Invalid;
+            const occurrence = try row.i("occurrence");
+            if (id == 0 or (!first and id < cursor)) return error.Invalid;
+            const expected: u64 = if (first or id != cursor) 0 else @intCast(last_occurrence + 1);
+            if (occurrence != expected or occurrence >= 2147483648) return error.Invalid;
             const raw = try row.value("payload");
             if (raw != .blob) return error.Invalid;
             if (std.mem.eql(u8, kind, "read_only_task")) {
+                if (occurrence != 0) return error.Invalid;
                 var found = false;
                 for (state.tasks) |task| {
                     if (task.id == id) {
@@ -481,9 +480,12 @@ pub fn loadPreserving(allocator: std.mem.Allocator, database: sql.Database, limi
                 try readonly.append(allocator, .{ .task_id = id, .recent_order = order, .payload = raw.blob });
             } else try retained.append(allocator, .{ .kind = if (std.mem.eql(u8, kind, "workspace")) .workspace else .task, .id = id, .order = order, .payload = raw.blob });
             cursor = id;
+            last_occurrence = @intCast(occurrence);
             first = false;
         }
     }
+    const total = try query(allocator, database, "SELECT COUNT(*) AS total FROM retained_records", &.{});
+    if (try total.row(0).i("total") != retained.items.len + readonly.items.len) return error.Invalid;
     const result: Loaded = .{ .value = state, .preserved = .{ .retained = try retained.toOwnedSlice(allocator), .read_only_tasks = try readonly.toOwnedSlice(allocator) } };
     try validatePreserved(allocator, result.value, result.preserved);
     return result;
@@ -582,9 +584,8 @@ fn readState(row: Record) !wire.StateWire {
     return v;
 }
 
-fn writeWorkspace(batch: *Batch, v: wire.WorkspaceWire, ordinal: usize) !void {
+fn writeWorkspace(batch: *Batch, v: wire.WorkspaceWire) !void {
     try batch.add("workspaces", .{
-        .ordinal = try integer(ordinal),
         .id = try batch.u(v.id),
         .epoch = try batch.u(v.epoch),
         .kind = t(v.kind),
@@ -607,13 +608,11 @@ fn readWorkspace(row: Record) !wire.WorkspaceWire {
     return v;
 }
 
-fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
-    const approval = if (v.checkpoint) |cp| std.mem.eql(u8, cp.anchor.terminal.kind, "approval") else false;
-    const checkpoint = if (approval) null else v.checkpoint;
+fn writeTask(batch: *Batch, v: wire.TaskWire) !void {
+    const checkpoint = v.checkpoint;
     try batch.add("tasks", .{
         .presentation_format = try oi(if (v.presentation_format) |format| @as(u64, format) else null),
         .next_presentation_order = try batch.ou(v.next_presentation_order),
-        .ordinal = try integer(ordinal),
         .id = try batch.u(v.id),
         .recent_order = try batch.u(v.recent_order),
         .completion_seen_run_id = try batch.ou(v.completion_seen_run_id),
@@ -646,12 +645,6 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .checkpoint_model = ob(if (checkpoint) |cp| cp.session.model else null),
         .checkpoint_terminal_kind = ot(if (checkpoint) |cp| cp.anchor.terminal.kind else null),
         .checkpoint_terminal_id = try batch.ou(if (checkpoint) |cp| cp.anchor.terminal.id else null),
-        .checkpoint_approval_revision = try batch.ou(if (approval) v.checkpoint.?.anchor.terminal.id else null),
-        .checkpoint_approval_json = if (approval) try batch.json(ApprovalCheckpointPayload{
-            .blob = v.checkpoint.?.blob,
-            .session = v.checkpoint.?.session,
-            .binding_epoch = v.checkpoint.?.anchor.binding_epoch,
-        }) else .null_value,
         .checkpoint_binding_epoch = try batch.ou(if (checkpoint) |cp| cp.anchor.binding_epoch else null),
     });
 }
@@ -691,10 +684,10 @@ fn readTask(row: Record) !wire.TaskWire {
     return v;
 }
 
-fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void {
+fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, position: usize) !void {
     try batch.add("runs", .{
         .task_id = try batch.u(task_id),
-        .ordinal = try integer(ordinal),
+        .ordinal = try ordinal(position),
         .id = try batch.u(v.id),
         .coverage = t(v.coverage),
         .generation = try batch.u(v.generation),
@@ -770,11 +763,11 @@ fn readRun(row: Record) !wire.RunWire {
     return v;
 }
 
-fn writeTool(batch: *Batch, v: wire.ToolWire, task_id: u64, run_id: u64, ordinal: usize) !void {
+fn writeTool(batch: *Batch, v: wire.ToolWire, task_id: u64, run_id: u64, position: usize) !void {
     try batch.add("run_tools", .{
         .task_id = try batch.u(task_id),
         .run_id = try batch.u(run_id),
-        .ordinal = try integer(ordinal),
+        .ordinal = try ordinal(position),
         .activity_order = try batch.u(v.order),
         .id = b(v.id),
         .name = b(v.name),
@@ -811,11 +804,11 @@ fn readTool(row: Record) !wire.ToolWire {
     return v;
 }
 
-fn writeChange(batch: *Batch, v: wire.FileChangeWire, task_id: u64, run_id: u64, ordinal: usize) !void {
+fn writeChange(batch: *Batch, v: wire.FileChangeWire, task_id: u64, run_id: u64, position: usize) !void {
     try batch.add("run_file_changes", .{
         .task_id = try batch.u(task_id),
         .run_id = try batch.u(run_id),
-        .ordinal = try integer(ordinal),
+        .ordinal = try ordinal(position),
         .activity_order = try batch.u(v.order),
         .id = b(v.id),
         .kind = t(v.kind),
@@ -855,24 +848,8 @@ fn readChange(row: Record) !wire.FileChangeWire {
     return v;
 }
 
-const ApprovalCheckpointPayload = struct {
-    blob: wire.CheckpointBlobWire,
-    session: wire.CheckpointSessionWire,
-    binding_epoch: u64,
-};
-
 fn readCheckpoint(row: Record) !?wire.CheckpointWire {
     try row.optionalGroup(.{ "checkpoint_generation", "checkpoint_byte_size", "checkpoint_digest", "checkpoint_logical_session_id", "checkpoint_last_run_id", "checkpoint_last_compact_id", "checkpoint_model", "checkpoint_terminal_kind", "checkpoint_terminal_id", "checkpoint_binding_epoch" });
-    try row.optionalGroup(.{ "checkpoint_approval_revision", "checkpoint_approval_json" });
-    if (try row.ou("checkpoint_approval_revision")) |revision| {
-        if (!try row.isNull("checkpoint_generation")) return error.Invalid;
-        const payload = try row.json(ApprovalCheckpointPayload, "checkpoint_approval_json");
-        return .{
-            .blob = payload.blob,
-            .session = payload.session,
-            .anchor = .{ .terminal = .{ .kind = "approval", .id = revision }, .binding_epoch = payload.binding_epoch },
-        };
-    }
     if (try row.isNull("checkpoint_generation")) return null;
     var v: wire.CheckpointWire = undefined;
     v.blob.generation = try row.u("checkpoint_generation");

@@ -164,6 +164,23 @@ test("Task list stays flat while ordering action before recency", () => {
   );
 });
 
+test("equal Task priority and recency use numeric identity instead of input order", () => {
+  const tasks = [
+    task({ id: "9007199254740994", recentOrder: "8" }),
+    task({ id: "12", recentOrder: "8" }),
+    task({ id: "2", recentOrder: "8" }),
+  ];
+  const expected = ["2", "12", "9007199254740994"];
+  assert.deepEqual(
+    orderedTasks(tasks).map((item) => item.id),
+    expected,
+  );
+  assert.deepEqual(
+    orderedTasks([...tasks].reverse()).map((item) => item.id),
+    expected,
+  );
+});
+
 test("automatic review is processing until the current request needs a user", () => {
   const reviewing = task({
     id: "reviewing",

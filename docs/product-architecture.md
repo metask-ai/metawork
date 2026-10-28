@@ -444,6 +444,8 @@ Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普
 
 正式 SQL 不存在时，单向导入旧 canonical framed store，保留合法事实、只读 payload、无法解释的完整记录及身份高水位；不读取更早的 JSON envelope 或开发期废弃格式。导入在同目录临时库中完成，经完整 loader 校验、WAL TRUNCATE 和连接关闭后才 rename 发布。原 framed 文件保留为受管迁移材料，仅安全维护可以清洗它。正式 SQL 一旦存在就不退回旧 store。缺 canonical 但存在恢复证据不是首次启动；未知 schema 版本不得保存、quarantine 或替换正式库，即使显式恢复也必须拒绝。损坏或不可读的当前版本历史不自动覆盖，沿既有显式恢复入口保全原件和现存 DB/WAL/SHM 组件，再发布经验证的关闭候选。
 
+framed 恢复分类必须包含实际 Task 恢复约束：仅解码或局部校验通过、但完整恢复失败的 Task 继续保留原帧，不能使整批导入或随后携带保留帧的正常保存失败。同 kind、同身份的多条保留帧仍是不同 occurrence，必须保留各自 payload、顺序事实和重复次数，不能按身份覆盖或按内容去重。Automatic Workspace 的 owner 无法恢复时，其 scope 原帧一并保留；只读映射只引用已恢复的 Task，高水位不因降级而倒退。默认审批偏好的导入回退复用 Runtime 判定并反馈启动降级事实，不改变历史 Task/Run 的权限；执行资源、I/O 或提交失败仍中止导入，不发布空候选代替有效记录。当前 SQL 加载与业务候选继续严格校验，导入恢复不构成静默 SQL 修复路径。
+
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
 交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。若 required commit 明确失败，Control 回滚候选并删除仍可证明未发布的 Automatic Workspace 空目录；若结果不确定，Control 同样回滚内存 Task/Run/Workspace 候选但必须保留物理目录，因为 canonical store 可能已经引用它。两种拒绝都保持 occurrence `task_id = 0`，不得伪造 interrupted Run 或 terminal cause。Task 物理删除仍遵守 §4.2 的 commit-before-release 边界。
@@ -458,9 +460,13 @@ Host 重启从通过校验的 store 重建 durable history 和 detached attachme
 
 Product Control 统一拥有同一个 history 数据库的结构和有序迁移清单，业务 aggregate 不独立执行迁移。schema 是无状态模块，直接产出 Storage 的 `sql.Migration`；版本从清单推导，新建与升级共用同一条迁移链。清单在编译期校验连续版本和有效 UTF-8/LF 字节，已成为需保留数据库身份的历史迁移不得原地改写。唯一建表 SQL 拥有精确列、约束与索引定义，文档不维护第二份字段表。
 
-历史 SQL 表达保留原有完整 u64、可空状态、数组顺序与已有身份关系。独立表须有当前查询、更新或容量收益；随所属记录整体读写的有界附属集合使用 typed JSON，单个可选附属记录可以使用全空或全有的字段组。关系列中的 u64 用等长 big-endian BLOB 表达，自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。JSON 直接按 Product wire 类型编码和解码，u64 不经浮点中转，数组顺序与转义字符串必须无损。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。
+历史 SQL 表达保留原有完整 u64、可空状态与已有身份关系。Workspace 和 Task 顶层集合按身份升序恢复，容器槽位不属于持久化语义；导航保持业务排序，排序条件相同时按身份升序确定顺序。追加输入已有严格递增的身份顺序，按该身份恢复。Run、工具、文件变更、Compact、UI history 和输入提交保留原有数组顺序，不能以 generation 或 activity order 的唯一性推断数组递增；这些事实各有独立语义。独立表须有当前查询、更新或容量收益；随所属记录整体读写的有界附属集合使用 typed JSON，单个可选附属记录可以使用全空或全有的字段组。关系列中的 u64 用等长 big-endian BLOB 表达，自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。JSON 直接按 Product wire 类型编码和解码，u64 不经浮点中转，JSON 内数组顺序与转义字符串必须无损。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。
 
 DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；JSON 内的数量、字段、唯一性、引用以及跨记录语义由 Product 校验，不能把 SQL 写入成功视作历史有效。Product 继续校验 UTF-8 与字节预算，加载还须覆盖原编码器的恢复失败记录限制和实际 Task 恢复中的 checkpoint 校验，不能仅凭局部 candidate 校验或字段往返宣称可恢复。合并或移除物理表不能丢失恢复诊断，历史权限仍不具有当前授权效力。
+
+父子记录的物理删除由 Product 在同一事务内显式完成，外键延迟到提交检查且不得级联删除；遗漏子记录须使整个事务失败。单个可选 checkpoint 使用同一组完整字段表达 Run、Compact 与审批 anchor，不能按 anchor 种类分裂存储；审批 anchor 的 revision 上界同时受行内 SQL 约束和 Product 校验。局部约束与非主键唯一性必须可在既定 Storage 权限内演进，不以关闭外键或放宽 authorizer 作为升级前提。
+
+持久化 JSON 的结构、枚举域或接受语义发生版本变化时，必须同步推进唯一 migration identity；即使没有 DDL 也须有标记迁移，使旧版本在解码前以 `VersionUnknown` 拒绝写入和替换。验证须覆盖允许持久化的枚举全集及未知值拒绝，不将运行时专用状态误当作持久化能力。
 
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 

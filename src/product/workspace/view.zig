@@ -87,6 +87,7 @@ pub fn copyProjections(
         {},
         struct {
             fn lessThan(_: void, left: Projection, right: Projection) bool {
+                if (left.recent_order == right.recent_order) return left.id < right.id;
                 return left.recent_order > right.recent_order;
             }
         }.lessThan,
