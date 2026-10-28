@@ -2924,6 +2924,23 @@ export default function App() {
     await refreshCommittedView();
     return result;
   }
+  async function commitScheduleMutation<T>(
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await mutation();
+      await refreshCommittedView();
+      return result;
+    } catch (error) {
+      if (
+        !(await reconcileCommandTimeout(error, "operation.schedule", {
+          scope: "execution",
+        }))
+      )
+        await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
   async function commitMcpMutation(
     mutation: () => Promise<McpMutationResult>,
   ): Promise<McpMutationResult> {
@@ -4463,17 +4480,33 @@ export default function App() {
               bridgeUnavailable || !snapshot.capabilities.scheduledTasks
             }
             recoveryDisabled={bridgeUnavailable}
-            onCreate={(input) => client.createScheduledTask(input)}
+            onCreate={(input) =>
+              commitScheduleMutation(() => client.createScheduledTask(input))
+            }
             onUpdate={(id, epoch, input) =>
-              client.updateScheduledTask(id, epoch, input)
+              commitScheduleMutation(() =>
+                client.updateScheduledTask(id, epoch, input),
+              )
             }
             onSetEnabled={(id, epoch, enabled) =>
-              client.setScheduledTaskEnabled(id, epoch, enabled)
+              commitScheduleMutation(() =>
+                client.setScheduledTaskEnabled(id, epoch, enabled),
+              )
             }
-            onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
-            onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+            onRunNow={(id, epoch) =>
+              commitScheduleMutation(() =>
+                client.runScheduledTaskNow(id, epoch),
+              )
+            }
+            onDelete={(id, epoch) =>
+              commitScheduleMutation(() =>
+                client.deleteScheduledTask(id, epoch),
+              )
+            }
             onRecover={() =>
-              client.recoverScheduledTaskStore(snapshot.revision)
+              commitScheduleMutation(() =>
+                client.recoverScheduledTaskStore(snapshot.revision),
+              )
             }
             onOpenTask={(taskId) => {
               const task = snapshot.taskIndex.find(

@@ -6072,6 +6072,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .scheduled-row-copy small {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible;
   margin-top: 5px;
   color: var(--ui-content-muted);
   font-size: var(--text-label);

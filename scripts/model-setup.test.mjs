@@ -77,7 +77,9 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { default: App } = await vite.ssrLoadModule("/src/app/App.tsx");
-const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+const { BridgeClient, BridgeCommandTimeoutError } = await vite.ssrLoadModule(
+  "/src/bridge/client.ts",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -274,6 +276,35 @@ async function renderApp(
     },
   };
 }
+
+test("schedule timeout refreshes canonical state once without replaying the mutation", async (ctx) => {
+  const snapshot = customModels();
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.scheduledTasks = [];
+  await renderApp(ctx, snapshot);
+  let mutations = 0;
+  let reads = 0;
+  ctx.mock.method(BridgeClient.prototype, "createScheduledTask", async () => {
+    mutations++;
+    throw new BridgeCommandTimeoutError("metawork.scheduledTasks.create", 10);
+  });
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
+    reads++;
+    return productStateFixture(snapshot, scope);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
+  fireEvent.click(await screen.findByRole("button", { name: /Daily brief/ }));
+  const before = reads;
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    assert.match(document.body.textContent, /result is unconfirmed/),
+  );
+  assert.ok(reads > before);
+  assert.equal(mutations, 1);
+  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+});
 
 test("unconfigured and expired-login states have different recovery actions", () => {
   const state = signedOut();

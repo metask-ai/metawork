@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   PermissionProfile,
@@ -16,6 +16,7 @@ import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { persistenceRecoveryErrorMessageId } from "../../i18n/persistence-recovery.ts";
+import { BridgeCommandTimeoutError } from "../../bridge/client.ts";
 
 type Draft = {
   title: string;
@@ -176,6 +177,8 @@ function toMutation(
   const start = Math.floor(new Date(draft.start).getTime() / 1000);
   if (!draft.title.trim() || !Number.isSafeInteger(start) || start <= 0)
     return null;
+  if (draft.recurrenceKind === "once" && start <= Math.floor(Date.now() / 1000))
+    return null;
   if (!draft.text.trim()) return null;
   if (!snapshot.capabilities.automaticWorkspaces) return null;
   if (
@@ -188,7 +191,9 @@ function toMutation(
     draft.unit === "days" ? 86_400 : draft.unit === "hours" ? 3600 : 60;
   if (
     draft.recurrenceKind === "interval" &&
-    (!Number.isSafeInteger(every) || every <= 0)
+    (!Number.isSafeInteger(every) ||
+      every <= 0 ||
+      !Number.isSafeInteger(every * unitSeconds))
   )
     return null;
   const binding = currentBinding(snapshot);
@@ -282,10 +287,11 @@ export function ScheduledTasksPage({
   const editorOpen = creating || selected !== null;
   const hasScheduledTasks = snapshot.scheduledTasks.length > 0;
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const mutation = useMemo(
-    () => toMutation(snapshot, draft),
-    [snapshot, draft],
-  );
+  const mutation = toMutation(snapshot, draft);
+  const expiredOnce =
+    draft.recurrenceKind === "once" &&
+    new Date(draft.start).getTime() <= Date.now();
+  const binding = currentBinding(snapshot);
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
@@ -403,7 +409,12 @@ export function ScheduledTasksPage({
   }
 
   async function submit() {
-    if (!mutation || busy) return;
+    if (busy) return;
+    const mutation = toMutation(snapshot, draft);
+    if (!mutation) {
+      setError(t(expiredOnce ? "scheduled.expired_once" : "scheduled.error"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -412,7 +423,13 @@ export function ScheduledTasksPage({
       closeEditor();
       setQuery("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("scheduled.error"));
+      setError(
+        t(
+          caught instanceof BridgeCommandTimeoutError
+            ? "scheduled.timeout"
+            : "scheduled.error",
+        ),
+      );
     } finally {
       setBusy(false);
     }
@@ -424,7 +441,13 @@ export function ScheduledTasksPage({
     try {
       await run();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t("scheduled.error"));
+      setError(
+        t(
+          caught instanceof BridgeCommandTimeoutError
+            ? "scheduled.timeout"
+            : "scheduled.error",
+        ),
+      );
     } finally {
       setBusy(false);
     }
@@ -451,6 +474,15 @@ export function ScheduledTasksPage({
       return t("cause.permission_required");
     if (occurrence.taskOutcome === "completed")
       return t("scheduled.occurrence.completed");
+    if (occurrence.taskOutcome === "unavailable")
+      return t("scheduled.occurrence.unavailable");
+    if (
+      occurrence.taskOutcome === "stopped" ||
+      occurrence.taskOutcome === "cancelled"
+    )
+      return t("scheduled.occurrence.stopped");
+    if (occurrence.taskOutcome === "interrupted")
+      return t("scheduled.occurrence.interrupted");
     if (occurrence.taskOutcome) return t("scheduled.occurrence.failed");
     if (occurrence.result === "submitted")
       return t("scheduled.occurrence.running");
@@ -524,6 +556,12 @@ export function ScheduledTasksPage({
             {t("scheduled.new")}
           </Button>
         </header>
+
+        {!editorOpen && error && (
+          <p className="scheduled-error" role="alert">
+            {error}
+          </p>
+        )}
 
         {snapshot.capabilities.scheduledTaskPersistenceHealth !== "ready" && (
           <ConfirmationNotice
@@ -677,10 +715,36 @@ export function ScheduledTasksPage({
                                       : t("scheduled.no_next_run"),
                                   )}
                                 </time>
+                                {latestOccurrence &&
+                                  task.nextRunAtUnixSeconds && (
+                                    <small>
+                                      {occurrenceLabel(latestOccurrence)}
+                                    </small>
+                                  )}
+                                {task.failureReason && (
+                                  <small>
+                                    {t(
+                                      `scheduled.reason.${task.failureReason}`,
+                                    )}
+                                  </small>
+                                )}
                               </span>
                               <Icon name="chevron" />
                             </button>
                             <div className="scheduled-row-actions">
+                              {latestOccurrence?.taskId &&
+                                latestOccurrence.taskOutcome !==
+                                  "unavailable" && (
+                                  <button
+                                    type="button"
+                                    className="text-button focus-ring"
+                                    onClick={() =>
+                                      onOpenTask(latestOccurrence.taskId!)
+                                    }
+                                  >
+                                    {t("scheduled.open_task")}
+                                  </button>
+                                )}
                               <button
                                 type="button"
                                 className="text-button focus-ring"
@@ -809,6 +873,27 @@ export function ScheduledTasksPage({
                 </section>
               )}
 
+              {selected?.failureReason && (
+                <p className="scheduled-error" role="status">
+                  {t(`scheduled.reason.${selected.failureReason}`)}
+                </p>
+              )}
+              {selected &&
+                binding &&
+                (selected.health === "needs_attention" ||
+                  !sameModelRef(selected.binding.modelRef, binding.modelRef) ||
+                  selected.binding.sourceGeneration !==
+                    binding.sourceGeneration ||
+                  selected.binding.selectionRevision !==
+                    binding.selectionRevision ||
+                  selected.binding.protocol !== binding.protocol) && (
+                  <p className="scheduled-reconfirm" role="status">
+                    {t("scheduled.reconfirm", {
+                      model: binding.modelRef.modelId,
+                    })}
+                  </p>
+                )}
+
               <section
                 className="scheduled-editor-section"
                 aria-labelledby="scheduled-editor-content-title"
@@ -896,6 +981,11 @@ export function ScheduledTasksPage({
                   <span>{t("scheduled.starts")}</span>
                   <Input
                     type="datetime-local"
+                    aria-label={t("scheduled.starts")}
+                    aria-invalid={expiredOnce}
+                    aria-describedby={
+                      expiredOnce ? "scheduled-time-error" : undefined
+                    }
                     value={draft.start}
                     onChange={(event) =>
                       setDraft((value) => ({
@@ -904,6 +994,11 @@ export function ScheduledTasksPage({
                       }))
                     }
                   />
+                  {expiredOnce && (
+                    <small id="scheduled-time-error" role="alert">
+                      {t("scheduled.expired_once")}
+                    </small>
+                  )}
                 </label>
                 {draft.recurrenceKind === "interval" && (
                   <label>
@@ -966,16 +1061,30 @@ export function ScheduledTasksPage({
                                 t("scheduled.no_next_run"),
                               )}
                             </time>
+                            {occurrence.source === "timer" &&
+                              BigInt(occurrence.triggeredAtUnixSeconds) >
+                                BigInt(occurrence.plannedAtUnixSeconds) && (
+                                <small>
+                                  {t("scheduled.occurrence.delayed", {
+                                    time: formatTime(
+                                      occurrence.plannedAtUnixSeconds,
+                                      locale,
+                                      "",
+                                    ),
+                                  })}
+                                </small>
+                              )}
                           </span>
-                          {occurrence.taskId && (
-                            <button
-                              type="button"
-                              className="text-button focus-ring"
-                              onClick={() => onOpenTask(occurrence.taskId!)}
-                            >
-                              {t("scheduled.open_task")}
-                            </button>
-                          )}
+                          {occurrence.taskId &&
+                            occurrence.taskOutcome !== "unavailable" && (
+                              <button
+                                type="button"
+                                className="text-button focus-ring"
+                                onClick={() => onOpenTask(occurrence.taskId!)}
+                              >
+                                {t("scheduled.open_task")}
+                              </button>
+                            )}
                         </li>
                       ))}
                     </ol>
@@ -992,7 +1101,11 @@ export function ScheduledTasksPage({
                 </div>
               </section>
 
-              {error && <p className="scheduled-error">{error}</p>}
+              {error && (
+                <p className="scheduled-error" role="alert">
+                  {error}
+                </p>
+              )}
             </div>
 
             <footer>
@@ -1001,9 +1114,7 @@ export function ScheduledTasksPage({
                   <button
                     type="button"
                     className="danger-text-button focus-ring"
-                    disabled={
-                      disabled || busy || selected.health === "needs_attention"
-                    }
+                    disabled={disabled || busy}
                     onClick={() =>
                       void action(async () => {
                         await onDelete(selected.id, selected.epoch);
@@ -1039,7 +1150,9 @@ export function ScheduledTasksPage({
                   <button
                     type="button"
                     className="text-button focus-ring"
-                    disabled={disabled || busy}
+                    disabled={
+                      disabled || busy || selected.health === "needs_attention"
+                    }
                     onClick={() =>
                       void action(async () => {
                         const result = await onRunNow(
