@@ -452,7 +452,7 @@ Host 重启从通过校验的 store 重建 durable history 和 detached attachme
 
 Product Control 统一拥有同一个 history 数据库的结构和有序迁移清单，业务 aggregate 不独立执行迁移。schema 是无状态模块，直接产出 Storage 的 `sql.Migration`；版本从清单推导，新建与升级共用同一条迁移链。清单在编译期校验连续版本和有效 UTF-8/LF 字节，已成为需保留数据库身份的历史迁移不得原地改写。唯一建表 SQL 拥有精确列、约束与索引定义，文档不维护第二份字段表。
 
-历史 SQL 表达保留原有完整 u64、可空状态、数组顺序与已有身份关系。独立表须有当前查询、更新或容量收益；随所属记录整体读写的有界附属集合使用 typed JSON，单个可选附属记录可以使用全空或全有的字段组。关系列中的 u64 用等长 big-endian BLOB 表达，自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。JSON 直接按 Product wire 类型编码和解码，u64 不经浮点中转，数组顺序与转义字符串必须无损。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。
+历史 SQL 表达保留原有完整 u64、可空状态与已有身份关系。Workspace 和 Task 顶层集合按身份升序恢复，容器槽位不属于持久化语义；导航保持业务排序，排序条件相同时按身份升序确定顺序。追加输入已有严格递增的身份顺序，按该身份恢复。Run、工具、文件变更、Compact、UI history 和输入提交保留原有数组顺序，不能以 generation 或 activity order 的唯一性推断数组递增；这些事实各有独立语义。独立表须有当前查询、更新或容量收益；随所属记录整体读写的有界附属集合使用 typed JSON，单个可选附属记录可以使用全空或全有的字段组。关系列中的 u64 用等长 big-endian BLOB 表达，自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。JSON 直接按 Product wire 类型编码和解码，u64 不经浮点中转，JSON 内数组顺序与转义字符串必须无损。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。
 
 DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；JSON 内的数量、字段、唯一性、引用以及跨记录语义由 Product 校验，不能把 SQL 写入成功视作历史有效。Product 继续校验 UTF-8 与字节预算，加载还须覆盖原编码器的恢复失败记录限制和实际 Task 恢复中的 checkpoint 校验，不能仅凭局部 candidate 校验或字段往返宣称可恢复。合并或移除物理表不能丢失恢复诊断，历史权限仍不具有当前授权效力。
 

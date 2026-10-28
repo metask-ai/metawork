@@ -26,11 +26,25 @@ fn save(allocator: std.mem.Allocator, database: sql.Database, state: history.wir
 
 fn expectSame(allocator: std.mem.Allocator, database: sql.Database, expected: history.wire.StateWire) !void {
     const actual = try history.load(allocator, database);
+    // Top-level identity sets have a canonical order; nested arrays do not.
+    var canonical = expected;
+    canonical.workspaces = try allocator.dupe(history.wire.WorkspaceWire, expected.workspaces);
+    canonical.tasks = try allocator.dupe(history.wire.TaskWire, expected.tasks);
+    std.mem.sort(history.wire.WorkspaceWire, canonical.workspaces, {}, struct {
+        fn less(_: void, a: history.wire.WorkspaceWire, b: history.wire.WorkspaceWire) bool {
+            return a.id < b.id;
+        }
+    }.less);
+    std.mem.sort(history.wire.TaskWire, canonical.tasks, {}, struct {
+        fn less(_: void, a: history.wire.TaskWire, b: history.wire.TaskWire) bool {
+            return a.id < b.id;
+        }
+    }.less);
     const expected_buffer = try std.testing.allocator.alloc(u8, history.wire.max_store_bytes);
     defer std.testing.allocator.free(expected_buffer);
     const actual_buffer = try std.testing.allocator.alloc(u8, history.wire.max_store_bytes);
     defer std.testing.allocator.free(actual_buffer);
-    try std.testing.expectEqualSlices(u8, try history.wire.encode(expected_buffer, expected, history.limits), try history.wire.encode(actual_buffer, actual, history.limits));
+    try std.testing.expectEqualSlices(u8, try history.wire.encode(expected_buffer, canonical, history.limits), try history.wire.encode(actual_buffer, actual, history.limits));
 }
 
 fn temporaryPath(allocator: std.mem.Allocator, dir: std.Io.Dir) ![]const u8 {
@@ -241,6 +255,9 @@ test "history schema rejects structural counterexamples and rolls back the prece
     _ = try save(allocator, database.capability(), state);
     // Workspace and Task array order intentionally differs from identity order.
     try expectSame(allocator, database.capability(), state);
+    const canonical = try history.load(allocator, database.capability());
+    try std.testing.expectEqual(@as(u64, 2), canonical.workspaces[0].id);
+    try std.testing.expectEqual(@as(u64, 6), canonical.tasks[0].id);
     for ([_][]const u8{
         "UPDATE runs SET task_id=NULL",
         "UPDATE runs SET generation=X'00'",
@@ -262,7 +279,7 @@ test "history schema rejects structural counterexamples and rolls back the prece
         "UPDATE run_tools SET is_error=1",
         "UPDATE run_tools SET task_id=X'0000000000000006'",
         "UPDATE tasks SET workspace_id=X'00000000000000ff'",
-        "UPDATE tasks SET ordinal=0 WHERE id=X'0000000000000006'",
+        "UPDATE tasks SET id=NULL",
         "UPDATE runs SET generation=X'000000000000000d' WHERE id=X'000000000000000e'",
         "UPDATE workspaces SET canonical_root=(SELECT canonical_root FROM workspaces WHERE id=X'0000000000000003') WHERE id=X'0000000000000002'",
         "UPDATE runs SET submitted_at_unix_ms=-1",
@@ -409,22 +426,23 @@ test "history unsigned values retain byte ordering and exact boundary equality" 
     for (numbers, 0..) |number, index| {
         std.mem.writeInt(u64, &encoded[index], number, .big);
         std.mem.writeInt(u64, &ids[index], index + 1, .big);
+        const label = [_]u8{@intCast('0' + index)};
         try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{
-            .sql = "INSERT INTO workspaces(ordinal,id,epoch,kind,canonical_root,display_name,visible,recent_order) VALUES(?1,?2,?2,'automatic',?2,X'61',0,?3)",
-            .params = &.{ .{ .integer = @intCast(index) }, .{ .blob = &ids[index] }, .{ .blob = &encoded[index] } },
+            .sql = "INSERT INTO workspaces(id,epoch,kind,canonical_root,display_name,visible,recent_order) VALUES(?1,?1,'automatic',?1,?3,0,?2)",
+            .params = &.{ .{ .blob = &ids[index] }, .{ .blob = &encoded[index] }, .{ .blob = &label } },
         } }}));
     }
     var sequence: Sequence = .{};
-    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT ordinal FROM workspaces ORDER BY recent_order", &.{}, sequence.receiver()));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT CAST(display_name AS INTEGER) FROM workspaces ORDER BY recent_order", &.{}, sequence.receiver()));
     try std.testing.expect(!sequence.overflow);
     try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, sequence.values[0..sequence.len]);
     sequence = .{};
-    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT ordinal FROM workspaces WHERE recent_order>=?1 ORDER BY recent_order", &.{.{ .blob = &encoded[2] }}, sequence.receiver()));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT CAST(display_name AS INTEGER) FROM workspaces WHERE recent_order>=?1 ORDER BY recent_order", &.{.{ .blob = &encoded[2] }}, sequence.receiver()));
     try std.testing.expect(!sequence.overflow);
     try std.testing.expectEqualSlices(i64, &.{ 2, 3 }, sequence.values[0..sequence.len]);
     for (encoded, 0..) |bytes, index| {
         var count: Count = .{};
-        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM workspaces WHERE recent_order=?1 AND ordinal=?2", &.{ .{ .blob = &bytes }, .{ .integer = @intCast(index) } }, count.receiver()));
+        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM workspaces WHERE recent_order=?1 AND id=?2", &.{ .{ .blob = &bytes }, .{ .blob = &ids[index] } }, count.receiver()));
         try std.testing.expectEqual(@as(?i64, 1), count.value);
     }
 }
@@ -805,7 +823,7 @@ test "history schema preserves unsigned identity and NUL bytes through the publi
     const high_id = sql.Value{ .blob = &.{ 0x80, 0, 0, 0, 0, 0, 0, 1 } };
     const one = sql.Value{ .blob = &.{ 0, 0, 0, 0, 0, 0, 0, 1 } };
     const root = sql.Value{ .blob = "C:/history\x00bytes" };
-    const insert = "INSERT INTO workspaces(ordinal,id,epoch,kind,canonical_root,display_name,visible,recent_order) VALUES(0,?1,?2,'manual',?3,?4,1,?2)";
+    const insert = "INSERT INTO workspaces(id,epoch,kind,canonical_root,display_name,visible,recent_order) VALUES(?1,?2,'manual',?3,?4,1,?2)";
     const capability = database.capability();
     try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{
         .statement = .{ .sql = insert, .params = &.{ high_id, one, root, .{ .blob = "Workspace" } } },
@@ -1145,6 +1163,200 @@ test "repository commits only changed rows and keeps witness atomic" {
     try std.testing.expectEqual(@as(u64, 2), (try schema.repository.readWitness(database.capability())).generation);
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&changed));
     try expectSame(a, database.capability(), state);
+}
+
+test "history preserves descending Run tool and file arrays without inferring order" {
+    inline for (.{ "runs", "tools", "file_changes" }) |kind| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const state = try history.fixture(a);
+        const task = &state.tasks[0];
+        task.checkpoint = null;
+        task.checkpoint_anchor = "none";
+        task.compacts = &.{};
+        const run = &task.runs[0];
+        run.coverage = "excluded";
+        if (comptime std.mem.eql(u8, kind, "runs")) {
+            var second = run.*;
+            second.id = 14;
+            second.generation = 1;
+            second.tools = &.{};
+            second.additional_inputs = &.{};
+            second.file_change_observation = null;
+            second.file_changes = null;
+            second.outputs = &.{};
+            second.submission = null;
+            task.runs = try a.dupe(history.wire.RunWire, &.{ run.*, second });
+        } else if (comptime std.mem.eql(u8, kind, "tools")) {
+            var second = run.tools[0];
+            second.id = "tool-second";
+            second.order = 1;
+            second.file_refs = null;
+            run.tools = try a.dupe(history.wire.ToolWire, &.{ run.tools[0], second });
+        } else {
+            var second = run.file_changes.?[0];
+            second.id = "change-7-13-1";
+            second.order = 1;
+            second.artifact = null;
+            run.file_changes = try a.dupe(history.wire.FileChangeWire, &.{ run.file_changes.?[0], second });
+        }
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+        try expectSame(a, database.capability(), state);
+    }
+}
+
+test "repository skips body-only position writes and vacates all swapped batches atomically" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const state = try populated(a, 8, 3, 1);
+    const run = &state.tasks[0].runs[0];
+    const body = try a.alloc(u8, history.limits.max_tool_field_bytes);
+    @memset(body, 'x');
+    for (run.tools) |*tool| {
+        tool.input = body;
+        tool.progress = body;
+        tool.content = body;
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var first = try repository.prepare(state, .{}, @splat(1));
+    defer first.deinit();
+    for (first.mutations) |m| try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "ordinal=ordinal+") == null);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&first));
+    run.usage.input_tokens += 1;
+    var counter = try repository.prepare(state, .{}, @splat(2));
+    defer counter.deinit();
+    try std.testing.expectEqual(@as(usize, 1), counter.changed_rows);
+    try std.testing.expectEqual(@as(usize, 2), counter.mutations.len);
+    for (counter.mutations) |m| {
+        try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "ordinal=ordinal+") == null);
+        try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "id=excluded.id") == null);
+        try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "task_id=excluded.task_id") == null);
+    }
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&counter));
+    const previous_first = run.tools[0].id;
+    std.mem.reverse(history.wire.ToolWire, run.tools);
+    var swapped = try repository.prepare(state, .{}, @splat(3));
+    defer swapped.deinit();
+    var vacates: usize = 0;
+    var started_inserting = false;
+    for (swapped.mutations) |m| {
+        if (std.mem.startsWith(u8, m.statement.sql, "INSERT INTO run_tools")) started_inserting = true;
+        if (std.mem.startsWith(u8, m.statement.sql, "UPDATE run_tools SET ordinal=")) {
+            try std.testing.expect(!started_inserting);
+            try expectIndexed(a, database.capability(), m);
+            vacates += 1;
+        }
+    }
+    try std.testing.expect(vacates >= 2);
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, repository.commit(&swapped));
+    const old = try history.load(a, database.capability());
+    try std.testing.expectEqualStrings(previous_first, old.tasks[0].runs[0].tools[0].id);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&swapped));
+    try expectSame(a, database.capability(), state);
+    run.tools = run.tools[1..];
+    var deletion = try repository.prepare(state, .{}, @splat(4));
+    defer deletion.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deletion));
+    try expectSame(a, database.capability(), state);
+}
+
+test "history loader rejects committed temporary positions and gaps" {
+    for ([_][]const u8{ "UPDATE runs SET ordinal=2147483648", "UPDATE runs SET ordinal=1" }) |invalid| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const state = try history.fixture(a);
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = invalid } }}));
+        try std.testing.expectError(error.Invalid, history.load(a, database.capability()));
+    }
+}
+
+const IndexedPlan = struct {
+    searches: usize = 0,
+    correlated: bool = false,
+    fn receive(raw: *anyopaque, row: sql.Row) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const detail = row.value(3).text;
+        if (std.mem.indexOf(u8, detail, "SEARCH ") != null) self.searches += 1;
+        if (std.mem.indexOf(u8, detail, "CORRELATED") != null) self.correlated = true;
+    }
+};
+
+fn expectIndexed(a: std.mem.Allocator, db: sql.Database, mutation: sql.Mutation) !void {
+    var plan: IndexedPlan = .{};
+    // Query authority intentionally rejects even EXPLAIN of a mutation.
+    // Observe the identical key predicate through a read-only SELECT instead.
+    const statement = mutation.statement.sql;
+    const from = if (std.mem.startsWith(u8, statement, "DELETE FROM ")) "DELETE FROM ".len else "UPDATE ".len;
+    const end = std.mem.indexOfScalarPos(u8, statement, from, ' ').?;
+    const where = std.mem.indexOf(u8, statement, " WHERE ").?;
+    const explain = try std.fmt.allocPrint(a, "EXPLAIN QUERY PLAN SELECT 1 FROM {s}{s}", .{ statement[from..end], statement[where..] });
+    try std.testing.expectEqual(sql.QueryOutcome.ok, db.query(explain, mutation.statement.params, .{ .context = &plan, .receive_fn = IndexedPlan.receive }));
+    try std.testing.expect(plan.searches > 0);
+    try std.testing.expect(!plan.correlated);
+}
+
+test "repository Task deletion and insertion do not renumber unrelated identities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try history.fixture(a);
+    var other = state.tasks[0];
+    other.id = 6;
+    other.recent_order = 42;
+    other.runs = &.{};
+    other.compacts = &.{};
+    other.ui_history = &.{};
+    other.input_submissions = &.{};
+    other.checkpoint = null;
+    other.checkpoint_anchor = "none";
+    other.completion_seen_run_id = 0;
+    other.next_run_generation = 0;
+    state.tasks = try a.dupe(history.wire.TaskWire, &.{ state.tasks[0], other });
+    state.next_task_recent_order = 43;
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var first = try repository.prepare(state, .{}, @splat(1));
+    defer first.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&first));
+    state.tasks = state.tasks[1..];
+    var deleted = try repository.prepare(state, .{}, @splat(2));
+    defer deleted.deinit();
+    try std.testing.expectEqual(@as(usize, 0), deleted.changed_rows);
+    for (deleted.mutations) |m| {
+        try std.testing.expect(!std.mem.startsWith(u8, m.statement.sql, "INSERT"));
+        if (std.mem.startsWith(u8, m.statement.sql, "DELETE")) try expectIndexed(a, database.capability(), m);
+    }
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deleted));
+    other.id = 8;
+    other.recent_order = 43;
+    state.tasks = try a.dupe(history.wire.TaskWire, &.{ other, state.tasks[0] });
+    state.next_task_id = 9;
+    state.next_task_recent_order = 44;
+    var inserted = try repository.prepare(state, .{}, @splat(3));
+    defer inserted.deinit();
+    try std.testing.expectEqual(@as(usize, 2), inserted.changed_rows);
+    for (inserted.mutations) |m| try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "ordinal=ordinal+") == null);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&inserted));
+    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    try repository.seed(loaded.value, loaded.preserved);
+    var unchanged = try repository.prepare(state, .{}, @splat(4));
+    defer unchanged.deinit();
+    try std.testing.expectEqual(@as(usize, 0), unchanged.changed_rows);
+    try std.testing.expectEqual(@as(usize, 1), unchanged.mutations.len);
 }
 
 test "repository deletes Task descendants and backfills a previously failed change" {

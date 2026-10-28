@@ -42,7 +42,6 @@ CREATE TABLE history_state (
 );
 
 CREATE TABLE workspaces (
-    ordinal INTEGER NOT NULL,
     id BLOB NOT NULL,
     epoch BLOB NOT NULL,
     kind TEXT NOT NULL,
@@ -51,9 +50,6 @@ CREATE TABLE workspaces (
     canonical_root BLOB NOT NULL,
     display_name BLOB NOT NULL,
     PRIMARY KEY(id),
-    CONSTRAINT workspaces_ordinal_type CHECK(typeof(ordinal)='integer'),
-    CONSTRAINT workspaces_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT workspaces_ordinal_domain_2 CHECK(ordinal<=4294967295),
     CONSTRAINT workspaces_id_type CHECK(typeof(id)='blob'),
     CONSTRAINT workspaces_id_length CHECK(length(id)=8),
     CONSTRAINT workspaces_id_domain CHECK(id<>X'0000000000000000'),
@@ -73,7 +69,6 @@ CREATE TABLE workspaces (
 );
 
 CREATE TABLE tasks (
-    ordinal INTEGER NOT NULL,
     id BLOB NOT NULL,
     recent_order BLOB NOT NULL,
     completion_seen_run_id BLOB,
@@ -111,9 +106,6 @@ CREATE TABLE tasks (
     model_intent_json TEXT,
     PRIMARY KEY(id),
     FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT tasks_ordinal_type CHECK(typeof(ordinal)='integer'),
-    CONSTRAINT tasks_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT tasks_ordinal_domain_2 CHECK(ordinal<=4294967295),
     CONSTRAINT tasks_id_type CHECK(typeof(id)='blob'),
     CONSTRAINT tasks_id_length CHECK(length(id)=8),
     CONSTRAINT tasks_id_domain CHECK(id<>X'0000000000000000'),
@@ -496,7 +488,6 @@ CREATE TABLE run_additional_inputs (
     task_id BLOB NOT NULL,
     run_id BLOB NOT NULL,
     id BLOB NOT NULL,
-    ordinal INTEGER NOT NULL,
     payload TEXT NOT NULL,
     PRIMARY KEY(task_id,run_id,id),
     FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id) ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED,
@@ -507,9 +498,6 @@ CREATE TABLE run_additional_inputs (
     CONSTRAINT run_additional_inputs_id_type CHECK(typeof(id)='blob'),
     CONSTRAINT run_additional_inputs_id_length CHECK(length(id)=8),
     CONSTRAINT run_additional_inputs_id_domain CHECK(id<>X'0000000000000000'),
-    CONSTRAINT run_additional_inputs_ordinal_type CHECK(typeof(ordinal)='integer'),
-    CONSTRAINT run_additional_inputs_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT run_additional_inputs_ordinal_domain_limit CHECK(ordinal<=4294967295),
     CONSTRAINT run_additional_inputs_payload_type CHECK(typeof(payload)='text'),
     CONSTRAINT run_additional_inputs_payload_domain CHECK(json_valid(payload))
 );
@@ -530,9 +518,7 @@ CREATE TABLE retained_records (
     CONSTRAINT retained_records_payload_type CHECK(typeof(payload)='blob')
 );
 
-CREATE UNIQUE INDEX workspaces_ordinal_unique ON workspaces(ordinal);
 CREATE UNIQUE INDEX workspaces_canonical_root_unique ON workspaces(canonical_root);
-CREATE UNIQUE INDEX tasks_ordinal_unique ON tasks(ordinal);
 CREATE UNIQUE INDEX runs_task_id_generation_unique ON runs(task_id,generation);
 CREATE UNIQUE INDEX runs_task_id_ordinal_unique ON runs(task_id,ordinal);
 CREATE UNIQUE INDEX run_tools_task_id_run_id_ordinal_unique ON run_tools(task_id,run_id,ordinal);
@@ -542,5 +528,4 @@ CREATE UNIQUE INDEX run_file_changes_task_id_run_id_activity_order_unique ON run
 CREATE UNIQUE INDEX task_compacts_order ON task_compacts(task_id,ordinal);
 CREATE UNIQUE INDEX task_ui_history_order ON task_ui_history(task_id,ordinal);
 CREATE UNIQUE INDEX task_input_submissions_order ON task_input_submissions(task_id,ordinal);
-CREATE UNIQUE INDEX run_additional_inputs_order ON run_additional_inputs(task_id,run_id,ordinal);
 CREATE INDEX tasks_workspace ON tasks(workspace_id);

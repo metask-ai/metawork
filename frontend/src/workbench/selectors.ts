@@ -58,7 +58,10 @@ export function orderedTasks<T extends TaskNavigation>(tasks: T[]): T[] {
   const byRecent = (left: T, right: T) => {
     const leftOrder = BigInt(left.recentOrder);
     const rightOrder = BigInt(right.recentOrder);
-    return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
+    if (rightOrder !== leftOrder) return rightOrder > leftOrder ? 1 : -1;
+    const leftId = BigInt(left.id);
+    const rightId = BigInt(right.id);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
   };
   const priority = (task: T) => {
     if (

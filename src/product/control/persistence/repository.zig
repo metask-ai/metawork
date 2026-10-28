@@ -19,6 +19,7 @@ const Entry = struct {
     names: []const []const u8,
     primary: []const sql.Value,
     digest: [32]u8,
+    position: ?i64,
 };
 
 const Index = struct {
@@ -40,7 +41,7 @@ const Index = struct {
                 names[i] = row.columns[field];
                 primary[i] = try copyValue(a, row.values[field]);
             }
-            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = names, .primary = primary, .digest = row.digest });
+            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = names, .primary = primary, .digest = row.digest, .position = row.position() });
         }
         return self;
     }
@@ -111,28 +112,30 @@ fn insertGroup(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
     const encoded = try a.alloc([]const Cell, rows.len);
     for (rows, 0..) |row, i| encoded[i] = try cells(a, row.values);
     const expressions = try a.alloc([]const u8, first.columns.len);
-    const updates = try a.alloc([]const u8, first.columns.len);
+    var updates: std.ArrayList([]const u8) = .empty;
     for (first.columns, 0..) |name, i| {
         expressions[i] = try expression(a, i);
-        updates[i] = try std.fmt.allocPrint(a, "{s}=excluded.{s}", .{ name, name });
+        if (std.mem.indexOfScalar(usize, first.primary, i) == null)
+            try updates.append(a, try std.fmt.allocPrint(a, "{s}=excluded.{s}", .{ name, name }));
     }
     const primary = try a.alloc([]const u8, first.primary.len);
     for (first.primary, 0..) |field, i| primary[i] = first.columns[field];
-    const text = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) SELECT {s} FROM json_each(?1) AS j WHERE 1 ON CONFLICT({s}) DO UPDATE SET {s}", .{ first.table, try join(a, first.columns, ","), try join(a, expressions, ","), try join(a, primary, ","), try join(a, updates, ",") });
+    const text = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) SELECT {s} FROM json_each(?1) AS j WHERE 1 ON CONFLICT({s}) DO UPDATE SET {s}", .{ first.table, try join(a, first.columns, ","), try join(a, expressions, ","), try join(a, primary, ","), try join(a, updates.items, ",") });
     return .{ .statement = .{ .sql = text, .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, encoded, .{}) }}) } };
 }
 
 fn insertRow(a: std.mem.Allocator, row: codec.Row) !sql.Mutation {
     const placeholders = try a.alloc([]const u8, row.columns.len);
-    const updates = try a.alloc([]const u8, row.columns.len);
+    var updates: std.ArrayList([]const u8) = .empty;
     for (row.columns, 0..) |name, i| {
         placeholders[i] = try std.fmt.allocPrint(a, "?{d}", .{i + 1});
-        updates[i] = try std.fmt.allocPrint(a, "{s}=excluded.{s}", .{ name, name });
+        if (std.mem.indexOfScalar(usize, row.primary, i) == null)
+            try updates.append(a, try std.fmt.allocPrint(a, "{s}=excluded.{s}", .{ name, name }));
     }
     const primary = try a.alloc([]const u8, row.primary.len);
     for (row.primary, 0..) |field, i| primary[i] = row.columns[field];
     return .{ .statement = .{
-        .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s}) ON CONFLICT({s}) DO UPDATE SET {s}", .{ row.table, try join(a, row.columns, ","), try join(a, placeholders, ","), try join(a, primary, ","), try join(a, updates, ",") }),
+        .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s}) ON CONFLICT({s}) DO UPDATE SET {s}", .{ row.table, try join(a, row.columns, ","), try join(a, placeholders, ","), try join(a, primary, ","), try join(a, updates.items, ",") }),
         .params = try cloneValues(a, row.values),
     } };
 }
@@ -169,7 +172,7 @@ fn appendDeletes(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), 
     }
 }
 
-fn appendGroup(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), rows: []const codec.Row) !void {
+fn appendGroup(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), rows: []const codec.Row, positions_only: bool) !void {
     const target = sql.Limits.exec_parameter_bytes / 4;
     var groups: std.ArrayList([]const codec.Row) = .empty;
     var start: usize = 0;
@@ -187,7 +190,10 @@ fn appendGroup(a: std.mem.Allocator, mutations: *std.ArrayList(sql.Mutation), ro
         start = end;
     }
     // All previous ordinals must be vacant before any position is reused.
-    for (groups.items) |group| if (!std.mem.eql(u8, rows[0].table, "history_state")) try mutations.append(a, try vacateOrder(a, group));
+    if (positions_only) {
+        for (groups.items) |group| try mutations.append(a, try vacateOrder(a, group));
+        return;
+    }
     for (groups.items) |group| {
         try mutations.append(a, if (group.len == 1 and transportSize(group[0]) >= target) try insertRow(a, group[0]) else try insertGroup(a, group));
     }
@@ -197,9 +203,9 @@ fn deleteGroup(a: std.mem.Allocator, entries: []const Entry) !sql.Mutation {
     const first = entries[0];
     const encoded = try a.alloc([]const Cell, entries.len);
     for (entries, 0..) |entry, i| encoded[i] = try cells(a, entry.primary);
-    const predicates = try a.alloc([]const u8, first.names.len);
-    for (first.names, 0..) |name, i| predicates[i] = try std.fmt.allocPrint(a, "t.{s}={s}", .{ name, try expression(a, i) });
-    const text = try std.fmt.allocPrint(a, "DELETE FROM {s} AS t WHERE EXISTS(SELECT 1 FROM json_each(?1) AS j WHERE {s})", .{ first.table, try join(a, predicates, " AND ") });
+    const values = try a.alloc([]const u8, first.names.len);
+    for (values, 0..) |*value, i| value.* = try expression(a, i);
+    const text = try std.fmt.allocPrint(a, "DELETE FROM {s} WHERE ({s}) IN (SELECT {s} FROM json_each(?1) AS j)", .{ first.table, try join(a, first.names, ","), try join(a, values, ",") });
     return .{ .statement = .{ .sql = text, .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, encoded, .{}) }}) } };
 }
 
@@ -215,10 +221,14 @@ fn vacateOrder(a: std.mem.Allocator, rows: []const codec.Row) !sql.Mutation {
         for (row.primary, 0..) |field, j| primary[j] = row.values[field];
         keys[i] = try cells(a, primary);
     }
-    const predicates = try a.alloc([]const u8, first.primary.len);
-    for (first.primary, 0..) |field, i| predicates[i] = try std.fmt.allocPrint(a, "t.{s}={s}", .{ first.columns[field], try expression(a, i) });
+    const names = try a.alloc([]const u8, first.primary.len);
+    const values = try a.alloc([]const u8, first.primary.len);
+    for (first.primary, 0..) |field, i| {
+        names[i] = first.columns[field];
+        values[i] = try expression(a, i);
+    }
     return .{ .statement = .{
-        .sql = try std.fmt.allocPrint(a, "UPDATE {s} AS t SET ordinal=ordinal+2147483648 WHERE EXISTS(SELECT 1 FROM json_each(?1) AS j WHERE {s})", .{ first.table, try join(a, predicates, " AND ") }),
+        .sql = try std.fmt.allocPrint(a, "UPDATE {s} SET ordinal=ordinal+2147483648 WHERE ({s}) IN (SELECT {s} FROM json_each(?1) AS j)", .{ first.table, try join(a, names, ","), try join(a, values, ",") }),
         .params = try a.dupe(sql.Value, &.{.{ .text = try std.json.Stringify.valueAlloc(a, keys, .{}) }}),
     } };
 }
@@ -301,10 +311,12 @@ pub const Repository = struct {
         }
         for (tables) |table| {
             var group: std.ArrayList(codec.Row) = .empty;
+            var moved: std.ArrayList(codec.Row) = .empty;
             for (rows) |row| {
                 if (!std.mem.eql(u8, row.table, table)) continue;
                 if (self.index) |old| if (old.entries.get(row.key)) |entry| {
                     if (std.mem.eql(u8, &entry.digest, &row.digest)) continue;
+                    if (row.position() != null and entry.position != row.position()) try moved.append(a, row);
                 };
                 // Opaque legacy payloads can approach 16MiB. Bind them as BLOB,
                 // rather than doubling them through the bulk hex transport.
@@ -314,7 +326,8 @@ pub const Repository = struct {
                 } else try group.append(a, row);
             }
             if (group.items.len != 0) {
-                try appendGroup(a, &mutations, group.items);
+                if (moved.items.len != 0) try appendGroup(a, &mutations, moved.items, true);
+                try appendGroup(a, &mutations, group.items, false);
                 changed += group.items.len;
             }
         }

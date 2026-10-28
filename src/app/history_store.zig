@@ -222,7 +222,8 @@ pub const Store = struct {
         if (self.repository) |*old| old.deinit();
         self.repository = null;
         self.open() catch return error.PublishOutcomeUnknown;
-        self.repository.?.seed(state, preserved) catch return error.PublishOutcomeUnknown;
+        const published = product.loadHistory(arena.allocator(), self.database.?.capability(), self.limits) catch return error.PublishOutcomeUnknown;
+        self.repository.?.seed(published.value, published.preserved) catch return error.PublishOutcomeUnknown;
         self.pending_publication = null;
         self.restore_failed = false;
         self.requires_reopen = false;
@@ -574,7 +575,7 @@ test "SQLite history confirms unknown without replay and backfills failed unrela
     try std.testing.expect(store.pending == null);
 }
 
-test "SQLite history delete then slot reuse preserves Task and Workspace order on restart" {
+test "SQLite history slot reuse restores Task and Workspace identity order" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -624,11 +625,11 @@ test "SQLite history delete then slot reuse preserves Task and Workspace order o
     defer a.free(bytes);
     var loaded = try wire.decodeRecovering(a, bytes, store.limits);
     defer loaded.deinit();
-    for ([_]u64{ 1, 4, 3 }, 0..) |id, i| {
+    for ([_]u64{ 1, 3, 4 }, 0..) |id, i| {
         try std.testing.expectEqual(id, loaded.value.tasks[i].id);
         try std.testing.expectEqual(id, loaded.value.workspaces[i].id);
     }
-    try std.testing.expectEqualStrings("subsequent save", loaded.value.tasks[2].title);
+    try std.testing.expectEqualStrings("subsequent save", loaded.value.tasks[1].title);
 }
 
 test "SQLite history newly learned credential is removed and repeated borrows do not rewrite" {
