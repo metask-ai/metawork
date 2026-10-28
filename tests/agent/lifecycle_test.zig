@@ -4372,6 +4372,30 @@ test "Core Session creation failure releases diagnostics and leaves capacity reu
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
+test "Session create preserves typed MCP rejections and fails closed for other statuses" {
+    for ([_]struct { status: u32, failure: anyerror, malformed_handle: bool = false }{
+        .{ .status = wire.STATUS_MCP_NOT_REFRESHED, .failure = error.McpNotRefreshed },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.InvalidMcpSelection },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.CoreCallFailed, .malformed_handle = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .failure = error.CoreCallFailed },
+        .{ .status = 0xffffffff, .failure = error.CoreCallFailed },
+    }) |case| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        fake_core.forced_session_create_status = case.status;
+        fake_core.malformed_session_create_handle = case.malformed_handle;
+        try std.testing.expectError(case.failure, openSession(runtime));
+        const session = try openSession(runtime);
+        try closeSession(session, .session_close);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.buffer_releases);
+    }
+}
+
 test "closed Session storage is reused only after explicit Runtime release" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });

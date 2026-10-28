@@ -1563,7 +1563,21 @@ test "compatible STDIO MCP product chain admits a new Task after tool authorizat
     try expectMcpProductAdmission("2025-11-25", .stdio);
 }
 
+test "real Product creates a null MCP Task after Core withdrawal before Host publication" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .core_withdrawal);
+}
+
+test "real Product creates a null MCP Task after Host generation changes before Admission installation" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .stale_host);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host };
+
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
+    try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
+}
+
+fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.McpTransportKind, race: McpCreationRace) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -1574,11 +1588,16 @@ fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpT
         "{s}/product-trace.jsonl",
         .{root_storage[0..root_len]},
     );
-    var fixture = try HttpFixture.startWithTtl(
+    const gate = try std.fmt.allocPrint(std.testing.allocator, "{s}/publication", .{root_storage[0..root_len]});
+    defer std.testing.allocator.free(gate);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
+    var fixture = try HttpFixture.startWithGate(
         protocol_version,
         "json",
         trace_path,
         2_000,
+        "text",
+        gate,
     );
     defer fixture.deinit();
     const registry_storage = try std.testing.allocator.alloc(
@@ -1779,6 +1798,68 @@ fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpT
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
     );
+    if (race != .expiry) {
+        if (race == .core_withdrawal) {
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.fail", .data = "fail" });
+            // Stop at the actual ABI publication boundary: Core has narrowed
+            // its catalog, while both Agent and Product still own the prior
+            // generation. This must exercise InvalidMcpSelection, not only
+            // the Host StaleMcpSelection check.
+            var diagnostic = std.mem.zeroes(wire.OwnedBytesV1);
+            defer restarted_runtime.api.bufferRelease()(&diagnostic);
+            var generation: u64 = 0;
+            try std.testing.expectEqual(sdk.Status.ok, try sdk.Status.fromCode(restarted_runtime.api.mcp().refresh()(restarted_runtime.runtime.?, &generation, &diagnostic)));
+        } else {
+            const newer = switch (try restarted_runtime.activateMcp()) {
+                .activated => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            newer.deinit();
+        }
+        const task_id = try restarted_workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            1,
+            restarted_workbench.newTaskAdmissionView().active_selection_revision,
+            null,
+            null,
+            null,
+            .{ .interactive = null },
+        );
+        try std.testing.expectEqual(fresh_task_id + 1, task_id);
+        try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.unavailable, try restarted_workbench.taskMcpAuthority(task_id));
+        try std.testing.expect(restarted_workbench.mcp.?.hasRefreshJob() or mcp_types.testing.state(&restarted_workbench.mcp.?).refresh_pending);
+        // A failed candidate must leave the third and last Session slot free.
+        const third = try restarted_workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            1,
+            restarted_workbench.newTaskAdmissionView().active_selection_revision,
+            null,
+            null,
+            null,
+            .{ .interactive = null },
+        );
+        try std.testing.expectEqual(task_id + 1, third);
+        try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.unavailable, try restarted_workbench.taskMcpAuthority(task_id));
+        var output: [512 * 1024]u8 = undefined;
+        const snapshot = try restarted_workbench.writeAggregateFixture(&output);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 3), parsed.value.object.get("tasks").?.array.items.len);
+        var found_unavailable = false;
+        for (parsed.value.object.get("tasks").?.array.items) |task| {
+            const id = task.object.get("id").?.string;
+            var id_storage: [32]u8 = undefined;
+            const expected_id = try std.fmt.bufPrint(&id_storage, "{d}", .{task_id});
+            if (std.mem.eql(u8, id, expected_id)) {
+                try std.testing.expectEqualStrings("unavailable", task.object.get("mcpAuthority").?.object.get("kind").?.string);
+                found_unavailable = true;
+            }
+        }
+        try std.testing.expect(found_unavailable);
+        return;
+    }
     if (!std.mem.eql(u8, protocol_version, "2026-07-28")) return;
     std.Io.Timeout.sleep(.{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(2_500),

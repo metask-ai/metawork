@@ -4311,7 +4311,10 @@ pub const Runtime = struct {
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => return self.sessionPressureError(null),
-            error.McpNotRefreshed => retry: {
+            error.McpNotRefreshed, error.InvalidMcpSelection, error.StaleMcpSelection => retry: {
+                // Only an MCP-bearing candidate may lose its optional
+                // authority. A malformed null create is not recoverable here.
+                if (task_input.mcp_selection == null) return err;
                 self.recoverExpiredMcpCatalogNoFail();
                 mcp_selection = null;
                 mcp_authority = .unavailable;

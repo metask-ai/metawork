@@ -22,6 +22,35 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "ordinary Task creation does not retry MCP errors on null Selection or generic Core failure" {
+    for ([_]struct { status: u32, failure: anyerror }{
+        .{ .status = wire.STATUS_MCP_NOT_REFRESHED, .failure = error.McpNotRefreshed },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.InvalidMcpSelection },
+        .{ .status = wire.STATUS_CORE_ERROR, .failure = error.CoreCallFailed },
+    }) |case| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_workspaces = 1,
+        }, productControlConfiguration());
+        defer control.deinit();
+        try installControlExecution(&control);
+        fake_core.forced_session_create_status = case.status;
+        try std.testing.expectError(case.failure, control.createTask(productControlTaskInput()));
+        try std.testing.expectEqual(@as(usize, 0), fake_core.session_created);
+        const task = try control.createTask(productControlTaskInput());
+        try std.testing.expectEqual(@as(u64, 1), task);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+    }
+}
+
 test "history capacity executes more than sixteen Runs through worker retirement" {
     const scenario = try ReviewScenario.initForInput(.controlled);
     defer scenario.deinit();

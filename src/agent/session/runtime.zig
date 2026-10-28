@@ -980,12 +980,14 @@ pub const Runtime = struct {
         const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
         if (typed_status != .ok) {
             // AgentCore must not return a live handle for a rejected create.
-            // Preserve the typed freshness signal only for a well-formed
-            // rejection so the caller can rebuild MCP authority.
+            // Preserve MCP authority rejection only for a well-formed failure,
+            // so ordinary Task creation can continue without that selection.
             if (raw_session != null) return error.CoreCallFailed;
-            if (typed_status == .mcp_not_refreshed)
-                return error.McpNotRefreshed;
-            return error.CoreCallFailed;
+            return switch (typed_status) {
+                .mcp_not_refreshed => error.McpNotRefreshed,
+                .invalid_mcp_selection => error.InvalidMcpSelection,
+                else => error.CoreCallFailed,
+            };
         }
         if (raw_session == null) return error.CoreCallFailed;
         session.raw = raw_session;
