@@ -732,6 +732,47 @@ const RawMcpAdmissionProbe = struct {
     }
 };
 
+fn expectHostMcpCreateAndRestore(runtime: *agent.Runtime, options_value: agent.SessionOpenOptions) !void {
+    const session = try runtime.createSession(options_value);
+    const limits: agent.CheckpointLimits = .{
+        .hard_bytes = 1024 * 1024,
+        .max_section_bytes = 1024 * 1024,
+        .max_string_bytes = 64 * 1024,
+        .max_messages = 128,
+        .max_blocks_per_message = 128,
+        .chunk_bytes = 4096,
+    };
+    var bytes = RestoreBytes{};
+    defer bytes.bytes.deinit(std.testing.allocator);
+    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, 0, 0, options_value.model_binding.target.model);
+    defer exported.deinit();
+    const checkpoint = switch (exported) {
+        .success => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    const restored = try runtime.restoreSessionRoute(.{
+        .session = options_value,
+        .checkpoint_limits = limits,
+        .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
+        .expectation = .{
+            .logical_session_id = checkpoint.description.session_id,
+            .checkpoint_generation = checkpoint.checkpoint.generation,
+            .last_run_id = 0,
+            .last_compact_id = 0,
+            .model = options_value.model_binding.target.model,
+        },
+    });
+    try std.testing.expectEqual(agent.CheckpointRestoreHealth.complete, restored.report.health);
+    try std.testing.expectEqual(@as(u32, 0), restored.report.invalidated_mcp_bindings);
+    var inputs = try restored.session.captureRestoreInputs();
+    defer inputs.deinit() catch unreachable;
+    try std.testing.expect(inputs.mcp != null);
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
+}
+
 test "canonical MCP ABI accepts original selectors during refresh and after publication" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -757,6 +798,18 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
         else => return error.TestUnexpectedResult,
     };
     defer first.deinit();
+    const host_selection = first.takeSelection() orelse return error.TestUnexpectedResult;
+    defer host_selection.deinit();
+    const host_options: agent.SessionOpenOptions = .{
+        .model_binding = .{
+            .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" },
+            .credential = "fixture-credential",
+        },
+        .permission_mode = .full_access,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .mcp_selection = host_selection,
+    };
     var probe: RawMcpAdmissionProbe = .{
         .api = runtime.api,
         .runtime = runtime.runtime.?,
@@ -799,6 +852,8 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
     // Qualify Core through the official ABI independently of Host admission
     // guards, using the same selectors and checkpoint in every phase.
     try probe.check(true);
+    try std.testing.expectEqual(.available, runtime.restoreAdmission(null));
+    try expectHostMcpCreateAndRestore(runtime, host_options);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "refresh.release", .data = "release" });
     thread.join();
     joined = true;
@@ -810,6 +865,7 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
     defer second.deinit();
     try std.testing.expect(first.catalogGeneration() != second.catalogGeneration());
     try probe.check(true);
+    try expectHostMcpCreateAndRestore(runtime, host_options);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "refresh.fail", .data = "fail" });
     const failed_server = switch (try runtime.activateMcp()) {
         .activated => |value| value,
@@ -818,6 +874,7 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
     defer failed_server.deinit();
     try std.testing.expectEqual(agent.McpActivationState.unavailable, failed_server.state());
     try probe.check(false);
+    try std.testing.expectError(error.StaleMcpSelection, runtime.createSession(host_options));
 }
 
 test "real Product MCP allow once asks again across checkpoints and approval modes" {
@@ -1567,7 +1624,7 @@ test "real Product creates a null MCP Task after Core withdrawal before Host pub
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .core_withdrawal);
 }
 
-test "real Product creates a null MCP Task after Host generation changes before Admission installation" {
+test "real Product creates a null MCP Task when Admission exceeds the bounded generation handoff" {
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .stale_host);
 }
 
@@ -1810,11 +1867,15 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             var generation: u64 = 0;
             try std.testing.expectEqual(sdk.Status.ok, try sdk.Status.fromCode(restarted_runtime.api.mcp().refresh()(restarted_runtime.runtime.?, &generation, &diagnostic)));
         } else {
-            const newer = switch (try restarted_runtime.activateMcp()) {
-                .activated => |value| value,
-                else => return error.TestUnexpectedResult,
-            };
-            newer.deinit();
+            // One predecessor is deliberately accepted during installation.
+            // An older historical proof must still be rejected.
+            for (0..2) |_| {
+                const newer = switch (try restarted_runtime.activateMcp()) {
+                    .activated => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                newer.deinit();
+            }
         }
         const task_id = try restarted_workbench.createTaskInWorkspace(
             workspace_id,
@@ -2330,7 +2391,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     _ = try control.selectTaskModel(task_id, .{ .expected_selection_revision = task.durable.model_intent.?.revision, .target = selected.target, .expected_source_generation = selected.expected_source_generation, .expected_catalog_generation = selected.expected_catalog_generation });
     // The full one-slot Runtime can offer rebind through the same Snapshot
     // consumed by Renderer, because this Task owns the slot it will release.
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(runtime.restoreAdmission(null) != .available);
     var snapshot_bytes: [128 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});

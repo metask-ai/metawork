@@ -519,29 +519,34 @@ test "recovery capacity observation counts only an owned route scheduled for rel
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(0));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(std.math.maxInt(u64)));
+    try std.testing.expect(runtime.restoreAdmission(null) == .available);
+    try std.testing.expect(runtime.restoreAdmission(0) != .available);
+    try std.testing.expectEqual(.unavailable, runtime.restoreAdmission(std.math.maxInt(u64)));
     const session = try openSession(runtime);
     const route = session.id;
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route + 1));
-    // Projection cannot bypass the existing Runtime refresh fence.
+    try std.testing.expect(runtime.restoreAdmission(null) != .available);
+    try std.testing.expect(runtime.restoreAdmission(route) == .available);
+    try std.testing.expect(runtime.restoreAdmission(route + 1) != .available);
+    // Pure refresh preserves admission. Apply has a distinct busy result,
+    // which must never be interpreted as Session capacity pressure.
     runtime.mcp_refresh_running = true;
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expectEqual(.available, runtime.restoreAdmission(route));
+    runtime.mcp_configuration_applying = true;
+    try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(route));
+    try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(null));
+    runtime.mcp_configuration_applying = false;
     runtime.mcp_refresh_running = false;
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(runtime.restoreAdmission(route) != .available);
+    try std.testing.expect(runtime.restoreAdmission(null) == .available);
     const next = try openSession(runtime);
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(next.id));
+    try std.testing.expect(runtime.restoreAdmission(route) != .available);
+    try std.testing.expect(runtime.restoreAdmission(next.id) == .available);
     const next_route = next.id;
     try runtime.shutdown();
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(next_route));
+    try std.testing.expect(runtime.restoreAdmission(null) != .available);
+    try std.testing.expect(runtime.restoreAdmission(next_route) != .available);
 }
 
 const CheckpointCollector = struct {

@@ -99,7 +99,11 @@ pub const Runtime = struct {
     active_mcp_calls: usize = 0,
     active_restore_calls: usize = 0,
     mcp_refresh_running: bool = false,
+    mcp_configuration_applying: bool = false,
     mcp_catalog_generation: ?u64 = null,
+    // One completed refresh may be awaiting Product installation. Retain only
+    // that immediate predecessor, in the same configuration epoch.
+    mcp_previous_catalog_generation: ?u64 = null,
     mcp_registry_generation: ?u64,
     mcp_owner_id: u64,
     mcp_servers: mcp_runtime.Servers,
@@ -386,6 +390,7 @@ pub const Runtime = struct {
             return error.McpRefreshInProgress;
         }
         self.mcp_refresh_running = true;
+        self.mcp_configuration_applying = true;
         self.active_mcp_calls += 1;
         var reap_count: usize = 0;
         var retired_index: usize = 0;
@@ -426,6 +431,7 @@ pub const Runtime = struct {
         const desired_revision = self.mcp_apply_revision + 1;
         const desired_generation = input.generation;
         self.mcp_catalog_generation = null;
+        self.mcp_previous_catalog_generation = null;
         self.sessions_mutex.unlock(self.io);
 
         var replacement = input.take() catch {
@@ -489,6 +495,7 @@ pub const Runtime = struct {
         }
         self.active_mcp_calls -= 1;
         self.mcp_refresh_running = false;
+        self.mcp_configuration_applying = false;
         const reject = self.shutting_down.load(.acquire);
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
@@ -511,9 +518,10 @@ pub const Runtime = struct {
             return error.RuntimeShuttingDown;
         };
         const expected_servers = self.mcp_servers.expectedServers();
-        // Refresh is an authority fence. Old selections become stale before
-        // any transport or AgentCore call, and remain stale on every failure.
-        self.mcp_catalog_generation = null;
+        // Transport refresh does not invalidate the published catalog. Retire
+        // the previous handoff now; Product serializes and installs each job
+        // before starting another. Core still validates the actual selectors.
+        self.mcp_previous_catalog_generation = null;
         self.mcp_refresh_running = true;
         self.active_mcp_calls += 1;
         self.sessions_mutex.unlock(self.io);
@@ -549,8 +557,10 @@ pub const Runtime = struct {
         self.active_mcp_calls -= 1;
         self.mcp_refresh_running = false;
         const reject = self.shutting_down.load(.acquire);
-        if (!reject)
+        if (!reject) {
+            self.mcp_previous_catalog_generation = self.mcp_catalog_generation;
             self.mcp_catalog_generation = generation;
+        }
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
         if (reject) return error.RuntimeShuttingDown;
@@ -611,13 +621,12 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
+        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
         if (!mcp_catalog.projectionBelongsTo(
             projection,
             self.mcp_owner_id,
         )) return error.McpCatalogBindingMismatch;
-        if (self.mcp_catalog_generation == null or
-            self.mcp_catalog_generation.? != mcp_catalog.projectionGeneration(projection))
+        if (!self.acceptsMcpGeneration(mcp_catalog.projectionGeneration(projection)))
             return error.StaleMcpSelection;
         return mcp_catalog.createSelection(
             self.allocator,
@@ -639,9 +648,8 @@ pub const Runtime = struct {
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
-        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
-        if (self.mcp_catalog_generation == null or
-            self.mcp_catalog_generation.? != activation.catalogGeneration())
+        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
+        if (!self.acceptsMcpGeneration(activation.catalogGeneration()))
             return error.StaleMcpSelection;
         return mcp_catalog.createSelectionForActivation(
             self.allocator,
@@ -743,8 +751,8 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
-        if (self.mcp_catalog_generation == null or self.mcp_catalog_generation.? != activation.catalogGeneration()) return error.StaleMcpSelection;
+        if (self.mcp_configuration_applying) return error.McpRefreshInProgress;
+        if (!self.acceptsMcpGeneration(activation.catalogGeneration())) return error.StaleMcpSelection;
         return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers(), ceiling) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
@@ -757,6 +765,11 @@ pub const Runtime = struct {
         std.debug.assert(self.mcp_refresh_running);
         self.active_mcp_calls -= 1;
         self.mcp_refresh_running = false;
+        self.mcp_configuration_applying = false;
+        // This path has no validated publication result. Do not assume a
+        // failure left Core's catalog unchanged.
+        self.mcp_catalog_generation = null;
+        self.mcp_previous_catalog_generation = null;
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
     }
@@ -771,22 +784,29 @@ pub const Runtime = struct {
     /// Lightweight recovery observation, not a reservation. A rebind may
     /// release its own still-owned route before restoring. Actual restore
     /// revalidates capacity under this mutex after that release.
-    pub fn restoreAdmissionAvailable(self: *Runtime, releasing_route_id: ?u64) bool {
+    pub const RestoreAdmission = enum { available, capacity_reached, mcp_busy, unavailable };
+
+    pub fn restoreAdmission(self: *Runtime, releasing_route_id: ?u64) RestoreAdmission {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
-        if (self.shutting_down.load(.acquire) or
-            self.runtime == null or
-            self.mcp_refresh_running)
-            return false;
+        if (self.shutting_down.load(.acquire) or self.runtime == null) return .unavailable;
+        if (self.mcp_configuration_applying) return .mcp_busy;
         if (releasing_route_id) |route_id| {
-            if (route_id == 0) return false;
+            if (route_id == 0) return .unavailable;
             for (self.sessions) |entry| if (entry) |session|
-                if (session.id == route_id) return true;
-            return false;
+                if (session.id == route_id) return .available;
+            return .unavailable;
         }
         for (self.sessions, self.session_reservations) |entry, reserved|
-            if (entry == null and !reserved) return true;
-        return false;
+            if (entry == null and !reserved) return .available;
+        return .capacity_reached;
+    }
+
+    /// Caller holds sessions_mutex. Only the published generation and the
+    /// single in-progress publication handoff belong to this config epoch.
+    fn acceptsMcpGeneration(self: *const Runtime, generation: u64) bool {
+        return (self.mcp_catalog_generation != null and self.mcp_catalog_generation.? == generation) or
+            (self.mcp_previous_catalog_generation != null and self.mcp_previous_catalog_generation.? == generation);
     }
 
     /// Creates one Agent Session and returns its canonical routing identity in
@@ -844,17 +864,14 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        // A refresh invalidates only selections derived from the catalog being
-        // replaced. A session that deliberately carries no MCP selection does
-        // not consume that authority and remains safe to create while the
-        // refresh is in flight.
-        if (self.mcp_refresh_running and options.mcp_selection != null)
+        // Apply can change the configuration epoch. A pure catalog refresh
+        // preserves the published authority; Core checks actual availability.
+        if (self.mcp_configuration_applying and options.mcp_selection != null)
             return error.McpRefreshInProgress;
         if (options.mcp_selection) |selection| {
             if (!mcp_catalog.belongsTo(selection, self.mcp_owner_id))
                 return error.McpCatalogBindingMismatch;
-            if (self.mcp_catalog_generation == null or
-                mcp_catalog.selectionGeneration(selection) != self.mcp_catalog_generation.?)
+            if (!self.acceptsMcpGeneration(mcp_catalog.selectionGeneration(selection)))
                 return error.StaleMcpSelection;
         }
         const mcp_restore_selection = try self.captureMcpRestoreSelectionLocked(options.mcp_selection);
@@ -1106,7 +1123,7 @@ pub const Runtime = struct {
             self.sessions_mutex.unlock(self.io);
             return error.RuntimeShuttingDown;
         };
-        if (self.mcp_refresh_running) {
+        if (self.mcp_configuration_applying) {
             self.sessions_mutex.unlock(self.io);
             return error.McpRefreshInProgress;
         }
@@ -1115,9 +1132,7 @@ pub const Runtime = struct {
                 self.sessions_mutex.unlock(self.io);
                 return error.McpCatalogBindingMismatch;
             }
-            if (self.mcp_catalog_generation == null or
-                mcp_catalog.selectionGeneration(selection) != self.mcp_catalog_generation.?)
-            {
+            if (!self.acceptsMcpGeneration(mcp_catalog.selectionGeneration(selection))) {
                 self.sessions_mutex.unlock(self.io);
                 return error.StaleMcpSelection;
             }

@@ -4635,8 +4635,10 @@ pub const Runtime = struct {
                     error.SessionCapacity => return self.sessionPressureError(task_id),
                     else => return err,
                 };
-                if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
-                    return self.sessionPressureError(task_id);
+                switch (self.agent_runtime.restoreAdmission(null)) {
+                    .available => {},
+                    .capacity_reached => return self.sessionPressureError(task_id),
+                    .mcp_busy, .unavailable => return error.RecoveryUnavailable,
                 }
             }
             if (target) |*value| if (task.runtime.attachment == .detached or
@@ -8094,13 +8096,19 @@ pub const Runtime = struct {
             .execution_admission = if (execution_available) .available else .unavailable,
             .workspace_identity_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
-            .runtime_admission = if (self.shutting_down)
-                .shutting_down
-            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id) or
-                (if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
-                .available
-            else
-                .capacity_reached,
+            .runtime_admission = admission: {
+                if (self.shutting_down) break :admission .shutting_down;
+                switch (self.agent_runtime.restoreAdmission(releasing_route_id)) {
+                    .available => break :admission .available,
+                    .mcp_busy => break :admission .busy,
+                    .unavailable => break :admission .unavailable,
+                    .capacity_reached => {},
+                }
+                if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route|
+                    if (self.agent_runtime.restoreAdmission(route) == .available)
+                        break :admission .available;
+                break :admission .capacity_reached;
+            },
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
