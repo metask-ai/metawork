@@ -590,6 +590,28 @@ test "canonical MCP catalog refresh restores the original Session without select
     try expectRepeatedMcpPermission("2026-07-28", .refreshed);
 }
 
+test "canonical MCP catalog refresh preserves original session allow grants" {
+    try expectRepeatedMcpPermission("2026-07-28", .refreshed_allow);
+}
+
+test "canonical MCP catalog refresh preserves original session deny grants" {
+    try expectRepeatedMcpPermission("2026-07-28", .refreshed_deny);
+}
+
+test "canonical MCP schema change narrows the original Session" {
+    try expectRepeatedMcpPermission("2026-07-28", .schema_changed);
+}
+
+test "canonical MCP catalog expansion does not expand the original Session" {
+    try expectRepeatedMcpPermission("2026-07-28", .expanded);
+}
+
+// Dependency qualification: this is an observed Core gap, not an acceptance
+// assertion that redirecting an existing Session is safe. Keep issue #29 open.
+test "canonical MCP same binding source replacement exposes an origin isolation gap" {
+    try expectRepeatedMcpPermission("2026-07-28", .source_replaced);
+}
+
 // Dependency qualification intentionally calls the official SDK directly:
 // the production Agent refresh fence must not determine what Core accepts.
 const RawMcpAdmissionProbe = struct {
@@ -880,20 +902,28 @@ test "real Product MCP allow once asks again across checkpoints and approval mod
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
 }
 
-const McpRepeatTiming = enum { valid, expired, refreshed };
+const McpRepeatTiming = enum { valid, expired, refreshed, refreshed_allow, refreshed_deny, schema_changed, expanded, source_replaced };
 
 fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTiming) !void {
-    const expire_between_runs = timing != .valid;
+    const expire_between_runs = timing == .expired or timing == .refreshed;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const trace_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/repeat-trace.jsonl", .{root});
     defer std.testing.allocator.free(trace_path);
-    var fixture = try HttpFixture.startWithTtl(protocol_version, "json", trace_path, if (expire_between_runs) 1_000 else 60_000);
+    const gate = try std.fmt.allocPrint(std.testing.allocator, "{s}/catalog", .{root});
+    defer std.testing.allocator.free(gate);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "catalog.release", .data = "release" });
+    var fixture = try HttpFixture.startWithGate(protocol_version, "json", trace_path, if (expire_between_runs) 1_000 else 60_000, "text", gate);
     defer fixture.deinit();
+    const replacement_trace = try std.fmt.allocPrint(std.testing.allocator, "{s}/replacement-trace.jsonl", .{root});
+    defer std.testing.allocator.free(replacement_trace);
+    var replacement_fixture: ?HttpFixture = null;
+    defer if (replacement_fixture) |*value| value.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, protocol_version);
     defer preparation.deinit();
+    if (timing == .expanded) preparation.registry.?.value.servers[0].tools = &.{ "echo", "new_echo" };
     var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
@@ -927,30 +957,50 @@ fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTi
         .mcp_selection = selection,
     });
     for (0..3) |index| {
-        if (expire_between_runs and index == 1) {
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1_250), .awake);
-            if (timing == .refreshed) {
+        if (index == 1 or (timing == .refreshed_deny and index == 2)) {
+            if (expire_between_runs) try std.Io.sleep(std.testing.io, .fromMilliseconds(1_250), .awake);
+            if (timing == .schema_changed) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "catalog.schema", .data = "schema" });
+            if (timing == .expanded) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "catalog.extra", .data = "extra" });
+            if (timing == .source_replaced) {
+                replacement_fixture = try HttpFixture.start(protocol_version, "json", replacement_trace);
+                var replaced_preparation = try prepareHttpFixture(replacement_fixture.?.endpoint, protocol_version);
+                defer replaced_preparation.deinit();
+                var replaced_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &replaced_preparation, .{});
+                defer replaced_build.deinit();
+                try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&replaced_build.input.?));
+            }
+            if (timing != .valid and timing != .expired) {
                 const refreshed = switch (try runtime.activateMcp()) {
                     .activated => |value| value,
                     else => return error.TestUnexpectedResult,
                 };
+                if (timing == .expanded) try std.testing.expectEqual(@as(usize, 2), refreshed.catalogTools().len);
                 refreshed.deinit();
             }
         }
-        const expired = timing == .expired and index > 0;
-        const run_id = try session.prepareRun(.{ .text = if (index == 0) "Call the selected echo tool." else if (expired) "Call the expired echo tool." else "Call the restored echo tool." });
-        const result = try runWithPermission(runtime, session, run_id, .allow_once);
+        const expired = (timing == .expired or timing == .schema_changed) and index > 0;
+        const deny = timing == .refreshed_deny and index > 0;
+        const run_id = try session.prepareRun(.{ .text = if (index == 0) "Call the selected echo tool." else if (expired) "Call the expired echo tool." else if (deny) "Deny this echo tool." else "Call the restored echo tool." });
+        const choice: agent.PermissionChoice = if (deny) .deny_session else if (timing == .refreshed_allow or timing == .source_replaced) .allow_session else .allow_once;
+        const result = try runWithPermission(runtime, session, run_id, choice);
         var terminal = result.terminal;
         defer terminal.deinit();
-        try std.testing.expectEqual(@as(usize, if (expired) 0 else 1), result.answers);
+        const cached = ((timing == .refreshed_allow or timing == .source_replaced) and index > 0) or (timing == .refreshed_deny and index == 2);
+        try std.testing.expectEqual(@as(usize, if (expired or cached) 0 else 1), result.answers);
         try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
         try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), terminal.stop_reason);
     }
     const trace = try tmp.dir.readFileAlloc(std.testing.io, "repeat-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
     defer std.testing.allocator.free(trace);
-    try std.testing.expectEqual(@as(usize, if (timing == .expired) 1 else 3), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
-    if (timing == .expired)
+    const narrowed = timing == .expired or timing == .schema_changed or timing == .refreshed_deny or timing == .source_replaced;
+    try std.testing.expectEqual(@as(usize, if (narrowed) 1 else 3), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
+    if (timing == .expired or timing == .schema_changed)
         try std.testing.expect(std.mem.indexOf(u8, trace, "permission_denied") != null);
+    if (timing == .source_replaced) {
+        const replacement_calls = try tmp.dir.readFileAlloc(std.testing.io, "replacement-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(replacement_calls);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, replacement_calls, "\"method\":\"tools/call\""));
+    }
 }
 
 test "canonical MCP rejected configuration preserves healthy server authority" {

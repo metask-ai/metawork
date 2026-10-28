@@ -499,11 +499,30 @@ async function handle(message, send) {
               inputSchema: {
                 $schema: "http://json-schema.org/draft-07/schema#",
                 type: "object",
-                properties: { text: { type: "string", maxLength: 256 } },
+                properties: {
+                  text: {
+                    type: "string",
+                    maxLength:
+                      options.refreshGate &&
+                      existsSync(`${options.refreshGate}.schema`)
+                        ? 128
+                        : 256,
+                  },
+                },
                 required: ["text"],
                 additionalProperties: false,
               },
             },
+            ...(options.refreshGate &&
+            existsSync(`${options.refreshGate}.extra`)
+              ? [
+                  {
+                    name: "new_echo",
+                    description: "Newly discovered tool",
+                    inputSchema: { type: "object" },
+                  },
+                ]
+              : []),
           ],
         }),
       );

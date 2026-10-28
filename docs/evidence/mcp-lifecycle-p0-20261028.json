@@ -1,0 +1,41 @@
+{
+  "id": "E-MAC-MCP-LIFECYCLE-P0-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "1bb08fce1e91dc5d7974b36690c8e483c68cca1b",
+  "platform": "macOS 27.0.1 arm64 / Zig 0.16.0",
+  "canonicalLock": "build_support/agentcore-bundle.macos-aarch64.lock.json",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "tests/agent/mcp_interop_test.zig": "21828ed0ed9b82e2f92999ecd79f7a8d26d032aab7e2150a25221778ef8bfb67",
+    "tests/fixtures/mcp_server.mjs": "ffa03a77d660d8f84acfc1099e438d8deee743c3a910675568e347d33ef88939"
+  },
+  "command": "zig build test-mcp-interop --summary all",
+  "exitCode": 0,
+  "passed": 33,
+  "summary": "Build Summary: 8/8 steps succeeded; 33/33 tests passed\ntest-mcp-interop success\n+- run test metawork-mcp-interop 33 pass (33 total) 18s MaxRSS:77M\n   +- compile test metawork-mcp-interop Debug native-macos.13.0 success 8s MaxRSS:1G\n      +- options cached\n      +- options cached\n      +- options cached\n      +- options cached\n      +- options cached",
+  "qualification": {
+    "sameOriginRefresh": "Original Session and allow/deny grants continue; deny grant is established before another refresh.",
+    "schemaChange": "Original Session loses changed tool; no permission callback or further RPC.",
+    "globalExpansion": "Current catalog has two tools; original Session still offers and executes only echo.",
+    "originIsolation": "FAILED GATE: same binding and same schema, changed endpoint; original Session executes two RPCs on replacement endpoint, reusing original allow_session without another callback. The named origin-isolation-gap test characterizes this defect; its pass is not safety acceptance.",
+    "globalFailureBeforePublication": "Locked source Manager.refresh builds offside and retains current snapshot on pre-publication allocation/resource errors. No canonical ABI allocation-failure injection was performed; ordinary tools/list failures publish a narrowed catalog. Unknown or malformed outcomes must fail closed."
+  },
+  "upstreamRequirement": "AgentCore Session selectors/materialization and checkpoint authority must bind the original connection provenance as well as schema. Consume a canonical release and rerun negative origin and grant tests; no local SDK/Core patch, selection hot replacement, Session rebuild, or shadow catalog.",
+  "unclosed": [
+    "Issue #29 full origin-isolation acceptance",
+    "Original desktop issue timelines and remote-provider/platform acceptance",
+    "Pre-publication canonical ABI allocation/resource failure injection"
+  ],
+  "baselineNative": {
+    "command": "node_modules/.bin/native test . --yes",
+    "base": "fa6ef0a8 plus committed qualification wiring",
+    "exitCode": 1,
+    "passed": 1481,
+    "total": 1491,
+    "skipped": 9,
+    "failed": 1,
+    "case": "app.history_store.test.SQLite history delete then slot reuse preserves Task and Workspace order on restart",
+    "failure": "TaskStoreEncodeFailed at src/product/task/persistence.zig:2516, called by src/app/history_store.zig:601",
+    "note": "Before product MCP implementation; no attribution to MCP and no full Native pass claim."
+  }
+}
