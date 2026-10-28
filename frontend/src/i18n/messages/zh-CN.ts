@@ -1580,7 +1580,7 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.timeout":
     "操作结果尚未确认。已请求刷新当前状态，请检查后再决定是否重试。",
   "scheduled.reconfirm":
-    "保存将确认使用当前模型「{model}」和此处的权限，恢复后续运行。请核对任务内容与时间。",
+    "保存将确认使用当前模型「{model}」和此处的权限，用于后续运行。请核对任务内容与时间。",
   "scheduled.occurrence.unavailable": "原任务已不可用",
   "scheduled.occurrence.stopped": "已停止",
   "scheduled.occurrence.interrupted": "已中断",
