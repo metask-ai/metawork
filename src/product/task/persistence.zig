@@ -2604,6 +2604,27 @@ pub fn decode(
 }
 
 pub const testing = if (builtin.is_test) struct {
+    // Actual owner enums, not a second list of accepted string spellings.
+    // SQL fixtures exercise each value in a Product-valid aggregate.
+    pub const relational_enums = .{
+        .{ "tasks", "protocol", task_state.Protocol },
+        .{ "tasks", "permission_profile", task_state.PermissionProfile },
+        .{ "tasks", "permission_interaction", task_state.PermissionInteraction },
+        .{ "history_state", "default_approval_mode", task_state.ApprovalMode },
+        .{ "tasks", "checkpoint_anchor", task_state.CheckpointAnchor },
+        .{ "tasks", "checkpoint_attempt", task_state.CheckpointAttempt },
+        .{ "runs", "phase", task_state.RunPhase },
+        .{ "runs", "outcome", task_state.RunOutcome },
+        .{ "runs", "cause", task_state.RunCause },
+        .{ "runs", "coverage", task_state.ConversationCoverage },
+        .{ "runs", "assistant_output_kind", task_state.AssistantOutputKind },
+        .{ "runs", "file_change_observation", task_state.FileChangeObservation },
+        .{ "runs", "event_projection_failure", task_state.EventProjectionFailure },
+        .{ "run_tools", "state", task_state.ToolState },
+        .{ "run_file_changes", "kind", task_state.FileChangeKind },
+        .{ "run_file_changes", "status", task_state.FileChangeStatus },
+    };
+
     pub fn setConfirmationSyncFailure(store: *FileStore, failed: bool) void {
         store.confirmation_sync_fault = failed;
     }

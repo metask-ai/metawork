@@ -456,6 +456,10 @@ Product Control 统一拥有同一个 history 数据库的结构和有序迁移�
 
 DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；JSON 内的数量、字段、唯一性、引用以及跨记录语义由 Product 校验，不能把 SQL 写入成功视作历史有效。Product 继续校验 UTF-8 与字节预算，加载还须覆盖原编码器的恢复失败记录限制和实际 Task 恢复中的 checkpoint 校验，不能仅凭局部 candidate 校验或字段往返宣称可恢复。合并或移除物理表不能丢失恢复诊断，历史权限仍不具有当前授权效力。
 
+父子记录的物理删除由 Product 在同一事务内显式完成，外键延迟到提交检查且不得级联删除；遗漏子记录须使整个事务失败。单个可选 checkpoint 使用同一组完整字段表达 Run、Compact 与审批 anchor，不能按 anchor 种类分裂存储；审批 anchor 的 revision 上界同时受行内 SQL 约束和 Product 校验。局部约束与非主键唯一性必须可在既定 Storage 权限内演进，不以关闭外键或放宽 authorizer 作为升级前提。
+
+持久化 JSON 的结构、枚举域或接受语义发生版本变化时，必须同步推进唯一 migration identity；即使没有 DDL 也须有标记迁移，使旧版本在解码前以 `VersionUnknown` 拒绝写入和替换。验证须覆盖允许持久化的枚举全集及未知值拒绝，不将运行时专用状态误当作持久化能力。
+
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 
 生产使用单个串行写入者。每次提交将已确认行摘要与完整候选事实比较，只写变化及删除；此前失败、TaskBusy 跳过和被动已读回执都必须随后续候选补齐，只有整个候选被确认才恢复 ready。共享业务原子组不拆分；大候选按 Storage 输入额度分块，同一事务提交全部块及 witness，不把单块额度当作累计历史上限。最后提交 witness 与变化同事务保存；结果不确定时保留精确候选、重开并读回 witness，再完成 Storage 同步确认，不重放业务 effect。凭据首次获知时清洗当前及保留历史，清除旧 WAL 版本；重复借用不重复触发维护，未完成清洗的有界凭据副本不得提前释放。旧迁移源清洗失败独立标记为维护未完成并保留凭据副本，不把已确认的 SQL 业务提交改成 unknown，也不阻塞后续安全 SQL 提交；SQL 本身的清洗及 purge 失败仍须保持原有屏障。历史写入 capability 冻结凭据安全代次；首次获知凭据后，旧代次候选即使尚未派发、且凭据后来已释放，也不得再写入。未确认事务只能读回原 witness，不能借换代重放；冻结缓冲释放时清零。历史 Task 数不消耗 Session 名额，Task、Run 和 Compact 集合按需增长；借用中的记录地址必须稳定，Run/Compact 仅在全部 worker lease 静止后移动容器。历史额度与 Renderer 单次快照、catalog 额度分开，达到历史额度保留既有历史并拒绝新增占用，不删除旧记录。

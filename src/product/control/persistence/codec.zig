@@ -608,8 +608,7 @@ fn readWorkspace(row: Record) !wire.WorkspaceWire {
 }
 
 fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
-    const approval = if (v.checkpoint) |cp| std.mem.eql(u8, cp.anchor.terminal.kind, "approval") else false;
-    const checkpoint = if (approval) null else v.checkpoint;
+    const checkpoint = v.checkpoint;
     try batch.add("tasks", .{
         .presentation_format = try oi(if (v.presentation_format) |format| @as(u64, format) else null),
         .next_presentation_order = try batch.ou(v.next_presentation_order),
@@ -646,12 +645,6 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .checkpoint_model = ob(if (checkpoint) |cp| cp.session.model else null),
         .checkpoint_terminal_kind = ot(if (checkpoint) |cp| cp.anchor.terminal.kind else null),
         .checkpoint_terminal_id = try batch.ou(if (checkpoint) |cp| cp.anchor.terminal.id else null),
-        .checkpoint_approval_revision = try batch.ou(if (approval) v.checkpoint.?.anchor.terminal.id else null),
-        .checkpoint_approval_json = if (approval) try batch.json(ApprovalCheckpointPayload{
-            .blob = v.checkpoint.?.blob,
-            .session = v.checkpoint.?.session,
-            .binding_epoch = v.checkpoint.?.anchor.binding_epoch,
-        }) else .null_value,
         .checkpoint_binding_epoch = try batch.ou(if (checkpoint) |cp| cp.anchor.binding_epoch else null),
     });
 }
@@ -855,24 +848,8 @@ fn readChange(row: Record) !wire.FileChangeWire {
     return v;
 }
 
-const ApprovalCheckpointPayload = struct {
-    blob: wire.CheckpointBlobWire,
-    session: wire.CheckpointSessionWire,
-    binding_epoch: u64,
-};
-
 fn readCheckpoint(row: Record) !?wire.CheckpointWire {
     try row.optionalGroup(.{ "checkpoint_generation", "checkpoint_byte_size", "checkpoint_digest", "checkpoint_logical_session_id", "checkpoint_last_run_id", "checkpoint_last_compact_id", "checkpoint_model", "checkpoint_terminal_kind", "checkpoint_terminal_id", "checkpoint_binding_epoch" });
-    try row.optionalGroup(.{ "checkpoint_approval_revision", "checkpoint_approval_json" });
-    if (try row.ou("checkpoint_approval_revision")) |revision| {
-        if (!try row.isNull("checkpoint_generation")) return error.Invalid;
-        const payload = try row.json(ApprovalCheckpointPayload, "checkpoint_approval_json");
-        return .{
-            .blob = payload.blob,
-            .session = payload.session,
-            .anchor = .{ .terminal = .{ .kind = "approval", .id = revision }, .binding_epoch = payload.binding_epoch },
-        };
-    }
     if (try row.isNull("checkpoint_generation")) return null;
     var v: wire.CheckpointWire = undefined;
     v.blob.generation = try row.u("checkpoint_generation");

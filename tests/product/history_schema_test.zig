@@ -286,7 +286,7 @@ test "history loader refuses invalid domain data instead of silently producing e
         "UPDATE tasks SET checkpoint_anchor='none'",
         "UPDATE task_ui_history SET payload='null'",
         "UPDATE task_compacts SET payload='{}'",
-        "UPDATE history_state SET failures_json='['",
+        "UPDATE history_state SET failures_json='{}'",
         "DELETE FROM history_state",
     }) |invalid| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -464,18 +464,22 @@ test "history schema preserves approval revisions and the approval checkpoint un
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{
         .sql = "UPDATE tasks SET approval_revision=X'0000000000000001'",
     } }}));
-    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{
-        .sql = "UPDATE tasks SET checkpoint_terminal_kind='run',checkpoint_terminal_id=X'0000000000000001'",
-    } }}));
+    // Every terminal kind now uses the same complete relational columns.
+    // Referenced terminal existence is checked by Product, not a fake FK.
     try expectSame(allocator, database.capability(), state);
     for ([_][]const u8{
         "UPDATE tasks SET approval_revision=1",
         "UPDATE tasks SET approval_revision=X'01'",
-        "UPDATE tasks SET checkpoint_approval_revision=X'0000000000000000'",
-        "UPDATE tasks SET checkpoint_approval_revision=NULL",
-        "UPDATE tasks SET checkpoint_approval_json=NULL",
-        "UPDATE tasks SET checkpoint_approval_json=X'7b7d'",
-        "UPDATE tasks SET checkpoint_approval_json='{'",
+        "UPDATE tasks SET checkpoint_terminal_id=X'0000000000000000'",
+        "UPDATE tasks SET checkpoint_terminal_id=NULL",
+        "UPDATE tasks SET checkpoint_digest=NULL",
+        "UPDATE tasks SET checkpoint_terminal_kind='unknown'",
+        "UPDATE tasks SET permission_review_delegated=2",
+        "UPDATE tasks SET model_intent_json='{'",
+        "UPDATE history_state SET failures_json='['",
+        "UPDATE runs SET input_json='{'",
+        "UPDATE runs SET commentary_ends_json='{'",
+        "UPDATE tasks SET presentation_format=1,next_presentation_order=X'0000000000000000'",
     }) |statement| {
         try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
         try expectSame(allocator, database.capability(), state);
@@ -759,7 +763,14 @@ test "history schema accepts one complete relational set atomically" {
     }));
     try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM run_tools", &.{}, count.receiver()));
     try std.testing.expectEqual(@as(?i64, 1), count.value);
-    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "DELETE FROM runs" } }}));
+    // Deferred NO ACTION rejects an incomplete delete at COMMIT, preserving
+    // every child. Physical deletion is explicit and ordered by the owner.
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "DELETE FROM runs" } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{
+        .{ .statement = .{ .sql = "DELETE FROM run_tools" } },
+        .{ .statement = .{ .sql = "DELETE FROM run_file_changes" } },
+        .{ .statement = .{ .sql = "DELETE FROM runs" } },
+    }));
     try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT (SELECT COUNT(*) FROM runs)+(SELECT COUNT(*) FROM run_tools)+(SELECT COUNT(*) FROM run_file_changes)", &.{}, count.receiver()));
     try std.testing.expectEqual(@as(?i64, 0), count.value);
 }
@@ -821,6 +832,169 @@ const Count = struct {
         return .{ .context = self, .receive_fn = receive };
     }
 };
+
+test "history schema deferred parent rebuild preserves every child and value" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try temporaryPath(allocator, temporary.dir);
+    const state = try history.fixture(allocator);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(allocator, database.capability(), state);
+    }
+    const tables = [_][]const u8{ "history_state", "workspaces", "tasks", "runs", "run_tools", "run_file_changes", "task_compacts", "task_ui_history", "task_input_submissions", "run_additional_inputs", "retained_records" };
+    var script: std.ArrayList(u8) = .empty;
+    for (tables) |table| try script.appendSlice(allocator, try std.fmt.allocPrint(allocator, "CREATE TABLE copy_{s} AS SELECT * FROM {s};", .{ table, table }));
+    const ddl = schema.migrations[0].sql;
+    const start = std.mem.indexOf(u8, ddl, "CREATE TABLE tasks (").?;
+    const end = std.mem.indexOfPos(u8, ddl, start, "\n);").? + 3;
+    try script.appendSlice(allocator, "DROP TABLE tasks;");
+    try script.appendSlice(allocator, ddl[start..end]);
+    try script.appendSlice(allocator, "INSERT INTO tasks SELECT * FROM copy_tasks;");
+    var lines = std.mem.splitScalar(u8, ddl, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "CREATE ") and std.mem.indexOf(u8, line, " ON tasks(") != null)
+            try script.appendSlice(allocator, line);
+    }
+    const migrations = [_]sql.Migration{ schema.migrations[0], .{ .version = 2, .name = "rebuild_parent", .sql = script.items } };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer database.destroy() catch unreachable;
+    for (tables) |table| {
+        var count: Count = .{};
+        const query = try std.fmt.allocPrint(allocator, "SELECT (SELECT COUNT(*) FROM (SELECT * FROM {s} EXCEPT SELECT * FROM copy_{s}))+(SELECT COUNT(*) FROM (SELECT * FROM copy_{s} EXCEPT SELECT * FROM {s}))", .{ table, table, table, table });
+        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query(query, &.{}, count.receiver()));
+        try std.testing.expectEqual(@as(?i64, 0), count.value);
+    }
+    try expectSame(allocator, database.capability(), state);
+}
+
+test "history schema named nullable checks and unique indexes evolve through Storage" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try temporaryPath(allocator, temporary.dir);
+    const state = try history.fixture(allocator);
+    state.tasks[0].runs[0].assistant_output_kind = null;
+    state.tasks[0].runs[0].assistant_output_start = null;
+    state.tasks[0].runs[0].assistant = "";
+    state.tasks[0].runs[0].commentary_ends = &.{};
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(allocator, database.capability(), state);
+    }
+    const migrations = [_]sql.Migration{
+        schema.migrations[0],
+        .{ .version = 2, .name = "named_constraints", .sql =
+        \\ALTER TABLE runs DROP CONSTRAINT runs_assistant_output_kind_domain;
+        \\ALTER TABLE runs ADD CONSTRAINT runs_assistant_output_kind_domain CHECK(assistant_output_kind IS NULL OR assistant_output_kind IN ('final','partial','future'));
+        \\DROP INDEX workspaces_canonical_root_unique;
+        \\CREATE UNIQUE INDEX workspaces_canonical_root_unique ON workspaces(canonical_root);
+        },
+    };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(allocator, database.capability(), state);
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET assistant_output_kind='unknown',assistant_output_start=X'0000000000000000'" } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET assistant_output_kind='future',assistant_output_start=X'0000000000000000'" } }}));
+    if (history.load(allocator, database.capability())) |_| return error.FutureTagAccepted else |_| {}
+}
+
+fn setPhase(task: *history.wire.TaskWire, phase: []const u8) void {
+    const run = &task.runs[0];
+    run.phase = phase;
+    run.cause = null;
+    const active = std.mem.eql(u8, phase, "queued") or std.mem.eql(u8, phase, "running") or std.mem.eql(u8, phase, "waiting_ui") or std.mem.eql(u8, phase, "stopping");
+    if (active) {
+        run.outcome = null;
+        run.coverage = "pending";
+        run.elapsed_ms = null;
+        run.finished_at_unix_ms = null;
+        run.file_change_observation = "collecting";
+        task.active_operation = .{ .kind = "run", .id = run.id };
+    } else {
+        run.outcome = phase;
+        task.active_operation = null;
+    }
+}
+
+test "history schema accepts every owner relational enum in a valid Product aggregate" {
+    inline for (history.wire.testing.relational_enums) |binding| {
+        for (std.meta.tags(binding[2])) |tag| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var state = try history.fixture(allocator);
+            const task = &state.tasks[0];
+            const run = &task.runs[0];
+            task.archived = false;
+            task.completion_seen_run_id = 0;
+            task.compacts = &.{};
+            task.checkpoint = null;
+            task.checkpoint_anchor = "none";
+            const value = @tagName(tag);
+            if (comptime std.mem.eql(u8, binding[1], "protocol")) {
+                task.binding.protocol = value;
+                run.execution_protocol = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "permission_profile")) {
+                task.permission_profile = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "permission_interaction")) {
+                task.permission_interaction = value;
+                run.permission_interaction = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "default_approval_mode")) {
+                state.default_approval_mode = value;
+                state.default_permission_profile = @tagName(tag.profile());
+            } else if (comptime std.mem.eql(u8, binding[1], "checkpoint_anchor")) {
+                task.checkpoint_anchor = value;
+                if (!std.mem.eql(u8, value, "none")) {
+                    const baseline = try history.fixture(allocator);
+                    task.checkpoint = baseline.tasks[0].checkpoint;
+                    task.checkpoint.?.anchor.terminal = .{ .kind = "run", .id = run.id };
+                    task.checkpoint.?.session.last_compact_id = 0;
+                }
+            } else if (comptime std.mem.eql(u8, binding[1], "checkpoint_attempt")) {
+                task.checkpoint_attempt = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "phase")) {
+                setPhase(task, value);
+            } else if (comptime std.mem.eql(u8, binding[1], "outcome")) {
+                setPhase(task, if (tag == .dependency_contract_failure) "failed" else value);
+                run.outcome = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "cause")) {
+                setPhase(task, "failed");
+                run.cause = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "coverage")) {
+                run.coverage = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "assistant_output_kind")) {
+                run.assistant_output_kind = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "file_change_observation")) {
+                if (tag == .collecting) setPhase(task, "running");
+                run.file_change_observation = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "event_projection_failure")) {
+                run.event_projection_failure = value;
+            } else if (comptime std.mem.eql(u8, binding[1], "state")) {
+                run.tools[0].state = value;
+                run.tools[0].is_error = tag == .failed;
+            } else if (comptime std.mem.eql(u8, binding[1], "kind")) {
+                run.file_changes.?[0].kind = value;
+                run.file_changes.?[0].from_display_path = if (tag == .moved) "old.zig" else null;
+            } else if (comptime std.mem.eql(u8, binding[1], "status")) {
+                run.file_changes.?[0].status = value;
+            } else @compileError("New enum binding needs a valid aggregate fixture");
+            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+            defer database.destroy() catch unreachable;
+            _ = try save(allocator, database.capability(), state);
+            try expectSame(allocator, database.capability(), state);
+            const invalid = try std.fmt.allocPrint(allocator, "UPDATE {s} SET {s}='unknown'", .{ binding[0], binding[1] });
+            try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = invalid } }}));
+        }
+    }
+}
 
 test "history file reference JSON preserves Host image provenance and defaults old records to false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
