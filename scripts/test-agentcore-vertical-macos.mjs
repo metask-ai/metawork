@@ -456,6 +456,8 @@ desktopVertical: try {
       repositoryRoot: root,
       fixtureRoot,
       evidenceDir: path.join(root, ".zig-cache", "mcp-lifecycle-desktop"),
+      protocolVersion: process.env.METAWORK_MCP_PROTOCOL,
+      transport: process.env.METAWORK_MCP_TRANSPORT,
     });
     await stopApplication("MCP lifecycle verification complete");
     break desktopVertical;

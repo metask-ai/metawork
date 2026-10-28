@@ -1,0 +1,77 @@
+{
+  "id": "E-MCP-ISSUE-ACCEPTANCE-AUDIT-20261028",
+  "sampledOn": "2026-10-28",
+  "issues": [
+    {
+      "number": 18,
+      "title": "[Bug][0.2.7/macOS] MCP 显示新任务可用，但授权后新建任务的 MCP 仍不可用",
+      "url": "https://github.com/shuzuan-org/metawork/issues/18",
+      "state": "OPEN",
+      "updatedAt": "2026-10-27T09:18:50Z",
+      "bodySha256": "610a64c5a033eddc80e2c9da50ee931be59b4f84735f70138dbf286b5ef64e02",
+      "commentCount": 1
+    },
+    {
+      "number": 26,
+      "title": "[Bug][0.2.7/macOS] 一个不可达MCP导致正常服务也被标记为「无法连接」",
+      "url": "https://github.com/shuzuan-org/metawork/issues/26",
+      "state": "OPEN",
+      "updatedAt": "2026-10-27T09:18:39Z",
+      "bodySha256": "b017962563939f8387710c5903eb45e44b9ae5a8b9a27cb5a6916ba758a075fc",
+      "commentCount": 0
+    },
+    {
+      "number": 29,
+      "title": "[Bug][0.2.7/macOS] MCP 首轮允许一次后成功，后续相同调用无审批直接 permission_denied",
+      "url": "https://github.com/shuzuan-org/metawork/issues/29",
+      "state": "OPEN",
+      "updatedAt": "2026-10-27T09:36:53Z",
+      "bodySha256": "8db187513ace3755823e5adad724f12cbcc82c47619a8eee7b94de2aeef3402b",
+      "commentCount": 0
+    }
+  ],
+  "findings": {
+    "18": "Original sample is a 2025-11-25 STDIO qa_add fixture with two newly created Tasks; later HTTP comment shows one earlier permission callback but a later new Task unavailable after explicit refresh. Exact authorization/list/Task deadlines are absent, so TTL cannot be asserted as the sole original cause. Add current real desktop compatible STDIO coverage rather than treating modern HTTP as the same scope.",
+    "26": "Report covers cold mixed and running-added unreachable HTTP server plus disable recovery; canonical atomic rejection is expected policy. Current Product/Core cases match those state transitions; no per-server network failure may be invented when candidate publication was rejected.",
+    "29": "Task52 first allow_once succeeded, later identical calls returned permission_denied before RPC, including after auto_review to manual. Precise later timestamps are absent. Same-origin refresh/permission and profile/checkpoint regressions cover the mechanism, while the original timeline remains unproven."
+  },
+  "matrixGapsFound": [
+    "The explicit single Run worker/all workers waiting for UI/full queue row was not covered by completed-run desktop tests. A real Product/Core regression fails QueueFull on the prior shared lane.",
+    "2025-06-18 and actual compatible STDIO desktop default-TTL RPC need stronger evidence than current creation-only Product tests.",
+    "A full Native run additionally exposed a ReviewScenario setup race: Task catalog not-loading did not prove Workspace discovery had vacated its one-slot queue. Repair uses existing test setup synchronization, without weakening production admission."
+  ],
+  "scope": "Read-only issue inspection; no comments, issue state changes, external messages, real credentials, or remote model calls.",
+  "upstreamCheck": {
+    "repository": "https://github.com/metask-ai/metacodes",
+    "lockedSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+    "mainAtObservation": "4bcfe5ca9815005ebd702f7778ae9b7c2d1e72e0",
+    "aheadBy": 54,
+    "mcpFiles": [
+      {
+        "filename": "src/app/mcp_startup.zig",
+        "status": "modified"
+      },
+      {
+        "filename": "src/mcp/client.zig",
+        "status": "modified"
+      },
+      {
+        "filename": "src/mcp/transport_http.zig",
+        "status": "modified"
+      }
+    ],
+    "relevantCommitSubjects": [
+      {
+        "sha": "d89f2a68428bc1fedef0db66c19cd16435bdb6fe",
+        "subject": "fix(http): a request carrying a key never follows a redirect"
+      }
+    ],
+    "diffSha256": "fc6cd5bb4aac3d9140cdff96a5cb41214cbc166ce286eb13934ec902caec4157",
+    "conclusion": "Inspected changes affect request redirect handling and errors; no Session selector/materialization provenance change was found in this compared main range. This does not qualify unrelated branches or an unpublished artifact. Keep the exact canonical origin Gate failed; do not patch local Core or silently switch inputs."
+  },
+  "matrixGapDisposition": {
+    "workerPressure": "Reproduced and repaired; see mcp-worker-pressure-20261028.json and commit62a45c8f.",
+    "protocolAndTransport": "All six real desktop combinations passed; see mcp-protocol-matrix-20261028.json.",
+    "nativeFixturePreparation": "Separate tests-only fixes 88b353af and 36cdc43b; all original failures retained."
+  }
+}

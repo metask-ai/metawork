@@ -1868,6 +1868,10 @@ test "compatible MCP product chain admits a new Task after tool authorization" {
     try expectMcpProductAdmission("2025-11-25", .streamable_http);
 }
 
+test "2025-06-18 MCP product chain admits a new Task after tool authorization" {
+    try expectMcpProductAdmission("2025-06-18", .streamable_http);
+}
+
 test "compatible STDIO MCP product chain admits a new Task after tool authorization" {
     try expectMcpProductAdmission("2025-11-25", .stdio);
 }

@@ -298,10 +298,21 @@ function startHttp() {
           return;
         }
         if (request.url !== "/mcp") throw new Error("unexpected endpoint");
-        if (request.headers["mcp-protocol-version"] !== options.protocolVersion)
-          throw new Error("unexpected MCP protocol header");
         const message = JSON.parse(body);
-        trace({ transport: "http", direction: "request", message });
+        const protocolHeader = request.headers["mcp-protocol-version"];
+        const classicOffer =
+          options.protocolVersion === "2025-06-18" &&
+          message.method === "initialize" &&
+          message.params?.protocolVersion === "2025-11-25" &&
+          protocolHeader === "2025-11-25";
+        if (protocolHeader !== options.protocolVersion && !classicOffer)
+          throw new Error("unexpected MCP protocol header");
+        trace({
+          transport: "http",
+          direction: "request",
+          protocolHeader,
+          message,
+        });
         void handle(message, (rpcResponse) => {
           if (rpcResponse === null) {
             response.writeHead(202).end();
@@ -458,7 +469,10 @@ async function handle(message, send) {
     }
     case "tools/list": {
       catalogLists += 1;
-      if (options.refreshGate && catalogLists > 1) {
+      if (
+        options.refreshGate &&
+        (catalogLists > 1 || existsSync(`${options.refreshGate}.armed`))
+      ) {
         writeFileSync(`${options.refreshGate}.waiting`, "waiting");
         while (!existsSync(`${options.refreshGate}.release`))
           await new Promise((resolve) => setTimeout(resolve, 5));
@@ -603,7 +617,11 @@ function respondError(send, id, code, message) {
 
 function trace(event) {
   if (options.tracePath)
-    appendFileSync(options.tracePath, `${JSON.stringify(event)}\n`, "utf8");
+    appendFileSync(
+      options.tracePath,
+      `${JSON.stringify({ observedAtMs: Date.now(), ...event })}\n`,
+      "utf8",
+    );
 }
 
 function parseOptions(args) {

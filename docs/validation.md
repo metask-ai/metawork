@@ -176,7 +176,7 @@ Task 模型意图与选择的定向入口为 `zig build test-task-model-selectio
 
 MCP 既有活动 Session 的来源隔离存在未闭合的 AgentCore 依赖缺口：保持相同 server binding 与工具 schema、替换连接来源后，原 Session 的后续 Run 可能解析到新来源；同进程 restore 的 Host 来源校验不能证明这条路径安全。正式 `test-mcp-interop` 的来源替换资格用例和[精确证据](evidence/mcp-lifecycle-p0-20261028.json)记录当前反例；该用例通过仅表示反例仍可复现，不是来源隔离通过。修复归 AgentCore 的 Session selection/materialization owner，须由 canonical 发布及回归确认，不以 Host 热替换 Selection、复制目录、重建 Session 或弱化期望绕过；该缺口闭合前，不得关闭 MCP 旧 Task 来源隔离及 #29 的完整验收。
 
-当前 macOS MCP 桌面生命周期入口为 `METAWORK_MCP_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，消费正式 automation artifact、隔离 profile 与本地 HTTP/Provider fixture。它须通过真实 Application apply/activation、Bridge、Product timer 和 canonical Core 观察默认 30 秒 TTL 的提前刷新、刷新暂停点创建、静默后台投影及原 Task 跨 TTL 的真实 RPC；once 再次询问、原 binding 和 Run 数量以及完整 `tools/list` 请求计数共同排除授权扩张、重放和查询驱动刷新。该范围不替代远程 OAuth/限流、原发行包时间线、其他平台或来源隔离 Gate；报告保留观测时长与请求总数。
+当前 macOS MCP 桌面生命周期入口为 `METAWORK_MCP_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，消费正式 automation artifact、隔离 profile 与本地 MCP/Provider fixture。`METAWORK_MCP_PROTOCOL` 可指定现有协议 `2026-07-28`、`2025-11-25` 或 `2025-06-18`，`METAWORK_MCP_TRANSPORT` 可指定 `http` 或 `stdio`，默认分别为 `2026-07-28` 与 `http`；STDIO 子进程由真实 Application transport 创建和关闭。它须通过真实 Application apply/activation、Bridge、Product timer 和 canonical Core 观察默认 30 秒 TTL 的提前刷新、刷新暂停点创建、静默后台投影及原 Task 跨 TTL 的真实 RPC；once 再次询问、原 binding 和 Run 数量以及完整 `tools/list` 请求计数共同排除授权扩张、重放和查询驱动刷新。该范围不替代远程 OAuth/限流、原发行包时间线、其他平台或来源隔离 Gate；报告按协议与传输保存观测时长与请求总数。
 
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 

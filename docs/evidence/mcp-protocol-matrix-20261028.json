@@ -1,0 +1,202 @@
+{
+  "id": "E-MAC-MCP-PROTOCOL-MATRIX-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "36cdc43b1408a122a8d5e7db71f34e9447ed1335",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "artifactSha256": "0faf0680ec2fb7938cdff83dabf6d78c6799985f6f9442d5bbf915e4368f84b8",
+  "sourceFilesSha256": {
+    "scripts/mcp-lifecycle-vertical.mjs": "f8fd55d4f7185b54152b7f483da7ada37b0cd52118b81c808272e1759032402b",
+    "scripts/probe-product-state.mjs": "f7367a31aaf94a931500032fe317e33a69afcfa52234312c902da22ce03778ee",
+    "scripts/test-agentcore-vertical-macos.mjs": "af6d15dd82591a475c31b365357b240e847aeac5f840a717c5eac4c1625c2460",
+    "tests/fixtures/mcp_server.mjs": "922cdb7c74ae683357ee315150f41ff5942d38bce219840708ce7b3f650545ba",
+    "tests/agent/mcp_interop_test.zig": "ddd045f5e7e4e7b718f965bfaf70fc9cf7468497476d3fc92002f3ba6ff89bff",
+    "src/product/control/runtime.zig": "57a03ff5c693fd33c7d11087a341007dc65d1ee30bcf5aa9ca59eaada9c68bb8"
+  },
+  "command": "METAWORK_MCP_ONLY=1 METAWORK_MCP_PROTOCOL=<protocol> METAWORK_MCP_TRANSPORT=<transport> METAWORK_VERTICAL_PREBUILT=1 METAWORK_TEST_APP_CWD=.zig-cache/mcp-lifecycle-20261028/matrix-cwd node scripts/test-agentcore-vertical-macos.mjs aarch64-macos",
+  "build": "First matrix attempt rebuilt verified current automation Debug artifact after Control MCP lane fix; later runs reuse that exact artifact. No product source changed after that build.",
+  "cases": [
+    {
+      "protocol": "2025-11-25",
+      "transport": "stdio",
+      "ttlMs": 30000,
+      "proactiveAtMs": 24566,
+      "observedDurationMs": 67942,
+      "initialToolsLists": 2,
+      "finalToolsLists": 4,
+      "automaticRefreshes": 2,
+      "refreshIntervalsMs": [
+        25656
+      ],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    },
+    {
+      "protocol": "2025-06-18",
+      "transport": "http",
+      "ttlMs": 30000,
+      "proactiveAtMs": 24234,
+      "observedDurationMs": 65320,
+      "initialToolsLists": 2,
+      "finalToolsLists": 4,
+      "automaticRefreshes": 2,
+      "refreshIntervalsMs": [
+        25448
+      ],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    },
+    {
+      "protocol": "2026-07-28",
+      "transport": "http",
+      "ttlMs": 30000,
+      "proactiveAtMs": 49862,
+      "observedDurationMs": 85583,
+      "initialToolsLists": 3,
+      "finalToolsLists": 5,
+      "automaticRefreshes": 2,
+      "refreshIntervalsMs": [
+        25434
+      ],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    },
+    {
+      "protocol": "2025-11-25",
+      "transport": "http",
+      "ttlMs": 30000,
+      "proactiveAtMs": 49154,
+      "observedDurationMs": 63286,
+      "initialToolsLists": 3,
+      "finalToolsLists": 4,
+      "automaticRefreshes": 1,
+      "refreshIntervalsMs": [],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    },
+    {
+      "protocol": "2025-06-18",
+      "transport": "stdio",
+      "ttlMs": 30000,
+      "proactiveAtMs": 24877,
+      "observedDurationMs": 65774,
+      "initialToolsLists": 2,
+      "finalToolsLists": 4,
+      "automaticRefreshes": 2,
+      "refreshIntervalsMs": [
+        25563
+      ],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    },
+    {
+      "protocol": "2026-07-28",
+      "transport": "stdio",
+      "ttlMs": 30000,
+      "proactiveAtMs": 24400,
+      "observedDurationMs": 65624,
+      "initialToolsLists": 2,
+      "finalToolsLists": 4,
+      "automaticRefreshes": 2,
+      "refreshIntervalsMs": [
+        25478
+      ],
+      "actualToolCalls": 3,
+      "originalTaskRuns": 2,
+      "distinctOnceRequests": true,
+      "originalBindingPreserved": true,
+      "createdDuringRefresh": "ready(selected)",
+      "validBackgroundOperation": "idle",
+      "limits": [
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+      ],
+      "exitCode": 0,
+      "normalApplicationStop": true
+    }
+  ],
+  "totalActualToolCalls": 18,
+  "checks": [
+    {
+      "command": "node_modules/.bin/native test . --yes",
+      "exitCode": 0,
+      "stepsSucceeded": 236,
+      "stepsTotal": 236,
+      "passed": 1507,
+      "skipped": 9,
+      "total": 1516
+    },
+    {
+      "command": "node --test scripts/agentcore-vertical.test.mjs scripts/architecture-boundaries.test.mjs scripts/mcp-page.test.mjs scripts/workbench-contract.test.mjs",
+      "exitCode": 0,
+      "passed": 141,
+      "total": 141
+    },
+    {
+      "command": "npm --workspace @metawork/renderer run check",
+      "exitCode": 0
+    }
+  ],
+  "qualificationRepairs": [
+    "STDIO refresh reopens an Application-owned child, so its list counter is per-process. An explicit shared fixture .armed marker now holds the next real tools/list independent of process lifetime.",
+    "A 2025-06-18 server must accept the initial 2025-11-25 Classic initialize offer, then enforce its selected era on later HTTP headers. The fixture remains strict for other requests.",
+    "Long CLI collection can span multiple normal refresh periods. The held IO boundary permits exactly one shared job; later server arrival times must be at least 24 seconds apart (one-second observation allowance around the nominal 25-second schedule).",
+    "MCP-only scoped reads use the existing snapshot probe retry and secret checks; Task reads collect only the target Task. Run observations use the same 60-second budget as the desktop harness. No mutation is replayed."
+  ],
+  "priorFailures": [
+    "Initial compatible STDIO gate could not observe a fresh child process.",
+    "Initial 2025-06-18 fixture rejected legal initial negotiation.",
+    "A subsequent long STDIO sample legitimately contained a second periodic refresh, disproving the old fixed-one-refresh assertion.",
+    "A broad/independent snapshot collector lost responses during desktop notification traffic; narrowed scope now reuses the canonical probe path.",
+    "Native review setup raced background discovery; separate fix 88b353af. Compact raced the prior checkpoint worker lease; separate fix 36cdc43b."
+  ],
+  "limits": [
+    "Exact original Task18/19/52 timelines are not reconstructed by these current synthetic runs.",
+    "Origin-isolation Gate remains failed on the canonical artifact.",
+    "Real remote OAuth/429/quota qualification is not implied by local fixtures.",
+    "A later default full Node run again lost task-panel.test.mjs to SIGKILL; bounded-heap and two-case diagnostics exposed JavaScript OOM. Preserve this failure until qualified; earlier full passes do not erase it."
+  ]
+}

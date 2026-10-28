@@ -15,46 +15,58 @@ export async function runMcpLifecycleVertical({
   repositoryRoot,
   fixtureRoot,
   evidenceDir,
+  protocolVersion = "2026-07-28",
+  transport = "http",
 }) {
+  assert.ok(
+    ["2026-07-28", "2025-11-25", "2025-06-18"].includes(protocolVersion),
+  );
+  assert.ok(["http", "stdio"].includes(transport));
   const tracePath = path.join(fixtureRoot, "mcp-desktop.jsonl");
   const gate = path.join(fixtureRoot, "mcp-refresh");
   await writeFile(`${gate}.release`, "release");
-  const server = spawn(
-    process.execPath,
-    [
-      path.join(repositoryRoot, "tests/fixtures/mcp_server.mjs"),
-      "--transport",
-      "http",
-      "--protocol",
-      "2026-07-28",
-      "--ttl-ms",
-      "30000",
-      "--trace",
-      tracePath,
-      "--refresh-gate",
-      gate,
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const argumentsFor = (kind) => [
+    path.join(repositoryRoot, "tests/fixtures/mcp_server.mjs"),
+    "--transport",
+    kind,
+    "--protocol",
+    protocolVersion,
+    "--ttl-ms",
+    "30000",
+    "--trace",
+    tracePath,
+    "--refresh-gate",
+    gate,
+  ];
+  // STDIO is launched and owned by the real Application transport; the
+  // external listener is needed only for HTTP.
+  const server =
+    transport === "http"
+      ? spawn(process.execPath, argumentsFor("http"), {
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      : null;
   let output = "";
   let failure;
   let exit;
-  server.stdout.setEncoding("utf8");
-  server.stdout.on("data", (chunk) => {
+  server?.stdout.setEncoding("utf8");
+  server?.stdout.on("data", (chunk) => {
     output += chunk;
   });
-  server.stderr.on("data", () => {
+  server?.stderr.on("data", () => {
     failure ??= new Error("MCP fixture wrote to stderr");
   });
-  server.once("error", (error) => {
+  server?.once("error", (error) => {
     failure = error;
   });
-  const exited = new Promise((resolve) =>
-    server.once("exit", (code, signal) => {
-      exit = { code, signal };
-      resolve(exit);
-    }),
-  );
+  const exited = server
+    ? new Promise((resolve) =>
+        server.once("exit", (code, signal) => {
+          exit = { code, signal };
+          resolve(exit);
+        }),
+      )
+    : Promise.resolve();
   const wait = (operation, duration, label) =>
     poll(
       async () => {
@@ -78,31 +90,48 @@ export async function runMcpLifecycleVertical({
         event.direction === "request" && event.message?.method === method,
     );
   const task = async (id) =>
-    (await snapshot()).tasks.find((item) => item.id === id);
+    (await snapshot({ taskId: id })).tasks.find((item) => item.id === id);
+  const mcpView = async () => (await snapshot({ mcpOnly: true })).mcp;
   try {
-    const endpoint = await wait(
-      async () => {
-        const line = output.split("\n").find(Boolean);
-        return line ? JSON.parse(line).endpoint : null;
-      },
-      10_000,
-      "MCP fixture listener",
-    );
-    const initial = (await snapshot()).mcp;
+    const endpoint =
+      transport === "http"
+        ? await wait(
+            async () => {
+              const line = output.split("\n").find(Boolean);
+              return line ? JSON.parse(line).endpoint : null;
+            },
+            10_000,
+            "MCP fixture listener",
+          )
+        : null;
+    const initial = await mcpView();
     assert.equal(initial.managementHealth, "ready");
-    const created = await invoke("metawork.mcp.createHttpServer", {
+    const common = {
       expectedDesiredGeneration: initial.desiredGeneration,
       displayName: "Desktop MCP fixture",
-      negotiation: "modern_only",
+      negotiation:
+        protocolVersion === "2026-07-28" ? "modern_only" : "automatic",
       timeoutMs: 8000,
-      endpoint,
-      authMode: "none",
-      headerNames: [],
-    });
+    };
+    const created =
+      transport === "http"
+        ? await invoke("metawork.mcp.createHttpServer", {
+            ...common,
+            endpoint,
+            authMode: "none",
+            headerNames: [],
+          })
+        : await invoke("metawork.mcp.createStdioServer", {
+            ...common,
+            command: process.execPath,
+            arguments: argumentsFor("stdio"),
+            cwd: null,
+            environmentNames: [],
+          });
     assert.equal(created.outcome, "saved", JSON.stringify(created));
     const connected = await wait(
       async () => {
-        const current = (await snapshot()).mcp;
+        const current = await mcpView();
         return current.runtimeAlignment === "current" &&
           current.configurationApply === "idle" &&
           current.servers[0]?.runtimeStatus === "ready"
@@ -121,8 +150,7 @@ export async function runMcpLifecycleVertical({
     });
     assert.equal(allowed.outcome, "saved", JSON.stringify(allowed));
     await wait(
-      async () =>
-        (await snapshot()).mcp.servers[0]?.newTaskAccess === "available",
+      async () => (await mcpView()).servers[0]?.newTaskAccess === "available",
       10_000,
       "MCP new Task authority",
     );
@@ -131,8 +159,11 @@ export async function runMcpLifecycleVertical({
       (item) => item.id === chosen?.workspaceId,
     );
     assert.ok(workspace, "Workspace choice must have a committed identity");
+    // The model selection is unchanged throughout this fixture. Reuse its
+    // captured CAS input so creation at the held refresh boundary is a single
+    // Bridge mutation, as it is for an already-rendered New Task form.
+    const admission = (await snapshot()).newTaskAdmission;
     const create = async () => {
-      const admission = (await snapshot()).newTaskAdmission;
       const result = await invoke("metawork.tasks.create", {
         workspace: {
           kind: "manual",
@@ -194,7 +225,7 @@ export async function runMcpLifecycleVertical({
             ? current.pendingUi
             : null;
         },
-        15_000,
+        60_000,
         `${label} permission`,
       );
       assert.equal(pending.kind, "permission");
@@ -212,7 +243,7 @@ export async function runMcpLifecycleVertical({
           const last = current.runs.find((item) => item.id === started.runId);
           return last?.terminal && !current.activeOperation ? current : null;
         },
-        15_000,
+        60_000,
         `${label} terminal`,
       );
       assert.equal(
@@ -228,6 +259,9 @@ export async function runMcpLifecycleVertical({
     const originalTask = await create();
     const firstRun = await run(originalTask, "before-default-ttl");
     const initialLists = (await requests("tools/list")).length;
+    // STDIO refresh may open a new owned child. Its in-process list counter
+    // starts over, so arm the transport-independent IO pause explicitly.
+    await writeFile(`${gate}.armed`, "armed");
     await unlink(`${gate}.release`);
     await unlink(`${gate}.waiting`).catch((error) => {
       if (error.code !== "ENOENT") throw error;
@@ -245,9 +279,14 @@ export async function runMcpLifecycleVertical({
       "default 30-second proactive timer reaches Core IO",
     );
     const proactiveAtMs = Date.now() - originalReadyAt;
-    const during = (await snapshot()).mcp;
+    const during = await mcpView();
     assert.equal(during.operation, "idle");
     assert.equal(during.servers[0].newTaskAccess, "available");
+    assert.equal(
+      (await requests("tools/list")).length,
+      initialLists + 1,
+      "only one shared refresh can reach the held IO boundary",
+    );
     const duringTask = await create();
     await writeFile(`${gate}.release`, "release");
     await wait(
@@ -261,21 +300,31 @@ export async function runMcpLifecycleVertical({
     await run(duringTask, "created-during-proactive-refresh");
     assert.equal((await task(originalTask)).runs.length, 2);
     assert.equal((await requests("tools/call")).length, 3);
-    const finalLists = (await requests("tools/list")).length;
-    assert.equal(
-      finalLists,
-      initialLists + 1,
-      "one automatic full refresh, independent of snapshot polling",
+    const listRequests = await requests("tools/list");
+    const finalLists = listRequests.length;
+    const automatic = listRequests.slice(initialLists);
+    const refreshIntervalsMs = automatic
+      .slice(1)
+      .map((item, index) => item.observedAtMs - automatic[index].observedAtMs);
+    // CLI collection can outlast a second normal 25-second period. Count it,
+    // and check actual server arrival times rather than assuming one period.
+    // The one-second allowance covers observation/descriptor rounding.
+    assert.ok(
+      refreshIntervalsMs.every((interval) => interval >= 24_000),
+      "snapshot polling must not accelerate the default-TTL schedule",
     );
-    const final = (await snapshot()).mcp;
+    const final = await mcpView();
     assert.equal(final.servers[0].newTaskAccess, "available");
     const report = {
-      protocol: "2026-07-28",
+      protocol: protocolVersion,
+      transport,
       ttlMs: 30_000,
       proactiveAtMs,
       observedDurationMs: Date.now() - originalReadyAt,
       initialToolsLists: initialLists,
       finalToolsLists: finalLists,
+      automaticRefreshes: automatic.length,
+      refreshIntervalsMs,
       actualToolCalls: 3,
       originalTaskRuns: 2,
       distinctOnceRequests: firstRun.requestId !== secondRun.requestId,
@@ -284,18 +333,21 @@ export async function runMcpLifecycleVertical({
       createdDuringRefresh: "ready(selected)",
       validBackgroundOperation: during.operation,
       limits: [
-        "Local synthetic HTTP and Provider; does not qualify remote OAuth quotas or canonical origin isolation.",
+        "Local synthetic MCP and Provider; does not qualify remote OAuth quotas or canonical origin isolation.",
       ],
     };
     await mkdir(evidenceDir, { recursive: true });
     await writeFile(
-      path.join(evidenceDir, "mcp-desktop-report.json"),
+      path.join(
+        evidenceDir,
+        `mcp-desktop-${protocolVersion}-${transport}.json`,
+      ),
       `${JSON.stringify(report, null, 2)}\n`,
     );
     console.log(`MCP desktop lifecycle passed: ${JSON.stringify(report)}`);
   } finally {
     await writeFile(`${gate}.release`, "release");
-    if (!exit) server.kill("SIGTERM");
+    if (!exit) server?.kill("SIGTERM");
     await exited;
   }
 }
