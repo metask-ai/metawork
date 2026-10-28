@@ -154,10 +154,16 @@ pub const Job = struct {
     fn run(self: *Job) Outcome {
         if (self.cancelled.load(.acquire)) return fail(.cancelled, false);
         switch (self.work) {
-            .history => |*work| return .{ .history = switch (work.input) {
-                .resolution => |token| work.capability.resolveCommit(token),
-                .candidate => |*owned| work.capability.commitConfirmed(&owned.candidate),
-            } },
+            .history => |*work| {
+                const result = switch (work.input) {
+                    .resolution => |token| work.capability.resolveCommit(token),
+                    .candidate => |*owned| work.capability.commitConfirmed(&owned.candidate),
+                };
+                // Store can report an older unresolved transaction before it
+                // prepares this candidate. That gives this job no commit to
+                // confirm; reject it rather than publishing a tokenless wait.
+                return .{ .history = if (result == .outcome_unknown and self.historyToken() == null) .failed else result };
+            },
             .retire => |work| {
                 work.store.delete(work.identity);
                 return .retired;
@@ -366,4 +372,40 @@ test "approval resolution worker only reads the retained candidate and releases 
     try std.testing.expectEqual(@as(usize, 1), harness.reads);
     job.deinit();
     try std.testing.expectEqual(@as(usize, 0), leases.liveCount());
+}
+
+test "history worker rejects unknown without a candidate token while preserving resolution unknown" {
+    const Harness = struct {
+        fn notify(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn commit(_: ?*anyopaque, _: *persistence.Candidate) persistence.Commit {
+            return .outcome_unknown;
+        }
+        fn resolve(_: ?*anyopaque, _: persistence.CommitToken) persistence.Commit {
+            return .outcome_unknown;
+        }
+    };
+    for ([_]bool{ false, true }) |resolution| {
+        var leases: worker_lease.WorkerLeaseSet = .{};
+        const job = try std.testing.allocator.create(Job);
+        job.* = .{
+            .allocator = std.testing.allocator,
+            .lease = try leases.acquire(),
+            .notifier = .{ .context = null, .notify_fn = Harness.notify },
+            .work = .{ .history = .{
+                .input = if (resolution) .{ .resolution = @splat(9) } else .{ .candidate = try persistence.OwnedCandidate.capture(std.testing.allocator, .{ .value = .{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 1, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} } }) },
+                .capability = .{ .enabled = true, .confirmed_commit_fn = Harness.commit, .resolve_commit_fn = Harness.resolve },
+            } },
+        };
+        Job.execute(job);
+        const outcome = job.outcome.history;
+        const token_present = job.historyToken() != null;
+        const completed = job.completionReady();
+        job.deinit();
+        try std.testing.expect(completed);
+        try std.testing.expectEqual(@as(usize, 0), leases.liveCount());
+        try std.testing.expectEqual(resolution, token_present);
+        try std.testing.expectEqual(if (resolution) persistence.Commit.outcome_unknown else .failed, outcome);
+    }
 }

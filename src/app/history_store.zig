@@ -7,7 +7,7 @@ const product = @import("metawork_product_control");
 const wire = @import("metawork_product_task").history;
 pub const file_name = "workbench-history.sqlite";
 const import_name = ".workbench-history.import.sqlite";
-const recovery_prefix = ".workbench-history.recovery.";
+const recovery_prefix = ".workbench-history.sqlite-recovery.";
 const Credential = struct {
     bytes: [4096]u8 = @splat(0),
     length: usize = 0,
@@ -1235,6 +1235,49 @@ test "SQLite history partial quarantine prevents reimport and preserves the old 
     try std.testing.expect(try store.exists(evidence));
     const loaded = try product.loadHistory(arena.allocator(), std.testing.allocator, store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("memory facts", loaded.value.tasks[0].runs[0].assistant);
+}
+
+test "SQLite history import ignores legacy recovery temp beside a valid legacy store" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const bytes = try wire.encodeAlloc(arena.allocator(), try testHistory(arena.allocator(), 1, 1, "import me"), .{}, store.limits);
+    try store.legacy.commit(bytes);
+    const legacy_temp = ".workbench-history.recovery.interrupted.tmp";
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = legacy_temp, .data = "legacy staged bytes" });
+    try std.testing.expect(!try store.hasSqlRecoveryEvidence());
+    var restored = (try store.load(a)).?;
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("import me", restored.value.tasks[0].runs[0].assistant);
+    try std.testing.expect(try store.exists(legacy_temp));
+    const legacy = (try store.legacy.loadAlloc(a)).?;
+    defer a.free(legacy);
+    try std.testing.expectEqualSlices(u8, bytes, legacy);
+}
+
+test "SQLite history staged recovery cannot be mistaken for legacy recovery or empty history" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const sql_temp = recovery_prefix ++ "interrupted.tmp";
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = sql_temp, .data = "SQL staged bytes" });
+    const legacy = try store.legacy.loadAlloc(a);
+    defer if (legacy) |bytes| a.free(bytes);
+    try std.testing.expect(legacy == null);
+    try std.testing.expect(try store.hasSqlRecoveryEvidence());
+    try std.testing.expectError(error.RecoveryPending, store.load(a));
+    try std.testing.expect(!try store.exists(file_name));
+    try std.testing.expect(try store.exists(sql_temp));
 }
 
 test "SQLite history reopens a poisoned maintenance connection before retry" {

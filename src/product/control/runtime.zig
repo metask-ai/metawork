@@ -4839,7 +4839,7 @@ pub const Runtime = struct {
                             .outcome_unknown => {
                                 if (!resolve_only) {
                                     std.debug.assert(self.approval_history_unknown == null);
-                                    self.approval_history_unknown = slot.job.historyToken().?;
+                                    self.approval_history_unknown = slot.job.historyToken();
                                 }
                                 self.approval_history_dirty = true;
                                 self.task_persistence_health = .outcome_unknown;
@@ -4878,7 +4878,7 @@ pub const Runtime = struct {
                                     self.markTaskPersistenceWriteFailed();
                             },
                             .outcome_unknown => {
-                                if (!resolve_only) restore.unknown_history = slot.job.historyToken().?;
+                                if (!resolve_only) restore.unknown_history = slot.job.historyToken();
                                 self.task_persistence_health = .outcome_unknown;
                                 task.runtime.last_restore_failure = .binding_persistence_unknown;
                             },
@@ -9654,7 +9654,9 @@ pub const Runtime = struct {
         };
         const status = self.task_persistence.credentials(collected.values[0..collected.count], complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
         self.task_persistence.security_epoch = status.epoch;
-        if (!status.ready) self.markTaskPersistenceWriteFailed();
+        // Maintenance is also not ready while the original transaction is
+        // unresolved. Keep that stronger fact visible until token resolution.
+        if (!status.ready and self.task_persistence_health != .outcome_unknown) self.markTaskPersistenceWriteFailed();
     }
 
     fn invalidateProjectionSecurity(self: *Runtime) void {
@@ -13892,6 +13894,43 @@ test "ordinary unknown retains original token and backfills newer memory only af
     var restored = try task_persistence.decode(std.testing.allocator, persistence.storage[0..persistence.len], control.taskPersistenceLimits());
     defer restored.deinit();
     try std.testing.expectEqualStrings("confirmed backfill", restored.value.tasks[0].title);
+}
+
+test "credential maintenance not ready preserves ordinary unknown health through save and recovery" {
+    const Harness = struct {
+        fn credentials(context: ?*anyopaque, _: []const []const u8, _: bool, _: task_persistence.CredentialScrub) task_persistence.CredentialStatus {
+            const persistence: *TestTaskPersistence = @ptrCast(@alignCast(context.?));
+            return .{ .epoch = 1, .ready = persistence.commits == 0 or persistence.resolution_result != .outcome_unknown };
+        }
+    };
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage, .result = .outcome_unknown };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence.credentials_fn = Harness.credentials;
+    control.task_persistence_health = .ready;
+    try control.renameTask(3, "unconfirmed candidate");
+    const token = control.ordinary_history_unknown.?;
+    try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
+    const revision = control.currentRevision();
+    control.syncHistoryCredentials(null, null);
+    try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
+    try std.testing.expectEqual(revision, control.currentRevision());
+    try control.renameTask(3, "newer unsaved memory");
+    try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
+    try std.testing.expectEqual(PersistenceRecoveryOutcome.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+    try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
+    try std.testing.expectEqualSlices(u8, &token, &control.ordinary_history_unknown.?);
+    try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+    try std.testing.expect(control.approvalHistoryBlocked());
+    persistence.resolution_result = .committed;
+    persistence.result = .committed;
+    try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, control.recoverTaskHistory(control.currentRevision()));
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+    try std.testing.expectEqual(@as(usize, 0), persistence.recoveries);
 }
 
 test "Task invariant rejection preserves the last good persistence candidate" {

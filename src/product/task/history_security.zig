@@ -3,7 +3,7 @@ const std = @import("std");
 const wire = @import("persistence.zig");
 
 fn structural(comptime T: type, comptime name: []const u8) bool {
-    const names: []const []const u8 = if (T == wire.StateWire) &.{ "default_permission_profile", "default_approval_mode" } else if (T == wire.WorkspaceWire) &.{"kind"} else if (T == wire.TaskWire) &.{ "permission_profile", "permission_interaction", "checkpoint_anchor", "checkpoint_attempt" } else if (T == wire.BindingWire) &.{"protocol"} else if (T == wire.OperationWire or T == wire.CheckpointTerminalWire or T == wire.RunInputWire) &.{"kind"} else if (T == wire.RunWire) &.{ "coverage", "execution_protocol", "permission_profile", "permission_interaction", "assistant_output_kind", "phase", "outcome", "cause", "file_change_observation", "event_projection_failure" } else if (T == wire.ToolWire or T == wire.AdditionalInputWire or T == wire.InputSubmissionWire) &.{"state"} else if (T == wire.CompactWire) &.{ "coverage", "phase", "cause" } else if (T == wire.UiRecordWire) &.{ "kind", "state", "answered_by" } else if (T == wire.PermissionSummaryWire) &.{ "decision", "source", "callback_outcome", "canonical_arguments_digest" } else if (T == wire.AttachmentWire) &.{ "kind", "format" } else if (T == wire.FileReferenceWire) &.{ "locator_kind", "presentation_state" } else if (T == wire.FileChangeWire) &.{ "kind", "status" } else if (T == wire.CheckpointBlobWire or T == wire.FileChangeArtifactWire) &.{"digest"} else if (T == wire.OutputWire) &.{ "id", "sha256" } else &.{};
+    const names: []const []const u8 = if (T == wire.StateWire) &.{ "default_permission_profile", "default_approval_mode" } else if (T == wire.WorkspaceWire) &.{"kind"} else if (T == wire.TaskWire) &.{ "permission_profile", "permission_interaction", "checkpoint_anchor", "checkpoint_attempt" } else if (T == wire.BindingWire) &.{"protocol"} else if (T == wire.OperationWire or T == wire.CheckpointTerminalWire or T == wire.RunInputWire) &.{"kind"} else if (T == wire.RunWire) &.{ "coverage", "execution_protocol", "permission_profile", "permission_interaction", "assistant_output_kind", "phase", "outcome", "cause", "file_change_observation", "event_projection_failure" } else if (T == wire.ToolWire or T == wire.AdditionalInputWire or T == wire.InputSubmissionWire) &.{"state"} else if (T == wire.CompactWire) &.{ "coverage", "phase", "cause" } else if (T == wire.UiRecordWire) &.{ "kind", "state", "answered_by" } else if (T == wire.SubmissionWire) &.{"presentation_state"} else if (T == wire.PermissionSummaryWire) &.{ "tool_namespace", "decision", "source", "callback_outcome", "canonical_arguments_digest" } else if (T == wire.AttachmentWire) &.{ "kind", "format" } else if (T == wire.FileReferenceWire) &.{ "locator_kind", "presentation_state" } else if (T == wire.FileChangeWire) &.{ "kind", "status" } else if (T == wire.CheckpointBlobWire or T == wire.FileChangeArtifactWire) &.{"digest"} else if (T == wire.OutputWire) &.{ "id", "sha256" } else &.{};
     for (names) |item| if (std.mem.eql(u8, item, name)) return true;
     return false;
 }
@@ -202,4 +202,43 @@ test "history security preserves structural tags and handles readonly unknown st
     const scrubbed = try redact(aa, retained, "none");
     try std.testing.expect(!try contains(aa, scrubbed, "none"));
     try std.testing.expectEqual(retained.id, scrubbed.id);
+}
+
+test "history security preserves namespace and submission tags but still cleans matching free text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "builtin", "host", "mcp" }) |namespace| {
+        var summary: wire.PermissionSummaryWire = .{
+            .request_id = "request",
+            .matched_rule_id = "rule",
+            .tool_namespace = namespace,
+            .tool_name = "tool",
+            .tool_binding = "binding",
+            .decision = "allow",
+            .source = "policy",
+            .policy_generation = 1,
+            .used_session_rule = false,
+            .callback_outcome = null,
+        };
+        try std.testing.expect(!try contains(a, summary, namespace));
+        summary.tool_name = namespace;
+        try std.testing.expect(try contains(a, summary, namespace));
+        const cleaned = try redact(a, summary, namespace);
+        try std.testing.expectEqualStrings(namespace, cleaned.tool_namespace);
+        try std.testing.expect(!try contains(a, cleaned, namespace));
+    }
+    for ([_][]const u8{ "anchored", "legacy" }) |state| {
+        var submission: wire.SubmissionWire = .{ .presentation_state = state, .operation_id = "operation" };
+        try std.testing.expect(!try contains(a, submission, state));
+        submission.operation_id = state;
+        const cleaned = try redact(a, submission, state);
+        try std.testing.expectEqualStrings(state, cleaned.presentation_state.?);
+        try std.testing.expect(!try contains(a, cleaned, state));
+    }
+    const readonly: wire.ReadOnlyPayload = .{ .task_id = 1, .recent_order = 1, .payload = "{\"ui_history\":[{\"permission\":{\"tool_namespace\":\"host\",\"tool_name\":\"tool\"}}],\"runs\":[{\"submission\":{\"presentation_state\":\"anchored\",\"operation_id\":\"operation\"}}]}" };
+    for ([_][]const u8{ "host", "anchored" }) |secret| {
+        try std.testing.expect(!try contains(a, readonly, secret));
+        try std.testing.expectEqualStrings(readonly.payload, (try redact(a, readonly, secret)).payload);
+    }
 }
