@@ -8078,7 +8078,7 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
     };
     const control = try std.testing.allocator.create(product_control.Runtime);
     defer std.testing.allocator.destroy(control);
-    control.* = try product_control.TestSupport.maximumFixture();
+    try product_control.TestSupport.maximumFixture(control);
     defer control.deinit();
     var dispatcher = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
         .context = null,

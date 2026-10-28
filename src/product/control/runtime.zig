@@ -10564,11 +10564,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
     }
     pub const maximumFixture = maximumProjectionFixture;
-    pub fn maximumToolFixture() !Runtime {
-        return maximumProjectionFixtureWithTools(true, .{});
+    pub fn maximumToolFixture(control: *Runtime) !void {
+        return maximumProjectionFixtureWithTools(control, true, .{});
     }
-    pub fn maximumSmallFixture() !Runtime {
-        return maximumProjectionFixtureWithTools(true, .{ .max_tasks = 1, .max_runs_per_task = 1 });
+    pub fn maximumSmallFixture(control: *Runtime) !void {
+        return maximumProjectionFixtureWithTools(control, true, .{ .max_tasks = 1, .max_runs_per_task = 1 });
     }
     pub fn installResultFixture(control: *Runtime, sparse: bool) !void {
         const first = &control.task_runtime.tasks[0].?.durable.runs[0].?;
@@ -17981,14 +17981,12 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     control.finishAccountCommitNoFail();
 }
 
-fn maximumProjectionFixture() !Runtime {
-    return maximumProjectionFixtureWithTools(false, .{});
+fn maximumProjectionFixture(control: *Runtime) !void {
+    return maximumProjectionFixtureWithTools(control, false, .{});
 }
 
-fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime {
+fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limits: Limits) !void {
     test_agent_runtime.io = std.testing.io;
-    const control = try std.testing.allocator.create(Runtime);
-    defer std.testing.allocator.destroy(control);
     control.* = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -18223,15 +18221,13 @@ fn maximumProjectionFixtureWithTools(tool_inputs: bool, limits: Limits) !Runtime
         limits.max_tool_field_bytes,
     );
     if (limits.max_tasks == (Limits{}).max_tasks) try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
-
-    return control.*;
 }
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
     const control = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(control);
-    control.* = try maximumProjectionFixture();
+    try maximumProjectionFixture(control);
     defer control.deinit();
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
@@ -21623,7 +21619,7 @@ test "Product view duplicate credential ownership preserves reads while exact ne
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
     const control = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(control);
-    control.* = try maximumProjectionFixture();
+    try maximumProjectionFixture(control);
     defer control.deinit();
     const epoch = control.projection_history_epoch;
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
@@ -21863,7 +21859,7 @@ test "transport cancellation cannot revoke a replacement Product read" {
 test "Product view cached large body moves into frozen read without a body-sized begin copy" {
     const control = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(control);
-    control.* = try TestSupport.maximumSmallFixture();
+    try TestSupport.maximumSmallFixture(control);
     defer control.deinit();
     try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
@@ -21986,7 +21982,7 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
 
     const control = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(control);
-    control.* = try TestSupport.maximumSmallFixture();
+    try TestSupport.maximumSmallFixture(control);
     defer control.deinit();
     try TestSupport.installResultFixture(control, true);
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);

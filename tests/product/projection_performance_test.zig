@@ -60,11 +60,11 @@ const Read = struct {
 };
 
 fn initializeFixture(comptime fixture: Fixture, runtime: *control.Runtime) !void {
-    runtime.* = switch (fixture) {
-        .escaped_history => try control.TestSupport.maximumFixture(),
-        .tool_inputs, .tool_results => try control.TestSupport.maximumToolFixture(),
-        .concentrated_results => try control.TestSupport.maximumSmallFixture(),
-    };
+    switch (fixture) {
+        .escaped_history => try control.TestSupport.maximumFixture(runtime),
+        .tool_inputs, .tool_results => try control.TestSupport.maximumToolFixture(runtime),
+        .concentrated_results => try control.TestSupport.maximumSmallFixture(runtime),
+    }
     errdefer runtime.deinit();
     if (fixture == .tool_results or fixture == .concentrated_results)
         try control.TestSupport.installResultFixture(runtime, fixture == .concentrated_results);
