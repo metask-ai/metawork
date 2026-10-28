@@ -36,6 +36,7 @@ import { runApprovalReadabilityVertical } from "./agentcore-approval-readability
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
+import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
 import {
   runOutputDeliveryVertical,
   runOfficeDeliveryHostProbe,
@@ -444,6 +445,21 @@ startApplication();
 
 desktopVertical: try {
   await waitForBridge();
+  if (process.env.METAWORK_MCP_ONLY === "1") {
+    await runMcpLifecycleVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+      repositoryRoot: root,
+      fixtureRoot,
+      evidenceDir: path.join(root, ".zig-cache", "mcp-lifecycle-desktop"),
+    });
+    await stopApplication("MCP lifecycle verification complete");
+    break desktopVertical;
+  }
   if (process.env.METAWORK_MODEL_SWITCH_ONLY === "1") {
     await verifyModelSwitch();
     await stopApplication("model switch verification complete");
