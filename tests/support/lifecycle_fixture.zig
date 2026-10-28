@@ -15,6 +15,41 @@ pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
 
+/// Framed storage is a test double here; production history uses typed SQLite.
+pub const TypedHistory = struct {
+    file_store: *product_task.history.FileStore,
+    pending: ?[]u8 = null,
+    token: product_task.history.CommitToken = @splat(0),
+
+    pub fn capability(self: *@This()) product_task.history.Capability {
+        return .{ .context = self, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve };
+    }
+    pub fn deinit(self: *@This()) void {
+        if (self.pending) |bytes| std.testing.allocator.free(bytes);
+    }
+    fn commit(context: ?*anyopaque, candidate: *product_task.history.Candidate) product_task.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.pending != null) return .outcome_unknown;
+        std.Io.randomSecure(std.testing.io, &self.token) catch return .failed;
+        candidate.token = self.token;
+        const bytes = product_task.history.encodeAlloc(std.testing.allocator, candidate.value, candidate.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+        const result = self.file_store.commitConfirmed(std.testing.allocator, bytes);
+        if (result == .outcome_unknown) self.pending = bytes else std.testing.allocator.free(bytes);
+        return result;
+    }
+    fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (!std.mem.eql(u8, &token, &self.token)) return .outcome_unknown;
+        const bytes = self.pending orelse return .outcome_unknown;
+        const result = self.file_store.resolveCommit(std.testing.allocator, bytes);
+        if (result != .outcome_unknown) {
+            std.testing.allocator.free(bytes);
+            self.pending = null;
+        }
+        return result;
+    }
+};
+
 pub fn credentialDigest(bytes: []const u8) [32]u8 {
     var result: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});

@@ -1274,7 +1274,8 @@ pub const Runtime = struct {
     // Deferred lifecycle facts share the approval writer; unknown keeps its
     // exact candidate until an explicit readback decides the canonical record.
     approval_history_dirty: bool = false,
-    approval_history_unknown: ?[]u8 = null,
+    approval_history_unknown: ?task_persistence.CommitToken = null,
+    ordinary_history_unknown: ?task_persistence.CommitToken = null,
     pending_model_intent: ?task_runtime.PreparedModelIntent = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
@@ -4739,38 +4740,34 @@ pub const Runtime = struct {
     }
 
     fn approvalHistoryBlocked(self: *const Runtime) bool {
-        return self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+        return self.ordinary_history_unknown != null or self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
     }
 
-    fn encodeApprovalCandidate(self: *Runtime, task_id: u64) Error![]u8 {
+    fn captureApprovalCandidate(self: *Runtime, task_id: u64) Error!task_persistence.OwnedCandidate {
         const prepared = try self.task_runtime.prepareApprovalCommit(task_id);
         defer prepared.rollback();
-        return self.encodeTaskHistoryCandidate(if (prepared.checkpoint) |record|
+        return self.captureTaskHistoryCandidate(if (prepared.checkpoint) |record|
             .{ .task_id = task_id, .record = record, .anchor = .available }
         else
             null);
     }
 
-    fn encodeTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error![]u8 {
+    fn captureTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error!task_persistence.OwnedCandidate {
         self.syncHistoryCredentials(null, null);
         var scratch = try self.buildTaskStateWireWithCheckpoint(checkpoint);
         defer scratch.deinit();
-        const bytes = try task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, self.taskPersistenceLimits());
-        defer {
-            std.crypto.secureZero(u8, bytes);
-            self.allocator.free(bytes);
-        }
         if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return error.TaskStoreEncodeFailed;
-        return self.allocator.dupe(u8, bytes);
+        return task_persistence.OwnedCandidate.capture(self.allocator, .{ .value = scratch.state, .preserved = scratch.preserved });
     }
 
     fn queueApprovalProjection(self: *Runtime, resolve_only: bool) !void {
-        const bytes = if (resolve_only)
-            try self.allocator.dupe(u8, self.approval_history_unknown orelse return error.TaskBusy)
+        if (resolve_only and !self.task_runtime.approvalHistoryWorkerActive()) self.syncHistoryCredentials(null, null);
+        var input: task_runtime.HistoryInput = if (resolve_only)
+            .{ .resolution = self.approval_history_unknown orelse return error.TaskBusy }
         else
-            try self.encodeTaskHistoryCandidate(null);
-        errdefer self.allocator.free(bytes);
-        try self.task_runtime.queueApprovalProjection(bytes, self.task_persistence, resolve_only, self.approvalExecutor(), self.approvalNotifier());
+            .{ .candidate = try self.captureTaskHistoryCandidate(null) };
+        errdefer input.deinit();
+        try self.task_runtime.queueApprovalProjection(input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
         if (!resolve_only) self.approval_history_dirty = false;
     }
 
@@ -4815,7 +4812,7 @@ pub const Runtime = struct {
             const task_id = slot.task_id;
             if (task_id == 0) {
                 if (slot.job.work == .history) {
-                    const resolve_only = slot.job.work.history.resolve_only;
+                    const resolve_only = slot.job.work.history.input == .resolution;
                     switch (slot.job.outcome) {
                         .history => |result| switch (result) {
                             .committed, .failed => {
@@ -4824,7 +4821,7 @@ pub const Runtime = struct {
                                         if (result == .committed) intent.complete() else intent.rollback();
                                         self.pending_model_intent = null;
                                     }
-                                    self.allocator.free(self.approval_history_unknown.?);
+
                                     self.approval_history_unknown = null;
                                     self.approval_history_dirty = true;
                                 }
@@ -4838,7 +4835,7 @@ pub const Runtime = struct {
                             .outcome_unknown => {
                                 if (!resolve_only) {
                                     std.debug.assert(self.approval_history_unknown == null);
-                                    self.approval_history_unknown = slot.job.takeHistory().?;
+                                    self.approval_history_unknown = slot.job.historyToken().?;
                                 }
                                 self.approval_history_dirty = true;
                                 self.task_persistence_health = .outcome_unknown;
@@ -4859,7 +4856,7 @@ pub const Runtime = struct {
             if (slot.restore_attempt_id) |attempt_id| {
                 const restore = task.runtime.restore_job orelse unreachable;
                 std.debug.assert(restore.attempt.attempt_id == attempt_id);
-                const resolve_only = slot.job.work.history.resolve_only;
+                const resolve_only = slot.job.work.history.input == .resolution;
                 switch (slot.job.outcome) {
                     .history => |outcome| {
                         restore.binding_commit = switch (outcome) {
@@ -4869,7 +4866,6 @@ pub const Runtime = struct {
                         };
                         switch (outcome) {
                             .committed, .failed => {
-                                if (restore.unknown_history) |bytes| self.allocator.free(bytes);
                                 restore.unknown_history = null;
                                 task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
                                 if (outcome == .committed or resolve_only)
@@ -4878,7 +4874,7 @@ pub const Runtime = struct {
                                     self.markTaskPersistenceWriteFailed();
                             },
                             .outcome_unknown => {
-                                if (!resolve_only) restore.unknown_history = slot.job.takeHistory().?;
+                                if (!resolve_only) restore.unknown_history = slot.job.historyToken().?;
                                 self.task_persistence_health = .outcome_unknown;
                                 task.runtime.last_restore_failure = .binding_persistence_unknown;
                             },
@@ -4900,8 +4896,8 @@ pub const Runtime = struct {
             const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
             const phase = change.phase;
             const outcome = slot.job.outcome;
-            const unknown_bytes = if (outcome == .history and outcome.history == .outcome_unknown and !slot.job.work.history.resolve_only)
-                slot.job.takeHistory()
+            const unknown_bytes = if (outcome == .history and outcome.history == .outcome_unknown and slot.job.work.history.input != .resolution)
+                slot.job.historyToken()
             else
                 null;
             const record = slot.job.takeCheckpoint();
@@ -4992,13 +4988,13 @@ pub const Runtime = struct {
                 },
                 .baseline_commit, .mode_commit => {
                     if (self.approvalHistoryBlocked()) continue;
-                    const bytes = self.encodeApprovalCandidate(task.durable.id) catch {
+                    var candidate = self.captureApprovalCandidate(task.durable.id) catch {
                         self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                         changed = true;
                         continue;
                     };
-                    self.task_runtime.queueApprovalHistory(task.durable.id, bytes, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
-                        self.allocator.free(bytes);
+                    self.task_runtime.queueApprovalHistory(task.durable.id, candidate, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
+                        candidate.deinit();
                         self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                     };
                     changed = true;
@@ -5223,18 +5219,18 @@ pub const Runtime = struct {
                 .ready, .degraded, .write_failed => {},
                 else => return error.TaskPersistenceUnavailable,
             }
-            const bytes = try self.encodeTaskHistoryCandidate(null);
-            var bytes_owned = true;
-            defer if (bytes_owned) self.allocator.free(bytes);
-            switch (self.task_persistence.commitConfirmed(bytes)) {
+            var scratch = try self.buildTaskStateWire();
+            defer scratch.deinit();
+            if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return error.TaskStoreEncodeFailed;
+            var candidate: task_persistence.Candidate = .{ .value = scratch.state, .preserved = scratch.preserved };
+            switch (self.task_persistence.commitConfirmed(&candidate)) {
                 .committed => self.task_persistence_health = .ready,
                 .failed => {
                     self.markTaskPersistenceWriteFailed();
                     return error.TaskPersistenceFailed;
                 },
                 .outcome_unknown => {
-                    self.approval_history_unknown = bytes;
-                    bytes_owned = false;
+                    self.approval_history_unknown = candidate.token orelse return error.TaskPersistenceFailed;
                     self.pending_model_intent = prepared;
                     prepared.active = false;
                     self.approval_history_dirty = true;
@@ -5800,6 +5796,13 @@ pub const Runtime = struct {
         if (expected_revision != self.revision) return .stale_revision;
         // An approval candidate owns the indeterminate history transaction.
         // Resolve it on the bounded executor; never quarantine or rewrite it.
+        var resolved_pending = false;
+        if (self.ordinary_history_unknown) |token| {
+            self.syncHistoryCredentials(null, null);
+            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return .outcome_unknown;
+            self.ordinary_history_unknown = null;
+            resolved_pending = true;
+        }
         if (self.approval_history_unknown != null) {
             self.queueApprovalProjection(true) catch return .unavailable;
             self.bumpRevision();
@@ -5813,9 +5816,8 @@ pub const Runtime = struct {
         if (self.approvalHistoryBlocked()) {
             for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
                 if (restore.binding_commit != .outcome_unknown) continue;
-                const bytes = self.allocator.dupe(u8, restore.unknown_history orelse return .unavailable) catch return .unavailable;
-                self.task_runtime.queueRecoveryHistory(task.durable.id, bytes, self.task_persistence, true, self.approvalExecutor(), self.approvalNotifier()) catch {
-                    self.allocator.free(bytes);
+                const token = restore.unknown_history orelse return .unavailable;
+                self.task_runtime.queueRecoveryHistory(task.durable.id, .{ .resolution = token }, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
                     return .unavailable;
                 };
                 self.bumpRevision();
@@ -5835,19 +5837,9 @@ pub const Runtime = struct {
         };
         var scratch = self.buildTaskStateWire() catch return .failed;
         defer scratch.deinit();
-        const bytes = task_persistence.encodeAlloc(
-            self.allocator,
-            scratch.state,
-            scratch.preserved,
-            self.taskPersistenceLimits(),
-        ) catch
-            return .failed;
-        defer {
-            std.crypto.secureZero(u8, bytes);
-            self.allocator.free(bytes);
-        }
         if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return .failed;
-        return switch (self.task_persistence.recover(bytes)) {
+        var candidate: task_persistence.Candidate = .{ .value = scratch.state, .preserved = scratch.preserved };
+        return switch (if (resolved_pending) self.task_persistence.commitConfirmed(&candidate) else self.task_persistence.recover(&candidate)) {
             .committed => recovered: {
                 self.task_persistence_health = .ready;
                 self.approval_history_dirty = false;
@@ -5856,6 +5848,7 @@ pub const Runtime = struct {
             },
             .failed => .failed,
             .outcome_unknown => unknown: {
+                self.ordinary_history_unknown = candidate.token;
                 self.task_persistence_health = .outcome_unknown;
                 self.bumpRevision();
                 break :unknown .outcome_unknown;
@@ -7777,7 +7770,6 @@ pub const Runtime = struct {
         self.pending_model_intent = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
-        if (self.approval_history_unknown) |bytes| self.allocator.free(bytes);
         self.attachments.deinit();
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
@@ -9224,9 +9216,9 @@ pub const Runtime = struct {
             return .committed;
         if (!self.task_persistence_health.operational()) return .failed;
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
-        const bytes = try self.encodeTaskHistoryCandidate(null);
-        errdefer self.allocator.free(bytes);
-        try self.task_runtime.queueRecoveryHistory(task_id, bytes, self.task_persistence, false, self.approvalExecutor(), self.approvalNotifier());
+        var input: task_runtime.HistoryInput = .{ .candidate = try self.captureTaskHistoryCandidate(null) };
+        errdefer input.deinit();
+        try self.task_runtime.queueRecoveryHistory(task_id, input, self.task_persistence, self.approvalExecutor(), self.approvalNotifier());
         self.task_runtime.find(task_id).?.runtime.restore_job.?.binding_commit = .pending;
         return null;
     }
@@ -9298,6 +9290,11 @@ pub const Runtime = struct {
         self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!void {
+        if (self.ordinary_history_unknown) |token| {
+            self.syncHistoryCredentials(null, null);
+            if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return error.TaskPersistenceOutcomeUnknown;
+            self.ordinary_history_unknown = null;
+        }
         // During an approval transaction, ordinary lifecycle facts join the
         // existing bounded history writer. Even a gap between its jobs must
         // not turn cancel/terminal reconciliation into synchronous disk I/O.
@@ -9309,7 +9306,8 @@ pub const Runtime = struct {
             self.approval_history_dirty = true;
             return error.TaskBusy;
         }
-        // Retry memory scrubs using the retained credential lease.
+        // Retry failed memory scrubs using the Store's retained credential
+        // lease, even if its execution owner has already retired.
         self.syncHistoryCredentials(null, null);
         switch (self.task_persistence_health) {
             .ready, .degraded, .write_failed, .outcome_unknown => {},
@@ -9326,24 +9324,15 @@ pub const Runtime = struct {
                 "Task history invariant rejected scope={s} entity_id={d} code={s}",
                 .{ @tagName(failure.scope), failure.entity_id, @tagName(failure.code) },
             );
-            if (builtin.mode == .Debug and !builtin.is_test)
-                std.debug.assert(false);
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
-        }
-        const bytes = task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, persistence_limits) catch |err| {
-            self.markTaskPersistenceWriteFailed();
-            return err;
-        };
-        defer {
-            std.crypto.secureZero(u8, bytes);
-            self.allocator.free(bytes);
         }
         if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) {
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
         }
-        switch (self.task_persistence.commit(bytes)) {
+        var candidate: task_persistence.Candidate = .{ .value = scratch.state, .preserved = scratch.preserved };
+        switch (self.task_persistence.commit(&candidate)) {
             .committed => {
                 self.approval_history_dirty = false;
                 if (self.task_persistence_health != .ready) {
@@ -9352,10 +9341,12 @@ pub const Runtime = struct {
                 }
             },
             .failed => {
+                if (!builtin.is_test) if (candidate.failure) |failure| std.log.err("Task history invariant rejected scope={s} entity_id={d} code={s}", .{ @tagName(failure.scope), failure.entity_id, @tagName(failure.code) });
                 self.markTaskPersistenceWriteFailed();
                 return error.TaskPersistenceFailed;
             },
             .outcome_unknown => {
+                self.ordinary_history_unknown = candidate.token;
                 self.task_persistence_health = .outcome_unknown;
                 self.bumpRevision();
                 return error.TaskPersistenceOutcomeUnknown;
@@ -10558,6 +10549,13 @@ test "updates Control publishes committed facts through the canonical live conte
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn captureHistoryFixture(control: *Runtime) !task_persistence.OwnedCandidate {
+        return control.captureTaskHistoryCandidate(null);
+    }
+    pub fn initHistoryFixture(allocator: std.mem.Allocator, control: *Runtime, limits: Limits, configuration: Configuration) !void {
+        test_agent_runtime.io = std.testing.io;
+        control.* = try Runtime.init(allocator, std.testing.io, &test_agent_runtime, limits, configuration);
+    }
     pub const OutputFileEffect = OutputCheckHarness;
 
     pub const OutputSaveEffect = OutputSaveHarness;
@@ -12344,13 +12342,13 @@ const TestTaskPersistence = struct {
 
     fn commit(
         context: ?*anyopaque,
-        bytes: []const u8,
+        candidate: *task_persistence.Candidate,
     ) TaskPersistenceCommit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
+        candidate.token = @splat(17);
         if (self.result != .committed) return self.result;
-        if (bytes.len > self.storage.len) return .failed;
-        @memcpy(self.storage[0..bytes.len], bytes);
+        const bytes = task_persistence.encodePreserving(self.storage, candidate.value, candidate.preserved, persistenceLimits(.{}, 16)) catch return .failed;
         self.len = bytes.len;
         return .committed;
     }
@@ -12370,7 +12368,7 @@ const TestTaskPersistence = struct {
         };
     }
 
-    fn resolve(context: ?*anyopaque, _: []const u8) TaskPersistenceCommit {
+    fn resolve(context: ?*anyopaque, _: task_persistence.CommitToken) TaskPersistenceCommit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.resolutions += 1;
         return self.resolution_result;
@@ -12378,11 +12376,11 @@ const TestTaskPersistence = struct {
 
     fn recover(
         context: ?*anyopaque,
-        bytes: []const u8,
+        candidate: *task_persistence.Candidate,
     ) TaskPersistenceCommit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.recoveries += 1;
-        return commit(context, bytes);
+        return commit(context, candidate);
     }
 };
 
@@ -12890,6 +12888,7 @@ test "Workspace upsert unknown outcome stays usable and heals on retry" {
         control.task_persistence_health,
     );
     persistence.result = .committed;
+    persistence.resolution_result = .committed;
     _ = try control.openWorkspace(.{
         .workspace_root = root_path,
         .trust = .explicitly_trusted,
@@ -13812,12 +13811,14 @@ test "explicit Task history recovery is revision bound and preserves live Produc
     try std.testing.expect(control.taskHistoryRecoveryAvailable());
 
     persistence.result = .committed;
+    persistence.resolution_result = .committed;
     try std.testing.expectEqual(
         PersistenceRecoveryOutcome.recovered,
         control.recoverTaskHistory(control.currentRevision()),
     );
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
-    try std.testing.expectEqual(@as(usize, 2), persistence.recoveries);
+    try std.testing.expectEqual(@as(usize, 1), persistence.recoveries);
+    try std.testing.expectEqual(@as(usize, 1), persistence.resolutions);
     try std.testing.expectEqualStrings(title_before, control.task_runtime.tasks[0].?.durable.title);
     try std.testing.expect(
         std.mem.indexOf(
@@ -13849,6 +13850,34 @@ test "Task persistence failure publishes metadata and retries the next save" {
     try control.renameTask(3, "saved on retry");
     try std.testing.expectEqualStrings("saved on retry", control.task_runtime.tasks[0].?.durable.title);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+}
+
+test "ordinary unknown retains original token and backfills newer memory only after confirmation" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestTaskPersistence = .{ .storage = storage, .result = .outcome_unknown };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+    try control.renameTask(3, "first candidate");
+    const token = control.ordinary_history_unknown.?;
+    const commits = persistence.commits;
+    try std.testing.expect(control.approvalHistoryBlocked());
+    try control.renameTask(3, "newer memory");
+    try std.testing.expectEqual(commits, persistence.commits);
+    try std.testing.expectEqualSlices(u8, &token, &control.ordinary_history_unknown.?);
+    try std.testing.expectEqualStrings("newer memory", control.task_runtime.tasks[0].?.durable.title);
+    persistence.resolution_result = .committed;
+    persistence.result = .committed;
+    try control.renameTask(3, "confirmed backfill");
+    try std.testing.expectEqual(commits + 1, persistence.commits);
+    try std.testing.expectEqual(@as(usize, 2), persistence.resolutions);
+    try std.testing.expect(control.ordinary_history_unknown == null);
+    try std.testing.expect(!control.approvalHistoryBlocked());
+    var restored = try task_persistence.decode(std.testing.allocator, persistence.storage[0..persistence.len], control.taskPersistenceLimits());
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("confirmed backfill", restored.value.tasks[0].title);
 }
 
 test "Task invariant rejection preserves the last good persistence candidate" {
@@ -16332,13 +16361,13 @@ test "Task model selection unknown commit resolves the original candidate before
         const witness = control.approval_history_unknown.?;
         const digest = std.crypto.hash.sha2.Sha256.hash;
         var original_digest: [32]u8 = undefined;
-        digest(witness, &original_digest, .{});
+        digest(&witness, &original_digest, .{});
         try std.testing.expectError(error.TaskBusy, control.selectTaskModel(3, testTaskModelSelectionInput(&control, 1, "fixture-model")));
         try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.runTask(3, .{ .text = "must not use an unconfirmed selection" }));
         try control.renameTask(3, "later title");
-        try std.testing.expectEqual(witness.ptr, control.approval_history_unknown.?.ptr);
+        try std.testing.expectEqualSlices(u8, &witness, &control.approval_history_unknown.?);
         var retained_digest: [32]u8 = undefined;
-        digest(control.approval_history_unknown.?, &retained_digest, .{});
+        digest(&control.approval_history_unknown.?, &retained_digest, .{});
         try std.testing.expectEqualSlices(u8, &original_digest, &retained_digest);
         var snapshot_bytes: [16 * 1024]u8 = undefined;
         try std.testing.expect(std.mem.indexOf(u8, try control.writeAggregateFixture(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
@@ -17759,7 +17788,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
         }
         try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
         try std.testing.expect(task.approval_change.?.unknown_history != null);
-        const retained = task.approval_change.?.unknown_history.?.bytes;
+        const retained = task.approval_change.?.unknown_history.?.token;
         const writes = history.commits;
         for (0..10) |_| control.syncLifecycle();
         try std.testing.expectEqual(@as(usize, 0), history.resolutions);
@@ -17770,7 +17799,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
         try control.task_runtime.queueApprovalResolution(3, history.capability(null), .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, control.approvalNotifier());
         try std.testing.expect(HeldExecutor.cancel(&held, &held));
         control.syncLifecycle();
-        try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+        try std.testing.expectEqualSlices(u8, &retained, &task.approval_change.?.unknown_history.?.token);
         try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
         try std.testing.expectEqual(@as(usize, 0), history.resolutions);
         try std.testing.expect(!task.runtime.worker_leases.hasLive());
@@ -17789,7 +17818,7 @@ test "approval unknown commit is resolved explicitly without retrying or quarant
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
         try std.testing.expectEqual(@as(usize, 1), history.resolutions);
-        try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+        try std.testing.expectEqualSlices(u8, &retained, &task.approval_change.?.unknown_history.?.token);
         try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
         try std.testing.expectEqual(writes, history.commits);
         history.resolution_result = final;
@@ -21212,6 +21241,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         storage: []u8,
         main_thread: std.Thread.Id,
         len: usize = 0,
+        pending: ?[]u8 = null,
         main_commits: usize = 0,
         worker_commits: usize = 0,
         resolutions: usize = 0,
@@ -21220,7 +21250,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         projection_result: TaskPersistenceCommit = .outcome_unknown,
         entered: std.atomic.Value(bool) = .init(false),
         released: std.atomic.Value(bool) = .init(false),
-        fn save(context: ?*anyopaque, bytes: []const u8) TaskPersistenceCommit {
+        fn save(context: ?*anyopaque, candidate: *task_persistence.Candidate) TaskPersistenceCommit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (std.Thread.getCurrentId() == self.main_thread) {
                 self.main_commits += 1;
@@ -21231,24 +21261,30 @@ test "approval projection writes deferred facts off-thread and unknown readback 
                     while (!self.released.load(.acquire)) std.Thread.yield() catch {};
                 }
                 // The mode commit succeeds; its deferred projection is unknown.
-                if (self.worker_commits == 2) return self.projection_result;
+                if (self.worker_commits == 2 and self.projection_result == .outcome_unknown) {
+                    candidate.token = @splat(9);
+                    self.pending = task_persistence.encodeAlloc(std.testing.allocator, candidate.value, candidate.preserved, persistenceLimits(.{}, 16)) catch return .failed;
+                    return .outcome_unknown;
+                }
+                if (self.worker_commits == 2 and self.projection_result == .failed) return .failed;
             }
-            if (bytes.len > self.storage.len) return .failed;
-            @memcpy(self.storage[0..bytes.len], bytes);
+            const bytes = task_persistence.encodePreserving(self.storage, candidate.value, candidate.preserved, persistenceLimits(.{}, 16)) catch return .failed;
             self.len = bytes.len;
             return .committed;
         }
-        fn resolve(context: ?*anyopaque, bytes: []const u8) TaskPersistenceCommit {
+        fn resolve(context: ?*anyopaque, token: task_persistence.CommitToken) TaskPersistenceCommit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
             self.resolutions += 1;
+            std.debug.assert(std.mem.eql(u8, &token, &(@as(task_persistence.CommitToken, @splat(9)))));
+            const bytes = self.pending.?;
             if (self.resolution_result == .committed) {
                 @memcpy(self.storage[0..bytes.len], bytes);
                 self.len = bytes.len;
             }
             return self.resolution_result;
         }
-        fn recover(context: ?*anyopaque, _: []const u8) TaskPersistenceCommit {
+        fn recover(context: ?*anyopaque, _: *task_persistence.Candidate) TaskPersistenceCommit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.recoveries += 1;
             return .failed;
@@ -21288,6 +21324,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
     };
     for (cases) |case| {
         var history = Harness{ .storage = storage, .main_thread = std.Thread.getCurrentId(), .projection_result = case.projection };
+        defer if (history.pending) |pending| std.testing.allocator.free(pending);
         var control = try testRuntimeWith(.{ .task_persistence = history.capability() });
         defer control.deinit();
         defer history.released.store(true, .release);
@@ -21349,7 +21386,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
         try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
         try std.testing.expect(task.durable.permission_review_delegated);
-        var candidate = try task_persistence.decode(std.testing.allocator, retained, control.taskPersistenceLimits());
+        var candidate = try task_persistence.decode(std.testing.allocator, history.pending.?, control.taskPersistenceLimits());
         defer candidate.deinit();
         try std.testing.expectEqualStrings("renamed while mode writer is held", candidate.value.tasks[0].title);
         try control.renameTask(3, "latest title while projection is unknown");
@@ -21361,11 +21398,11 @@ test "approval projection writes deferred facts off-thread and unknown readback 
 
         // Queued cancellation releases only the read job's duplicate packet.
         var held = HeldExecutor{};
-        const copy = try control.allocator.dupe(u8, retained);
-        try control.task_runtime.queueApprovalProjection(copy, history.capability(), true, .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, control.approvalNotifier());
+        const copy = retained;
+        try control.task_runtime.queueApprovalProjection(.{ .resolution = copy }, history.capability(), .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, control.approvalNotifier());
         try std.testing.expect(HeldExecutor.cancel(&held, &held));
         control.syncLifecycle();
-        try std.testing.expectEqual(retained.ptr, control.approval_history_unknown.?.ptr);
+        try std.testing.expectEqualSlices(u8, &retained, &control.approval_history_unknown.?);
         try std.testing.expectEqual(.outcome_unknown, control.task_persistence_health);
         try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
         try std.testing.expectEqual(@as(usize, 0), history.resolutions);
@@ -21376,7 +21413,7 @@ test "approval projection writes deferred facts off-thread and unknown readback 
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
         try std.testing.expectEqual(@as(usize, 1), history.resolutions);
-        try std.testing.expectEqual(retained.ptr, control.approval_history_unknown.?.ptr);
+        try std.testing.expectEqualSlices(u8, &retained, &control.approval_history_unknown.?);
         try std.testing.expectEqual(@as(usize, 2), history.worker_commits);
         history.resolution_result = case.resolved;
         try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
@@ -21834,6 +21871,26 @@ test "rejected credential-bearing history frees the encoded candidate on every a
     try std.testing.expectEqual(before, history.commits);
 }
 
+test "learned short credentials scrub Runtime retained and readonly originals without changing tags" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var scratch = try control.buildTaskStateWire();
+    defer scratch.deinit();
+    const record = scratch.state.tasks[0];
+    const original = try std.json.Stringify.valueAlloc(control.allocator, record, .{});
+    defer control.allocator.free(original);
+    const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
+    control.task_runtime.find(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
+    try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
+    control.redactAllProductProjectionsNoFail("none");
+    const payload = control.task_runtime.find(record.id).?.read_only_history.?.payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
+    try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
+    try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
+    control.redactAllProductProjectionsNoFail("none");
+    try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
+}
+
 test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
     var control = try testRuntime();
     defer control.deinit();
@@ -21863,26 +21920,6 @@ test "execution reinstall preserves projection for equal authority and revokes c
         try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
         if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
     }
-}
-
-test "learned short credentials scrub Runtime retained and readonly originals without changing tags" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var scratch = try control.buildTaskStateWire();
-    defer scratch.deinit();
-    const record = scratch.state.tasks[0];
-    const original = try std.json.Stringify.valueAlloc(control.allocator, record, .{});
-    defer control.allocator.free(original);
-    const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
-    control.task_runtime.find(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
-    try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
-    control.redactAllProductProjectionsNoFail("none");
-    const payload = control.task_runtime.find(record.id).?.read_only_history.?.payload;
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
-    try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
-    try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
-    control.redactAllProductProjectionsNoFail("none");
-    try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
 }
 
 test "transport cancellation cannot revoke a replacement Product read" {
@@ -22755,10 +22792,8 @@ test "history allowance admits more than sixteen Runs beyond the old shared proj
         if (entry != null) count += 1;
     }
     try std.testing.expectEqual(@as(usize, 25), count);
-    const encoded = try control.encodeTaskHistoryCandidate(null);
-    defer control.allocator.free(encoded);
-    var recovered = try task_persistence.decodeRecovering(control.allocator, encoded, control.taskPersistenceLimits());
-    defer recovered.deinit();
-    try std.testing.expectEqual(@as(usize, 25), recovered.value.tasks[0].runs.len);
-    try std.testing.expect(!recovered.degraded);
+    var owned = try control.captureTaskHistoryCandidate(null);
+    defer owned.deinit();
+    try std.testing.expectEqual(@as(usize, 25), owned.candidate.value.tasks[0].runs.len);
+    try std.testing.expect(task_persistence.validateCandidate(&owned.candidate.value, control.taskPersistenceLimits()) == null);
 }

@@ -182,22 +182,20 @@ pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, co
     return store.syncCredentials(values, complete, scrub);
 }
 
-pub fn commitTaskStoreGeneration(context: ?*anyopaque, bytes: []const u8, epoch: u64, confirmed: bool) product_task.history.Commit {
+pub fn commitTaskStoreGeneration(context: ?*anyopaque, candidate: *product_task.history.Candidate, epoch: u64, confirmed: bool) product_task.history.Commit {
     const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .failed));
-    return store.commitGeneration(bytes, epoch, confirmed);
+    return store.commitGeneration(candidate, epoch, confirmed);
 }
 
-pub fn resolveTaskStoreCommit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+pub fn resolveTaskStoreCommit(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
     const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .outcome_unknown));
-    return store.resolve(bytes);
+    return store.resolve(token);
 }
 
 pub fn recoverTaskStore(
     context: ?*anyopaque,
-    bytes: []const u8,
+    candidate: *product_task.history.Candidate,
 ) product_task.history.Commit {
-    const store: *history_store.Store = @ptrCast(
-        @alignCast(context orelse return .failed),
-    );
-    return store.recover(bytes);
+    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .failed));
+    return store.recover(candidate);
 }

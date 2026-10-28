@@ -58,6 +58,85 @@ pub const Commit = enum {
     outcome_unknown,
 };
 
+pub const CommitToken = [32]u8;
+
+/// Borrowed for a synchronous call. Token/failure are outputs; records are read-only.
+pub const Candidate = struct {
+    value: StateWire,
+    preserved: PreservedFrames = .{},
+    token: ?CommitToken = null,
+    failure: ?ValidationFailure = null,
+};
+
+/// Used only by existing cross-thread history jobs, not synchronous commits.
+pub const OwnedCandidate = struct {
+    arena: *std.heap.ArenaAllocator,
+    candidate: Candidate,
+
+    pub fn capture(allocator: std.mem.Allocator, candidate: Candidate) !OwnedCandidate {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+        return .{ .arena = arena, .candidate = try copy(arena.allocator(), candidate) };
+    }
+
+    fn copy(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!@TypeOf(value) {
+        const T = @TypeOf(value);
+        return switch (@typeInfo(T)) {
+            .pointer => |p| if (p.size == .slice) blk: {
+                const items = try allocator.dupe(p.child, value);
+                if (p.child != u8) for (items) |*item| {
+                    item.* = try copy(allocator, item.*);
+                };
+                break :blk items;
+            } else @compileError("Owned history input must not retain a borrowed pointer"),
+            .@"struct" => |s| blk: {
+                var result = value;
+                inline for (s.fields) |field| @field(result, field.name) = try copy(allocator, @field(value, field.name));
+                break :blk result;
+            },
+            .optional => if (value) |item| try copy(allocator, item) else null,
+            .array => |array| if (array.child == u8) value else @compileError("Review owned history array element ownership"),
+            .int, .float, .bool, .@"enum" => value,
+            else => @compileError("Review owned history input ownership for this type"),
+        };
+    }
+
+    fn wipe(value: anytype) void {
+        switch (@typeInfo(@TypeOf(value))) {
+            .pointer => |p| if (p.size == .slice) {
+                if (p.child == u8) std.crypto.secureZero(u8, @constCast(value)) else for (value) |item| wipe(item);
+            },
+            .@"struct" => |s| inline for (s.fields) |field| wipe(@field(value, field.name)),
+            .optional => if (value) |item| wipe(item),
+            else => {},
+        }
+    }
+
+    pub fn deinit(self: *OwnedCandidate) void {
+        const allocator = self.arena.child_allocator;
+        wipe(self.candidate);
+        self.arena.deinit();
+        allocator.destroy(self.arena);
+        self.* = undefined;
+    }
+};
+
+test "owned history job input does not alias its source" {
+    const a = std.testing.allocator;
+    var source = std.heap.ArenaAllocator.init(a);
+    const text = try source.allocator().dupe(u8, "source field");
+    const failures = try source.allocator().dupe(TaskFailureWire, &.{.{ .task_id = 1, .recent_order = 1, .reason = text }});
+    var owned = try OwnedCandidate.capture(a, .{ .value = .{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 2, .next_task_recent_order = 2, .workspaces = &.{}, .tasks = &.{}, .failures = failures } });
+    defer owned.deinit();
+    @memset(text, 'z');
+    source.deinit();
+    try std.testing.expectEqualStrings("source field", owned.candidate.value.failures[0].reason);
+}
+
 pub const CredentialStatus = struct { epoch: u64, ready: bool };
 pub const CredentialScrub = struct {
     context: ?*anyopaque = null,
@@ -103,50 +182,50 @@ pub const Capability = struct {
     // owns any bounded copy needed until sanitizing retired disk versions.
     credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool, CredentialScrub) CredentialStatus = null,
     security_epoch: u64 = 1,
-    generation_commit_fn: ?*const fn (?*anyopaque, []const u8, u64, bool) Commit = null,
+    generation_commit_fn: ?*const fn (?*anyopaque, *Candidate, u64, bool) Commit = null,
 
     commit_fn: *const fn (
         context: ?*anyopaque,
-        bytes: []const u8,
+        candidate: *Candidate,
     ) Commit = unsupportedCommit,
-    confirmed_commit_fn: *const fn (?*anyopaque, []const u8) Commit = unsupportedCommit,
-    resolve_commit_fn: *const fn (?*anyopaque, []const u8) Commit = unsupportedResolve,
+    confirmed_commit_fn: *const fn (?*anyopaque, *Candidate) Commit = unsupportedCommit,
+    resolve_commit_fn: *const fn (?*anyopaque, CommitToken) Commit = unsupportedResolve,
     recover_fn: *const fn (
         context: ?*anyopaque,
-        bytes: []const u8,
+        candidate: *Candidate,
     ) Commit = unsupportedCommit,
 
     pub fn credentials(self: Capability, values: []const []const u8, complete: bool, scrub: CredentialScrub) CredentialStatus {
         return if (self.credentials_fn) |notify| notify(self.context, values, complete, scrub) else .{ .epoch = self.security_epoch, .ready = true };
     }
 
-    pub fn commit(self: Capability, bytes: []const u8) Commit {
+    pub fn commit(self: Capability, candidate: *Candidate) Commit {
         if (!self.enabled) return .failed;
-        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, false);
-        return self.commit_fn(self.context, bytes);
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, candidate, self.security_epoch, false);
+        return self.commit_fn(self.context, candidate);
     }
 
-    pub fn commitConfirmed(self: Capability, bytes: []const u8) Commit {
+    pub fn commitConfirmed(self: Capability, candidate: *Candidate) Commit {
         if (!self.enabled) return .failed;
-        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, bytes, self.security_epoch, true);
-        return self.confirmed_commit_fn(self.context, bytes);
+        if (self.generation_commit_fn) |commit_generation| return commit_generation(self.context, candidate, self.security_epoch, true);
+        return self.confirmed_commit_fn(self.context, candidate);
     }
 
-    pub fn resolveCommit(self: Capability, bytes: []const u8) Commit {
+    pub fn resolveCommit(self: Capability, token: CommitToken) Commit {
         if (!self.enabled) return .outcome_unknown;
-        return self.resolve_commit_fn(self.context, bytes);
+        return self.resolve_commit_fn(self.context, token);
     }
 
-    pub fn recover(self: Capability, bytes: []const u8) Commit {
+    pub fn recover(self: Capability, candidate: *Candidate) Commit {
         if (!self.enabled) return .failed;
-        return self.recover_fn(self.context, bytes);
+        return self.recover_fn(self.context, candidate);
     }
 
-    fn unsupportedResolve(_: ?*anyopaque, _: []const u8) Commit {
+    fn unsupportedResolve(_: ?*anyopaque, _: CommitToken) Commit {
         return .outcome_unknown;
     }
 
-    fn unsupportedCommit(_: ?*anyopaque, _: []const u8) Commit {
+    fn unsupportedCommit(_: ?*anyopaque, _: *Candidate) Commit {
         return .failed;
     }
 };
@@ -2595,6 +2674,16 @@ pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFai
         .scope = .state,
         .entity_id = 0,
         .code = .invalid_workbench_state,
+    };
+    return null;
+}
+
+/// Diagnostic work is only needed after a rejected prepare, not twice on saves.
+pub fn diagnoseCandidate(allocator: std.mem.Allocator, state: *const StateWire, limits: Limits) ?ValidationFailure {
+    if (validateCandidate(state, limits)) |failure| return failure;
+    for (state.tasks) |task| validateRestorableTask(allocator, task, limits) catch |err| {
+        if (err == error.OutOfMemory) return null;
+        return .{ .scope = .task, .entity_id = task.id, .code = .invalid_task_record };
     };
     return null;
 }
@@ -5533,7 +5622,7 @@ test "canonical approval resolution distinguishes the prior record from an unrel
     const canonical = (try store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(canonical);
     try std.testing.expectEqualStrings("previous", canonical);
-    try std.testing.expectEqual(Commit.outcome_unknown, (Capability{ .enabled = true }).resolveCommit("candidate"));
+    try std.testing.expectEqual(Commit.outcome_unknown, (Capability{ .enabled = true }).resolveCommit(@splat(1)));
 }
 
 test "Output metadata validates identities, safe locators, redaction, duplicates and capacity" {

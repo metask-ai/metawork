@@ -1175,24 +1175,7 @@ const image_product = struct {
         }
     };
 
-    const History = struct {
-        fn commit(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
-            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
-            store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
-            return .committed;
-        }
-        fn confirmed(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
-            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
-            return store.commitConfirmed(std.testing.allocator, bytes);
-        }
-        fn resolve(context: ?*anyopaque, bytes: []const u8) task_api.history.Commit {
-            const store: *task_api.history.FileStore = @ptrCast(@alignCast(context.?));
-            return store.resolveCommit(std.testing.allocator, bytes);
-        }
-        fn port(store: *task_api.history.FileStore) task_api.history.Capability {
-            return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
-        }
-    };
+    const History = @import("lifecycle_fixture").TypedHistory;
 
     fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8, image_input: bool) !void {
         try std.testing.expect(control.createCustomProviderWithCredential("synthetic-dialogue-key", .{
@@ -1310,10 +1293,12 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     account.commit(&authenticated);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
+    var typed_history: image_product.History = .{ .file_store = &history };
+    defer typed_history.deinit();
     var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
     defer checkpoints.deinit();
     var configuration = image_product.fixture_api.productControlConfiguration();
-    configuration.task_persistence = image_product.History.port(&history);
+    configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
     var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
@@ -1795,10 +1780,12 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
     file.close(std.testing.io);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
+    var typed_history: image_product.History = .{ .file_store = &history };
+    defer typed_history.deinit();
     var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
     defer checkpoints.deinit();
     var configuration = image_product.fixture_api.productControlConfiguration();
-    configuration.task_persistence = image_product.History.port(&history);
+    configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
     const limits: image_product.control_api.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 };
@@ -1868,10 +1855,12 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     file.close(std.testing.io);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
+    var typed_history: image_product.History = .{ .file_store = &history };
+    defer typed_history.deinit();
     var checkpoints = try image_product.task_api.checkpoint_store.FileStore.init(std.testing.io, h.root);
     defer checkpoints.deinit();
     var configuration = image_product.fixture_api.productControlConfiguration();
-    configuration.task_persistence = image_product.History.port(&history);
+    configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = h.root;
     var control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 3, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);

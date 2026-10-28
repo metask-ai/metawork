@@ -369,16 +369,13 @@ pub const Repository = struct {
         return result;
     }
 
-    pub fn sanitize(self: *Repository, credential: []const u8) !void {
+    pub fn sanitize(self: *Repository, credential: []const u8, token: wire.CommitToken) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         const loaded = try codec.loadPreserving(a, self.database, self.limits);
         const cleaned = try redact(a, loaded, credential);
-        const rows = try codec.rowsFor(a, cleaned.value, cleaned.preserved, self.limits);
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        for (rows) |row| hash.update(&row.digest);
-        var prepared = try self.prepare(cleaned.value, cleaned.preserved, hash.finalResult());
+        var prepared = try self.prepare(cleaned.value, cleaned.preserved, token);
         defer prepared.deinit();
         if (prepared.changed_rows != 0 or prepared.deleted_rows != 0) {
             if (self.commit(&prepared) != .committed) return error.SanitizationFailed;

@@ -12,6 +12,7 @@ const view = @import("product_task_view");
 const execution_binding = @import("product_task_execution_binding");
 
 pub const Runtime = runtime.Runtime;
+pub const HistoryInput = runtime.HistoryInput;
 pub const SearchCursor = runtime.SearchCursor;
 pub const search_query_bytes = runtime.search_query_bytes;
 pub const search_result_limit = runtime.search_result_limit;

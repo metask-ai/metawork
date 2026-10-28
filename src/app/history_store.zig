@@ -17,12 +17,6 @@ const Credential = struct {
     memory_pending: bool = false,
 };
 
-fn digestBytes(bytes: []const u8) [32]u8 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return digest;
-}
-
 pub const Store = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -40,6 +34,7 @@ pub const Store = struct {
     credential_capacity_failed: bool = false,
     legacy_maintenance_failed: bool = false,
     publish_sync_fault: bool = false,
+    random_fault: bool = false,
     security_epoch: u64 = 1,
     requires_reopen: bool = false,
     legacy_import_failed: bool = false,
@@ -115,9 +110,9 @@ pub const Store = struct {
                 defer recovered.deinit();
                 const defaults_degraded = wire.normalizeRecoveredDefaults(&recovered.value);
                 self.import_degraded = recovered.degraded or defaults_degraded;
-                try self.publish(recovered.value, recovered.preserved, false, digestBytes(bytes));
+                try self.publish(recovered.value, recovered.preserved, false, try self.newToken());
             } else {
-                try self.publish(.{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 1, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} }, .{}, false, digestBytes("empty history"));
+                try self.publish(.{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 1, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} }, .{}, false, try self.newToken());
             }
         }
         if (self.database == null) try self.open();
@@ -236,53 +231,65 @@ pub const Store = struct {
         self.legacy_import_failed = false;
     }
 
-    pub fn commit(self: *Store, bytes: []const u8, confirmed: bool) wire.Commit {
-        return self.commitGeneration(bytes, self.security_epoch, confirmed);
+    fn newToken(self: *Store) !wire.CommitToken {
+        if (builtin.is_test and self.random_fault) return error.RandomUnavailable;
+        var token: wire.CommitToken = undefined;
+        try std.Io.randomSecure(self.io, &token);
+        return token;
     }
 
-    pub fn commitGeneration(self: *Store, bytes: []const u8, epoch: u64, confirmed: bool) wire.Commit {
+    pub fn commit(self: *Store, candidate: *wire.Candidate, confirmed: bool) wire.Commit {
+        return self.commitGeneration(candidate, self.security_epoch, confirmed);
+    }
+
+    pub fn commitGeneration(self: *Store, candidate: *wire.Candidate, epoch: u64, confirmed: bool) wire.Commit {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.security_epoch == 0 or epoch != self.security_epoch) return .failed;
-        return self.commitLocked(bytes, confirmed);
+        return self.commitLocked(candidate, confirmed);
     }
 
-    fn commitLocked(self: *Store, bytes: []const u8, confirmed: bool) wire.Commit {
+    fn commitLocked(self: *Store, candidate: *wire.Candidate, confirmed: bool) wire.Commit {
+        candidate.token = null;
+        candidate.failure = null;
         if (self.pending_publication != null) return .outcome_unknown;
         if (self.incompatible or self.restore_failed) return .failed;
         if (self.pending != null and self.resolvePending() == .outcome_unknown) return .outcome_unknown;
         if ((self.database == null or self.requires_reopen) and !self.refreshConfirmed()) return .failed;
         if (self.credential_capacity_failed) return .failed;
-        var candidate = wire.decodeRecovering(self.allocator, bytes, self.limits) catch return .failed;
-        defer candidate.deinit();
         for (self.credentials) |slot| if (slot.length != 0) {
             if ((wire.security.contains(self.allocator, candidate.value, slot.bytes[0..slot.length]) catch true) or
                 (wire.security.contains(self.allocator, candidate.preserved, slot.bytes[0..slot.length]) catch true)) return .failed;
         };
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        var prepared = self.repository.?.prepare(candidate.value, candidate.preserved, digest) catch return .failed;
+        const token = self.newToken() catch return .failed;
+        var prepared = self.repository.?.prepare(candidate.value, candidate.preserved, token) catch |err| {
+            if (err != error.OutOfMemory) candidate.failure = wire.diagnoseCandidate(self.allocator, &candidate.value, self.limits);
+            return .failed;
+        };
+        candidate.token = token;
         const outcome = self.repository.?.commit(&prepared);
         if (outcome == .outcome_unknown or (outcome == .committed and !self.sanitizePending())) {
             self.pending = prepared;
-            return if (confirmed) self.resolveLocked(bytes) else .outcome_unknown;
+            return if (confirmed) self.resolveLocked(token) else .outcome_unknown;
         }
         prepared.deinit();
         if (outcome != .committed) self.requires_reopen = true;
         return if (outcome == .committed) .committed else .failed;
     }
 
-    pub fn resolve(self: *Store, bytes: []const u8) wire.Commit {
+    pub fn resolve(self: *Store, token: wire.CommitToken) wire.Commit {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.resolveLocked(bytes);
+        return self.resolveLocked(token);
     }
 
-    fn resolveLocked(self: *Store, bytes: []const u8) wire.Commit {
+    fn resolveLocked(self: *Store, token: wire.CommitToken) wire.Commit {
+        if (self.pending_publication) |expected| {
+            if (!std.mem.eql(u8, &token, &expected)) return .outcome_unknown;
+            return if (self.resolvePublication()) .committed else .outcome_unknown;
+        }
         const pending = if (self.pending) |*value| value else return .outcome_unknown;
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        if (!std.mem.eql(u8, &digest, &pending.next.digest)) return .outcome_unknown;
+        if (!std.mem.eql(u8, &token, &pending.next.digest)) return .outcome_unknown;
         return self.resolvePending();
     }
 
@@ -308,21 +315,22 @@ pub const Store = struct {
         return result;
     }
 
-    pub fn recover(self: *Store, bytes: []const u8) wire.Commit {
+    pub fn recover(self: *Store, candidate: *wire.Candidate) wire.Commit {
+        candidate.token = null;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.incompatible) return .failed;
         if (self.pending_publication != null) {
             if (!self.resolvePublication()) return .outcome_unknown;
-            return self.commitLocked(bytes, true);
+            return self.commitLocked(candidate, true);
         }
         if (self.pending != null) {
             if (self.resolvePending() == .outcome_unknown) return .outcome_unknown;
-            return self.commitLocked(bytes, true);
+            return self.commitLocked(candidate, true);
         }
-        var candidate = wire.decodeRecovering(self.allocator, bytes, self.limits) catch return .failed;
-        defer candidate.deinit();
-        self.publish(candidate.value, candidate.preserved, true, digestBytes(bytes)) catch |err| return if (err == error.PublishOutcomeUnknown) .outcome_unknown else .failed;
+        const token = self.newToken() catch return .failed;
+        candidate.token = token;
+        self.publish(candidate.value, candidate.preserved, true, token) catch |err| return if (err == error.PublishOutcomeUnknown) .outcome_unknown else .failed;
         return .committed;
     }
 
@@ -409,7 +417,8 @@ pub const Store = struct {
             if (slot.length == 0) continue;
             const value = slot.bytes[0..slot.length];
             if (slot.pending) {
-                self.repository.?.sanitize(value) catch {
+                const token = self.newToken() catch return false;
+                self.repository.?.sanitize(value, token) catch {
                     self.requires_reopen = true;
                     return false;
                 };
@@ -463,6 +472,83 @@ pub const Store = struct {
     }
 };
 
+fn commitFixture(store: *Store, bytes: []const u8, confirmed: bool) wire.Commit {
+    var recovered = wire.decodeRecovering(store.allocator, bytes, store.limits) catch return .failed;
+    defer recovered.deinit();
+    var candidate: wire.Candidate = .{ .value = recovered.value, .preserved = recovered.preserved };
+    return store.commit(&candidate, confirmed);
+}
+fn commitFixtureGeneration(store: *Store, bytes: []const u8, epoch: u64, confirmed: bool) wire.Commit {
+    var recovered = wire.decodeRecovering(store.allocator, bytes, store.limits) catch return .failed;
+    defer recovered.deinit();
+    var candidate: wire.Candidate = .{ .value = recovered.value, .preserved = recovered.preserved };
+    return store.commitGeneration(&candidate, epoch, confirmed);
+}
+fn recoverFixture(store: *Store, bytes: []const u8) wire.Commit {
+    var recovered = wire.decodeRecovering(store.allocator, bytes, store.limits) catch return .failed;
+    defer recovered.deinit();
+    var candidate: wire.Candidate = .{ .value = recovered.value, .preserved = recovered.preserved };
+    return store.recover(&candidate);
+}
+
+test "SQLite history typed Prepared survives freed input and resolves only its original random token" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    var source = std.heap.ArenaAllocator.init(a);
+    var candidate: wire.Candidate = .{ .value = try testHistory(source.allocator(), 1, 1, "independently owned result") };
+    store.database.?.test_hooks.lose_ack_after_commit = true;
+    try std.testing.expectEqual(wire.Commit.outcome_unknown, store.commit(&candidate, false));
+    const token = candidate.token.?;
+    source.deinit();
+    var wrong = token;
+    wrong[0] ^= 1;
+    try std.testing.expectEqual(wire.Commit.outcome_unknown, store.resolve(wrong));
+    try std.testing.expectEqual(wire.Commit.committed, store.resolve(token));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings("independently owned result", loaded.value.tasks[0].runs[0].assistant);
+    var next: wire.Candidate = .{ .value = loaded.value, .preserved = loaded.preserved };
+    const witness = store.repository.?.witness;
+    store.random_fault = true;
+    try std.testing.expectEqual(wire.Commit.failed, store.commit(&next, true));
+    try std.testing.expect(next.token == null);
+    try std.testing.expect(std.meta.eql(witness, store.repository.?.witness));
+    store.random_fault = false;
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(&next, true));
+    try std.testing.expect(!std.mem.eql(u8, &token, &next.token.?));
+}
+
+test "SQLite history typed save rejects an unrestorable Task without partially publishing other changes" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 2, 1, "original");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    var candidate: wire.Candidate = .{ .value = state };
+    try std.testing.expectEqual(wire.Commit.committed, store.commit(&candidate, true));
+    const original_title = state.tasks[0].title;
+    state.tasks[0].title = "must remain pending";
+    state.tasks[1].checkpoint_anchor = "available";
+    state.tasks[1].checkpoint = .{ .blob = .{ .generation = 1, .byte_size = 1, .digest = "00" ** 32 }, .session = .{ .logical_session_id = "session", .last_run_id = 1, .last_compact_id = 0, .model = "model" }, .anchor = .{ .terminal = .{ .kind = "run", .id = 999 }, .binding_epoch = 1 } };
+    try std.testing.expectEqual(wire.Commit.failed, store.commit(&candidate, true));
+    try std.testing.expectEqual(@as(u64, 2), candidate.failure.?.entity_id);
+    const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings(original_title, loaded.value.tasks[0].title);
+}
+
 test "SQLite history Application roundtrip and legacy import" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
@@ -488,7 +574,7 @@ test "SQLite history Application roundtrip and legacy import" {
         state.default_approval_mode = "full_access";
         state.default_permission_profile = "full_access";
         const changed = try wire.encode(output, state, limits);
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(changed, true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, changed, true));
         const legacy = (try store.legacy.loadAlloc(a)).?;
         defer a.free(legacy);
         try std.testing.expect(!std.mem.eql(u8, changed, legacy));
@@ -563,7 +649,7 @@ test "SQLite history imports restore-only failures as exact retained scopes and 
             var next = loaded.value;
             next.default_approval_mode = "manual";
             const candidate = try wire.encodeAlloc(aa, next, loaded.preserved, store.limits);
-            try std.testing.expectEqual(wire.Commit.committed, store.commit(candidate, true));
+            try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, candidate, true));
             const legacy = (try store.legacy.loadAlloc(a)).?;
             defer a.free(legacy);
             try std.testing.expectEqualSlices(u8, source, legacy);
@@ -629,14 +715,14 @@ test "SQLite history failed reopen and explicit publication both allow a new Tas
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
         if (try store.loadAlloc(a)) |bytes| a.free(bytes);
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         state.tasks[0].title = "pending change";
         const before = try wire.encodeAlloc(aa, state, .{}, store.limits);
         if (recovering) {
-            try std.testing.expectEqual(wire.Commit.committed, store.recover(before));
+            try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, before));
         } else {
             store.database.?.test_hooks.fail_before_commit = true;
-            try std.testing.expectEqual(wire.Commit.failed, store.commit(before, false));
+            try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, before, false));
             try std.testing.expect(store.requires_reopen);
         }
         var added = state.tasks[0];
@@ -646,7 +732,7 @@ test "SQLite history failed reopen and explicit publication both allow a new Tas
         state.tasks = try aa.dupe(wire.TaskWire, &.{ added, state.tasks[1], state.tasks[0] });
         state.next_task_id = 4;
         state.next_task_recent_order = 4;
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
         try std.testing.expectEqual(@as(usize, 3), loaded.value.tasks.len);
         try std.testing.expectEqualStrings("pending change", loaded.value.tasks[0].title);
@@ -721,17 +807,17 @@ test "SQLite history confirms unknown without replay and backfills failed unrela
     defer store.deinit();
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     var bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     state.tasks[0].title = "pending change";
     store.database.?.test_hooks.fail_before_commit = true;
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, bytes, true));
     store.database.?.test_hooks.fail_before_commit = false;
     try std.testing.expect(store.refreshConfirmed());
     state.tasks[1].title = "unrelated change";
     store.database.?.test_hooks.lose_ack_after_commit = true;
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("pending change", loaded.value.tasks[0].title);
     try std.testing.expectEqualStrings("unrelated change", loaded.value.tasks[1].title);
@@ -762,11 +848,11 @@ test "SQLite history slot reuse restores Task and Workspace identity order" {
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
         if (try store.loadAlloc(a)) |bytes| a.free(bytes);
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         const original_tasks = state.tasks;
         state.tasks = try aa.dupe(wire.TaskWire, &.{ original_tasks[0], original_tasks[2] });
         state.workspaces = try aa.dupe(wire.WorkspaceWire, &.{ workspaces[0], workspaces[2] });
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         var inserted_task = original_tasks[1];
         inserted_task.id = 4;
         inserted_task.recent_order = 4;
@@ -778,9 +864,9 @@ test "SQLite history slot reuse restores Task and Workspace identity order" {
         state.next_task_id = 5;
         state.next_task_recent_order = 5;
         state.next_workspace_id = 5;
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         state.tasks[2].title = "subsequent save";
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
     }
     var store = try Store.init(std.testing.io, a, directory);
     defer store.deinit();
@@ -808,7 +894,7 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     defer store.deinit();
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     store.credential("newly-discovered-value", true);
     const generation = store.repository.?.witness.generation;
     for (0..64) |_| {
@@ -824,10 +910,10 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     defer a.free(raw);
     _ = try file.readPositionalAll(std.testing.io, raw, 0);
     try std.testing.expect(std.mem.indexOf(u8, raw, "newly-discovered-value") == null);
-    try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, bytes, true));
     store.credential("newly-discovered-value", false);
     for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
-    try std.testing.expectEqual(wire.Commit.failed, store.commitGeneration(bytes, 1, true));
+    try std.testing.expectEqual(wire.Commit.failed, commitFixtureGeneration(&store, bytes, 1, true));
 }
 
 test "SQLite history credential cleanup covers readonly retained memory SQL and legacy across repeated saves" {
@@ -887,7 +973,7 @@ test "SQLite history credential cleanup covers readonly retained memory SQL and 
             try std.testing.expect(store.syncCredentials(&.{secret}, true, observer).ready);
             for (0..2) |_| {
                 const bytes = try wire.encodeAlloc(aa, memory.value, memory.preserved, store.limits);
-                try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+                try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
             }
             const legacy_bytes = (try store.legacy.loadAlloc(a)).?;
             defer a.free(legacy_bytes);
@@ -906,7 +992,7 @@ test "SQLite history credential cleanup covers readonly retained memory SQL and 
         try std.testing.expectEqual(@as(u64, 93), loaded.preserved.retained[0].id);
         try std.testing.expect(!try wire.security.contains(a, loaded.value, secret));
         try std.testing.expect(!try wire.security.contains(a, loaded.preserved, secret));
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, loaded.value, loaded.preserved, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, loaded.value, loaded.preserved, store.limits), true));
     }
 }
 
@@ -935,7 +1021,7 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
         const bytes = try wire.encodeAlloc(a, state, .{}, store.limits);
         defer a.free(bytes);
         try std.testing.expect(bytes.len > wire.max_store_bytes);
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
         try std.testing.expectEqual(storage.sql.QueryOutcome.ok, store.database.?.capability().maintain(.purge));
     }
     {
@@ -973,8 +1059,8 @@ test "SQLite history newer schema cannot be replaced through recovery" {
         defer store.deinit();
         try std.testing.expectError(error.VersionUnknown, store.loadAlloc(a));
         try std.testing.expect(store.incompatible);
-        try std.testing.expectEqual(wire.Commit.failed, store.commit("not a candidate", false));
-        try std.testing.expectEqual(wire.Commit.failed, store.recover("not a candidate"));
+        try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, "not a candidate", false));
+        try std.testing.expectEqual(wire.Commit.failed, recoverFixture(&store, "not a candidate"));
         const reopened = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
         try reopened.destroy();
     }
@@ -994,13 +1080,19 @@ test "SQLite history recovery publication unknown is confirmed before a newer ca
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     var bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
     store.publish_sync_fault = true;
-    try std.testing.expectEqual(wire.Commit.outcome_unknown, store.recover(bytes));
+    try std.testing.expectEqual(wire.Commit.outcome_unknown, recoverFixture(&store, bytes));
     try std.testing.expect(store.pending_publication != null);
+    const token = store.pending_publication.?;
+    var wrong_token = token;
+    wrong_token[0] ^= 1;
+    try std.testing.expectEqual(wire.Commit.outcome_unknown, store.resolve(wrong_token));
+    try std.testing.expectEqual(wire.Commit.outcome_unknown, store.resolve(token));
     state.tasks[0].title = "newer in-memory change";
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
     store.publish_sync_fault = false;
-    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expectEqual(wire.Commit.committed, store.resolve(token));
     try std.testing.expect(store.pending_publication == null);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("newer in-memory change", loaded.value.tasks[0].title);
 }
@@ -1021,10 +1113,10 @@ test "SQLite history preserves opaque records while saving unrelated Task change
     defer store.deinit();
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     const original = try wire.encodeAlloc(arena.allocator(), state, retained, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(original, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, original, true));
     state.tasks[0].title = "updated";
     const changed = try wire.encodeAlloc(arena.allocator(), state, retained, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(changed, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, changed, true));
     const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("updated", loaded.value.tasks[0].title);
     try std.testing.expectEqualStrings(retained.retained[0].payload, loaded.preserved.retained[0].payload);
@@ -1071,7 +1163,7 @@ test "SQLite history partial quarantine prevents reimport and preserves the old 
     try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = file_name ++ "-wal", .data = "old WAL evidence" });
     try std.testing.expectError(error.RecoveryPending, store.loadAlloc(a));
     try std.testing.expect(!try store.exists(file_name));
-    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
     try std.testing.expect(try store.exists(evidence));
     const loaded = try product.loadHistory(arena.allocator(), store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("memory facts", loaded.value.tasks[0].runs[0].assistant);
@@ -1090,14 +1182,14 @@ test "SQLite history reopens a poisoned maintenance connection before retry" {
     defer store.deinit();
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     var bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     store.database.?.test_hooks.fail_maintenance_sync = true;
     try std.testing.expect(!store.syncCredentials(&.{"late-known-value"}, true, .{}).ready);
     try std.testing.expect(store.requires_reopen);
     state.tasks[0].runs[0].assistant = "***";
     state.tasks[0].runs[0].input.text = "***";
     bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     try std.testing.expect(!store.requires_reopen);
 }
 
@@ -1120,16 +1212,16 @@ test "SQLite recovery failures never reuse a closed connection or retire a valid
         state.tasks[0].title = "after failed recovery";
         const bytes = try wire.encodeAlloc(aa, state, .{}, store.limits);
         store.recovery_fault = if (fault == 0) .after_close else .after_quarantine;
-        try std.testing.expectEqual(wire.Commit.failed, store.recover(bytes));
+        try std.testing.expectEqual(wire.Commit.failed, recoverFixture(&store, bytes));
         try std.testing.expect(store.database == null);
         const retained = (try store.legacy.loadAlloc(a)).?;
         defer a.free(retained);
         try std.testing.expectEqualSlices(u8, original, retained);
         // An intact canonical can be reopened. A partly quarantined one must
         // stay blocked until explicit recovery, never initialize an empty DB.
-        try std.testing.expectEqual(if (fault == 0) wire.Commit.committed else wire.Commit.failed, store.commit(bytes, true));
+        try std.testing.expectEqual(if (fault == 0) wire.Commit.committed else wire.Commit.failed, commitFixture(&store, bytes, true));
         store.recovery_fault = .none;
-        try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+        try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
         const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
         try std.testing.expectEqualStrings("after failed recovery", loaded.value.tasks[0].title);
         const still_retained = (try store.legacy.loadAlloc(a)).?;
@@ -1153,7 +1245,7 @@ test "SQLite explicit recovery retires only the failed legacy import source" {
     defer arena.deinit();
     const state = try testHistory(arena.allocator(), 0, 0, "");
     const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
-    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
     try std.testing.expect(!try store.exists(wire.file_name));
     try std.testing.expect(try store.hasSqlRecoveryEvidence());
 }
@@ -1177,7 +1269,7 @@ test "SQLite large single Task backfills beyond batch bytes and recovers above 3
         if (try store.loadAlloc(a)) |bytes| a.free(bytes);
         state.tasks[0].runs = all_runs[0..1];
         state.tasks[0].next_run_generation = 2;
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
         state.tasks[0].runs = all_runs;
         state.tasks[0].next_run_generation = 137;
         var bytes = try wire.encodeAlloc(a, state, .{}, store.limits);
@@ -1188,13 +1280,13 @@ test "SQLite large single Task backfills beyond batch bytes and recovers above 3
         try std.testing.expect(!decoded.degraded);
         try std.testing.expectEqual(@as(usize, 136), decoded.value.tasks[0].runs.len);
         store.database.?.test_hooks.fail_before_commit = true;
-        try std.testing.expectEqual(wire.Commit.failed, store.commit(bytes, true));
+        try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, bytes, true));
         // One unrelated receipt change must carry every previously failed Run.
         state.tasks[0].completion_seen_run_id = 136;
         a.free(bytes);
         bytes = try wire.encodeAlloc(a, state, .{}, store.limits);
-        try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
-        try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+        try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
     }
     var store = try Store.init(std.testing.io, a, directory);
     defer store.deinit();
@@ -1220,7 +1312,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     var store = try Store.init(std.testing.io, a, directory);
     defer store.deinit();
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
-    try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
     try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = wire.file_name, .data = "corrupted import source: late-known-value" });
     try std.testing.expect(store.syncCredentials(&.{"late-known-value"}, true, .{}).ready);
     try std.testing.expect(store.legacy_maintenance_failed);
@@ -1230,7 +1322,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     state.tasks[0].runs[0].assistant = "safe answer";
     state.tasks[0].title = "confirmed despite legacy failure";
     const bytes = try wire.encodeAlloc(aa, state, .{}, store.limits);
-    for (0..3) |_| try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+    for (0..3) |_| try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     try std.testing.expect(store.pending == null);
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     try std.testing.expect(store.legacy_maintenance_failed);
@@ -1239,7 +1331,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
         retained += 1;
     };
     try std.testing.expectEqual(@as(usize, 1), retained);
-    try std.testing.expectEqual(wire.Commit.committed, store.recover(bytes));
+    try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
     try std.testing.expect(try store.exists(wire.file_name));
     // Once the source becomes writable/decodable again, maintenance can
     // finish and retire its owned credential without replaying business work.

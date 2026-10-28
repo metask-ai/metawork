@@ -378,7 +378,7 @@ pub const Job = struct {
     outcome: Outcome = .none,
     lease: worker_lease.WorkerLease,
     binding_commit: BindingCommit = .not_started,
-    unknown_history: ?[]u8 = null,
+    unknown_history: ?[32]u8 = null,
     rebind: ?Rebind = null,
     metask_authorization_scope: u64 = 0,
     continuation_source_id: ?u64 = null,
@@ -464,7 +464,6 @@ pub const Job = struct {
             if (rebind.original_execution) |*execution| execution.deinit();
             self.allocator.free(rebind.source_id);
         }
-        if (self.unknown_history) |bytes| self.allocator.free(bytes);
         self.allocator.free(self.attempt.task_model);
         self.attempt.execution.deinit();
         self.attempt.workspace.deinit();
