@@ -878,6 +878,18 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
 }
 
 test "real Product MCP allow once asks again across checkpoints and approval modes" {
+    try expectProductMcpPermission(false, false);
+}
+
+test "real Product refresh progresses while the only Run worker waits for permission and its queue is full" {
+    try expectProductMcpPermission(true, false);
+}
+
+test "real Product shutdown joins an in-flight MCP refresh while a Run waits for permission" {
+    try expectProductMcpPermission(true, true);
+}
+
+fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -892,11 +904,23 @@ test "real Product MCP allow once asks again across checkpoints and approval mod
     defer std.testing.allocator.free(workspace_root);
     const trace_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/product-repeat-trace.jsonl", .{home});
     defer std.testing.allocator.free(trace_path);
-    var fixture = try HttpFixture.start("2025-11-25", "json", trace_path);
+    const gate = try std.fmt.allocPrint(std.testing.allocator, "{s}/pressure", .{home});
+    defer std.testing.allocator.free(gate);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pressure.release", .data = "release" });
+    var fixture = try HttpFixture.startWithGate("2025-11-25", "json", trace_path, 60_000, "text", gate);
     defer fixture.deinit();
     var preparation = try prepareHttpFixtureWithNegotiation(fixture.endpoint, "automatic");
     var preparation_owned = true;
     defer if (preparation_owned) preparation.deinit();
+    const approved = &preparation.registry.?.value.servers[0];
+    const fingerprint = mcp_configuration.connectionFingerprint(approved.*);
+    approved.connection_approval = .{ .fingerprint = try preparation.registry.?.arena.allocator().dupe(u8, &fingerprint) };
+    var runtime_manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) runtime_manifest.deinit();
+    const registry_storage = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+    defer std.testing.allocator.free(registry_storage);
+    var durable_registry: DurableRegistry = .{ .storage = registry_storage };
     var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
@@ -920,15 +944,16 @@ test "real Product MCP allow once asks again across checkpoints and approval mod
     defer enablement.deinit();
     var vault = TaskSwitchVault{};
     defer for (0..2) |index| std.crypto.secureZero(u8, vault.keys[index][0..vault.lengths[index]]);
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4, .max_tasks = 1, .max_workspaces = 1 }, .{
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = if (refresh_pressure) 1 else 4, .max_tasks = 1, .max_workspaces = 1 }, .{
         .directories = .{ .canonical_user_home = home },
         .task_persistence = TaskSwitchHistory.capability(&history),
         .checkpoint_store = .{ .file_store = &checkpoints },
         .skill_enablement = .{ .file_store = &enablement },
         .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
-        .mcp = .{ .preparation = &preparation, .activation = activation },
+        .mcp = .{ .preparation = &preparation, .activation = activation, .management = managementConfiguration(&durable_registry, &runtime_manifest) },
     });
     preparation_owned = false;
+    manifest_owned = false;
     activation_owned = false;
     runtime_owned = false;
     defer shutdownProduct(&control, runtime);
@@ -937,8 +962,94 @@ test "real Product MCP allow once asks again across checkpoints and approval mod
     const provider = try configureTaskSwitchProvider(&control, fixture.provider_endpoint, "source-model", .anthropic_messages);
     const workspace = try control.openWorkspace(.{ .workspace_root = workspace_root, .trust = .explicitly_trusted });
     const catalog = try waitTaskSwitchCatalog(&control, workspace, 1);
-    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, provider, catalog.revision, catalog.selection_revision, .{ .interactive = .auto_review });
+    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, provider, catalog.revision, catalog.selection_revision, .{ .interactive = if (refresh_pressure) .manual else .auto_review });
     try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try control.taskMcpAuthority(task_id));
+    if (refresh_pressure) {
+        const run_id = try control.runTask(task_id, .{ .text = "Call the selected echo tool." });
+        defer control.cancel(task_id, run_id) catch {};
+        const task = control.task_runtime.find(task_id).?;
+        const request_id = pending: {
+            for (0..2000) |_| {
+                try control.drainAgentEvents();
+                control.syncLifecycle();
+                var access = try task.runtime.acquireAccess();
+                defer access.deinit();
+                if (access.pendingUiObservation()) |request| break :pending request.request_id;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestUnexpectedResult;
+        };
+        const Queued = struct {
+            ran: std.atomic.Value(bool) = .init(false),
+            fn execute(context: *anyopaque) void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                self.ran.store(true, .release);
+            }
+            fn cancel(_: *anyopaque) void {}
+        };
+        var queued: Queued = .{};
+        try control.executor.enqueue(.{ .identity = &queued, .context = &queued, .execute_fn = Queued.execute, .cancel_fn = Queued.cancel });
+        const before = mcp_types.testing.state(&control.mcp.?).activation.?.catalogGeneration();
+        try control.refreshMcpCatalog();
+        for (0..2000) |_| {
+            try control.drainAgentEvents();
+            control.syncLifecycle();
+            if (mcp_types.testing.state(&control.mcp.?).activation.?.catalogGeneration() != before) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expect(!queued.ran.load(.acquire));
+        var access = try task.runtime.acquireAccess();
+        const still_pending = access.pendingUiObservation().?;
+        try std.testing.expectEqual(request_id, still_pending.request_id);
+        access.deinit();
+        if (shutdown_inflight) {
+            try tmp.dir.deleteFile(std.testing.io, "pressure.release");
+            tmp.dir.deleteFile(std.testing.io, "pressure.waiting") catch {};
+            defer tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pressure.release", .data = "release" }) catch {};
+            try control.refreshMcpCatalog();
+            for (0..2000) |_| {
+                _ = tmp.dir.statFile(std.testing.io, "pressure.waiting", .{}) catch {
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                    continue;
+                };
+                break;
+            } else return error.TestUnexpectedResult;
+            try std.testing.expectEqual(.running, mcp_types.testing.refreshJob(&control.mcp.?).?.state.load(.acquire));
+            const Release = struct {
+                directory: std.Io.Dir,
+                released: std.atomic.Value(bool) = .init(false),
+                fn run(self: *@This()) void {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch unreachable;
+                    self.released.store(true, .release);
+                    self.directory.writeFile(std.testing.io, .{ .sub_path = "pressure.release", .data = "release" }) catch unreachable;
+                }
+            };
+            var release: Release = .{ .directory = tmp.dir };
+            const thread = try std.Thread.spawn(.{}, Release.run, .{&release});
+            defer thread.join();
+            control.shutdownExecutor();
+            try std.testing.expect(release.released.load(.acquire));
+            try std.testing.expect(!control.mcp.?.hasRefreshJob());
+            try std.testing.expectEqual(.shutting_down, mcp_types.testing.state(&control.mcp.?).admission.blocked);
+            try std.testing.expect(mcp_types.testing.state(&control.mcp.?).activation == null);
+            try std.testing.expectError(error.ExecutorShuttingDown, control.refreshMcpCatalog());
+            const trace = try tmp.dir.readFileAlloc(std.testing.io, "product-repeat-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+            defer std.testing.allocator.free(trace);
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
+            return;
+        }
+        try control.respondUi(task_id, run_id, request_id, .{ .permission = .allow_once });
+        for (0..2000) |_| {
+            try control.drainAgentEvents();
+            control.syncLifecycle();
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive() and queued.ran.load(.acquire)) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        const trace = try tmp.dir.readFileAlloc(std.testing.io, "product-repeat-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(trace);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
+        return;
+    }
     for (0..3) |index| {
         if (index == 2) {
             const task = control.task_runtime.find(task_id).?;

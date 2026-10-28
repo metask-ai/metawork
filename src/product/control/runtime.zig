@@ -1286,6 +1286,7 @@ pub const Runtime = struct {
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     approval_executor: *executor_impl.Executor,
+    mcp_executor: ?*executor_impl.Executor = null,
     attachment_executor: *executor_impl.Executor,
     attachment_lane: *attachment_staging.Lane,
     attachment_io: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
@@ -1628,6 +1629,15 @@ pub const Runtime = struct {
         errdefer if (skill_owned) skill.deinit();
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
+        // A Run holds its worker while a synchronous permission callback
+        // waits for a person. Catalog freshness must progress independently
+        // even when every Run worker and queue slot is occupied.
+        const mcp_executor = if (mcp_startup != null)
+            try executor_impl.Executor.create(io, allocator, .{ .worker_count = 1, .queue_capacity = 1 })
+        else
+            null;
+        var mcp_executor_owned = true;
+        errdefer if (mcp_executor_owned) if (mcp_executor) |lane| lane.deinit();
         var control: Runtime = .{
             .allocator = allocator,
             .io = io,
@@ -1653,6 +1663,7 @@ pub const Runtime = struct {
             }) catch unreachable,
             .executor = executor,
             .approval_executor = approval_executor,
+            .mcp_executor = mcp_executor,
             .attachment_executor = attachment_executor,
             .attachment_lane = attachment_lane,
             .preview_executor = preview_executor,
@@ -1711,7 +1722,7 @@ pub const Runtime = struct {
         if (mcp_startup) |*startup| {
             control.mcp = startup.takeRuntime(
                 productMcpPorts(
-                    executor,
+                    mcp_executor.?,
                     agent_runtime,
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
@@ -1724,6 +1735,7 @@ pub const Runtime = struct {
         }
         preview_lane_owned = false;
         file_change_lane_owned = false;
+        mcp_executor_owned = false;
         return control;
     }
 
@@ -7787,6 +7799,7 @@ pub const Runtime = struct {
         self.output_checks.deinit();
         self.executor.deinit();
         self.approval_executor.deinit();
+        if (self.mcp_executor) |lane| lane.deinit();
         for (&self.preview_images) |*slot| if (slot.*) |image| {
             self.preview_lane.release(image.taken);
             slot.* = null;
@@ -7858,6 +7871,7 @@ pub const Runtime = struct {
             .context = self,
             .cancel_fn = cancelApprovalRuntimeExecutor,
         });
+        if (self.mcp_executor) |lane| lane.shutdown();
         self.executor.shutdown();
         self.approval_executor.shutdown();
         self.executor_shutdown = true;
