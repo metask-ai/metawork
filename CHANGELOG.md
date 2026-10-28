@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-28
+
+### Added
+
+- 设置新增“已归档任务”，支持搜索、查看只读历史、恢复和删除；归档成功后提供撤销与查看入口。Task 现在无需先归档即可直接删除，活动中的 Task 可以一次确认停止并删除，Workspace 中的真实文件保持不变。
+- 分发构建新增正式版本检查：后台和手动检查官方 manifest，在左下角提示新版本，并通过“关于 MetaWork”按当前平台与架构把下载交给系统浏览器；不自动下载、安装、重启或切换目标。
+
+### Changed
+
+- Product 历史改用类型化 SQLite schema、原子事务和有界分批读写，保留旧历史恢复，并提高大型 Task、Run 集合和积压提交的容量；credential 清洗与持久确认纳入同一恢复边界。
+- 全局搜索改为 Host 端有界分页查询，覆盖 Task、用户指令、完成消息和 Output 文件名；使用固定 Unicode 大小写折叠，并在历史变化或安全失效时使旧游标失效。
+- Task 重命名改用独立对话框，不再占用标题栏进行内联编辑；提交失败或结果未确认时在原对话框内保留草稿和反馈。
+- 审批卡片改为直接展示可读的动作、目标、完整脱敏内容和真实转人工原因；自动评审使用当前请求及已确认采纳的近期用户上下文，并受有界执行与取消预算约束。
+- Run 执行资源与已恢复历史分离，空闲 Session 可以在容量压力下回收；容量暂时不足时发布明确状态，并只在用户显式操作后重试。
+- AgentCore 升级至 `0.11.0-dev+e75ad43c4557` / ABI revision 24，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
+- Metask 模型目录、执行与 OAuth 端点迁移至 `www.metask-ai.com`。
+
+### Fixed
+
+- 修复定时任务在执行配置变化或使用 Custom Provider 时可能错误触发、丢失待处理执行或被重叠状态持续阻塞的问题；通知和管理动作现在始终指向真实 Task，并明确呈现恢复结果。
+- 修复 MCP 主动刷新造成短暂准入中断的问题；刷新改用独立控制容量和有界恢复，不再受等待审批的 Run 阻塞，也不再用配置应用失败覆盖单个服务的健康状态。
+- 修复 Office 资源校验错误依赖生成器版本，避免生成器升级使内容未变化的已发布资源失效。
+- 修复文件预览标签尚在等待聚焦时关闭 Task Panel，迟到的聚焦回调可能把焦点移到无关控件的问题。
+
 ## [0.2.7] - 2026-10-24
 
 ### Added
@@ -449,7 +473,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.7...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/metask-ai/metawork/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/metask-ai/metawork/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/metask-ai/metawork/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/metask-ai/metawork/compare/v0.2.4...v0.2.5
