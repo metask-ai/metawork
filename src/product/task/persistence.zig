@@ -8,6 +8,10 @@ const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const task_state = @import("product_task_state");
+pub const security = @import("history_security.zig");
+test {
+    _ = security;
+}
 
 /// Callback-scoped text buffer used while reconstructing Task history. The
 /// persistence leaf owns this wire-to-memory contract; callers never retain
@@ -55,6 +59,13 @@ pub const Commit = enum {
 };
 
 pub const CredentialStatus = struct { epoch: u64, ready: bool };
+pub const CredentialScrub = struct {
+    context: ?*anyopaque = null,
+    apply_fn: ?*const fn (?*anyopaque, []const u8) bool = null,
+    pub fn apply(self: CredentialScrub, secret: []const u8) bool {
+        return if (self.apply_fn) |apply_fn| apply_fn(self.context, secret) else true;
+    }
+};
 
 pub const RecoveryFault = enum {
     none,
@@ -90,7 +101,7 @@ pub const Capability = struct {
     restore_incompatible: bool = false,
     // Callback-scoped acquisition/retirement notice. Concrete history storage
     // owns any bounded copy needed until sanitizing retired disk versions.
-    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool) CredentialStatus = null,
+    credentials_fn: ?*const fn (?*anyopaque, []const []const u8, bool, CredentialScrub) CredentialStatus = null,
     security_epoch: u64 = 1,
     generation_commit_fn: ?*const fn (?*anyopaque, []const u8, u64, bool) Commit = null,
 
@@ -105,8 +116,8 @@ pub const Capability = struct {
         bytes: []const u8,
     ) Commit = unsupportedCommit,
 
-    pub fn credentials(self: Capability, values: []const []const u8, complete: bool) CredentialStatus {
-        return if (self.credentials_fn) |notify| notify(self.context, values, complete) else .{ .epoch = self.security_epoch, .ready = true };
+    pub fn credentials(self: Capability, values: []const []const u8, complete: bool, scrub: CredentialScrub) CredentialStatus {
+        return if (self.credentials_fn) |notify| notify(self.context, values, complete, scrub) else .{ .epoch = self.security_epoch, .ready = true };
     }
 
     pub fn commit(self: Capability, bytes: []const u8) Commit {

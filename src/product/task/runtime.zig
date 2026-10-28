@@ -3730,6 +3730,29 @@ pub const Runtime = struct {
         self.retained.clearRetainingCapacity();
     }
 
+    /// Only Runtime-owned originals are replaced. Workers own separate inputs.
+    pub fn redactPreservedHistory(self: *Runtime, credential: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        for (self.retained.items) |*record| {
+            const cleaned = try task_persistence.security.redact(arena.allocator(), record.*, credential);
+            if (std.mem.eql(u8, cleaned.payload, record.payload)) continue;
+            const replacement = try self.allocator.dupe(u8, cleaned.payload);
+            std.crypto.secureZero(u8, @constCast(record.payload));
+            self.allocator.free(record.payload);
+            record.payload = replacement;
+        }
+        for (self.tasks) |entry| if (entry) |task| if (task.read_only_history) |*history| {
+            const record = task_persistence.ReadOnlyPayload{ .task_id = task.durable.id, .recent_order = history.recent_order, .payload = history.payload };
+            const cleaned = try task_persistence.security.redact(arena.allocator(), record, credential);
+            if (std.mem.eql(u8, cleaned.payload, history.payload)) continue;
+            const replacement = try self.allocator.dupe(u8, cleaned.payload);
+            std.crypto.secureZero(u8, history.payload);
+            self.allocator.free(history.payload);
+            history.payload = replacement;
+        };
+    }
+
     pub fn recordFailure(
         self: *Runtime,
         task_id: u64,

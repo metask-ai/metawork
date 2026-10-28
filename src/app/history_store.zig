@@ -14,6 +14,7 @@ const Credential = struct {
     retained: bool = false,
     pending: bool = false,
     legacy_pending: bool = false,
+    memory_pending: bool = false,
 };
 
 fn digestBytes(bytes: []const u8) [32]u8 {
@@ -252,9 +253,12 @@ pub const Store = struct {
         if (self.pending != null and self.resolvePending() == .outcome_unknown) return .outcome_unknown;
         if ((self.database == null or self.requires_reopen) and !self.refreshConfirmed()) return .failed;
         if (self.credential_capacity_failed) return .failed;
-        for (self.credentials) |slot| if (slot.length != 0 and std.mem.indexOf(u8, bytes, slot.bytes[0..slot.length]) != null) return .failed;
         var candidate = wire.decodeRecovering(self.allocator, bytes, self.limits) catch return .failed;
         defer candidate.deinit();
+        for (self.credentials) |slot| if (slot.length != 0) {
+            if ((wire.security.contains(self.allocator, candidate.value, slot.bytes[0..slot.length]) catch true) or
+                (wire.security.contains(self.allocator, candidate.preserved, slot.bytes[0..slot.length]) catch true)) return .failed;
+        };
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         var prepared = self.repository.?.prepare(candidate.value, candidate.preserved, digest) catch return .failed;
@@ -344,10 +348,10 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.registerCredential(value, retained);
-        if (!self.incompatible and self.pending == null and self.database != null) _ = self.sanitizePending();
+        if (!self.incompatible and self.pending == null and self.pending_publication == null and self.database != null) _ = self.sanitizePending();
     }
 
-    pub fn syncCredentials(self: *Store, values: []const []const u8, complete: bool) wire.CredentialStatus {
+    pub fn syncCredentials(self: *Store, values: []const []const u8, complete: bool, scrub: wire.CredentialScrub) wire.CredentialStatus {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.credential_capacity_failed = !complete;
@@ -357,17 +361,20 @@ pub const Store = struct {
             slot.retained = for (values) |value| {
                 if (std.mem.eql(u8, value, slot.bytes[0..slot.length])) break true;
             } else false;
-            if (!slot.retained and !slot.pending and !slot.legacy_pending) self.clearCredential(slot);
+            if (!slot.retained and !slot.pending and !slot.legacy_pending and !slot.memory_pending) self.clearCredential(slot);
         }
         for (values) |value| if (value.len != 0) self.registerCredential(value, true);
-        return .{ .epoch = self.security_epoch, .ready = !self.incompatible and self.pending == null and self.database != null and self.sanitizePending() };
+        for (self.credentials) |*slot| if (slot.length != 0) {
+            slot.memory_pending = !scrub.apply(slot.bytes[0..slot.length]);
+        };
+        return .{ .epoch = self.security_epoch, .ready = !self.incompatible and self.pending == null and self.pending_publication == null and self.database != null and self.sanitizePending() };
     }
 
     fn registerCredential(self: *Store, value: []const u8, retained: bool) void {
         for (self.credentials) |*slot| {
             if (slot.length != value.len or !std.mem.eql(u8, slot.bytes[0..slot.length], value)) continue;
             slot.retained = retained;
-            if (!slot.pending and !slot.legacy_pending and !retained) self.clearCredential(slot);
+            if (!slot.pending and !slot.legacy_pending and !slot.memory_pending and !retained) self.clearCredential(slot);
             return;
         }
         if (value.len > 4096) {
@@ -395,7 +402,7 @@ pub const Store = struct {
     }
 
     fn sanitizePending(self: *Store) bool {
-        if (self.incompatible or self.credential_capacity_failed or self.security_epoch == 0) return false;
+        if (self.incompatible or self.pending_publication != null or self.credential_capacity_failed or self.security_epoch == 0) return false;
         if (self.requires_reopen and !self.refreshConfirmed()) return false;
         self.legacy_maintenance_failed = false;
         for (self.credentials) |*slot| {
@@ -418,8 +425,9 @@ pub const Store = struct {
                 };
                 slot.legacy_pending = false;
             }
-            if (!slot.retained) self.clearCredential(slot);
+            if (!slot.retained and !slot.memory_pending) self.clearCredential(slot);
         }
+        for (self.credentials) |slot| if (slot.memory_pending) return false;
         return true;
     }
 
@@ -441,10 +449,10 @@ pub const Store = struct {
         const original = try self.legacy.loadAlloc(self.allocator);
         defer if (original) |bytes| self.allocator.free(bytes);
         const bytes = original orelse return;
-        if (std.mem.indexOf(u8, bytes, credential_value) == null) return;
         var recovered = try wire.decodeRecovering(self.allocator, bytes, self.limits);
         defer recovered.deinit();
         const a = recovered.arena.allocator();
+        if (!try wire.security.contains(a, recovered.value, credential_value) and !try wire.security.contains(a, recovered.preserved, credential_value)) return;
         const state = try product.redactHistory(a, recovered.value, credential_value);
         const preserved = try product.redactHistory(a, recovered.preserved, credential_value);
         const output = try a.alloc(u8, wire.max_store_bytes);
@@ -822,6 +830,86 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     try std.testing.expectEqual(wire.Commit.failed, store.commitGeneration(bytes, 1, true));
 }
 
+test "SQLite history credential cleanup covers readonly retained memory SQL and legacy across repeated saves" {
+    const Memory = struct {
+        arena: std.heap.ArenaAllocator,
+        value: wire.StateWire,
+        preserved: wire.PreservedFrames,
+        fail: bool = false,
+        fn scrub(context: ?*anyopaque, secret: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.fail) return false;
+            self.value = wire.security.redact(self.arena.allocator(), self.value, secret) catch return false;
+            self.preserved = wire.security.redact(self.arena.allocator(), self.preserved, secret) catch return false;
+            return true;
+        }
+    };
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "none", "late-key\"\\\n" }) |secret| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var state = try testHistory(aa, 1, 1, secret);
+        state.next_task_id = 94;
+        state.next_task_recent_order = 94;
+        var rejected = state.tasks[0];
+        rejected.id = 93;
+        rejected.recent_order = 93;
+        rejected.binding.protocol = "future_protocol";
+        const retained = wire.RetainedRecord{ .kind = .task, .id = 93, .order = 93, .payload = try std.json.Stringify.valueAlloc(aa, rejected, .{}) };
+        const plain = try wire.encodeAlloc(aa, state, .{ .retained = &.{retained} }, product.persistenceLimits(.{}, 16));
+        const field = try std.fmt.allocPrint(aa, "\"future\":{s}", .{try std.json.Stringify.valueAlloc(aa, secret, .{})});
+        const source = try wire.testing.addTaskField(try aa.alloc(u8, plain.len + field.len * 3 + 128), plain, field);
+        var recovered = try wire.decodeRecovering(a, source, product.persistenceLimits(.{}, 16));
+        defer recovered.deinit();
+        var memory: Memory = .{ .arena = .init(a), .value = recovered.value, .preserved = recovered.preserved };
+        defer memory.arena.deinit();
+        const observer: wire.CredentialScrub = .{ .context = &memory, .apply_fn = Memory.scrub };
+        {
+            var store = try Store.init(std.testing.io, a, directory);
+            defer store.deinit();
+            try store.legacy.commit(source);
+            if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+            memory.fail = true;
+            try std.testing.expect(!store.syncCredentials(&.{secret}, true, observer).ready);
+            try std.testing.expect(!store.syncCredentials(&.{}, true, observer).ready);
+            var held = false;
+            for (store.credentials) |slot| if (slot.memory_pending) {
+                held = true;
+                try std.testing.expect(slot.length != 0);
+            };
+            try std.testing.expect(held);
+            memory.fail = false;
+            try std.testing.expect(store.syncCredentials(&.{secret}, true, observer).ready);
+            for (0..2) |_| {
+                const bytes = try wire.encodeAlloc(aa, memory.value, memory.preserved, store.limits);
+                try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
+            }
+            const legacy_bytes = (try store.legacy.loadAlloc(a)).?;
+            defer a.free(legacy_bytes);
+            var legacy = try wire.decodeRecovering(a, legacy_bytes, store.limits);
+            defer legacy.deinit();
+            try std.testing.expect(!try wire.security.contains(a, legacy.value, secret));
+            try std.testing.expect(!try wire.security.contains(a, legacy.preserved, secret));
+        }
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        try std.testing.expect(store.syncCredentials(&.{secret}, true, observer).ready);
+        const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+        try std.testing.expectEqual(@as(usize, 1), loaded.preserved.read_only_tasks.len);
+        try std.testing.expectEqual(@as(usize, 1), loaded.preserved.retained.len);
+        try std.testing.expectEqual(@as(u64, 93), loaded.preserved.retained[0].id);
+        try std.testing.expect(!try wire.security.contains(a, loaded.value, secret));
+        try std.testing.expect(!try wire.security.contains(a, loaded.preserved, secret));
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, loaded.value, loaded.preserved, store.limits), true));
+    }
+}
+
 test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive restart" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
@@ -954,14 +1042,14 @@ test "SQLite history credential rotation releases retired owned copies" {
     for (0..140) |generation| {
         var buffer: [64]u8 = undefined;
         const value = try std.fmt.bufPrint(&buffer, "rotating-owned-credential-{d}", .{generation});
-        try std.testing.expect(store.syncCredentials(&.{value}, true).ready);
+        try std.testing.expect(store.syncCredentials(&.{value}, true, .{}).ready);
         var retained: usize = 0;
         for (store.credentials) |slot| if (slot.length != 0) {
             retained += 1;
         };
         try std.testing.expectEqual(@as(usize, 1), retained);
     }
-    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
 }
 
@@ -1004,7 +1092,7 @@ test "SQLite history reopens a poisoned maintenance connection before retry" {
     var bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
     try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
     store.database.?.test_hooks.fail_maintenance_sync = true;
-    try std.testing.expect(!store.syncCredentials(&.{"late-known-value"}, true).ready);
+    try std.testing.expect(!store.syncCredentials(&.{"late-known-value"}, true, .{}).ready);
     try std.testing.expect(store.requires_reopen);
     state.tasks[0].runs[0].assistant = "***";
     state.tasks[0].runs[0].input.text = "***";
@@ -1134,7 +1222,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     if (try store.loadAlloc(a)) |bytes| a.free(bytes);
     try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
     try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = wire.file_name, .data = "corrupted import source: late-known-value" });
-    try std.testing.expect(store.syncCredentials(&.{"late-known-value"}, true).ready);
+    try std.testing.expect(store.syncCredentials(&.{"late-known-value"}, true, .{}).ready);
     try std.testing.expect(store.legacy_maintenance_failed);
     const clean = try product.loadHistory(aa, store.database.?.capability(), store.limits);
     try std.testing.expect(std.mem.indexOf(u8, clean.value.tasks[0].runs[0].assistant, "late-known-value") == null);
@@ -1144,7 +1232,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     const bytes = try wire.encodeAlloc(aa, state, .{}, store.limits);
     for (0..3) |_| try std.testing.expectEqual(wire.Commit.committed, store.commit(bytes, true));
     try std.testing.expect(store.pending == null);
-    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     try std.testing.expect(store.legacy_maintenance_failed);
     var retained: usize = 0;
     for (store.credentials) |slot| if (slot.length != 0 and slot.legacy_pending) {
@@ -1156,7 +1244,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     // Once the source becomes writable/decodable again, maintenance can
     // finish and retire its owned credential without replaying business work.
     try store.legacy.commit(bytes);
-    try std.testing.expect(store.syncCredentials(&.{}, true).ready);
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     try std.testing.expect(!store.legacy_maintenance_failed);
     for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
     const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);

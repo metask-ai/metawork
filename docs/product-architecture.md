@@ -446,6 +446,8 @@ Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普
 
 framed 恢复分类必须包含实际 Task 恢复约束：仅解码或局部校验通过、但完整恢复失败的 Task 继续保留原帧，不能使整批导入或随后携带保留帧的正常保存失败。同 kind、同身份的多条保留帧仍是不同 occurrence，必须保留各自 payload、顺序事实和重复次数，不能按身份覆盖或按内容去重。Automatic Workspace 的 owner 无法恢复时，其 scope 原帧一并保留；只读映射只引用已恢复的 Task，高水位不因降级而倒退。默认审批偏好的导入回退复用 Runtime 判定并反馈启动降级事实，不改变历史 Task/Run 的权限；执行资源、I/O 或提交失败仍中止导入，不发布空候选代替有效记录。当前 SQL 加载与业务候选继续严格校验，导入恢复不构成静默 SQL 修复路径。
 
+历史凭据检查与清洗共用字段分类：自由文本及携密内容须清洗，结构 tag、枚举及固定格式身份和摘要不因字节巧合被替换。只读记录须保留未知字段、数值精度与数组顺序；保留原帧的无损要求以安全清洗为例外，命中时可脱敏但不得丢记录或改变身份、顺序与重复次数。Control 持有的保留及只读原文、SQL 与旧导入源必须一并纳入维护，防止后续候选重新带回旧原文；未命中 payload 保持原文。维护复用现有安全代次及有界 credential lease，不能改动 worker 正在读取的 owned 输入或未知事务的确认依据；清洗失败继续保留必要 lease 和可诊断状态，未完成前不得报告安全 ready。
+
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
 交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。若 required commit 明确失败，Control 回滚候选并删除仍可证明未发布的 Automatic Workspace 空目录；若结果不确定，Control 同样回滚内存 Task/Run/Workspace 候选但必须保留物理目录，因为 canonical store 可能已经引用它。两种拒绝都保持 occurrence `task_id = 0`，不得伪造 interrupted Run 或 terminal cause。Task 物理删除仍遵守 §4.2 的 commit-before-release 边界。

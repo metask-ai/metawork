@@ -4752,6 +4752,7 @@ pub const Runtime = struct {
     }
 
     fn encodeTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error![]u8 {
+        self.syncHistoryCredentials(null, null);
         var scratch = try self.buildTaskStateWireWithCheckpoint(checkpoint);
         defer scratch.deinit();
         const bytes = try task_persistence.encodeAlloc(self.allocator, scratch.state, scratch.preserved, self.taskPersistenceLimits());
@@ -4759,7 +4760,7 @@ pub const Runtime = struct {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }
-        if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
+        if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return error.TaskStoreEncodeFailed;
         return self.allocator.dupe(u8, bytes);
     }
 
@@ -5845,7 +5846,7 @@ pub const Runtime = struct {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }
-        if (self.containsKnownCredential(bytes)) return .failed;
+        if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) return .failed;
         return switch (self.task_persistence.recover(bytes)) {
             .committed => recovered: {
                 self.task_persistence_health = .ready;
@@ -9308,6 +9309,8 @@ pub const Runtime = struct {
             self.approval_history_dirty = true;
             return error.TaskBusy;
         }
+        // Retry memory scrubs using the retained credential lease.
+        self.syncHistoryCredentials(null, null);
         switch (self.task_persistence_health) {
             .ready, .degraded, .write_failed, .outcome_unknown => {},
             .read_failed, .corrupt, .unavailable => return error.TaskPersistenceUnavailable,
@@ -9336,7 +9339,7 @@ pub const Runtime = struct {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }
-        if (self.containsKnownCredential(bytes)) {
+        if (self.containsKnownHistoryCredential(scratch.state, scratch.preserved)) {
             self.markTaskPersistenceWriteFailed();
             return error.TaskStoreEncodeFailed;
         }
@@ -9652,7 +9655,7 @@ pub const Runtime = struct {
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
-        const status = self.task_persistence.credentials(collected.values[0..collected.count], complete);
+        const status = self.task_persistence.credentials(collected.values[0..collected.count], complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
         self.task_persistence.security_epoch = status.epoch;
         if (!status.ready) self.markTaskPersistenceWriteFailed();
     }
@@ -9671,6 +9674,7 @@ pub const Runtime = struct {
     /// change of security authority and must not revoke unrelated UI state.
     fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
+        self.task_runtime.redactPreservedHistory(credential) catch self.markTaskPersistenceWriteFailed();
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
         _ = self.schedule.redactInMemoryNoFail(
@@ -10022,6 +10026,25 @@ pub const Runtime = struct {
         if (containsKnownSecret(value, current)) return true;
         if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
+    }
+
+    fn scrubPreservedHistory(context: ?*anyopaque, credential: []const u8) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context.?));
+        self.task_runtime.redactPreservedHistory(credential) catch return false;
+        return true;
+    }
+
+    fn containsKnownHistoryCredential(self: *Runtime, state: task_persistence.StateWire, preserved: task_persistence.PreservedFrames) bool {
+        var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
+        defer credentials.deinit();
+        credentials.add(self.execution_state.credential()) catch return true;
+        if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
+        self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
+        for (credentials.values.items) |secret| {
+            if ((task_persistence.security.contains(self.allocator, state, secret) catch true) or
+                (task_persistence.security.contains(self.allocator, preserved, secret) catch true)) return true;
+        }
+        return false;
     }
 
     fn redactWithKnownCredentialsNoFail(
@@ -21796,9 +21819,7 @@ test "rejected credential-bearing history frees the encoded candidate on every a
             return 1;
         }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
-            // A wire field name is deliberately also a known credential, so
-            // even perfectly scrubbed runtime values must reject this encoding.
-            try callback(context, "default_permission_profile");
+            try callback(context, "unredacted-history-key");
         }
     };
     var owner: u8 = 0;
@@ -21807,6 +21828,7 @@ test "rejected credential-bearing history frees the encoded candidate on every a
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
     control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    try control.replaceTracked(&control.task_runtime.find(3).?.durable.title, "unredacted-history-key", control.limits.max_task_title_bytes);
     const before = history.commits;
     for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
     try std.testing.expectEqual(before, history.commits);
@@ -21841,6 +21863,26 @@ test "execution reinstall preserves projection for equal authority and revokes c
         try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
         if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
     }
+}
+
+test "learned short credentials scrub Runtime retained and readonly originals without changing tags" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var scratch = try control.buildTaskStateWire();
+    defer scratch.deinit();
+    const record = scratch.state.tasks[0];
+    const original = try std.json.Stringify.valueAlloc(control.allocator, record, .{});
+    defer control.allocator.free(original);
+    const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
+    control.task_runtime.find(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
+    try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
+    control.redactAllProductProjectionsNoFail("none");
+    const payload = control.task_runtime.find(record.id).?.read_only_history.?.payload;
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
+    try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
+    try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
+    control.redactAllProductProjectionsNoFail("none");
+    try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
 }
 
 test "transport cancellation cannot revoke a replacement Product read" {

@@ -177,9 +177,9 @@ pub fn recoverScheduledTaskStore(
     return .committed;
 }
 
-pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool) product_task.history.CredentialStatus {
+pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool, scrub: product_task.history.CredentialScrub) product_task.history.CredentialStatus {
     const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .{ .epoch = 0, .ready = false }));
-    return store.syncCredentials(values, complete);
+    return store.syncCredentials(values, complete, scrub);
 }
 
 pub fn commitTaskStoreGeneration(context: ?*anyopaque, bytes: []const u8, epoch: u64, confirmed: bool) product_task.history.Commit {
