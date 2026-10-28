@@ -8607,7 +8607,12 @@ pub const Runtime = struct {
         }) orelse return error.ExecutionUnavailable;
         defer candidate.deinit();
         const resolved = candidate.input();
-        if (!std.mem.eql(u8, resolved.target.provider_id, expected.model_ref.source_id) or
+        const provider_matches = switch (authority.source) {
+            .metask => std.mem.eql(u8, resolved.target.provider_id, expected.model_ref.source_id),
+            .custom_provider => std.mem.startsWith(u8, resolved.target.provider_id, "custom_provider:") and
+                std.mem.eql(u8, resolved.target.provider_id["custom_provider:".len..], expected.model_ref.source_id),
+        };
+        if (candidate.source != authority.source or !provider_matches or
             !std.mem.eql(u8, resolved.target.model, expected.model_ref.model_id) or
             resolved.target.protocol != expected.protocol or
             resolved.source_generation != expected.source_generation)
@@ -14034,6 +14039,49 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
         "\r\n",
     );
     try std.testing.expectEqualStrings(models_fixture, models_writer.buffered());
+}
+
+test "Scheduled Task custom binding validates source identity and rejects stale authority" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{});
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
+    defer control.stopCustomProviders();
+    const selection = try createReadyTestCustomProvider(&control);
+    const provider = control.modelsView().custom_providers[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+
+    const binding = TestSupport.scheduledBinding(&control);
+    try control.validateScheduledBinding(binding);
+    var stale = binding;
+    stale.model_ref.source_id = "another-provider";
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.model_ref.model_id = "another-model";
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.source_generation += 1;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.selection_revision += 1;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.protocol = .anthropic_messages;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
