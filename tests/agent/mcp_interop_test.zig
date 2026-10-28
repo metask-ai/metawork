@@ -1397,7 +1397,10 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     {
         current_state.refresh_pending = true;
         defer current_state.refresh_pending = false;
-        try std.testing.expectError(error.RecoveryUnavailable, product_mcp.restoreAuthority(saved.mcp.?));
+        var while_refreshing = try product_mcp.restoreAuthority(saved.mcp.?);
+        defer while_refreshing.deinit();
+        try std.testing.expect(while_refreshing.selection != null);
+        try std.testing.expectEqual(@as(usize, 1), while_refreshing.selection.?.selectedTools().len);
         var absent = try product_mcp.restoreAuthority(null);
         defer absent.deinit();
         try std.testing.expect(absent.selection == null);
@@ -1628,7 +1631,11 @@ test "real Product creates a null MCP Task when Admission exceeds the bounded ge
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .stale_host);
 }
 
-const McpCreationRace = enum { expiry, core_withdrawal, stale_host };
+test "real Product proactive refresh preserves new Task authority and quiet background projection" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .proactive);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive };
 
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
     try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
@@ -1817,8 +1824,8 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         restarted_runtime,
     );
     try installExecution(&restarted_workbench);
-    try std.testing.expectEqual(@as(?u64, null), refresh_timer.armed_at_ms);
-    try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
+    try std.testing.expect(refresh_timer.armed_at_ms != null);
+    try std.testing.expect(refresh_timer.arm_count > 0);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try restarted_workbench.setMcpAllowedTools(1, .{
@@ -1855,6 +1862,48 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
     );
+    if (race == .proactive) {
+        try tmp.dir.deleteFile(std.testing.io, "publication.release");
+        tmp.dir.deleteFile(std.testing.io, "publication.waiting") catch {};
+        defer tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" }) catch {};
+        refresh_timer.now_ms = refresh_timer.armed_at_ms.?;
+        restarted_workbench.onMcpRefreshTimer();
+        for (0..1000) |_| {
+            _ = tmp.dir.statFile(std.testing.io, "publication.waiting", .{}) catch {
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                continue;
+            };
+            break;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expect(restarted_workbench.mcp.?.authorityStable());
+        const during = try restarted_workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            1,
+            restarted_workbench.newTaskAdmissionView().active_selection_revision,
+            null,
+            null,
+            null,
+            .{ .interactive = null },
+        );
+        try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try restarted_workbench.taskMcpAuthority(during));
+        var output: [512 * 1024]u8 = undefined;
+        const snapshot = try restarted_workbench.writeAggregateFixture(&output);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"operation\":\"refreshing\"") == null);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"newTaskAccess\":\"available\"") != null);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.release", .data = "release" });
+        for (0..1000) |_| {
+            const job = mcp_types.testing.refreshJob(&restarted_workbench.mcp.?) orelse return error.TestUnexpectedResult;
+            if (job.state.load(.acquire) == .completed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        const before_delivery = refresh_timer.now_ms;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+        refresh_timer.now_ms += 50;
+        restarted_workbench.syncLifecycle();
+        try std.testing.expect(refresh_timer.armed_at_ms.? <= before_delivery + 1_500);
+        return;
+    }
     if (race != .expiry) {
         if (race == .core_withdrawal) {
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.fail", .data = "fail" });
@@ -1926,6 +1975,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         .raw = std.Io.Duration.fromMilliseconds(2_500),
         .clock = .awake,
     } }, std.testing.io) catch return error.TestUnexpectedResult;
+    refresh_timer.now_ms += 2_500;
     const task_id = try restarted_workbench.createTaskInWorkspace(
         workspace_id,
         workspace_epoch,
@@ -1948,7 +1998,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         product_control.TaskMcpAuthorityAtCreation.unavailable,
         try restarted_workbench.taskMcpAuthority(task_id),
     );
-    try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
+    try std.testing.expect(refresh_timer.arm_count > 0);
     var snapshot_storage: [512 * 1024]u8 = undefined;
     const snapshot = try restarted_workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(

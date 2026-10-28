@@ -408,24 +408,24 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire) or self.runtime == null) {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.RuntimeShuttingDown;
         }
         if (self.retired_mcp_servers.items.len >= max_mcp_configuration_applies or
             self.mcp_apply_revision == std.math.maxInt(u64))
         {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.McpConfigurationApplyLimit;
         }
         self.retired_mcp_servers.ensureUnusedCapacity(self.allocator, 1) catch |err| {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return err;
         };
         const raw_runtime = self.runtime orelse {
             self.sessions_mutex.unlock(self.io);
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.RuntimeShuttingDown;
         };
         const desired_revision = self.mcp_apply_revision + 1;
@@ -435,7 +435,7 @@ pub const Runtime = struct {
         self.sessions_mutex.unlock(self.io);
 
         var replacement = input.take() catch {
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.McpConfigurationApplyFailed;
         };
         var replacement_owned = true;
@@ -452,7 +452,7 @@ pub const Runtime = struct {
         );
         releaseOwned(self.api, &diagnostic);
         const status = sdk.Status.fromCode(status_code) catch {
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.McpConfigurationApplyFailed;
         };
         const disposition: McpConfigurationApplyOutcome = if (status == .ok)
@@ -461,12 +461,12 @@ pub const Runtime = struct {
                 wire.MCP_APPLY_SUPERSEDED => .superseded,
                 wire.MCP_APPLY_REJECTED => .rejected,
                 else => {
-                    self.finishMcpCall();
+                    self.finishMcpCall(false);
                     return error.McpConfigurationApplyFailed;
                 },
             }
         else {
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return switch (status) {
                 .busy => error.McpRefreshInProgress,
                 .resource_limit => error.McpConfigurationApplyLimit,
@@ -478,7 +478,7 @@ pub const Runtime = struct {
             !std.mem.allEqual(u64, &report.reserved, 0) or
             (disposition == .applied and report.active_revision != desired_revision))
         {
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.McpConfigurationApplyFailed;
         }
 
@@ -537,13 +537,14 @@ pub const Runtime = struct {
         lease: McpRefreshLease,
     ) (Error || std.mem.Allocator.Error)!*McpCatalogProjection {
         const projection = mcp_catalog.refresh(
+            self.io,
             self.allocator,
             self.api,
             lease.raw_runtime,
             self.mcp_owner_id,
             lease.expected_servers,
         ) catch |err| {
-            self.finishMcpCall();
+            self.finishMcpCall(err == error.RefreshRejected);
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
         };
@@ -574,7 +575,7 @@ pub const Runtime = struct {
     ) (Error || std.mem.Allocator.Error)!McpActivationOutcome {
         const lease = try self.beginMcpRefresh();
         if (lease.expected_servers.len == 0) {
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return .empty;
         }
         const projection = self.performMcpRefresh(lease) catch |err| switch (err) {
@@ -586,7 +587,7 @@ pub const Runtime = struct {
         };
         const durable_generation = lease.registry_generation orelse {
             projection.deinit();
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return error.McpCatalogBindingMismatch;
         };
         const activation = mcp_catalog.createActivation(
@@ -597,7 +598,7 @@ pub const Runtime = struct {
             lease.expected_servers,
         ) catch |err| {
             projection.deinit();
-            self.finishMcpCall();
+            self.finishMcpCall(false);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => .{ .unavailable = mcpActivationUnavailableReason(
@@ -759,7 +760,7 @@ pub const Runtime = struct {
         };
     }
 
-    fn finishMcpCall(self: *Runtime) void {
+    fn finishMcpCall(self: *Runtime, keep_catalog: bool) void {
         self.sessions_mutex.lockUncancelable(self.io);
         std.debug.assert(self.active_mcp_calls > 0);
         std.debug.assert(self.mcp_refresh_running);
@@ -768,8 +769,10 @@ pub const Runtime = struct {
         self.mcp_configuration_applying = false;
         // This path has no validated publication result. Do not assume a
         // failure left Core's catalog unchanged.
-        self.mcp_catalog_generation = null;
-        self.mcp_previous_catalog_generation = null;
+        if (!keep_catalog) {
+            self.mcp_catalog_generation = null;
+            self.mcp_previous_catalog_generation = null;
+        }
         self.shutdown_condition.broadcast(self.io);
         self.sessions_mutex.unlock(self.io);
     }
@@ -1590,6 +1593,7 @@ test "restore preserves typed MCP freshness rejection" {
 fn mapMcpCatalogError(err: anyerror) Error {
     return switch (err) {
         error.RefreshFailed, error.DescribeFailed => error.McpRefreshFailed,
+        error.RefreshRejected => error.McpRefreshRejected,
         error.InvalidCatalogDescriptor => error.InvalidMcpCatalogDescriptor,
         error.CatalogResourceLimit => error.McpCatalogResourceLimit,
         error.CatalogGenerationMismatch => error.McpCatalogGenerationMismatch,
@@ -1605,6 +1609,7 @@ fn mapMcpCatalogError(err: anyerror) Error {
 fn mcpActivationUnavailableReason(err: anyerror) McpActivationUnavailableReason {
     return switch (err) {
         error.McpRefreshFailed => .refresh_failed,
+        error.McpRefreshRejected => .refresh_rejected,
         error.InvalidMcpCatalogDescriptor => .invalid_catalog,
         error.McpCatalogResourceLimit => .resource_limit,
         error.McpCatalogGenerationMismatch => .generation_mismatch,

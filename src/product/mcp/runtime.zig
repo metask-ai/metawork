@@ -28,6 +28,10 @@ pub const Capabilities = struct {
     host: state_module.McpHostCapabilities,
     secret_max_bytes: usize = 0,
 };
+pub const NewTaskAdmission = struct {
+    available: bool,
+    selection: ?*const agent.McpSelection,
+};
 pub const ViewError = view.Error;
 pub const TextProjection = view.TextProjection;
 pub const McpHostCapabilities = state_module.McpHostCapabilities;
@@ -193,13 +197,19 @@ pub const Runtime = struct {
         return self.refresh_job != null;
     }
 
-    pub fn selectionForNewTask(self: *const Runtime) ?*const agent.McpSelection {
-        return policy.selectionForNewTask(&self.state);
+    /// Capture availability together with the synchronous Selection borrow,
+    /// rather than sampling readiness again after copying that pointer.
+    pub fn selectionForNewTask(self: *const Runtime) NewTaskAdmission {
+        if (!self.state.committed or self.state.admission != .ready or self.admissionExpired())
+            return .{ .available = false, .selection = null };
+        const selection = policy.selectionForNewTask(&self.state);
+        if (selection == null and self.state.admission.ready.selection != null)
+            return .{ .available = false, .selection = null };
+        return .{ .available = true, .selection = selection };
     }
 
     pub fn newTaskAuthorityReady(self: *const Runtime) bool {
-        if (!self.state.committed) return false;
-        return self.state.admission == .ready;
+        return self.selectionForNewTask().available;
     }
 
     pub fn authorizationOperation(
@@ -225,14 +235,12 @@ pub const Runtime = struct {
     }
 
     pub fn recoveryGeneration(self: *const Runtime) ?u64 {
+        if (!self.authorityStable()) return null;
         return policy.recoveryGeneration(&self.state, self.refresh_job != null);
     }
 
     pub fn authorityStable(self: *const Runtime) bool {
-        if (!self.state.committed or self.refresh_job != null or
-            self.state.refresh_pending)
-            return false;
-        return self.state.admission == .ready;
+        return self.state.admissionFresh() and !self.admissionExpired();
     }
 
     pub fn recoveryAuthority(self: *Runtime) Error!state_module.RecoveryMcpAuthority {
@@ -445,6 +453,13 @@ pub const Runtime = struct {
 
     pub fn requestRefresh(self: *Runtime, invalidate_admission: bool) Error!bool {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.state.refresh_failures = 0;
+        self.state.refresh_paused = false;
+        return self.queueRefresh(invalidate_admission, true);
+    }
+
+    fn queueRefresh(self: *Runtime, invalidate_admission: bool, visible: bool) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = &self.state;
         if (!mcp.committed) return error.CatalogUnavailable;
         switch (mcp.preparation.state) {
@@ -456,16 +471,23 @@ pub const Runtime = struct {
         if (inspection.health != .ready) return error.McpManagementUnavailable;
         _ = management.desiredRegistry() orelse
             return error.McpManagementUnavailable;
+        mcp.refresh_visible = mcp.refresh_visible or visible;
+        if (invalidate_admission) policy.blockAdmission(mcp, .refreshing);
+        if (self.refresh_job != null or mcp.refresh_pending) {
+            self.rearmRefreshTimer();
+            return false;
+        }
         if (mcp.refresh_request_generation == std.math.maxInt(u64))
             return error.CatalogRequestGenerationExhausted;
         self.ports.timer.cancel();
         mcp.refresh_request_generation += 1;
         mcp.refresh_pending = true;
-        if (invalidate_admission) policy.blockAdmission(mcp, .refreshing);
-        return self.startPendingRefresh() catch |err| {
+        const started = self.startPendingRefresh() catch |err| {
             self.armRefreshRetry();
             return err;
         };
+        self.rearmRefreshTimer();
+        return started;
     }
 
     fn startPendingRefresh(self: *Runtime) Error!bool {
@@ -481,6 +503,8 @@ pub const Runtime = struct {
         const desired = management.desiredRegistry() orelse
             return error.McpManagementUnavailable;
         if (desired.oauth_operation != null) return false;
+        if (self.ports.timer.now()) |now_ms| if (mcp.refresh_not_before_ms) |not_before|
+            if (now_ms < not_before) return false;
         const generation = mcp.refresh_request_generation;
         std.debug.assert(generation != 0);
         var refresh_arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -497,13 +521,11 @@ pub const Runtime = struct {
             .catalog = self.ports.catalog,
             .notifier = self.ports.notifier,
             .request_generation = generation,
-            .requested_at_ms = self.ports.timer.now(),
             .arena = refresh_arena,
             .allowlists = allowlists,
             .build_admission = inspection.runtime_alignment == .current,
         };
         try self.ports.executor.enqueue(job.executorJob());
-        policy.blockAdmission(mcp, .refreshing);
         mcp.refresh_pending = false;
         self.refresh_job = job;
         return true;
@@ -511,11 +533,23 @@ pub const Runtime = struct {
 
     pub fn onRefreshTimer(self: *Runtime) bool {
         if (self.shutting_down) return false;
-        if (self.state.refresh_pending) {
-            _ = self.startPendingRefresh() catch self.armRefreshRetry();
+        self.expireAdmission();
+        if (self.refresh_job != null) {
+            self.rearmRefreshTimer();
             return true;
         }
-        _ = self.requestRefresh(true) catch {
+        if (self.state.refresh_pending) {
+            _ = self.startPendingRefresh() catch self.armRefreshRetry();
+            self.rearmRefreshTimer();
+            return true;
+        }
+        if (self.state.refresh_paused) return true;
+        if (self.state.refresh_deadline_ms) |deadline| if (self.ports.timer.now()) |now_ms|
+            if (now_ms < deadline) {
+                self.rearmRefreshTimer();
+                return true;
+            };
+        _ = self.queueRefresh(false, false) catch {
             if (self.refresh_job == null and !self.state.refresh_pending)
                 policy.blockAdmissionForCurrentState(&self.state);
         };
@@ -536,10 +570,6 @@ pub const Runtime = struct {
                         if (self.state.activation) |old| old.deinit();
                         self.state.activation = activated.activation;
                         self.state.activation_failed = false;
-                        self.state.refresh_deadline_ms = state_module.mcpRefreshDeadlineMs(
-                            activated.activation.catalogServers(),
-                            job.requested_at_ms,
-                        );
                         if (job.build_admission) {
                             policy.replaceAdmission(&self.state, .{ .ready = .{
                                 .selection = activated.selection,
@@ -549,6 +579,15 @@ pub const Runtime = struct {
                             policy.blockAdmissionForCurrentState(&self.state);
                         }
                         job.outcome = .empty;
+                        self.state.refresh_visible = false;
+                        self.state.refresh_schedule_failed = false;
+                        self.updateRefreshDeadline();
+                        if (activated.activation.state() == .unavailable or (job.build_admission and !self.state.admissionFresh()))
+                            self.recordRefreshFailure()
+                        else {
+                            self.state.refresh_failures = 0;
+                            self.state.refresh_paused = false;
+                        }
                     }
                 },
                 .empty => if (still_current) {
@@ -556,6 +595,11 @@ pub const Runtime = struct {
                     self.state.activation = null;
                     self.state.activation_failed = false;
                     self.state.refresh_deadline_ms = null;
+                    self.state.expiry_deadline_ms = null;
+                    self.state.refresh_failures = 0;
+                    self.state.refresh_paused = false;
+                    self.state.refresh_visible = false;
+                    self.state.refresh_schedule_failed = false;
                     if (job.build_admission)
                         policy.replaceAdmission(&self.state, .{ .ready = .{
                             .selection = null,
@@ -569,11 +613,25 @@ pub const Runtime = struct {
                     self.state.activation = null;
                     self.state.activation_failed = true;
                     self.state.refresh_deadline_ms = null;
+                    self.state.expiry_deadline_ms = null;
+                    self.state.refresh_visible = false;
                     policy.blockAdmission(&self.state, .activation_unavailable);
+                    self.recordRefreshFailure();
+                },
+                .retained => if (still_current) {
+                    // Only the typed pre-publication rejection proves Core
+                    // kept its catalog. The original deadline still applies.
+                    self.state.refresh_visible = false;
+                    self.expireAdmission();
+                    self.recordRefreshFailure();
                 },
             },
             .cancelled => {},
             .queued, .running => unreachable,
+        }
+        if (still_current) {
+            if (self.ports.timer.now()) |now_ms|
+                self.state.refresh_not_before_ms = @max(self.state.refresh_not_before_ms orelse 0, now_ms +| 1_000);
         }
         job.deinit();
         self.releaseBoundary();
@@ -663,6 +721,9 @@ pub const Runtime = struct {
         management.installRuntimeManifest(manifest);
         self.state.configuration_apply_state = .idle;
         self.state.refresh_pending = false;
+        self.state.refresh_failures = 0;
+        self.state.refresh_paused = false;
+        self.state.refresh_visible = false;
         if (activation_failed) {
             if (selection) |value| value.deinit();
             policy.blockAdmission(&self.state, .activation_unavailable);
@@ -1518,11 +1579,70 @@ pub const Runtime = struct {
 
     pub fn updateRefreshDeadline(self: *Runtime) void {
         self.state.refresh_deadline_ms = null;
+        self.state.expiry_deadline_ms = null;
         const activation = self.state.activation orelse return;
+        const now_ms = self.ports.timer.now() orelse {
+            if (self.ports.timer.enabled) {
+                self.state.refresh_schedule_failed = true;
+                self.markChanged();
+            }
+            return;
+        };
+        const age_ms = activation.catalogAgeMs() orelse return;
+        const observed_at_ms = std.math.sub(u64, now_ms, age_ms) catch return;
+        self.state.refresh_not_before_ms = @max(self.state.refresh_not_before_ms orelse 0, observed_at_ms +| 1_000);
         self.state.refresh_deadline_ms = state_module.mcpRefreshDeadlineMs(
             activation.catalogServers(),
-            self.ports.timer.now(),
+            observed_at_ms,
         );
+        var ttl_ms: ?u64 = null;
+        for (activation.catalogServers()) |server| if (server.fresh and server.ttl_remaining_ms != 0) {
+            ttl_ms = @min(ttl_ms orelse server.ttl_remaining_ms, server.ttl_remaining_ms);
+        };
+        if (ttl_ms) |ttl|
+            self.state.expiry_deadline_ms = std.math.add(u64, observed_at_ms, ttl) catch null;
+        self.expireAdmission();
+    }
+
+    pub fn admissionExpired(self: *const Runtime) bool {
+        if (self.state.admission != .ready) return false;
+        const expired = if (self.state.expiry_deadline_ms) |deadline|
+            if (self.ports.timer.now()) |now_ms| now_ms >= deadline else false
+        else
+            false;
+        return expired or !self.state.admissionFresh();
+    }
+
+    fn expireAdmission(self: *Runtime) void {
+        if (self.admissionExpired()) {
+            policy.blockAdmission(&self.state, .activation_unavailable);
+            self.markChanged();
+        }
+    }
+
+    pub fn syncFreshness(self: *Runtime) bool {
+        const was_ready = self.state.admission == .ready;
+        self.expireAdmission();
+        if (!was_ready or self.state.admission == .ready) return false;
+        if (!self.state.refresh_paused)
+            _ = self.queueRefresh(false, false) catch {};
+        return true;
+    }
+
+    fn recordRefreshFailure(self: *Runtime) void {
+        self.state.refresh_failures +|= 1;
+        // Retry a bounded series, then require an explicit refresh or a new
+        // configuration. This avoids permanent polling of failed services.
+        if (self.state.refresh_failures >= 5) {
+            self.state.refresh_paused = true;
+            self.state.refresh_pending = false;
+            self.state.refresh_deadline_ms = null;
+            return;
+        }
+        const now_ms = self.ports.timer.now() orelse return;
+        const delay_ms = @as(u64, 1_000) << @as(u6, @intCast(self.state.refresh_failures - 1));
+        self.state.refresh_deadline_ms = std.math.add(u64, now_ms, delay_ms) catch null;
+        self.state.refresh_not_before_ms = self.state.refresh_deadline_ms;
     }
 
     fn releaseBoundary(self: *Runtime) void {
@@ -1536,24 +1656,43 @@ pub const Runtime = struct {
         if (self.shutting_down or !self.ports.timer.enabled) return;
         const now_ms = self.ports.timer.now() orelse return;
         const deadline_ms = std.math.add(u64, now_ms, 1_000) catch std.math.maxInt(u64);
-        _ = self.ports.timer.armAt(deadline_ms);
+        self.state.refresh_not_before_ms = deadline_ms;
+        self.armRefreshAt(if (self.state.expiry_deadline_ms) |expiry|
+            if (self.state.admissionFresh()) @min(expiry, deadline_ms) else deadline_ms
+        else
+            deadline_ms);
+    }
+
+    fn armRefreshAt(self: *Runtime, deadline_ms: u64) void {
+        const failed = !self.ports.timer.armAt(deadline_ms);
+        if (failed != self.state.refresh_schedule_failed) {
+            self.state.refresh_schedule_failed = failed;
+            self.markChanged();
+        }
     }
 
     pub fn rearmRefreshTimer(self: *Runtime) void {
         self.ports.timer.cancel();
         if (self.shutting_down) return;
+        self.expireAdmission();
         if (self.state.refresh_pending) {
             const started = self.startPendingRefresh() catch {
                 self.armRefreshRetry();
                 return;
             };
-            if (started or self.state.refresh_pending) return;
+            if (!started and self.state.refresh_pending) {
+                const now_ms = self.ports.timer.now() orelse return;
+                const retry = @max(self.state.refresh_not_before_ms orelse now_ms +| 1_000, now_ms +| 1);
+                self.armRefreshAt(if (self.state.expiry_deadline_ms) |expiry|
+                    if (self.state.admissionFresh() and expiry > now_ms) @min(expiry, retry) else retry
+                else
+                    retry);
+                return;
+            }
         }
         if (!self.ports.timer.enabled) return;
-        if (!self.state.committed or
-            self.refresh_job != null or
-            self.state.configuration_apply_state == .applying or
-            self.state.activation_failed)
+        const now_ms = self.ports.timer.now() orelse return;
+        if (!self.state.committed or self.state.configuration_apply_state == .applying)
             return;
         const management = if (self.state.management) |*value| value else return;
         const inspection = management.inspect();
@@ -1561,18 +1700,26 @@ pub const Runtime = struct {
             return;
         const desired = management.desiredRegistry() orelse return;
         if (desired.oauth_operation != null) return;
-        const deadline_ms = self.state.refresh_deadline_ms orelse return;
-        const now_ms = self.ports.timer.now() orelse return;
-        if (deadline_ms <= now_ms) {
-            _ = self.requestRefresh(true) catch {};
+        if (self.refresh_job != null or self.state.refresh_paused) {
+            if (self.state.expiry_deadline_ms) |expiry| if (self.state.admissionFresh() and expiry > now_ms)
+                self.armRefreshAt(expiry);
             return;
         }
-        _ = self.ports.timer.armAt(deadline_ms);
+        var deadline_ms = self.state.refresh_deadline_ms orelse return;
+        if (self.state.refresh_not_before_ms) |floor| deadline_ms = @max(floor, deadline_ms);
+        if (self.state.expiry_deadline_ms) |expiry| if (self.state.admissionFresh() and expiry > now_ms) {
+            deadline_ms = @min(expiry, deadline_ms);
+        };
+        self.armRefreshAt(@max(now_ms +| 1, deadline_ms));
     }
 
     pub fn recoverExpiredCatalog(self: *Runtime) bool {
         if (self.shutting_down) return false;
-        _ = self.requestRefresh(true) catch {
+        if (self.state.refresh_paused) {
+            policy.blockAdmission(&self.state, .activation_unavailable);
+            return true;
+        }
+        _ = self.queueRefresh(true, false) catch {
             if (self.refresh_job == null and !self.state.refresh_pending)
                 policy.blockAdmissionForCurrentState(&self.state);
         };
@@ -1625,6 +1772,10 @@ const TestHarness = struct {
     notifications: usize = 0,
     failed_enqueues: usize = 0,
     armed_deadline_ms: ?u64 = null,
+    now_ms: u64 = 100,
+    activation_outcome: agent.McpActivationOutcome = .empty,
+    activations: usize = 0,
+    arm_succeeds: bool = true,
 
     fn enqueue(
         context: *anyopaque,
@@ -1648,8 +1799,10 @@ const TestHarness = struct {
         return true;
     }
 
-    fn activate(_: *anyopaque) ports_module.CatalogError!agent.McpActivationOutcome {
-        return .empty;
+    fn activate(context: *anyopaque) ports_module.CatalogError!agent.McpActivationOutcome {
+        const self: *TestHarness = @ptrCast(@alignCast(context));
+        self.activations += 1;
+        return self.activation_outcome;
     }
 
     fn createAdmissionSelection(
@@ -1664,14 +1817,15 @@ const TestHarness = struct {
         return error.InvalidMcpSelection;
     }
 
-    fn now(_: ?*anyopaque) ?u64 {
-        return 100;
+    fn now(context: ?*anyopaque) ?u64 {
+        const self: *TestHarness = @ptrCast(@alignCast(context.?));
+        return self.now_ms;
     }
 
     fn armAt(context: ?*anyopaque, deadline_ms: u64) bool {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
         self.armed_deadline_ms = deadline_ms;
-        return true;
+        return self.arm_succeeds;
     }
 
     fn cancelTimer(context: ?*anyopaque) void {
@@ -1718,6 +1872,110 @@ const TestHarness = struct {
         job.execute_fn(job.context);
     }
 };
+
+fn testEmptyRuntime(harness: *TestHarness) !Runtime {
+    const allocator = std.testing.allocator;
+    const preparation: configuration.Preparation = .{ .allocator = allocator, .state = .empty };
+    var manifest = (try configuration.RuntimeManifest.candidate(allocator, &preparation)).?;
+    const management = try configuration.ManagementPort.init(allocator, .{
+        .schema_version = configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &.{},
+    }, .{
+        .persistence = .{ .available = true },
+        .credentials = .{ .available = true },
+        .limits = test_limits,
+        .runtime_manifest = &manifest,
+    });
+    return Runtime.init(allocator, harness.ports(), .{
+        .preparation = .{ .allocator = allocator, .state = .empty },
+        .activation = null,
+        .activation_failed = false,
+        .management = management,
+        .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+        .host_capabilities = .{},
+        .committed = true,
+    });
+}
+
+test "Product MCP automatic failures back off then pause until explicit refresh" {
+    var harness = TestHarness{ .activation_outcome = .{ .unavailable = .refresh_failed } };
+    var runtime = try testEmptyRuntime(&harness);
+    defer runtime.deinit();
+    try std.testing.expect(try runtime.requestRefresh(false));
+    var previous_delay: u64 = 0;
+    for (0..5) |index| {
+        harness.executeQueued();
+        try std.testing.expect(runtime.syncRefreshJob());
+        try std.testing.expectEqual(index + 1, harness.activations);
+        if (index == 4) break;
+        const deadline = harness.armed_deadline_ms orelse return error.TestUnexpectedResult;
+        const delay = deadline - harness.now_ms;
+        try std.testing.expect(delay > previous_delay);
+        previous_delay = delay;
+        // A new Task's freshness recovery cannot skip the backoff.
+        _ = runtime.recoverExpiredCatalog();
+        try std.testing.expect(harness.queued == null);
+        harness.now_ms = deadline;
+        _ = runtime.onRefreshTimer();
+        try std.testing.expect(harness.queued != null);
+    }
+    try std.testing.expect(runtime.state.refresh_paused);
+    for (0..8) |_| {
+        harness.now_ms += 60_000;
+        _ = runtime.onRefreshTimer();
+        _ = runtime.recoverExpiredCatalog();
+        try std.testing.expect(harness.queued == null);
+    }
+    try std.testing.expectEqual(@as(usize, 5), harness.activations);
+    harness.activation_outcome = .empty;
+    try std.testing.expect(try runtime.requestRefresh(false));
+    harness.executeQueued();
+    try std.testing.expect(runtime.syncRefreshJob());
+    try std.testing.expect(!runtime.state.refresh_paused);
+    try std.testing.expectEqual(@as(u8, 0), runtime.state.refresh_failures);
+}
+
+test "Product MCP timer arm failure is observable and recovery clears it" {
+    var harness = TestHarness{ .failed_enqueues = 1, .arm_succeeds = false };
+    var runtime = try testEmptyRuntime(&harness);
+    defer runtime.deinit();
+    try std.testing.expectError(error.QueueFull, runtime.requestRefresh(false));
+    try std.testing.expect(runtime.state.refresh_schedule_failed);
+    try std.testing.expect(runtime.takeChanged());
+    harness.arm_succeeds = true;
+    runtime.rearmRefreshTimer();
+    try std.testing.expect(!runtime.state.refresh_schedule_failed);
+    try std.testing.expect(runtime.takeChanged());
+    harness.now_ms = harness.armed_deadline_ms.?;
+    _ = runtime.onRefreshTimer();
+    harness.executeQueued();
+    _ = runtime.syncRefreshJob();
+}
+
+test "Product MCP rejected refresh keeps its original expiry even across retry backoff" {
+    var harness = TestHarness{ .activation_outcome = .{ .unavailable = .refresh_rejected } };
+    var runtime = try testEmptyRuntime(&harness);
+    defer runtime.deinit();
+    runtime.state.expiry_deadline_ms = 1_000;
+    try std.testing.expect(try runtime.requestRefresh(false));
+    harness.executeQueued();
+    _ = runtime.syncRefreshJob();
+    try std.testing.expect(runtime.newTaskAuthorityReady());
+    try std.testing.expectEqual(@as(?u64, 1_000), runtime.state.expiry_deadline_ms);
+    try std.testing.expectEqual(@as(?u64, 1_000), harness.armed_deadline_ms);
+    harness.now_ms = 1_000;
+    _ = runtime.onRefreshTimer();
+    try std.testing.expect(!runtime.newTaskAuthorityReady());
+    try std.testing.expect(harness.queued == null);
+    try std.testing.expectEqual(@as(?u64, 1_000), runtime.state.expiry_deadline_ms);
+    harness.now_ms = 1_100;
+    _ = runtime.onRefreshTimer();
+    try std.testing.expect(harness.queued != null);
+    harness.executeQueued();
+    _ = runtime.syncRefreshJob();
+}
 
 const test_limits: configuration.Limits = .{
     .max_servers = 4,
@@ -1904,6 +2162,10 @@ test "Product MCP Runtime retries a pending refresh after executor enqueue failu
     try std.testing.expect(!runtime.hasRefreshJob());
     try std.testing.expectEqual(@as(?u64, 1_100), harness.armed_deadline_ms);
 
+    try std.testing.expect(runtime.onRefreshTimer());
+    try std.testing.expect(runtime.state.refresh_pending);
+    try std.testing.expect(harness.queued == null);
+    harness.now_ms = 1_100;
     try std.testing.expect(runtime.onRefreshTimer());
     try std.testing.expect(!runtime.state.refresh_pending);
     try std.testing.expect(runtime.hasRefreshJob());

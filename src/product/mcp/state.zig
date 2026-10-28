@@ -330,12 +330,40 @@ pub const McpProductState = struct {
     refresh_request_generation: u64 = 0,
     refresh_pending: bool = false,
     refresh_deadline_ms: ?u64 = null,
+    expiry_deadline_ms: ?u64 = null,
+    refresh_not_before_ms: ?u64 = null,
+    refresh_failures: u8 = 0,
+    refresh_paused: bool = false,
+    refresh_visible: bool = false,
+    refresh_schedule_failed: bool = false,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     host_capabilities: McpHostCapabilities,
     committed: bool = false,
+
+    /// Read-only freshness observation. Queries never enqueue work; an expired
+    /// admission cannot be projected as ready even if a timer or wake is lost.
+    pub fn admissionFresh(self: *const McpProductState) bool {
+        if (!self.committed or self.admission != .ready) return false;
+        const activation = self.activation orelse return self.admission.ready.catalog_generation == null;
+        if (activation.state() == .unavailable) return false;
+        const selection = self.admission.ready.selection orelse return true;
+        if (selection.selectedTools().len == 0) return true;
+        const age_ms = activation.catalogAgeMs() orelse return false;
+        for (selection.selectedTools()) |tool| {
+            const binding = for (activation.serverHealth()) |server| {
+                if (std.mem.eql(u8, server.id, tool.server_id)) break server.binding_identity;
+            } else return false;
+            const fresh = for (activation.catalogServers()) |server| {
+                if (std.mem.eql(u8, &server.binding_identity, &binding))
+                    break server.fresh and age_ms < server.ttl_remaining_ms;
+            } else false;
+            if (!fresh) return false;
+        }
+        return true;
+    }
 
     pub fn deinit(self: *McpProductState) void {
         if (self.authorization_operation) |*operation|
@@ -439,10 +467,9 @@ fn noMcpRefreshArm(_: ?*anyopaque, _: u64) bool {
 fn noMcpRefreshCancel(_: ?*anyopaque) void {}
 
 pub fn mcpRefreshDelayMs(servers: []const lifecycle.McpCatalogServer) ?u64 {
-    const minimum_proactive_ttl_ms: u64 = 30_000;
     var earliest_ttl_ms: ?u64 = null;
     for (servers) |server| {
-        if (!server.fresh or server.ttl_remaining_ms <= minimum_proactive_ttl_ms)
+        if (!server.fresh or server.ttl_remaining_ms == 0)
             continue;
         earliest_ttl_ms = if (earliest_ttl_ms) |current|
             @min(current, server.ttl_remaining_ms)
@@ -498,13 +525,30 @@ test "MCP refresh timer uses earliest safe fresh catalog TTL" {
             .tool_count = 0,
         },
     };
-    try std.testing.expectEqual(@as(?u64, 35_000), mcpRefreshDelayMs(&servers));
+    try std.testing.expectEqual(@as(?u64, 25_000), mcpRefreshDelayMs(&servers));
     try std.testing.expectEqual(
-        @as(?u64, 135_000),
+        @as(?u64, 125_000),
         mcpRefreshDeadlineMs(&servers, 100_000),
     );
     try std.testing.expectEqual(
-        @as(?u64, null),
+        @as(?u64, 25_000),
         mcpRefreshDelayMs(&.{ servers[2], servers[3] }),
     );
+}
+
+test "MCP refresh deadlines retain short TTL and reject missing clocks or overflow" {
+    var server: lifecycle.McpCatalogServer = .{
+        .binding_identity = @splat(1),
+        .namespace = "short",
+        .fresh = true,
+        .ttl_remaining_ms = 1,
+        .tool_offset = 0,
+        .tool_count = 1,
+    };
+    try std.testing.expectEqual(@as(?u64, 1), mcpRefreshDelayMs(&.{server}));
+    try std.testing.expectEqual(@as(?u64, 101), mcpRefreshDeadlineMs(&.{server}, 100));
+    try std.testing.expectEqual(@as(?u64, null), mcpRefreshDeadlineMs(&.{server}, null));
+    try std.testing.expectEqual(@as(?u64, null), mcpRefreshDeadlineMs(&.{server}, std.math.maxInt(u64)));
+    server.ttl_remaining_ms = 0;
+    try std.testing.expectEqual(@as(?u64, null), mcpRefreshDelayMs(&.{server}));
 }

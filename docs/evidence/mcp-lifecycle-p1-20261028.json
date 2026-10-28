@@ -1,0 +1,60 @@
+{
+  "id": "E-MAC-MCP-LIFECYCLE-P1-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "73033c356be60540829d2787f83c94923c0c9c3d",
+  "platform": "macOS 27.0.1 arm64 / Zig 0.16.0",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "src/agent/mcp/catalog.zig": "e1e8a20b2a7f6acceacab2d0a720f6827fd49e2a6e698f43a227b732b4263e5b",
+    "src/agent/session.zig": "350d1889b956aae2153a5ac325718268ee7a6e61197bd32c7ed1d7f34a4a7ddc",
+    "src/agent/session/runtime.zig": "f16e6864c586f0bf6b6a032aba171184dec95237cecc26fbb193ff72906a39fc",
+    "src/product/control/runtime.zig": "38eba101e8394f14e4eb4a3a20708acf28398e2a21724087cf05664f71c84ee3",
+    "src/product/mcp.zig": "cea88c74948e87d9025cf7ae83357c305f912836921c02a38c995a5ecd4cc222",
+    "src/product/mcp/policy.zig": "adaf0b97931129a062b527850a872aa864176f49a185e390c795f19cedec8042",
+    "src/product/mcp/refresh_job.zig": "84d18237fdadb99465dc931f08c45c12d2d6039be90b8be9876b5c3cda149124",
+    "src/product/mcp/runtime.zig": "6febc17d1fc5500bbc31ad429bf78f10ae5b32e2e1284009250841ea4c3a4a1a",
+    "src/product/mcp/state.zig": "66cea3b2d4d5e26bac3d9bdb37dfdef61c53261e6ddb6158b4022a59e2627a7e",
+    "src/product/mcp/view.zig": "8a80ce0bc3f2cfce8a7a7356a70f969726b20f59ce09850a14dfcc9f556371a1",
+    "tests/agent/lifecycle_test.zig": "62105e2539d9be34f9c6559add8c6a62a4e87f938fcd93ffd37c6a483132ef62",
+    "tests/agent/mcp_interop_test.zig": "b909d13c42ab80e3e7e72e80ac4f775739b0f8fcecf6ce2c7d7d2072d76538d1"
+  },
+  "checks": [
+    {
+      "command": "zig build test-lifecycle test-mcp-interop test-product-control-mcp test-mcp-catalog test-product-mcp-state test-product-mcp-policy test-product-mcp-view test-product-mcp-refresh-job test-product-mcp-runtime --summary all",
+      "exitCode": 0,
+      "passed": 349,
+      "total": 349
+    },
+    {
+      "command": "node --test scripts/architecture-boundaries.test.mjs",
+      "exitCode": 0,
+      "passed": 33,
+      "total": 33
+    },
+    {
+      "command": "npm --workspace @metawork/renderer run check",
+      "exitCode": 0
+    },
+    {
+      "command": "node --test scripts/mcp-page.test.mjs scripts/workbench-contract.test.mjs",
+      "exitCode": 0,
+      "passed": 104,
+      "total": 104
+    }
+  ],
+  "observed": [
+    "Default 30-second TTL schedules refresh at 25 seconds; short TTL refreshes have a minimum interval.",
+    "A held real Core refresh preserves Product creation and Agent restore authority; valid background refresh stays visually idle.",
+    "Core publication before Host installation rejects invalid or stale selections through typed one-shot null-MCP Task creation fallback.",
+    "Descriptor observation age includes completion delivery delay; no enqueue/completion time extension of remaining TTL.",
+    "Known pre-publication busy/allocation/resource rejection retains the old deadline; unknown or post-publication errors fail closed.",
+    "An expiry during rejected-refresh backoff blocks new MCP admission at the original deadline, without bypassing the retry floor.",
+    "Five consecutive failed activations pause automatic retries; ordinary Task creation cannot reset that budget; explicit Refresh can resume.",
+    "Timer arm failure is visible and does not strand the page in refreshing."
+  ],
+  "limits": [
+    "Canonical same-ID source replacement origin-isolation Gate remains failed; see mcp-lifecycle-p0-20261028.json.",
+    "Full Native baseline has an unrelated platform-dependent SQLite history fixture failure; no full Native pass claimed here.",
+    "Remote OAuth/quota and Windows/macOS desktop acceptance remain separate from deterministic and local HTTP fixture results."
+  ]
+}

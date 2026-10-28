@@ -111,6 +111,8 @@ Agent 复制官方 MCP catalog 的 `fresh` 与 `ttl_remaining_ms` 作为产品�
 
 纯 catalog refresh 的串行化不构成已发布 authority 的失效屏障。同一配置下，Agent 保留当前 generation 和一次刷新发布交接所需的紧邻上一代，供 Product 安装 completion 前同步创建或恢复；开始下一次刷新时退役更旧的证明。Selection 仍须来自同一 Runtime owner，Core 仍验证其当刻可用性，Product 仍负责原 deadline 与授权 ceiling；这不接受任意历史 generation，也不延长 TTL。配置 apply 清除旧 generation 并独立阻止相关准入；没有可验证发布结果的失败继续 fail closed。restore 准入观察须区分可用、真实容量不足、MCP 事务忙与 Runtime 不可用，调用方不得将后两者作为容量回收依据。
 
+Agent 将官方 descriptor 调用前的单调时钟观测与该不可变目录一同持有，向 Product 提供可扣除的观测 age；缺少时钟观测、时间倒退或溢出均不能证明 freshness。官方 refresh 入口明确返回 busy、out-of-memory 或 resource-limit 的未发布拒绝时，保留原 generation 并提供 typed `refresh_rejected` 事实；describe/解码/投影失败及未知状态不能按此处理，因为 Core 可能已经发布新目录。此事实只证明未发生替换，不刷新旧 TTL，也不把单服务 `tools/list` 失败发布的收缩目录解释为未发布。
+
 `agent/checkpoint.zig` 独占流式 export 与 typed Session description；`agent/checkpoint_restore.zig` 独占 source callback、restore config/report、post-restore description 与 expectation 对账。Product Control 持久化 opaque blob 和无 secret `CheckpointRecord`；冷启动恢复把经过 size/hash 再校验的 source、精确 Workspace/ExecutionConfig 与 null Skill catalog/policy、null MCP selection、null durable permission rules交给 Agent。AgentCore 可以返回 complete 或 degraded 的有效 Session；二者都保留同一 Conversation，degraded report 精确说明被安全失效的可选 authority。restore 不读取私有 transcript，不从 CLI 行为推断 resume，也不在 `agent/` 外复制 ABI。
 
 `Runtime.restoreSessionRoute` 按 catalog query 的既有并发范式工作：在 `sessions_mutex` 内预留 Session slot 并递增 active restore count，解锁后执行可能流式读取整个 checkpoint 的 ABI 调用，返回后重新加锁对账并在 shutdown 已开始时拒绝安装。`Runtime.shutdown()` 自己等待 restore、catalog 与 MCP in-flight 调用归零，然后关闭 Sessions、检查 catalog leases 并调用 `RuntimeApi.destroy`；Product Control/Application 的正常关闭顺序不能替代这条 Agent-owned fence。

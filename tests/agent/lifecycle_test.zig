@@ -956,6 +956,23 @@ test "MCP refresh failure immediately invalidates the previous selection generat
     );
 }
 
+test "MCP typed refresh rejection retains the published generation without extending it" {
+    for ([_]u32{ wire.STATUS_BUSY, wire.STATUS_OUT_OF_MEMORY, wire.STATUS_RESOURCE_LIMIT }) |status| {
+        fake_core.reset();
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const projection = try runtime.refreshMcpCatalog();
+        defer projection.deinit();
+        fake_core.forceNextMcpRefreshStatus(status);
+        try std.testing.expectError(error.McpRefreshRejected, runtime.refreshMcpCatalog());
+        const retained = try runtime.createMcpSelection(projection, &.{});
+        retained.deinit();
+    }
+}
+
 test "MCP catalog refresh binds explicit Session selection and idle replacement" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });

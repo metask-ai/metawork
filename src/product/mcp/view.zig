@@ -103,6 +103,7 @@ fn mcpToolSelectedForNewTask(
     server_id: []const u8,
     tool_name: []const u8,
 ) bool {
+    if (!mcp.admissionFresh()) return false;
     const ready = switch (mcp.admission) {
         .ready => |value| value,
         .blocked => return false,
@@ -118,6 +119,7 @@ fn mcpServerHasNewTaskAccess(
     mcp: *const mcp_state.McpProductState,
     server_id: []const u8,
 ) bool {
+    if (!mcp.admissionFresh()) return false;
     const ready = switch (mcp.admission) {
         .ready => |value| value,
         .blocked => return false,
@@ -132,6 +134,7 @@ fn mcpNewTaskAccess(
     mcp: *const mcp_state.McpProductState,
     server_id: []const u8,
 ) []const u8 {
+    if (mcp.admission == .ready and !mcp.admissionFresh()) return "unavailable";
     return switch (mcp.admission) {
         .ready => if (mcpServerHasNewTaskAccess(mcp, server_id))
             "available"
@@ -463,7 +466,7 @@ pub fn writeProjection(
     writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"configurationApply\":\"{s}\",\"authorizationOperation\":", .{
         @tagName(mcpAvailability(mcp)),
         @tagName(inspection.health),
-        if (input.refresh_job_active or mcp.refresh_pending) "refreshing" else "idle",
+        if (!mcp.refresh_schedule_failed and (input.refresh_job_active or mcp.refresh_pending) and (mcp.refresh_visible or !mcp.admissionFresh())) "refreshing" else "idle",
         @tagName(mcp.configuration_apply_state),
     }) catch return error.SnapshotTooLarge;
     try writeMcpAuthorizationOperation(writer, mcp, registry);
@@ -531,7 +534,13 @@ pub fn writeProjection(
             @tagName(status),
             mcpNewTaskAccess(mcp, server.id),
         }) catch return error.SnapshotTooLarge;
-        try input.text.writeJson(writer, switch (status) {
+        try input.text.writeJson(writer, if (mcp.refresh_schedule_failed)
+            "Automatic refresh could not be scheduled. Select Refresh to retry."
+        else if (mcp.refresh_paused)
+            "Tool catalog refresh paused after repeated failures. Select Refresh to retry."
+        else if (mcp.admission == .ready and !mcp.admissionFresh())
+            "Tool catalog expired"
+        else switch (status) {
             .not_loaded, .ready, .disabled => "",
             .needs_authentication => "Credential is unavailable",
             .@"unreachable" => "Server is unavailable",

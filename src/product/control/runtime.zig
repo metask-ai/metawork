@@ -4255,15 +4255,12 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
-        var mcp_selection = if (self.mcp) |*mcp|
+        const mcp_admission: mcp_runtime.NewTaskAdmission = if (self.mcp) |*mcp|
             mcp.selectionForNewTask()
         else
-            null;
-        var mcp_authority: product_task.McpAuthorityAtCreation = if (self.mcp) |*mcp|
-            if (mcp.newTaskAuthorityReady())
-                if (mcp_selection == null) .ready_without_selection else .ready_with_selection
-            else
-                .unavailable
+            .{ .available = false, .selection = null };
+        var mcp_authority: product_task.McpAuthorityAtCreation = if (mcp_admission.available)
+            if (mcp_admission.selection == null) .ready_without_selection else .ready_with_selection
         else
             .unavailable;
         var task_input: task_runtime.CreateTaskInput = .{
@@ -4290,7 +4287,7 @@ pub const Runtime = struct {
             .canonical_user_home = self.canonical_user_home orelse "",
             .skill_catalog = catalog_lease,
             .granted_skill_ids = granted_skill_ids.items,
-            .mcp_selection = mcp_selection,
+            .mcp_selection = mcp_admission.selection,
             .mcp_authority = mcp_authority,
             .pinned_catalog = &pinned_catalog,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
@@ -4316,9 +4313,8 @@ pub const Runtime = struct {
                 // authority. A malformed null create is not recoverable here.
                 if (task_input.mcp_selection == null) return err;
                 self.recoverExpiredMcpCatalogNoFail();
-                mcp_selection = null;
                 mcp_authority = .unavailable;
-                task_input.mcp_selection = mcp_selection;
+                task_input.mcp_selection = null;
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
                     error.SessionCapacity => return self.sessionPressureError(null),
@@ -7028,6 +7024,8 @@ pub const Runtime = struct {
         if (request.task_id) |id| if (self.task_runtime.taskHasActiveOperation(id)) {
             self.encoded_views.invalidate(.taskPage);
         };
+        if (request.management == .mcp) if (self.mcp) |*mcp|
+            if (mcp.admissionExpired()) self.encoded_views.invalidate(.management);
         inline for (std.meta.fields(view_cache.Kind)) |field| {
             const kind: view_cache.Kind = @enumFromInt(field.value);
             const key = viewKey(request, kind);
@@ -9493,7 +9491,8 @@ pub const Runtime = struct {
 
     fn commitMcpRefreshJobNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
-        return runtime.syncRefreshJob();
+        const changed = runtime.syncRefreshJob();
+        return runtime.syncFreshness() or changed;
     }
 
     fn workspaceHasTasks(self: *const Runtime, workspace_id: u64) bool {
@@ -20623,7 +20622,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"configurationApply\":\"failed\"",
     ) != null);
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.refreshing,
+        McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending);
@@ -21037,7 +21036,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 1,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -21074,7 +21072,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 2,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -21093,7 +21090,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 4,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,

@@ -15,6 +15,7 @@ pub const State = enum(u8) {
 
 pub const Outcome = union(enum) {
     empty,
+    retained,
     activated: struct {
         activation: *agent.McpActivation,
         selection: ?*agent.McpSelection,
@@ -27,7 +28,6 @@ pub const Job = struct {
     catalog: ports.Catalog,
     notifier: ports.Notifier,
     request_generation: u64,
-    requested_at_ms: ?u64,
     arena: std.heap.ArenaAllocator,
     allowlists: []const agent.McpServerAllowlist,
     build_admission: bool,
@@ -49,7 +49,7 @@ pub const Job = struct {
                 if (activated.selection) |selection| selection.deinit();
                 activated.activation.deinit();
             },
-            .empty, .unavailable => {},
+            .empty, .retained, .unavailable => {},
         }
         self.arena.deinit();
         const allocator = self.allocator;
@@ -87,7 +87,7 @@ pub const Job = struct {
                         .selection = selection,
                     } };
                 },
-                .unavailable => .unavailable,
+                .unavailable => |reason| if (reason == .refresh_rejected) .retained else .unavailable,
             }
         else |_|
             .unavailable;
@@ -110,9 +110,11 @@ pub const Job = struct {
 
 const TestHarness = struct {
     notifications: usize = 0,
+    outcome: agent.McpActivationOutcome = .empty,
 
-    fn activate(_: *anyopaque) ports.CatalogError!agent.McpActivationOutcome {
-        return .empty;
+    fn activate(context: *anyopaque) ports.CatalogError!agent.McpActivationOutcome {
+        const self: *TestHarness = @ptrCast(@alignCast(context));
+        return self.outcome;
     }
 
     fn createAdmissionSelection(
@@ -146,7 +148,6 @@ const TestHarness = struct {
             },
             .notifier = .{ .context = self, .notify_fn = notify },
             .request_generation = 1,
-            .requested_at_ms = null,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .allowlists = &.{},
             .build_admission = false,
@@ -176,4 +177,15 @@ test "Product MCP refresh job cancellation transfers queued ownership once" {
 
     try std.testing.expectEqual(State.cancelled, job.state.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "Product MCP refresh job distinguishes pre-publication rejection from unknown failure" {
+    for ([_]agent.McpActivationUnavailableReason{ .refresh_rejected, .refresh_failed, .invalid_catalog }) |reason| {
+        var harness = TestHarness{ .outcome = .{ .unavailable = reason } };
+        const job = try harness.job();
+        defer job.deinit();
+        job.executorJob().execute_fn(job);
+        try std.testing.expectEqual(State.completed, job.state.load(.acquire));
+        try std.testing.expect(if (reason == .refresh_rejected) job.outcome == .retained else job.outcome == .unavailable);
+    }
 }
