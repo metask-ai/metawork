@@ -239,7 +239,7 @@ CREATE TABLE runs (
     CONSTRAINT runs_id_domain CHECK(id<>X'0000000000000000'),
     CONSTRAINT runs_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT runs_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT runs_ordinal_domain_2 CHECK(ordinal<=4294967295),
+    CONSTRAINT runs_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT runs_coverage_type CHECK(typeof(coverage)='text'),
     CONSTRAINT runs_coverage_domain CHECK(coverage IN ('pending','covered','excluded')),
     CONSTRAINT runs_generation_type CHECK(typeof(generation)='blob'),
@@ -259,7 +259,7 @@ CREATE TABLE runs (
     CONSTRAINT runs_input_json_type CHECK(typeof(input_json)='text'),
     CONSTRAINT runs_input_json_json CHECK(json_valid(input_json)),
     CONSTRAINT runs_submission_json_type CHECK(submission_json IS NULL OR typeof(submission_json)='text'),
-    CONSTRAINT runs_submission_json_domain CHECK(submission_json IS NULL OR json_valid(submission_json)),
+    CONSTRAINT runs_submission_json_json CHECK(submission_json IS NULL OR json_valid(submission_json)),
     CONSTRAINT runs_assistant_type CHECK(typeof(assistant)='blob'),
     CONSTRAINT runs_assistant_redacted_type CHECK(typeof(assistant_redacted)='integer'),
     CONSTRAINT runs_assistant_redacted_domain CHECK(assistant_redacted IN (0,1)),
@@ -302,7 +302,7 @@ CREATE TABLE runs (
     CONSTRAINT runs_next_activity_order_length CHECK(length(next_activity_order)=8),
     CONSTRAINT runs_next_activity_order_domain CHECK(next_activity_order<>X'0000000000000000'),
     CONSTRAINT runs_outputs_json_type CHECK(typeof(outputs_json)='text'),
-    CONSTRAINT runs_outputs_json_domain CHECK(json_valid(outputs_json)),
+    CONSTRAINT runs_outputs_json_json CHECK(json_valid(outputs_json)),
     CONSTRAINT runs_assistant_output_complete CHECK((assistant_output_kind IS NULL AND assistant_output_start IS NULL) OR (assistant_output_kind IS NOT NULL AND assistant_output_start IS NOT NULL))
 );
 
@@ -336,7 +336,7 @@ CREATE TABLE run_tools (
     CONSTRAINT run_tools_id_length CHECK(length(id)>0),
     CONSTRAINT run_tools_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT run_tools_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT run_tools_ordinal_domain_2 CHECK(ordinal<=4294967295),
+    CONSTRAINT run_tools_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT run_tools_activity_order_type CHECK(typeof(activity_order)='blob'),
     CONSTRAINT run_tools_activity_order_length CHECK(length(activity_order)=8),
     CONSTRAINT run_tools_activity_order_domain CHECK(activity_order<>X'0000000000000000'),
@@ -394,7 +394,7 @@ CREATE TABLE run_file_changes (
     CONSTRAINT run_file_changes_id_length CHECK(length(id)>0),
     CONSTRAINT run_file_changes_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT run_file_changes_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT run_file_changes_ordinal_domain_2 CHECK(ordinal<=4294967295),
+    CONSTRAINT run_file_changes_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT run_file_changes_activity_order_type CHECK(typeof(activity_order)='blob'),
     CONSTRAINT run_file_changes_activity_order_length CHECK(length(activity_order)=8),
     CONSTRAINT run_file_changes_activity_order_domain CHECK(activity_order<>X'0000000000000000'),
@@ -443,9 +443,9 @@ CREATE TABLE task_compacts (
     CONSTRAINT task_compacts_id_domain CHECK(id<>X'0000000000000000'),
     CONSTRAINT task_compacts_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT task_compacts_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT task_compacts_ordinal_domain_limit CHECK(ordinal<=4294967295),
+    CONSTRAINT task_compacts_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT task_compacts_payload_type CHECK(typeof(payload)='text'),
-    CONSTRAINT task_compacts_payload_domain CHECK(json_valid(payload))
+    CONSTRAINT task_compacts_payload_json CHECK(json_valid(payload))
 );
 
 CREATE TABLE task_ui_history (
@@ -461,9 +461,9 @@ CREATE TABLE task_ui_history (
     CONSTRAINT task_ui_history_request_id_length CHECK(length(request_id)=8),
     CONSTRAINT task_ui_history_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT task_ui_history_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT task_ui_history_ordinal_domain_limit CHECK(ordinal<=4294967295),
+    CONSTRAINT task_ui_history_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT task_ui_history_payload_type CHECK(typeof(payload)='text'),
-    CONSTRAINT task_ui_history_payload_domain CHECK(json_valid(payload))
+    CONSTRAINT task_ui_history_payload_json CHECK(json_valid(payload))
 );
 
 CREATE TABLE task_input_submissions (
@@ -479,9 +479,9 @@ CREATE TABLE task_input_submissions (
     CONSTRAINT task_input_submissions_operation_id_length CHECK(length(operation_id)>0),
     CONSTRAINT task_input_submissions_ordinal_type CHECK(typeof(ordinal)='integer'),
     CONSTRAINT task_input_submissions_ordinal_domain CHECK(ordinal>=0),
-    CONSTRAINT task_input_submissions_ordinal_domain_limit CHECK(ordinal<=4294967295),
+    CONSTRAINT task_input_submissions_ordinal_max CHECK(ordinal<=4294967295),
     CONSTRAINT task_input_submissions_payload_type CHECK(typeof(payload)='text'),
-    CONSTRAINT task_input_submissions_payload_domain CHECK(json_valid(payload))
+    CONSTRAINT task_input_submissions_payload_json CHECK(json_valid(payload))
 );
 
 CREATE TABLE run_additional_inputs (
@@ -499,7 +499,7 @@ CREATE TABLE run_additional_inputs (
     CONSTRAINT run_additional_inputs_id_length CHECK(length(id)=8),
     CONSTRAINT run_additional_inputs_id_domain CHECK(id<>X'0000000000000000'),
     CONSTRAINT run_additional_inputs_payload_type CHECK(typeof(payload)='text'),
-    CONSTRAINT run_additional_inputs_payload_domain CHECK(json_valid(payload))
+    CONSTRAINT run_additional_inputs_payload_json CHECK(json_valid(payload))
 );
 
 CREATE TABLE retained_records (

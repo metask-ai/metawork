@@ -5,9 +5,9 @@ const builtin = @import("builtin");
 const storage = @import("storage");
 const product = @import("metawork_product_control");
 const wire = @import("metawork_product_task").history;
-pub const file_name = "workbench-history-v1.sqlite";
-const import_name = ".workbench-history-v1.import.sqlite";
-const recovery_prefix = ".workbench-history-v1.recovery.";
+pub const file_name = "workbench-history.sqlite";
+const import_name = ".workbench-history.import.sqlite";
+const recovery_prefix = ".workbench-history.recovery.";
 const Credential = struct {
     bytes: [4096]u8 = @splat(0),
     length: usize = 0,
@@ -604,32 +604,6 @@ test "SQLite history preference recovery matches Runtime without changing Task p
         try std.testing.expectEqualStrings(case[2], @tagName(wire.recoveredDefaults(loaded.value).mode));
         try std.testing.expectEqualStrings("approval_required", loaded.value.tasks[0].permission_profile);
         try std.testing.expectEqualStrings("approval_required", loaded.value.tasks[0].runs[0].permission_profile);
-    }
-}
-
-test "SQLite history unpublished filename cut ignores development database and its recovery namespace" {
-    const a = std.testing.allocator;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
-    defer a.free(directory);
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const aa = arena.allocator();
-    const state = try testHistory(aa, 1, 1, "published framed source");
-    var store = try Store.init(std.testing.io, a, directory);
-    defer store.deinit();
-    const source = try wire.encodeAlloc(aa, state, .{}, store.limits);
-    try store.legacy.commit(source);
-    const old_files = [_][]const u8{ "workbench-history.sqlite", "workbench-history.sqlite-wal", "workbench-history.sqlite-shm", ".workbench-history.import.sqlite", ".workbench-history.recovery.development.tmp", ".workbench-history.recovery.development.workbench-history.sqlite.bak" };
-    for (old_files) |name| try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "unpublished development bytes" });
-    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
-    const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
-    try std.testing.expectEqualStrings("published framed source", loaded.value.tasks[0].runs[0].assistant);
-    for (old_files) |name| {
-        const bytes = try store.legacy.dir.readFileAlloc(std.testing.io, name, a, .limited(1024));
-        defer a.free(bytes);
-        try std.testing.expectEqualStrings("unpublished development bytes", bytes);
     }
 }
 

@@ -430,7 +430,7 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 ### 4.3 `workbench-history.store`
 
-`<MetaWork data dir>/workbench/workbench-history-v1.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
+`<MetaWork data dir>/workbench/workbench-history.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
 
 Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普通工具文字、文件引用和 File Changes 不构成成果。记录归属其 Task/Run 与 Workspace，只保存非零成果身份、Workspace 相对 locator、交付时的大小和 SHA-256，不保存文件字节或组件版本。相同身份与相同内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。记录随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
 
