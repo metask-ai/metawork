@@ -1,10 +1,11 @@
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
 const options = parseOptions(process.argv.slice(2));
+let catalogLists = 0;
 const imageData =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3V8AAAAASUVORK5CYII=";
 if (options.transport === "stdio") startStdio();
@@ -227,8 +228,17 @@ function startHttp() {
                 part.type === "text" &&
                 part.text?.includes("Call the revoked echo tool."),
             );
+          const expiredCall = payload.messages
+            ?.at(-1)
+            ?.content?.some(
+              (part) =>
+                part.type === "text" &&
+                part.text?.includes("Call the expired echo tool."),
+            );
           if (revokedCall && (mcpTools.length !== 0 || !selectedMcpToolName))
             throw new Error("revoked MCP authority was still offered");
+          if (expiredCall && (mcpTools.length !== 0 || !selectedMcpToolName))
+            throw new Error("expired MCP authority was still offered");
           if (
             restoredCall &&
             (!toolResult || !mcpTool || mcpTools.length !== 1)
@@ -248,13 +258,14 @@ function startHttp() {
             restoredCall ||
             deniedCall ||
             revokedCall ||
+            expiredCall ||
             writeCall
               ? providerToolSse(
                   `mcp-message-${providerCalls + 1}`,
                   `mcp-call-${providerCalls + 1}`,
                   writeCall
                     ? "Write"
-                    : revokedCall
+                    : revokedCall || expiredCall
                       ? selectedMcpToolName
                       : mcpTool.name,
                   writeCall
@@ -412,7 +423,7 @@ async function handle(message, send) {
 
   switch (message.method) {
     case "server/discover": {
-      if (options.protocolVersion === "2025-06-18") {
+      if (options.protocolVersion !== "2026-07-28") {
         respondError(send, message.id, -32601, "method not found");
         return;
       }
@@ -446,6 +457,16 @@ async function handle(message, send) {
       return;
     }
     case "tools/list": {
+      catalogLists += 1;
+      if (options.refreshGate && catalogLists > 1) {
+        writeFileSync(`${options.refreshGate}.waiting`, "waiting");
+        while (!existsSync(`${options.refreshGate}.release`))
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        if (existsSync(`${options.refreshGate}.fail`)) {
+          respondError(send, message.id, -32000, "synthetic catalog failure");
+          return;
+        }
+      }
       if (Array.isArray(message.params)) process.exit(77);
       if (options.protocolVersion === "2026-07-28")
         requireModernMetadata(message);
@@ -575,6 +596,7 @@ function parseOptions(args) {
   let framing = "json";
   let ttlMs = 60_000;
   let resultKind = "text";
+  let refreshGate = null;
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
       case "--protocol":
@@ -600,6 +622,9 @@ function parseOptions(args) {
         break;
       case "--ttl-ms":
         ttlMs = Number(args[(index += 1)] ?? "");
+        break;
+      case "--refresh-gate":
+        refreshGate = args[(index += 1)] ?? null;
         break;
       default:
         throw new Error(`unknown MCP fixture option: ${args[index]}`);
@@ -627,5 +652,6 @@ function parseOptions(args) {
     framing,
     ttlMs,
     resultKind,
+    refreshGate,
   };
 }
