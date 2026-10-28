@@ -981,7 +981,10 @@ pub const Runtime = struct {
             .restart_required => .{ .blocked = .pending_restart },
             .unknown => .{ .blocked = .alignment_unknown },
             .current => current: {
-                if (self.state.activation_failed)
+                // A rejected apply fences Agent admission even when Core
+                // retained its prior Runtime. Desired edits must remain
+                // possible, without rebuilding authority from that old view.
+                if (self.state.activation_failed or self.state.configuration_apply_state == .failed)
                     break :current .{ .blocked = .activation_unavailable };
                 const activation = self.state.activation orelse break :current .{ .ready = .{
                     .selection = null,
@@ -1611,6 +1614,16 @@ pub const Runtime = struct {
         else
             false;
         return expired or !self.state.admissionFresh();
+    }
+
+    /// Cached management views must also age while admission is already
+    /// blocked (for example after an apply rejection).
+    pub fn catalogObservationExpired(self: *const Runtime) bool {
+        const activation = self.state.activation orelse return false;
+        const age = activation.catalogAgeMs() orelse return true;
+        for (activation.catalogServers()) |server|
+            if (server.fresh and age >= server.ttl_remaining_ms) return true;
+        return false;
     }
 
     fn expireAdmission(self: *Runtime) void {

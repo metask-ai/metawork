@@ -740,7 +740,6 @@ export function McpPage({
     !managementReady ||
     management.operation !== "idle" ||
     management.configurationApply === "applying" ||
-    management.availability === "unavailable" ||
     refreshPending ||
     createPending ||
     pendingServerId !== null ||
@@ -1417,7 +1416,11 @@ export function McpPage({
       );
     }
 
-    if (server.runtimeStatus !== "ready")
+    if (server.runtimeStatus !== "ready") {
+      const needsApply =
+        server.runtimeStatus === "not_loaded" &&
+        (management.runtimeAlignment !== "current" ||
+          management.configurationApply === "failed");
       return nextActionCard(
         t(`mcp.status.${server.runtimeStatus}`),
         server.runtimeStatus === "invalid_catalog"
@@ -1428,20 +1431,17 @@ export function McpPage({
             variant="primary"
             size="sm"
             disabled={
-              server.runtimeStatus === "not_loaded"
-                ? applyPending || mutationLocked
-                : refreshLocked
+              needsApply ? applyPending || mutationLocked : refreshLocked
             }
             onClick={() =>
-              void (server.runtimeStatus === "not_loaded"
-                ? applyConfiguration()
-                : refreshCatalog())
+              void (needsApply ? applyConfiguration() : refreshCatalog())
             }
           >
             {t("mcp.next.retry_connection.action")}
           </Button>
         ),
       );
+    }
 
     const discoveredTools = server.tools.filter((tool) => tool.discovered);
     if (discoveredTools.length > 0 && server.newTaskAccess === "not_allowed")

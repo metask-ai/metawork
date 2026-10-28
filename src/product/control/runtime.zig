@@ -7025,7 +7025,7 @@ pub const Runtime = struct {
             self.encoded_views.invalidate(.taskPage);
         };
         if (request.management == .mcp) if (self.mcp) |*mcp|
-            if (mcp.admissionExpired()) self.encoded_views.invalidate(.management);
+            if (mcp.admissionExpired() or mcp.catalogObservationExpired()) self.encoded_views.invalidate(.management);
         inline for (std.meta.fields(view_cache.Kind)) |field| {
             const kind: view_cache.Kind = @enumFromInt(field.value);
             const key = viewKey(request, kind);
@@ -20778,7 +20778,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
 
-test "MCP startup health commits a safe degraded Runtime projection" {
+test "MCP startup activation failure stays globally unavailable without inventing network failures" {
     const ManagementEffects = struct {
         fn journal(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
             return .committed;
@@ -20884,7 +20884,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
+        "\"availability\":\"unavailable\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -1507,6 +1507,64 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
+test("MCP distinguishes unapplied connections from a loaded runtime missing its catalog", async () => {
+  const calls = [];
+  const pending = {
+    ...servers[0],
+    runtimeStatus: "not_loaded",
+    newTaskAccess: "unavailable",
+    safeDiagnostic: "Tool catalog is unavailable. Select Refresh to retry.",
+    tools: [],
+  };
+  const management = {
+    availability: "unavailable",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "8",
+    runtimeAlignment: "current",
+    configurationApply: "idle",
+    redacted: false,
+    servers: [pending],
+  };
+  const handlers = {
+    onApply: async () => {
+      calls.push("apply");
+      return { outcome: "started" };
+    },
+    onRefresh: async () => {
+      calls.push("refresh");
+      return { outcome: "started" };
+    },
+  };
+  const view = render(pageElement(management, "", handlers));
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  let drawer = screen.getByRole("dialog");
+  assert.equal(within(drawer).queryByText("Cannot connect"), null);
+  assert.ok(within(drawer).getByText(pending.safeDiagnostic));
+  fireEvent.click(
+    within(drawer).getByRole("button", { name: "Retry connection" }),
+  );
+  await waitFor(() => assert.deepEqual(calls, ["refresh"]));
+  view.rerender(
+    pageElement(
+      {
+        ...management,
+        configurationApply: "failed",
+        runtimeAlignment: "restart_required",
+      },
+      "",
+      handlers,
+    ),
+  );
+  drawer = screen.getByRole("dialog");
+  fireEvent.click(
+    within(drawer).getByRole("button", { name: "Retry connection" }),
+  );
+  await waitFor(() => assert.deepEqual(calls, ["refresh", "apply"]));
+  assert.ok(screen.getByText("Connection changes were not applied"));
+  assert.equal(screen.queryByText("Cannot connect"), null);
+});
+
 test("MCP password input submits once and clears drafts on cancel, byte limit, revision and close", async () => {
   const server = {
     ...servers[2],

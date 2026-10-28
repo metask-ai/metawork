@@ -1125,6 +1125,144 @@ fn expectIsolatedMcpActivation(protocol_version: []const u8) !void {
     try std.testing.expectEqualStrings("deterministic-http", selection.selectedTools()[0].server_id);
 }
 
+test "real Product cold mixed configuration failure does not invent server network failures" {
+    try expectProductAtomicApplyFailure(false);
+}
+
+test "real Product adding a bad server preserves formal health and can recover by disabling it" {
+    try expectProductAtomicApplyFailure(true);
+}
+
+fn expectProductAtomicApplyFailure(healthy_loaded: bool) !void {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    const trace = try std.fmt.allocPrint(a, "{s}/apply-trace.jsonl", .{root});
+    defer a.free(trace);
+    var fixture = try HttpFixture.start("2026-07-28", "json", trace);
+    defer fixture.deinit();
+    var stopped = try HttpFixture.start("2026-07-28", "json", trace);
+    const bad_endpoint = try a.dupe(u8, stopped.endpoint);
+    defer a.free(bad_endpoint);
+    stopped.deinit();
+    var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    const approved = &preparation.registry.?.value.servers[0];
+    const fingerprint = mcp_configuration.connectionFingerprint(approved.*);
+    approved.connection_approval = .{ .fingerprint = try preparation.registry.?.arena.allocator().dupe(u8, &fingerprint) };
+    var healthy_build = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{});
+    defer healthy_build.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, a, .{ .max_sessions = 1 });
+    var runtime_owned = true;
+    defer if (runtime_owned) {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    };
+    var activation: ?*agent.McpActivation = null;
+    var activation_owned = true;
+    defer if (activation_owned) {
+        if (activation) |value| value.deinit();
+    };
+    if (healthy_loaded) {
+        try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&healthy_build.input.?));
+        activation = switch (try runtime.activateMcp()) {
+            .activated => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+    }
+    var empty: mcp_configuration.Preparation = .{ .allocator = a, .state = .empty };
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(a, if (healthy_loaded) &preparation else &empty)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const storage = try a.alloc(u8, mcp_configuration.max_store_bytes);
+    defer a.free(storage);
+    var durable: DurableRegistry = .{ .storage = storage };
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{
+        .preparation = &preparation,
+        .activation = activation,
+        .management = managementConfiguration(&durable, &manifest),
+        .host_capabilities = .{ .connection_approval = true },
+    } });
+    runtime_owned = false;
+    preparation_owned = false;
+    activation_owned = false;
+    manifest_owned = false;
+    defer shutdownProduct(&control, runtime);
+    try std.testing.expectEqual(.saved, try control.createMcpHttpServer(1, .{ .display_name = "Unreachable candidate", .url = bad_endpoint, .timeout_ms = 200, .negotiation = "modern_only" }));
+    var candidate = try mcp_configuration.prepare(a, durable.storage[0..durable.len], true, false, .{}, product_mcp_limits);
+    defer candidate.deinit();
+    const bad_id = try a.dupe(u8, candidate.registry.?.value.servers[1].id);
+    defer a.free(bad_id);
+    var candidate_build = try mcp_platform.buildRuntime(std.testing.io, a, &candidate, .{});
+    defer candidate_build.deinit();
+    try control.beginMcpConfigurationApply(2);
+    try std.testing.expectEqual(.rejected, try runtime.applyMcpConfiguration(&candidate_build.input.?));
+    control.failMcpConfigurationApply(2);
+    var output: [512 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&output);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, snapshot, .{});
+    defer parsed.deinit();
+    const mcp = parsed.value.object.get("mcp").?.object;
+    try std.testing.expectEqualStrings(if (healthy_loaded) "degraded" else "unavailable", mcp.get("availability").?.string);
+    try std.testing.expectEqualStrings("failed", mcp.get("configurationApply").?.string);
+    const servers = mcp.get("servers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), servers.len);
+    try std.testing.expectEqualStrings(if (healthy_loaded) "ready" else "not_loaded", servers[0].object.get("runtimeStatus").?.string);
+    try std.testing.expectEqualStrings("not_loaded", servers[1].object.get("runtimeStatus").?.string);
+    for (servers) |server| {
+        try std.testing.expectEqualStrings("restart_required", server.object.get("newTaskAccess").?.string);
+        try std.testing.expect(!std.mem.eql(u8, "Server is unavailable", server.object.get("safeDiagnostic").?.string));
+    }
+    // A disabled bad descriptor is omitted from the complete candidate. The
+    // same atomic apply route can then accept the remaining healthy server.
+    try std.testing.expectEqual(.saved, try control.setMcpServerEnabled(2, .{ .server_id = bad_id, .enabled = false }));
+    var recovered = try mcp_configuration.prepare(a, durable.storage[0..durable.len], true, false, .{}, product_mcp_limits);
+    var recovered_owned = true;
+    defer if (recovered_owned) recovered.deinit();
+    var recovered_manifest = (try mcp_configuration.RuntimeManifest.candidate(a, &recovered)).?;
+    var recovered_manifest_owned = true;
+    defer if (recovered_manifest_owned) recovered_manifest.deinit();
+    var recovered_build = try mcp_platform.buildRuntime(std.testing.io, a, &recovered, .{});
+    defer recovered_build.deinit();
+    try control.beginMcpConfigurationApply(3);
+    try std.testing.expectEqual(.applied, try runtime.applyMcpConfiguration(&recovered_build.input.?));
+    const recovered_activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var recovered_activation_owned = true;
+    defer if (recovered_activation_owned) recovered_activation.deinit();
+    const selection = recovered_activation.takeSelection();
+    var selection_owned = true;
+    defer if (selection_owned) {
+        if (selection) |value| value.deinit();
+    };
+    try std.testing.expect(control.completeMcpConfigurationApply(3, &recovered, &recovered_manifest, recovered_activation, selection, false));
+    recovered_owned = false;
+    recovered_manifest_owned = false;
+    recovered_activation_owned = false;
+    selection_owned = false;
+    const recovered_snapshot = try control.writeAggregateFixture(&output);
+    try std.testing.expect(std.mem.indexOf(u8, recovered_snapshot, "\"availability\":\"ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recovered_snapshot, "\"configurationApply\":\"idle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recovered_snapshot, "\"runtimeStatus\":\"disabled\"") != null);
+    try std.testing.expectEqual(.saved, try control.updateMcpHttpConnection(3, .{
+        .server_id = "deterministic-http",
+        .display_name = "Replaced origin",
+        .negotiation = "modern_only",
+        .timeout_ms = 2000,
+        .url = bad_endpoint,
+        .auth_mode = .none,
+    }));
+    const replaced_snapshot = try control.writeAggregateFixture(&output);
+    try std.testing.expect(std.mem.indexOf(u8, replaced_snapshot, "\"runtimeStatus\":\"ready\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replaced_snapshot, "\"discovered\":true") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replaced_snapshot, "\"availability\":\"unavailable\"") != null);
+}
+
 const RestoreBytes = struct {
     bytes: std.ArrayList(u8) = .empty,
     offset: usize = 0,
