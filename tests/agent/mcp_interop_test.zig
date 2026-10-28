@@ -1888,7 +1888,11 @@ test "real Product proactive refresh preserves new Task authority and quiet back
     try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .proactive);
 }
 
-const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive };
+test "real Product HTTP429 refresh retries are bounded and explicit refresh resumes" {
+    try expectMcpProductAdmissionCase("2026-07-28", .streamable_http, .rate_limit);
+}
+
+const McpCreationRace = enum { expiry, core_withdrawal, stale_host, proactive, rate_limit };
 
 fn expectMcpProductAdmission(protocol_version: []const u8, transport: agent.McpTransportKind) !void {
     try expectMcpProductAdmissionCase(protocol_version, transport, .expiry);
@@ -2115,6 +2119,56 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
     );
+    if (race == .rate_limit) {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "publication.rate_limit", .data = "429" });
+        for (0..5) |attempt| {
+            refresh_timer.now_ms = refresh_timer.armed_at_ms.?;
+            restarted_workbench.onMcpRefreshTimer();
+            for (0..2000) |_| {
+                try restarted_workbench.drainAgentEvents();
+                restarted_workbench.syncLifecycle();
+                if (!restarted_workbench.mcp.?.hasRefreshJob() and mcp_types.testing.state(&restarted_workbench.mcp.?).refresh_failures == attempt + 1) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.TestUnexpectedResult;
+            if (attempt < 4) {
+                const delay = @as(u64, 1_000) << @as(u6, @intCast(attempt));
+                try std.testing.expectEqual(refresh_timer.now_ms + delay, refresh_timer.armed_at_ms.?);
+            }
+        }
+        const state = mcp_types.testing.state(&restarted_workbench.mcp.?);
+        try std.testing.expect(state.refresh_paused);
+        try std.testing.expect(!restarted_workbench.mcp.?.authorityStable());
+        const rejected = try tmp.dir.readFileAlloc(std.testing.io, "product-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(rejected);
+        try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, rejected, "\"direction\":\"rate_limited\""));
+        const lists_before = std.mem.count(u8, rejected, "\"method\":\"tools/list\"");
+        refresh_timer.now_ms += 60_000;
+        for (0..10) |_| {
+            restarted_workbench.onMcpRefreshTimer();
+            _ = restarted_workbench.mcp.?.selectionForNewTask();
+        }
+        const unavailable_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, 1, restarted_workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        try std.testing.expectEqual(.unavailable, try restarted_workbench.taskMcpAuthority(unavailable_task));
+        try std.testing.expect(state.refresh_paused);
+        try std.testing.expect(!restarted_workbench.mcp.?.hasRefreshJob());
+        const paused = try tmp.dir.readFileAlloc(std.testing.io, "product-trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(paused);
+        try std.testing.expectEqual(lists_before, std.mem.count(u8, paused, "\"method\":\"tools/list\""));
+        try tmp.dir.deleteFile(std.testing.io, "publication.rate_limit");
+        try restarted_workbench.refreshMcpCatalog();
+        for (0..2000) |_| {
+            try restarted_workbench.drainAgentEvents();
+            restarted_workbench.syncLifecycle();
+            if (!restarted_workbench.mcp.?.hasRefreshJob() and restarted_workbench.mcp.?.authorityStable()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expect(!state.refresh_paused);
+        try std.testing.expectEqual(@as(u8, 0), state.refresh_failures);
+        try std.testing.expectEqual(.unavailable, try restarted_workbench.taskMcpAuthority(unavailable_task));
+        const recovered_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, 1, restarted_workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        try std.testing.expectEqual(.ready_with_selection, try restarted_workbench.taskMcpAuthority(recovered_task));
+        return;
+    }
     if (race == .proactive) {
         try tmp.dir.deleteFile(std.testing.io, "publication.release");
         tmp.dir.deleteFile(std.testing.io, "publication.waiting") catch {};

@@ -588,7 +588,7 @@ test "SQLite history delete then slot reuse preserves Task and Workspace order o
     for (workspaces, 0..) |*workspace, i| {
         workspace.* = state.workspaces[0];
         workspace.id = i + 1;
-        workspace.canonical_root = try std.fmt.allocPrint(aa, if (builtin.os.tag == .windows) "C:/workspace-{d}" else "/workspace-{d}", .{i});
+        workspace.canonical_root = try std.fmt.allocPrint(aa, "C:/workspace-{d}", .{i});
         state.tasks[i].workspace_id = workspace.id;
         state.tasks[i].workspace_root = workspace.canonical_root;
     }

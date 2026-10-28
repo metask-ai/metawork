@@ -313,6 +313,16 @@ function startHttp() {
           protocolHeader,
           message,
         });
+        if (
+          options.refreshGate &&
+          existsSync(`${options.refreshGate}.rate_limit`) &&
+          message.method === "tools/list"
+        ) {
+          trace({ transport: "http", direction: "rate_limited", status: 429 });
+          response.writeHead(429, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "synthetic rate limit" }));
+          return;
+        }
         void handle(message, (rpcResponse) => {
           if (rpcResponse === null) {
             response.writeHead(202).end();

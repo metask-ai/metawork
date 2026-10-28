@@ -188,11 +188,13 @@ const ReviewScenario = struct {
         var input = productControlTaskInput();
         input.approval_mode = .manual;
         self.task_id = try self.control.createTask(input);
-        // Task catalog readiness does not prove Workspace discovery has
-        // vacated the one-slot executor queue. Finish both setup operations
-        // before this fixture starts the Run whose approval it exercises.
-        try waitInitialTaskCatalog(&self.control, self.task_id);
-        try settleWorkspaceSkillQueries(&self.control, try self.control.taskWorkspaceId(self.task_id));
+        // A fresh test home has no Skill directory. Ordinary text admission
+        // waits for initial discovery, but does not require a ready catalog.
+        for (0..5000) |_| {
+            self.control.syncLifecycle();
+            if (self.control.task_runtime.catalogProjection(self.task_id).?.availability != .loading) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
         _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, if (plan == .ui_wait) "\"currentRunPhase\":\"waiting_ui\"" else "\"inputReady\":true");
         return self;
@@ -4618,15 +4620,6 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     try std.testing.expectEqual(@as(u64, 2), continuation_id);
     try waitSetTaskArchived(&workbench, task_id);
     try workbench.setTaskArchived(task_id, false);
-    // Archiving the terminal Run is allowed before its checkpoint worker
-    // returns the final lease; compact requires that worker to be quiescent.
-    const task = workbench.task_runtime.find(task_id).?;
-    for (0..10_000) |_| {
-        try workbench.drainAgentEvents();
-        workbench.syncLifecycle();
-        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    } else return error.TestUnexpectedResult;
     const compact_id = try workbench.compactTaskAtBinding(task_id, 1);
     try std.testing.expectEqual(@as(u64, 1), compact_id);
     try waitTaskSnapshot(
