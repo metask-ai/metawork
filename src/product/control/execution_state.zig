@@ -30,6 +30,7 @@ pub const NewTaskAdmissionView = struct {
     available: bool,
     reason: AdmissionReason,
     active_model_ref: ?models_contract.ModelRef = null,
+    active_protocol: ?models_contract.Protocol = null,
     active_generation: u64 = 0,
     active_selection_revision: u64 = 0,
     state: AdmissionState,

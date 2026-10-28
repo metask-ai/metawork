@@ -1575,4 +1575,32 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.cancel.rejected": "授权操作已不匹配。",
   "mcp.cancel.indeterminate": "远端请求可能已发送，使用前需要重新登录。",
   "mcp.cancel.capability_unavailable": "当前无法取消 OAuth 授权。",
+  "operation.schedule": "定时任务操作",
+  "scheduled.expired_once": "请选择未来的单次运行时间。",
+  "scheduled.timeout":
+    "操作结果尚未确认。已请求刷新当前状态，请检查后再决定是否重试。",
+  "scheduled.reconfirm":
+    "保存将确认使用当前模型「{model}」和此处的权限，用于后续运行。请核对任务内容与时间。",
+  "scheduled.occurrence.unavailable": "原任务已不可用",
+  "scheduled.occurrence.stopped": "已停止",
+  "scheduled.occurrence.interrupted": "已中断",
+  "scheduled.occurrence.delayed": "延迟触发，原计划时间：{time}",
+  "scheduled.reason.previous_task_running": "上一次任务仍在运行。",
+  "scheduled.reason.execution_changed": "默认模型或连接已变更，请编辑并确认。",
+  "scheduled.reason.workspace_unavailable":
+    "自动工作区不可用，请检查设置后编辑确认。",
+  "scheduled.reason.capacity_reached": "运行容量不足，请释放容量后编辑确认。",
+  "scheduled.reason.shutting_down": "应用正在退出，请重新打开后编辑确认。",
+  "scheduled.reason.task_start_failed":
+    "任务未能启动，请检查模型和任务设置后编辑确认。",
+  "scheduled.reason.timer_unavailable":
+    "后台计时不可用，请重新打开应用后编辑确认。",
+  "scheduled.reason.persistence_failed":
+    "运行记录未能保存，请先处理持久化错误。",
+  "scheduled.reason.host_interrupted":
+    "上次启动被应用中断，请编辑确认；不会自动重试。",
+  "scheduled.reason.permission_required":
+    "任务因权限不足停止，请核对内容和权限后编辑确认。",
+  "scheduled.notification_unavailable":
+    "通知中的任务当前不可用，请刷新并查看任务列表。",
 };

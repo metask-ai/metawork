@@ -5205,7 +5205,7 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
+        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeProtocol\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -6591,6 +6591,79 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     );
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
+}
+
+test "custom schedule creates updates and launches manual and timed Tasks through source authority" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer automatic_root.deinit();
+    var schedule: TestScheduleSupport = .{};
+    var history: TaskPersistenceProbe = .{};
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 2,
+        .max_scheduled_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{
+        .directories = .{ .testing_automatic_workspace_root = &automatic_root },
+        .schedule_timer = schedule.timer(),
+        .schedule_persistence = schedule.persistence(),
+        .task_persistence = history.capability(),
+    });
+    defer workbench.deinit();
+    var vault: TaskModelsVault = .{};
+    defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+    try workbench.startCustomProviders(root_storage[0..root_len], vault.port());
+    defer workbench.stopCustomProviders();
+    const probe = try configureTaskRebindTarget(&workbench);
+    const provider = workbench.modelsView().custom_providers[0];
+    try std.testing.expect(workbench.selectModelsDefault(.{
+        .selection = probe.model,
+        .expected_selection_revision = workbench.modelsView().selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+    workbench.setScheduleBackgroundAvailableNoFail(true);
+    const id = try workbench.createScheduledTask(.{
+        .title = "Custom schedule",
+        .binding = scheduledBinding(&workbench),
+        .permission_profile = .approval_required,
+        .input = "Review work",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try workbench.updateScheduledTask(id, 1, .{
+        .title = "Updated custom schedule",
+        .binding = scheduledBinding(&workbench),
+        .permission_profile = .approval_required,
+        .input = "Review work",
+        .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 300 } },
+    });
+    const first = try workbench.runScheduledTaskNow(id, 2);
+    try waitControlSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
+    schedule.now = 2_000;
+    workbench.onScheduledTaskTimer();
+    const occurrence = workbench.schedule.store.find(id).?.last_occurrence.?;
+    try std.testing.expectEqual(@as(u64, 2_000), occurrence.planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(u64, 2), occurrence.task_id);
+    try std.testing.expect(first != occurrence.task_id);
+    for ([_]u64{ first, occurrence.task_id }) |task_id| {
+        const execution = workbench.task_runtime.findConst(task_id).?.runtime.executionConst().?;
+        try std.testing.expectEqualStrings("custom_provider:" ++ TaskModelsVault.slot, execution.provider_id);
+        try std.testing.expectEqualStrings("other-model", execution.model);
+        try std.testing.expectEqual(models_contract.Protocol.openai_responses, execution.protocol);
+    }
 }
 
 test "Text schedule updates preserve historical Task profiles and create fresh automatic Workspaces" {

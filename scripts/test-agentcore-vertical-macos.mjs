@@ -37,6 +37,7 @@ import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
+import { runScheduledTasksVertical } from "./scheduled-tasks-vertical.mjs";
 import {
   runOutputDeliveryVertical,
   runOfficeDeliveryHostProbe,
@@ -445,6 +446,26 @@ startApplication();
 
 desktopVertical: try {
   await waitForBridge();
+  if (process.env.METAWORK_SCHEDULE_ONLY === "1") {
+    await runScheduledTasksVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      dataRoot,
+      evidenceDir: path.join(root, ".zig-cache", "schedule-desktop"),
+      restart: async () => {
+        await stopApplication("schedule restart");
+        await rm(automationDir, { recursive: true, force: true });
+        startApplication();
+        await waitForBridge();
+      },
+    });
+    await stopApplication("schedule verification complete");
+    break desktopVertical;
+  }
   if (process.env.METAWORK_MCP_ONLY === "1") {
     await runMcpLifecycleVertical({
       invoke: invokeBridge,

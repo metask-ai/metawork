@@ -99,6 +99,180 @@ function render(snapshot) {
   return renderToStaticMarkup(scheduledElement(snapshot));
 }
 
+function scheduleSnapshot(overrides = {}) {
+  const snapshot = structuredClone(fixture);
+  Object.assign(snapshot.capabilities, {
+    automaticWorkspaces: true,
+    scheduledTasks: true,
+    scheduledTaskPersistence: true,
+    scheduledTaskPersistenceHealth: "ready",
+    backgroundScheduleWake: true,
+  });
+  snapshot.scheduledTasks = [
+    {
+      id: "8",
+      epoch: "1",
+      title: "Review",
+      titleRedacted: false,
+      permissionProfile: "approval_required",
+      enabled: true,
+      health: "ready",
+      failureReason: null,
+      binding: {
+        status: "bound",
+        modelRef: { sourceId: "metask", modelId: "old-model" },
+        sourceGeneration: "1",
+        selectionRevision: "2",
+        protocol: "anthropic_messages",
+      },
+      input: {
+        kind: "text",
+        text: "Review every line\nAnd explain the result",
+        redacted: false,
+      },
+      recurrence: {
+        kind: "interval",
+        startAtUnixSeconds: "1800000000",
+        everySeconds: "3600",
+      },
+      nextRunAtUnixSeconds: "1800000000",
+      occurrences: [],
+      ...overrides,
+    },
+  ];
+  return snapshot;
+}
+
+test("attention explains its cause and requires confirmation while deletion stays available", async () => {
+  let updated;
+  let deleted = 0;
+  const snapshot = scheduleSnapshot({
+    enabled: false,
+    health: "needs_attention",
+    failureReason: "execution_changed",
+    nextRunAtUnixSeconds: null,
+  });
+  renderDom(
+    scheduledElement(snapshot, {
+      onUpdate: async (...args) => {
+        updated = args;
+      },
+      onDelete: async () => {
+        deleted++;
+      },
+    }),
+  );
+  assert.match(
+    document.body.textContent,
+    /default model or connection changed/,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  for (const button of screen.getAllByRole("button", { name: "Run now" }))
+    assert.equal(button.disabled, true);
+  for (const button of screen.getAllByRole("button", { name: "Resume" }))
+    assert.equal(button.disabled, true);
+  assert.equal(
+    screen.getByRole("button", { name: "Delete schedule" }).disabled,
+    false,
+  );
+  assert.match(
+    document.body.textContent,
+    /Saving confirms the current model “fixture-model”/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.ok(updated));
+  assert.equal(updated[2].binding.modelRef.modelId, "fixture-model");
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Delete schedule" }));
+  await waitFor(() => assert.equal(deleted, 1));
+});
+
+test("list action failures stay visible without opening an editor", async () => {
+  renderDom(
+    scheduledElement(scheduleSnapshot(), {
+      onRunNow: async () => {
+        throw new Error("internal implementation error");
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("alert").textContent,
+      /could not complete this schedule change/,
+    ),
+  );
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.doesNotMatch(
+    document.body.textContent,
+    /internal implementation error/,
+  );
+});
+
+test("expired one-time schedules require a future time and validate again at submit", async () => {
+  let saves = 0;
+  renderDom(
+    scheduledElement(
+      scheduleSnapshot({
+        recurrence: { kind: "once", atUnixSeconds: "1000" },
+        enabled: false,
+        health: "completed",
+        nextRunAtUnixSeconds: null,
+      }),
+      {
+        onUpdate: async () => {
+          saves++;
+        },
+      },
+    ),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  const time = screen.getByLabelText("Starts");
+  assert.equal(time.getAttribute("aria-invalid"), "true");
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  fireEvent.change(time, { target: { value: "2099-01-01T12:00" } });
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, false);
+  const now = Date.now;
+  try {
+    Date.now = () => new Date("2100-01-01T12:00").getTime();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    assert.equal(saves, 0);
+    assert.equal(time.getAttribute("aria-invalid"), "true");
+  } finally {
+    Date.now = now;
+  }
+});
+
+test("unavailable history is distinct from failure and delay retains its planned time", () => {
+  const snapshot = scheduleSnapshot({
+    occurrences: [
+      {
+        plannedAtUnixSeconds: "2000",
+        triggeredAtUnixSeconds: "2100",
+        source: "timer",
+        result: "submitted",
+        taskId: "3",
+        reason: null,
+        taskOutcome: "unavailable",
+      },
+    ],
+  });
+  renderDom(scheduledElement(snapshot));
+  fireEvent.click(
+    screen.getByRole("button", { name: /Review.*Review every line/ }),
+  );
+  assert.match(document.body.textContent, /Original task unavailable/);
+  assert.match(document.body.textContent, /Delayed from/);
+  assert.doesNotMatch(document.body.textContent, /Run failed/);
+  assert.equal(screen.queryByRole("button", { name: "View result" }), null);
+});
+
 test("Scheduled tasks is a truthful independent management page", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
@@ -292,6 +466,72 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   assert.equal(created.binding.protocol, "anthropic_messages");
 });
 
+test("schedule binding consumes installed protocol for Metask and custom sources", async () => {
+  for (const source of ["metask", "custom"]) {
+    for (const protocol of [
+      "anthropic_messages",
+      "openai_responses",
+      "openai_chat_completions",
+      "gemini_native",
+    ]) {
+      const snapshot = structuredClone(fixture);
+      snapshot.capabilities.automaticWorkspaces = true;
+      snapshot.capabilities.scheduledTasks = true;
+      snapshot.capabilities.scheduledTaskPersistence = true;
+      snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+      snapshot.newTaskAdmission.activeProtocol = protocol;
+      snapshot.newTaskAdmission.activeGeneration = "999";
+      const provider = snapshot.models.providers[0];
+      provider.sourceGeneration = "7";
+      if (source === "custom") {
+        snapshot.models.customProviders = [
+          {
+            id: "custom",
+            protocol,
+            sourceGeneration: "7",
+            enabled: true,
+            state: "ready",
+            credentialStatus: "ready",
+            models: [{ id: "fixture-model", ready: true }],
+          },
+        ];
+        snapshot.models.defaultSelection = {
+          sourceId: "custom",
+          modelId: "fixture-model",
+        };
+        snapshot.newTaskAdmission.activeModelRef =
+          snapshot.models.defaultSelection;
+      }
+      let created = null;
+      renderDom(
+        scheduledElement(snapshot, {
+          onCreate: async (input) => {
+            created = input;
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+      const save = screen.getByRole("button", { name: "Save" });
+      assert.equal(save.disabled, false);
+      fireEvent.click(save);
+      await waitFor(() => assert.ok(created));
+      assert.equal(created.binding.protocol, protocol);
+      assert.equal(created.binding.sourceGeneration, "7");
+      assert.equal(created.binding.modelRef.sourceId, source);
+      cleanup();
+    }
+  }
+  const stale = structuredClone(fixture);
+  stale.capabilities.automaticWorkspaces = true;
+  stale.capabilities.scheduledTasks = true;
+  stale.capabilities.scheduledTaskPersistence = true;
+  stale.capabilities.scheduledTaskPersistenceHealth = "ready";
+  stale.newTaskAdmission.activeSelectionRevision = "999";
+  renderDom(scheduledElement(stale));
+  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+});
+
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
@@ -439,7 +679,12 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
     (await client.createScheduledTask(mutation)).scheduledTaskId,
     "8",
   );
-  await client.setScheduledTaskEnabled("8", "1", false);
+  // A requested restore can reconcile back to attention. The ACK is state,
+  // not an echo of the request.
+  assert.equal(
+    (await client.setScheduledTaskEnabled("8", "1", true)).enabled,
+    false,
+  );
   assert.equal((await client.runScheduledTaskNow("8", "2")).taskId, "9");
   await client.deleteScheduledTask("8", "2");
   assert.deepEqual(
@@ -455,6 +700,6 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   assert.deepEqual(calls[1].payload, {
     scheduledTaskId: "8",
     expectedEpoch: "1",
-    enabled: false,
+    enabled: true,
   });
 });

@@ -190,6 +190,7 @@ async function fixture(ctx, configure = () => {}) {
     available: () => true,
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
+    onTaskOpen: () => () => {},
     onWorkbenchRevision: () => () => {},
     connect: async () => "1",
     disconnect: async () => {},

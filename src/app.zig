@@ -523,11 +523,18 @@ const App = struct {
                     try self.dispatcher.?.emitProductChanged();
                 }
             },
-            .command => |command| if (command.source == .tray) {
-                const result = self.platform.handleTrayCommand(command.tray_item_id);
-                if (result == .quit_requested) {
-                    if (self.single_instance) |coordinator| coordinator.stopIngress();
-                    try self.platform.requestExplicitQuit();
+            .command => |command| {
+                if (command.source == .tray) {
+                    const result = self.platform.handleTrayCommand(command.tray_item_id);
+                    if (result == .quit_requested) {
+                        if (self.single_instance) |coordinator| coordinator.stopIngress();
+                        try self.platform.requestExplicitQuit();
+                    }
+                } else if (command.source == .notification and command.window_id == app_window.main_window_id) {
+                    if (app_window.notificationTaskId(command.name)) |task_id| {
+                        self.platform.activateMainWindow();
+                        if (self.dispatcher) |dispatcher| try dispatcher.openTaskFromNotification(task_id);
+                    }
                 }
             },
             else => {},
@@ -901,6 +908,76 @@ test "SDK consumption Application test roots" {
     std.testing.refAllDecls(app_window);
     std.testing.refAllDecls(account_platform_binding);
     std.testing.refAllDecls(models_platform_binding);
+}
+
+test "notification activation follows SDK command routing into the real Task Bridge hint" {
+    const Host = struct {
+        calls: usize = 0,
+        fn emit(context: ?*anyopaque, window_id: u64, name: []const u8, detail: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expectEqual(@as(u64, 1), window_id);
+            try std.testing.expectEqualStrings("metawork:open-task", name);
+            try std.testing.expectEqualStrings("{\"generation\":\"1\",\"taskId\":\"1\"}", detail);
+            self.calls += 1;
+        }
+        fn wake(_: ?*anyopaque) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    var host: Host = .{};
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    control.* = try product_control.TestSupport.maximumSmallFixture();
+    defer control.deinit();
+    var dispatcher = try bridge_api.Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = &host,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 1);
+    defer dispatcher.deinit();
+    _ = try dispatcher.productDelivery().connect(1, .{
+        .context = &host,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+    });
+    var composition: App = .{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .frontend_asset_root = "",
+        .main_thread_id = std.Thread.getCurrentId(),
+        .automation = undefined,
+        .platform = .{ .io = std.testing.io, .main_thread_id = std.Thread.getCurrentId(), .native_runtime = &harness.runtime },
+        .completion_transport = undefined,
+        .dispatcher = &dispatcher,
+    };
+    const app: native_sdk.App = .{ .name = "schedule-notification-test", .context = &composition, .event_fn = App.event };
+    const before = control.currentRevision();
+    try std.testing.expect(composition.platform.window.notifyScheduledTask(&harness.runtime, .{ .scheduled_task_id = 1, .task_id = 1, .title = "Completed", .kind = .completed }));
+    try harness.runtime.dispatchCommand(app, .{ .name = "metawork.schedule.open.1", .source = .runtime, .window_id = 1 });
+    try std.testing.expectEqual(@as(usize, 0), host.calls);
+    const activation = harness.null_platform.activateNotification("schedule-1-1-completed").?;
+    try harness.runtime.dispatchPlatformEvent(app, activation);
+    try std.testing.expectEqual(@as(usize, 1), host.calls);
+    try std.testing.expectEqual(before, control.currentRevision());
 }
 
 test "MCP Application composition imports the startup owner" {

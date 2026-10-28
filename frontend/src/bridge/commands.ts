@@ -112,4 +112,5 @@ export const commands = {
 export const events = {
   hostSignal: "metawork:host-signal",
   workbench: "metawork:workbench-changed",
+  openTask: "metawork:open-task",
 } as const;

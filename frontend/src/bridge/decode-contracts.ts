@@ -1942,6 +1942,7 @@ function decodeNewTaskAdmission(
     "available",
     "reason",
     "activeModelRef",
+    "activeProtocol",
     "activeGeneration",
     "activeSelectionRevision",
     "state",
@@ -1955,6 +1956,13 @@ function decodeNewTaskAdmission(
     item.activeGeneration,
     `${path}.activeGeneration`,
   );
+  const activeProtocol = nullableEnum(
+    item.activeProtocol,
+    `${path}.activeProtocol`,
+    protocols,
+  );
+  if ((activeModelRef === null) !== (activeProtocol === null))
+    fail(path, "active model and protocol must be present together");
   const activeSelectionRevision = wireId(
     item.activeSelectionRevision,
     `${path}.activeSelectionRevision`,
@@ -1976,6 +1984,7 @@ function decodeNewTaskAdmission(
     available,
     reason: enumValue(item.reason, `${path}.reason`, newTaskAdmissionReasons),
     activeModelRef,
+    activeProtocol,
     activeGeneration,
     activeSelectionRevision,
     state,
@@ -4264,11 +4273,13 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
       if (
         result === "skipped" &&
-        (taskId !== null || reason === null || taskOutcome !== null)
+        ((taskId !== null && reason !== "previous_task_running") ||
+          reason === null ||
+          taskOutcome !== null)
       )
         fail(
           occurrencePath,
-          "skipped occurrence requires only a rejection reason",
+          "skipped occurrence permits a blocker Task only for previous_task_running",
         );
       if (result === "rejected" && (reason === null || taskOutcome !== null))
         fail(
@@ -5971,6 +5982,13 @@ export function decodeHostSignalEvent(value: unknown): HostSignal {
   nonNegativeNumber(item.requestBytes, "$.requestBytes");
   return signal;
 }
+export function decodeTaskOpenEvent(value: unknown) {
+  const item = object(value, "$", ["generation", "taskId"]);
+  return {
+    generation: positiveWireId(item.generation, "$.generation"),
+    taskId: positiveWireId(item.taskId, "$.taskId"),
+  };
+}
 export function decodePingResponse(value: unknown): HostSignal {
   return decodeSignal(value, [
     "sequence",
@@ -6633,7 +6651,6 @@ export function decodeScheduledTaskMutationResult(
 export function decodeScheduledTaskEnabledResult(
   value: unknown,
   expectedId: string,
-  expectedEnabled: boolean,
 ) {
   const item = object(value, "$", ["scheduledTaskId", "epoch", "enabled"]);
   const scheduledTaskId = positiveWireId(
@@ -6643,7 +6660,6 @@ export function decodeScheduledTaskEnabledResult(
   if (scheduledTaskId !== expectedId)
     fail("$.scheduledTaskId", "response identity mismatch");
   const enabled = booleanValue(item.enabled, "$.enabled");
-  if (enabled !== expectedEnabled) fail("$.enabled", "response state mismatch");
   return {
     scheduledTaskId,
     epoch: positiveWireId(item.epoch, "$.epoch"),

@@ -192,6 +192,7 @@ async function renderSubmissionApp(
     available: () => true,
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
+    onTaskOpen: () => () => {},
     onWorkbenchRevision: (callback) => {
       revision = callback;
       return () => {};

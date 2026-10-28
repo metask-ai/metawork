@@ -262,6 +262,7 @@ export type NewTaskAdmissionView = {
   available: boolean;
   reason: NewTaskAdmissionReason;
   activeModelRef: ModelRef | null;
+  activeProtocol: Protocol | null;
   activeGeneration: string;
   activeSelectionRevision: string;
   state: NewTaskAdmissionState;

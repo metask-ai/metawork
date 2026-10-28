@@ -810,6 +810,8 @@ test "scheduled task store round trips bounded occurrence history" {
     const item = store.find(id).?;
     try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
     try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed, null);
+    try store.markSkipped(item, 5_600, 5_601, 42);
+    try store.markSkipped(item, 9_200, 9_201, 0);
     const default_id = try store.create(.{
         .title = "Independent brief",
         .binding = .{
@@ -847,7 +849,9 @@ test "scheduled task store round trips bounded occurrence history" {
     });
     defer restored.deinit();
     const restored_item = restored.find(id).?;
-    try std.testing.expectEqual(@as(usize, 1), restored_item.occurrences().len);
+    try std.testing.expectEqual(@as(usize, 3), restored_item.occurrences().len);
+    try std.testing.expectEqual(@as(u64, 42), restored_item.occurrences()[1].task_id);
+    try std.testing.expectEqual(@as(u64, 0), restored_item.occurrences()[2].task_id);
     try std.testing.expectEqual(@as(u64, 42), restored_item.occurrences()[0].task_id);
     try std.testing.expectEqual(
         scheduled.OccurrenceTaskOutcome.completed,

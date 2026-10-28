@@ -5969,12 +5969,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .scheduled-suggestion > span:nth-child(2) > span {
   display: block;
   margin-top: 5px;
-  overflow: hidden;
   color: var(--ui-content-muted);
   font-size: var(--text-control);
   line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .scheduled-suggestion-time {
@@ -6072,6 +6071,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .scheduled-row-copy small {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible;
   margin-top: 5px;
   color: var(--ui-content-muted);
   font-size: var(--text-label);

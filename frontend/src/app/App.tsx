@@ -435,6 +435,11 @@ export default function App() {
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
   const client = useMemo(() => new BridgeClient(), []);
+  const [notificationTarget, setNotificationTarget] = useState<{
+    generation: string;
+    taskId: string;
+  } | null>(null);
+  const notificationRequest = useRef(0);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
   const pendingTaskDraftSource = useRef<{
@@ -1484,6 +1489,77 @@ export default function App() {
       ),
     );
   }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
+  // Subscribe before connection bootstrap, including a queued native click.
+  useEffect(() => {
+    if (!client.available()) return;
+    return client.onTaskOpen(
+      (target) => {
+        notificationRequest.current++;
+        setNotificationTarget(target);
+      },
+      () =>
+        setStatus(
+          attentionStatus("scheduled.notification_unavailable", {
+            scope: "execution",
+          }),
+        ),
+    );
+  }, [client]);
+  useEffect(() => {
+    if (!notificationTarget) return;
+    if (BigInt(notificationTarget.generation) < BigInt(bridgeGeneration)) {
+      setNotificationTarget(null);
+      return;
+    }
+    if (bridgeUnavailable || notificationTarget.generation !== bridgeGeneration)
+      return;
+    const target = notificationTarget;
+    const request = notificationRequest.current;
+    setNotificationTarget(null);
+    setSettingsOpen(false);
+    setModelSetupOpen(false);
+    setSearchOpen(false);
+    setRoute("workbench");
+    pendingTaskSelection.current = target.taskId;
+    void refreshSnapshot()
+      .then(() => {
+        if (
+          request !== notificationRequest.current ||
+          target.generation !== bridgeGenerationRef.current
+        )
+          return;
+        if (
+          !latestSnapshotRef.current?.taskIndex.some(
+            (task) => task.id === target.taskId,
+          )
+        ) {
+          pendingTaskSelection.current = null;
+          setStatus(
+            attentionStatus("scheduled.notification_unavailable", {
+              scope: "execution",
+            }),
+          );
+        }
+      })
+      .catch(() => {
+        if (
+          request === notificationRequest.current &&
+          target.generation === bridgeGenerationRef.current
+        ) {
+          pendingTaskSelection.current = null;
+          setStatus(
+            attentionStatus("scheduled.notification_unavailable", {
+              scope: "execution",
+            }),
+          );
+        }
+      });
+  }, [
+    notificationTarget,
+    bridgeGeneration,
+    bridgeUnavailable,
+    refreshSnapshot,
+  ]);
   useEffect(() => {
     let cancelled = false;
     const current = new WorkbenchConnection(client, {
@@ -2923,6 +2999,23 @@ export default function App() {
     );
     await refreshCommittedView();
     return result;
+  }
+  async function commitScheduleMutation<T>(
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await mutation();
+      await refreshCommittedView();
+      return result;
+    } catch (error) {
+      if (
+        !(await reconcileCommandTimeout(error, "operation.schedule", {
+          scope: "execution",
+        }))
+      )
+        await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
   }
   async function commitMcpMutation(
     mutation: () => Promise<McpMutationResult>,
@@ -4463,17 +4556,33 @@ export default function App() {
               bridgeUnavailable || !snapshot.capabilities.scheduledTasks
             }
             recoveryDisabled={bridgeUnavailable}
-            onCreate={(input) => client.createScheduledTask(input)}
+            onCreate={(input) =>
+              commitScheduleMutation(() => client.createScheduledTask(input))
+            }
             onUpdate={(id, epoch, input) =>
-              client.updateScheduledTask(id, epoch, input)
+              commitScheduleMutation(() =>
+                client.updateScheduledTask(id, epoch, input),
+              )
             }
             onSetEnabled={(id, epoch, enabled) =>
-              client.setScheduledTaskEnabled(id, epoch, enabled)
+              commitScheduleMutation(() =>
+                client.setScheduledTaskEnabled(id, epoch, enabled),
+              )
             }
-            onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
-            onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+            onRunNow={(id, epoch) =>
+              commitScheduleMutation(() =>
+                client.runScheduledTaskNow(id, epoch),
+              )
+            }
+            onDelete={(id, epoch) =>
+              commitScheduleMutation(() =>
+                client.deleteScheduledTask(id, epoch),
+              )
+            }
             onRecover={() =>
-              client.recoverScheduledTaskStore(snapshot.revision)
+              commitScheduleMutation(() =>
+                client.recoverScheduledTaskStore(snapshot.revision),
+              )
             }
             onOpenTask={(taskId) => {
               const task = snapshot.taskIndex.find(

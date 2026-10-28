@@ -77,7 +77,9 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { default: App } = await vite.ssrLoadModule("/src/app/App.tsx");
-const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+const { BridgeClient, BridgeCommandTimeoutError } = await vite.ssrLoadModule(
+  "/src/bridge/client.ts",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -125,6 +127,7 @@ function signedOut() {
     state: "unavailable",
     reason: "credential_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
   });
@@ -177,6 +180,7 @@ function customModels() {
     activeGeneration: "1",
     activeSelectionRevision: state.models.selectionRevision,
     activeModelRef: state.models.defaultSelection,
+    activeProtocol: "openai_chat_completions",
   });
   return state;
 }
@@ -184,9 +188,10 @@ function customModels() {
 async function renderApp(
   ctx,
   snapshot = signedOut(),
-  { strict = false, locale = "en-US" } = {},
+  { strict = false, locale = "en-US", generation = "1" } = {},
 ) {
   let revision;
+  let notification;
   const calls = {
     login: 0,
     cancel: 0,
@@ -199,11 +204,15 @@ async function renderApp(
     available: () => true,
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
+    onTaskOpen: (consume) => {
+      notification = consume;
+      return () => {};
+    },
     onWorkbenchRevision: (callback) => {
       revision = callback;
       return () => {};
     },
-    connect: async () => "1",
+    connect: async () => generation,
     disconnect: async () => {},
     ping: async () => {},
     fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
@@ -263,6 +272,9 @@ async function renderApp(
     snapshot,
     calls,
     view,
+    notification: async (target) => {
+      await act(async () => notification(target));
+    },
     mount,
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -272,6 +284,73 @@ async function renderApp(
     },
   };
 }
+
+test("schedule timeout refreshes canonical state once without replaying the mutation", async (ctx) => {
+  const snapshot = customModels();
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.scheduledTasks = [];
+  await renderApp(ctx, snapshot);
+  let mutations = 0;
+  let reads = 0;
+  ctx.mock.method(BridgeClient.prototype, "createScheduledTask", async () => {
+    mutations++;
+    throw new BridgeCommandTimeoutError("metawork.scheduledTasks.create", 10);
+  });
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
+    reads++;
+    return productStateFixture(snapshot, scope);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
+  fireEvent.click(await screen.findByRole("button", { name: /Daily brief/ }));
+  const before = reads;
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    assert.match(document.body.textContent, /result is unconfirmed/),
+  );
+  assert.ok(reads > before);
+  assert.equal(mutations, 1);
+  assert.ok(screen.getByRole("dialog", { name: "Schedule editor" }));
+});
+
+test("notification selects a real Task after canonical refresh and ignores old generations", async (ctx) => {
+  const snapshot = customModels();
+  snapshot.workspaces = structuredClone(fixture.workspaces);
+  snapshot.tasks = structuredClone(fixture.tasks);
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.scheduledTasks = [];
+  const app = await renderApp(ctx, snapshot, { generation: "2" });
+  fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
+  await screen.findByRole("button", { name: /Daily brief/ });
+  let reads = 0;
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
+    reads++;
+    return productStateFixture(snapshot, scope);
+  });
+  await app.notification({ generation: "2", taskId: fixture.tasks[0].id });
+  await waitFor(() =>
+    assert.equal(screen.queryByRole("button", { name: /Daily brief/ }), null),
+  );
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector(
+        '.task-list [data-task-id="3"][aria-current="page"]',
+      ),
+    ),
+  );
+  assert.ok(reads > 0);
+  assert.equal(app.calls.create, 0);
+  assert.equal(app.calls.input, 0);
+  fireEvent.click(screen.getByRole("button", { name: "Scheduled tasks" }));
+  await screen.findByRole("button", { name: /Daily brief/ });
+  const before = reads;
+  await app.notification({ generation: "1", taskId: fixture.tasks[0].id });
+  assert.ok(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(reads, before);
+});
 
 test("unconfigured and expired-login states have different recovery actions", () => {
   const state = signedOut();
@@ -788,6 +867,7 @@ test("a ready alternative does not immediately close manually opened setup", asy
     state: "unavailable",
     reason: "credential_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
   });
   const app = await renderApp(ctx, state);
   const user = userEvent.setup({ document: dom.window.document });

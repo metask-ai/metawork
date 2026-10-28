@@ -1795,5 +1795,37 @@ export const enUS = {
   "mcp.cancel.indeterminate":
     "The remote request may have been sent. Sign in again before use.",
   "mcp.cancel.capability_unavailable": "OAuth cancellation is unavailable.",
+  "operation.schedule": "schedule change",
+  "scheduled.expired_once": "Choose a future time for this one-time run.",
+  "scheduled.timeout":
+    "The result is unconfirmed. A refresh was requested; check the current state before retrying.",
+  "scheduled.reconfirm":
+    "Saving confirms the current model “{model}” and these permissions for future runs. Review the instruction and time.",
+  "scheduled.occurrence.unavailable": "Original task unavailable",
+  "scheduled.occurrence.stopped": "Stopped",
+  "scheduled.occurrence.interrupted": "Interrupted",
+  "scheduled.occurrence.delayed": "Delayed from {time}",
+  "scheduled.reason.previous_task_running":
+    "The previous task is still running.",
+  "scheduled.reason.execution_changed":
+    "The default model or connection changed. Edit and confirm.",
+  "scheduled.reason.workspace_unavailable":
+    "Automatic workspaces are unavailable. Check settings, then edit and confirm.",
+  "scheduled.reason.capacity_reached":
+    "Run capacity is full. Free capacity, then edit and confirm.",
+  "scheduled.reason.shutting_down":
+    "The app is shutting down. Reopen it, then edit and confirm.",
+  "scheduled.reason.task_start_failed":
+    "The task could not start. Check the model and task settings, then edit and confirm.",
+  "scheduled.reason.timer_unavailable":
+    "The background timer is unavailable. Reopen the app, then edit and confirm.",
+  "scheduled.reason.persistence_failed":
+    "The run record could not be saved. Resolve the storage error first.",
+  "scheduled.reason.host_interrupted":
+    "The app interrupted the previous start. Edit and confirm; it will not retry automatically.",
+  "scheduled.reason.permission_required":
+    "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
+  "scheduled.notification_unavailable":
+    "The task from this notification is unavailable. Refresh and check your tasks.",
 } as const;
 export type MessageId = keyof typeof enUS;

@@ -3069,6 +3069,7 @@ pub const Runtime = struct {
             .available = self.canCreateTask(),
             .reason = self.execution_state.availabilityError(),
             .active_model_ref = self.execution_state.activeModelRef(),
+            .active_protocol = self.execution_state.protocol(),
             .active_generation = self.execution_state.generation(),
             .active_selection_revision = self.execution_state.activeSelectionRevision(),
             .state = self.execution_state.availability(),
@@ -3573,16 +3574,19 @@ pub const Runtime = struct {
         // Live Tasks keep their owned ExecutionConfig until their own runtime
         // lifecycle releases it, so their references cannot block this gate.
         try self.execution_state.beginIdentityReplacement();
+        self.schedule.cancelTimer();
     }
 
     pub fn beginDefaultExecutionReplacement(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.execution_state.beginDefaultReplacement();
+        self.schedule.cancelTimer();
     }
 
     pub fn endExecutionReplacementNoFail(self: *Runtime) void {
         self.execution_state.endReplacementNoFail();
+        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
     }
 
     pub fn executionReplacementPending(self: *const Runtime) bool {
@@ -5653,11 +5657,11 @@ pub const Runtime = struct {
         id: u64,
         expected_epoch: u64,
         enabled: bool,
-    ) Error!void {
+    ) Error!bool {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.schedule.setEnabled(
+        return self.schedule.setEnabled(
             id,
             expected_epoch,
             enabled,
@@ -7697,6 +7701,11 @@ pub const Runtime = struct {
         }) catch
             return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.active_model_ref);
+        writer.writeAll(",\"activeProtocol\":") catch return error.SnapshotTooLarge;
+        if (view.active_protocol) |protocol|
+            writer.print("\"{s}\"", .{@tagName(protocol)}) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"activeGeneration\":\"{d}\",\"activeSelectionRevision\":\"{d}\",\"state\":\"{s}\"}}", .{
             view.active_generation,
             view.active_selection_revision,
@@ -8390,6 +8399,7 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .has_active_fn = scheduleTaskHasActive,
+            .preflight_fn = scheduleTaskPreflight,
             .launch_fn = scheduleTaskLaunch,
             .observe_fn = scheduleTaskObservation,
         };
@@ -8400,21 +8410,32 @@ pub const Runtime = struct {
         return self.task_runtime.taskHasActiveOperation(task_id);
     }
 
-    fn scheduleTaskLaunch(
-        context: *anyopaque,
-        input: product_schedule.TaskLaunch,
-    ) product_schedule.TaskLaunchOutcome {
+    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
             .selection_revision = input.selection_revision,
             .protocol = input.protocol,
-        }) catch |err| return .{ .rejected = .{
-            .cause = err,
-            .reason = scheduledFailure(err),
-            .task_id = 0,
-        } };
+        }) catch |err| {
+            if (err == error.ExecutionUnavailable) {
+                if (self.canCreateTask()) {
+                    self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+                    self.bumpRevision();
+                }
+                self.schedule.cancelTimer();
+            }
+            return err;
+        };
+    }
+
+    fn scheduleTaskLaunch(
+        context: *anyopaque,
+        input: product_schedule.TaskLaunch,
+    ) product_schedule.TaskLaunchOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        // The same main-thread occurrence already resolved its exact Models
+        // authority in preflight, before Schedule committed its claim.
         var prepared = self.prepareScheduledAdmission(input) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -8607,7 +8628,12 @@ pub const Runtime = struct {
         }) orelse return error.ExecutionUnavailable;
         defer candidate.deinit();
         const resolved = candidate.input();
-        if (!std.mem.eql(u8, resolved.target.provider_id, expected.model_ref.source_id) or
+        const provider_matches = switch (authority.source) {
+            .metask => std.mem.eql(u8, resolved.target.provider_id, expected.model_ref.source_id),
+            .custom_provider => std.mem.startsWith(u8, resolved.target.provider_id, "custom_provider:") and
+                std.mem.eql(u8, resolved.target.provider_id["custom_provider:".len..], expected.model_ref.source_id),
+        };
+        if (candidate.source != authority.source or !provider_matches or
             !std.mem.eql(u8, resolved.target.model, expected.model_ref.model_id) or
             resolved.target.protocol != expected.protocol or
             resolved.source_generation != expected.source_generation)
@@ -11145,8 +11171,6 @@ fn scheduledTaskOutcome(
 
 fn scheduledFailure(err: anyerror) product_schedule.FailureReason {
     return switch (err) {
-        error.ExecutionUnavailable,
-        error.ExecutionInUse,
         error.ExecutionGenerationMismatch,
         => .execution_changed,
         error.UnknownWorkspace,
@@ -13000,6 +13024,38 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     try std.testing.expectEqualStrings(expected, try control.writeAggregateFixture(&storage));
 }
 
+test "Schedule blocker projection matches the shared Renderer fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const id = try control.schedule.store.create(.{
+        .title = "History",
+        .permission_profile = .approval_required,
+        .binding = .{
+            .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" },
+            .source_generation = 1,
+            .selection_revision = 1,
+            .protocol = .openai_chat_completions,
+        },
+        .input = "Inspect",
+        .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
+    }, 1000);
+    const item = control.schedule.store.find(id).?;
+    try control.schedule.store.markSubmitted(item, 2000, 2001, .timer, 3);
+    try control.schedule.store.markSkipped(item, 5600, 5601, 3);
+    try control.schedule.store.markSkipped(item, 9200, 9201, 0);
+    var storage: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try control.schedule.writeProjection(&writer, .{
+        .context = &control,
+        .write_json_fn = Runtime.writeScheduleViewJson,
+    });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const history = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.array.items[0].object.get("occurrences").?, .{});
+    defer std.testing.allocator.free(history);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.scheduled_occurrences, "\r\n"), history);
+}
+
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -14036,6 +14092,104 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     try std.testing.expectEqualStrings(models_fixture, models_writer.buffered());
 }
 
+test "Scheduled Task custom binding validates source identity and rejects stale authority" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, .{
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{});
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
+    defer control.stopCustomProviders();
+    const selection = try createReadyTestCustomProvider(&control);
+    const provider = control.modelsView().custom_providers[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+
+    const binding = TestSupport.scheduledBinding(&control);
+    try std.testing.expectEqual(models_contract.Protocol.openai_responses, control.newTaskAdmissionView().active_protocol.?);
+    try control.validateScheduledBinding(binding);
+    var stale = binding;
+    stale.model_ref.source_id = "another-provider";
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.model_ref.model_id = "another-model";
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.source_generation += 1;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.selection_revision += 1;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    stale = binding;
+    stale.protocol = .anthropic_messages;
+    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+
+    var automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, directory_storage[0..directory_len]);
+    defer automatic_root.deinit();
+    product_workspace.testing.installAutomaticRoot(&control.workspace, &automatic_root);
+    var clock: TestScheduleClock = .{ .now = 1000 };
+    const storage = try std.testing.allocator.alloc(u8, product_schedule.testing.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestSchedulePersistence = .{ .storage = storage };
+    product_schedule.testing.configure(&control.schedule, clock.timer(), persistence.capability(), .ready);
+    defer product_schedule.testing.configure(&control.schedule, .{}, .{}, .unavailable);
+    const id = try control.createScheduledTask(.{
+        .title = "Replacement",
+        .binding = binding,
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
+    });
+    control.setScheduleBackgroundAvailableNoFail(true);
+    const commits = persistence.commits;
+    // Normal timer expiry inside either replacement window must never claim.
+    for ([_]bool{ false, true }) |identity| {
+        if (identity) try control.beginExecutionReplacement() else try control.beginDefaultExecutionReplacement();
+        try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+        clock.now = 2000;
+        control.onScheduledTaskTimer();
+        try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
+        try std.testing.expectEqual(commits, persistence.commits);
+        try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+        try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+        control.endExecutionReplacementNoFail();
+    }
+    // canCreateTask is still true, but resolveDefault can now fail reading its
+    // credential. This must be observed before any durable claim.
+    vault.read_fails = true;
+    control.onScheduledTaskTimer();
+    try std.testing.expectEqual(commits, persistence.commits);
+    try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    try std.testing.expect(!control.canCreateTask());
+    vault.read_fails = false;
+    control.reconcileModelsDefaultNoFail(true, false);
+    control.finishDefaultExecutionCommitNoFail();
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
+    // A missing Models authority can also precede Control's alignment wake.
+    // Exercise that second full-preflight branch with local admission ready.
+    try std.testing.expect(control.custom_providers.clearDefault().accepted);
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
+    try std.testing.expectEqual(commits, persistence.commits);
+    try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+}
+
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     var control = try testRuntime();
     defer control.deinit();
@@ -14135,7 +14289,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
-    try control.setScheduledTaskEnabled(id, item.epoch, false);
+    try std.testing.expect(!try control.setScheduledTaskEnabled(id, item.epoch, false));
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(
