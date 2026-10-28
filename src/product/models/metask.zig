@@ -5,7 +5,7 @@ const contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
 const transport_api = @import("metask_transport");
 
-pub const models_url = "https://app.metask-ai.com/v1/models";
+pub const models_url = "https://www.metask-ai.com/v1/models";
 pub const anthropic_messages_url = contract.metask_anthropic_messages_url;
 
 pub const Limits = struct {

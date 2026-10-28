@@ -7,7 +7,7 @@ const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
 pub const userinfo_url = oauth.userinfo_url;
-pub const usage_stats_url = "https://app.metask-ai.com/v1/usage/stats";
+pub const usage_stats_url = "https://www.metask-ai.com/v1/usage/stats";
 
 pub const RequestKind = enum {
     exchange_code,

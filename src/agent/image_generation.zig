@@ -328,7 +328,7 @@ pub fn validateImage(bytes: []const u8) !Format {
 
 test "fixture targets cannot escape the loopback image endpoint" {
     try validateTestEndpoint("http://127.0.0.1:12345/v1/images/generations");
-    for ([_][]const u8{ "https://app.metask-ai.com/v1/images/generations", "http://127.0.0.1:0/v1/images/generations", "http://127.0.0.1:10/elsewhere", "http://127.0.0.1:10@evil/v1/images/generations" }) |value|
+    for ([_][]const u8{ "https://www.metask-ai.com/v1/images/generations", "http://127.0.0.1:0/v1/images/generations", "http://127.0.0.1:10/elsewhere", "http://127.0.0.1:10@evil/v1/images/generations" }) |value|
         try std.testing.expectError(error.InvalidBinding, validateTestEndpoint(value));
 }
 

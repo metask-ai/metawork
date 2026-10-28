@@ -23,16 +23,16 @@ pub const Limits = struct {
 
 pub const metask_source_id = "metask";
 pub const metask_anthropic_messages_url =
-    "https://app.metask-ai.com/v1/messages";
+    "https://www.metask-ai.com/v1/messages";
 pub const metask_default_image_model = "gemini-3.1-flash-image-preview";
 pub const metask_images_generations_url =
-    "https://app.metask-ai.com/v1/images/generations";
+    "https://www.metask-ai.com/v1/images/generations";
 
 pub fn metaskEndpoint(protocol: Protocol) ?[]const u8 {
     return switch (protocol) {
         .anthropic_messages => metask_anthropic_messages_url,
-        .openai_responses => "https://app.metask-ai.com/v1/responses",
-        .openai_chat_completions => "https://app.metask-ai.com/v1/chat/completions",
+        .openai_responses => "https://www.metask-ai.com/v1/responses",
+        .openai_chat_completions => "https://www.metask-ai.com/v1/chat/completions",
         .gemini_native => null,
     };
 }

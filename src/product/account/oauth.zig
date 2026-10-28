@@ -3,7 +3,7 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const mechanics = @import("oauth_mechanics");
 
-pub const authority = "https://app.metask-ai.com";
+pub const authority = "https://www.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
@@ -654,7 +654,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 test "token decoder validates consumed fields and tolerates additive metadata" {
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"gateway_url":"https://app.metask-ai.com"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"gateway_url":"https://www.metask-ai.com"}
     ,
         100,
     );

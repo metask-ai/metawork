@@ -62,7 +62,7 @@ checking | signed_out | authorizing | authenticated
 
 `AccountView` 只包含 `state`、`can_cancel`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`summary` 保留全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与 `wallet/usage/history` 的稳定 wire shape；当前 OAuth 合同在 authenticated history 同步时将 eligibility 置为 enabled，wallet 与 usage 保持 unavailable且不携带数据或错误，history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 recorded cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
 
-公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已进入 refresh window 时立即启动 refresh，否则重新 arm Host timer；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://app.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
+公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已进入 refresh window 时立即启动 refresh，否则重新 arm Host timer；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://www.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
 
 ## 4. Authorization lease 与 Metask provider
 
@@ -85,14 +85,14 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 | 项目          | 固定值                                                    |
 | ------------- | --------------------------------------------------------- |
 | Flow          | OAuth 2.0 Authorization Code + PKCE S256                  |
-| Authority     | `https://app.metask-ai.com`                               |
-| Authorize     | `https://app.metask-ai.com/oauth/authorize`               |
-| Token         | `https://app.metask-ai.com/api/oauth/token`               |
-| Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo` |
+| Authority     | `https://www.metask-ai.com`                               |
+| Authorize     | `https://www.metask-ai.com/oauth/authorize`               |
+| Token         | `https://www.metask-ai.com/api/oauth/token`               |
+| Userinfo      | bearer `GET https://www.metask-ai.com/api/oauth/userinfo` |
 | Client ID     | `metawork`，无 `client_secret`                            |
 | Scope         | `read model:invoke`                                       |
 | Redirect      | `http://localhost:<dynamic-port>/auth/metask/callback`    |
-| Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`     |
+| Usage history | bearer `GET https://www.metask-ai.com/v1/usage/stats`     |
 
 Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。每次登录由 Application callback listener 在 IPv4 loopback `127.0.0.1` 上绑定 OS 分配的动态端口；授权请求和 authorization-code exchange 必须使用同一个实际端口，并保持精确 `localhost` host 与 callback path。无法取得本地端口时登录明确失败，不改用非 loopback 地址或其他 URI。callback 只接受一次精确路径的 `GET`，严格按 form encoding 解析 query、拒绝已识别参数重复及 code/error 冲突，忽略未知扩展参数，并以 constant-time 比较 `state`；扩展参数不得提供 identity 或改变 issuer 接受政策。
 
@@ -102,7 +102,7 @@ authorization-code token response 必须有界解码，包含非空 `access_toke
 
 Userinfo 仅将完整有界 JSON 的 `401 + authorization_revoked / user_not_found` 解释为对应 refresh credential 失效；`invalid_token`、普通 `401/403` 或协议错误不能证明 refresh token 失效，保留已提交的新 refresh token，并以 Account 错误和普通登录入口结束未验证身份。正常已验证 refresh 沿用当前 principal，不新增 Userinfo 请求。
 
-新的 OAuth gateway token 只发送给新 OAuth Userinfo 与 `app.metask-ai.com/v1/*`，不得发送给旧 `/api/v1/auth/me` 或 `/api/v1/usage/dashboard/*`，也不得以旧 `run_mode` 决定 history admission。authenticated identity 建立后，Account 直接把 `usage_eligibility` 置为 enabled并读取以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的 usage stats。history 请求固定使用 `scope=user&granularity=day`，Host拥有 `Asia/Shanghai` 日历范围并把本地日边界换算为 UTC `since`（包含）与 `before`（不包含）；Renderer不提交或推断这些参数。响应必须回显 `scope=user`、`granularity=day`、`timezone=Asia/Shanghai` 与精确查询边界；Host严格校验桶顺序、唯一性、`bucket_start`、Token恒等式与 `totals`。稀疏响应中缺失日期只在整段响应通过验证后由Renderer解释为零使用。`cost_mu` 是非负毫 U 整数并在Host中无损规范化为 U 十进制定点字符串；当前已发布响应允许省略 `unit` 与 `cost_complete`，若出现 `unit` 则必须为 `mU`，每日金额因此只具有 recorded cost语义，不承诺区间费用完整。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
+新的 OAuth gateway token 只发送给新 OAuth Userinfo 与 `www.metask-ai.com/v1/*`，不得发送给旧 `/api/v1/auth/me` 或 `/api/v1/usage/dashboard/*`，也不得以旧 `run_mode` 决定 history admission。authenticated identity 建立后，Account 直接把 `usage_eligibility` 置为 enabled并读取以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的 usage stats。history 请求固定使用 `scope=user&granularity=day`，Host拥有 `Asia/Shanghai` 日历范围并把本地日边界换算为 UTC `since`（包含）与 `before`（不包含）；Renderer不提交或推断这些参数。响应必须回显 `scope=user`、`granularity=day`、`timezone=Asia/Shanghai` 与精确查询边界；Host严格校验桶顺序、唯一性、`bucket_start`、Token恒等式与 `totals`。稀疏响应中缺失日期只在整段响应通过验证后由Renderer解释为零使用。`cost_mu` 是非负毫 U 整数并在Host中无损规范化为 U 十进制定点字符串；当前已发布响应允许省略 `unit` 与 `cost_complete`，若出现 `unit` 则必须为 `mU`，每日金额因此只具有 recorded cost语义，不承诺区间费用完整。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
 
 `/v1/models` 与 `/v1/messages` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。Account 只通过 generation-bound lease 交付当前 OAuth access token；Models 将其作为目录与模型调用的 transient bearer credential，不建立 Metask API Key 选择。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
 

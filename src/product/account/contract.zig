@@ -36,11 +36,11 @@ pub const Limits = struct {
     pub const usage_history_days: usize = 371;
 };
 
-pub const recharge_page_url = "https://app.metask-ai.com/app/billing";
+pub const recharge_page_url = "https://www.metask-ai.com/app/billing";
 
 test "recharge page uses the canonical Metask billing URL" {
     try std.testing.expectEqualStrings(
-        "https://app.metask-ai.com/app/billing",
+        "https://www.metask-ai.com/app/billing",
         recharge_page_url,
     );
 }
