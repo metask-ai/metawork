@@ -828,7 +828,8 @@ export function TaskContent({
             >
               {showRoot && (
                 <>
-                  <Message role="user"
+                  <Message
+                    role="user"
                     tabIndex={-1}
                     className="focus-ring"
                     data-reading-id={
@@ -873,7 +874,8 @@ export function TaskContent({
                       {localNodes.get(entry.operationId)}
                     </Fragment>
                   ) : entry.kind === "image" ? (
-                    <Message role="assistant"
+                    <Message
+                      role="assistant"
                       key={entry.identity}
                       data-reading-id={entry.identity}
                     >
@@ -898,7 +900,8 @@ export function TaskContent({
                   ) : entry.parts.some((part) => part.content) ||
                     entry.redacted ? (
                     <Fragment key={entry.identity}>
-                      <Message role="assistant"
+                      <Message
+                        role="assistant"
                         className="run-assistant-output"
                       >
                         {entry.parts

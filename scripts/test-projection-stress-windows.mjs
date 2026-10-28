@@ -30,7 +30,10 @@ assert.ok(
 // Keep the original aggregate text rate while exercising every production worker.
 // The observed concurrent Provider streams below, rather than this source read,
 // prove that the real execution path reached the configured limit.
-const liveChunkRepetitions = Math.max(1, Math.floor(16 / configuredConcurrency));
+const liveChunkRepetitions = Math.max(
+  1,
+  Math.floor(16 / configuredConcurrency),
+);
 const historicalRuns = configuredConcurrency + 5;
 await buildAutomationDebugArtifact(root);
 const fixture = await mkdtemp(join(tmpdir(), "metawork-projection-stress-"));
@@ -297,7 +300,9 @@ try {
       }, `historical Run ${marker}`);
     }
   }
-  console.log(`Projection stress: ${historicalRuns} real historical Runs retained.`);
+  console.log(
+    `Projection stress: ${historicalRuns} real historical Runs retained.`,
+  );
   await webview.evaluate(`(() => {
     const state=window.__projectionPressure={reads:[],preparations:0,frames:[],longTasks:[],running:true};
     const transport=window.chrome.webview; const post=transport.postMessage;
