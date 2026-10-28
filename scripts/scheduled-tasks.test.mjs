@@ -292,6 +292,72 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   assert.equal(created.binding.protocol, "anthropic_messages");
 });
 
+test("schedule binding consumes installed protocol for Metask and custom sources", async () => {
+  for (const source of ["metask", "custom"]) {
+    for (const protocol of [
+      "anthropic_messages",
+      "openai_responses",
+      "openai_chat_completions",
+      "gemini_native",
+    ]) {
+      const snapshot = structuredClone(fixture);
+      snapshot.capabilities.automaticWorkspaces = true;
+      snapshot.capabilities.scheduledTasks = true;
+      snapshot.capabilities.scheduledTaskPersistence = true;
+      snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+      snapshot.newTaskAdmission.activeProtocol = protocol;
+      snapshot.newTaskAdmission.activeGeneration = "999";
+      const provider = snapshot.models.providers[0];
+      provider.sourceGeneration = "7";
+      if (source === "custom") {
+        snapshot.models.customProviders = [
+          {
+            id: "custom",
+            protocol,
+            sourceGeneration: "7",
+            enabled: true,
+            state: "ready",
+            credentialStatus: "ready",
+            models: [{ id: "fixture-model", ready: true }],
+          },
+        ];
+        snapshot.models.defaultSelection = {
+          sourceId: "custom",
+          modelId: "fixture-model",
+        };
+        snapshot.newTaskAdmission.activeModelRef =
+          snapshot.models.defaultSelection;
+      }
+      let created = null;
+      renderDom(
+        scheduledElement(snapshot, {
+          onCreate: async (input) => {
+            created = input;
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+      const save = screen.getByRole("button", { name: "Save" });
+      assert.equal(save.disabled, false);
+      fireEvent.click(save);
+      await waitFor(() => assert.ok(created));
+      assert.equal(created.binding.protocol, protocol);
+      assert.equal(created.binding.sourceGeneration, "7");
+      assert.equal(created.binding.modelRef.sourceId, source);
+      cleanup();
+    }
+  }
+  const stale = structuredClone(fixture);
+  stale.capabilities.automaticWorkspaces = true;
+  stale.capabilities.scheduledTasks = true;
+  stale.capabilities.scheduledTaskPersistence = true;
+  stale.capabilities.scheduledTaskPersistenceHealth = "ready";
+  stale.newTaskAdmission.activeSelectionRevision = "999";
+  renderDom(scheduledElement(stale));
+  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+});
+
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;

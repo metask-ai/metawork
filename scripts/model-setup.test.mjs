@@ -125,6 +125,7 @@ function signedOut() {
     state: "unavailable",
     reason: "credential_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
   });
@@ -177,6 +178,7 @@ function customModels() {
     activeGeneration: "1",
     activeSelectionRevision: state.models.selectionRevision,
     activeModelRef: state.models.defaultSelection,
+    activeProtocol: "openai_chat_completions",
   });
   return state;
 }
@@ -788,6 +790,7 @@ test("a ready alternative does not immediately close manually opened setup", asy
     state: "unavailable",
     reason: "credential_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
   });
   const app = await renderApp(ctx, state);
   const user = userEvent.setup({ document: dom.window.document });

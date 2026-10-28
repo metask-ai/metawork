@@ -806,6 +806,7 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     available: false,
     reason: "credential_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
     state: "unavailable",
@@ -836,6 +837,7 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
     available: false,
     reason: "custom_provider_persistence_unavailable",
     activeModelRef: null,
+    activeProtocol: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
     state: "unavailable",
@@ -1428,9 +1430,15 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
 
   const blockerHistory = clone(scheduled);
-  blockerHistory.scheduledTasks[0].occurrences = JSON.parse(readFileSync(
-    new URL("../frontend/src/bridge/__fixtures__/scheduled-occurrences.fixture", import.meta.url), "utf8",
-  ));
+  blockerHistory.scheduledTasks[0].occurrences = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/scheduled-occurrences.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   assert.deepEqual(decodeWorkbenchSnapshot(blockerHistory), blockerHistory);
   const invalidBlocker = clone(blockerHistory);
   invalidBlocker.scheduledTasks[0].occurrences[1].reason = "capacity_reached";
@@ -1938,6 +1946,27 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
 });
 
+test("installed admission protocol is strict and paired with its model identity", () => {
+  for (const protocol of [
+    "anthropic_messages",
+    "openai_responses",
+    "openai_chat_completions",
+    "gemini_native",
+  ]) {
+    const snapshot = clone(fixture);
+    snapshot.newTaskAdmission.activeProtocol = protocol;
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  }
+  for (const invalid of [null, "guessed_protocol", undefined]) {
+    const snapshot = clone(fixture);
+    snapshot.newTaskAdmission.activeProtocol = invalid;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(snapshot),
+      /protocol|activeProtocol|enum|expected keys/,
+    );
+  }
+});
+
 test("Custom Provider readiness survives an isolated failed retest", () => {
   const snapshot = clone(fixture);
   snapshot.account = {
@@ -1990,6 +2019,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     available: true,
     reason: "none",
     activeModelRef: { sourceId: "provider-1", modelId: "gpt-5" },
+    activeProtocol: "openai_chat_completions",
     activeGeneration: "9",
     activeSelectionRevision: snapshot.models.selectionRevision,
     state: "ready",
@@ -2390,6 +2420,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     available: false,
     reason: "none",
     activeModelRef: null,
+    activeProtocol: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
     state: "unavailable",
@@ -2538,6 +2569,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.models.providers[0].errorCode = "authorization_unavailable";
   signedOut.newTaskAdmission.state = "unavailable";
   signedOut.newTaskAdmission.activeModelRef = null;
+  signedOut.newTaskAdmission.activeProtocol = null;
   signedOut.newTaskAdmission.activeGeneration = "0";
   signedOut.newTaskAdmission.activeSelectionRevision = "0";
   signedOut.newTaskAdmission.available = false;

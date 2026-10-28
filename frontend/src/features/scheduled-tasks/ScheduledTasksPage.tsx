@@ -128,54 +128,44 @@ function currentBinding(
   snapshot: WorkbenchSnapshot,
 ): ScheduledTaskBinding | null {
   const selection = snapshot.models.defaultSelection;
+  const admission = snapshot.newTaskAdmission;
   if (
-    !snapshot.newTaskAdmission.available ||
-    !sameModelRef(selection, snapshot.newTaskAdmission.activeModelRef) ||
-    snapshot.models.selectionRevision === "0"
+    !admission.available ||
+    !sameModelRef(selection, admission.activeModelRef) ||
+    admission.activeProtocol === null ||
+    snapshot.models.selectionRevision === "0" ||
+    snapshot.models.selectionRevision !== admission.activeSelectionRevision
   )
     return null;
-  const custom = snapshot.models.customProviders.find(
-    (connection) => connection.id === selection!.sourceId,
-  );
-  if (custom) {
-    const model = custom.models.find(
-      (candidate) => candidate.id === selection!.modelId,
-    );
-    if (
-      !custom.enabled ||
-      custom.state !== "ready" ||
-      custom.credentialStatus !== "ready" ||
-      custom.sourceGeneration === "0" ||
-      !model?.ready
-    )
-      return null;
-    return {
-      modelRef: selection!,
-      sourceGeneration: custom.sourceGeneration,
-      selectionRevision: snapshot.models.selectionRevision,
-      protocol: custom.protocol,
-    };
-  }
-  const metask = snapshot.models.providers.find(
-    (provider) => provider.id === "metask",
-  );
-  const model = metask?.models.find(
+  const provider = [
+    ...snapshot.models.providers,
+    ...snapshot.models.customProviders,
+  ].find((candidate) => candidate.id === selection!.sourceId);
+  const model = provider?.models.find(
     (candidate) => candidate.id === selection!.modelId,
   );
-  if (
-    !metask ||
-    selection!.sourceId !== "metask" ||
-    metask.catalogState !== "ready" ||
-    metask.sourceGeneration === "0" ||
-    !model ||
-    !sameModelRef(snapshot.models.metaskSelection, selection)
+  if (!provider || provider.sourceGeneration === "0" || !model) return null;
+  if ("catalogState" in provider) {
+    if (
+      provider.catalogState !== "ready" ||
+      !sameModelRef(snapshot.models.metaskSelection, selection)
+    )
+      return null;
+  } else if (
+    !provider.enabled ||
+    provider.state !== "ready" ||
+    provider.credentialStatus !== "ready" ||
+    !provider.models.some(
+      (candidate) => candidate.id === selection!.modelId && candidate.ready,
+    ) ||
+    provider.protocol !== admission.activeProtocol
   )
     return null;
   return {
     modelRef: selection!,
-    sourceGeneration: metask.sourceGeneration,
+    sourceGeneration: provider.sourceGeneration,
     selectionRevision: snapshot.models.selectionRevision,
-    protocol: "anthropic_messages",
+    protocol: admission.activeProtocol,
   };
 }
 

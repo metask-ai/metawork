@@ -3069,6 +3069,7 @@ pub const Runtime = struct {
             .available = self.canCreateTask(),
             .reason = self.execution_state.availabilityError(),
             .active_model_ref = self.execution_state.activeModelRef(),
+            .active_protocol = self.execution_state.protocol(),
             .active_generation = self.execution_state.generation(),
             .active_selection_revision = self.execution_state.activeSelectionRevision(),
             .state = self.execution_state.availability(),
@@ -7700,6 +7701,11 @@ pub const Runtime = struct {
         }) catch
             return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.active_model_ref);
+        writer.writeAll(",\"activeProtocol\":") catch return error.SnapshotTooLarge;
+        if (view.active_protocol) |protocol|
+            writer.print("\"{s}\"", .{@tagName(protocol)}) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"activeGeneration\":\"{d}\",\"activeSelectionRevision\":\"{d}\",\"state\":\"{s}\"}}", .{
             view.active_generation,
             view.active_selection_revision,
@@ -14111,6 +14117,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     }).accepted);
 
     const binding = TestSupport.scheduledBinding(&control);
+    try std.testing.expectEqual(models_contract.Protocol.openai_responses, control.newTaskAdmissionView().active_protocol.?);
     try control.validateScheduledBinding(binding);
     var stale = binding;
     stale.model_ref.source_id = "another-provider";

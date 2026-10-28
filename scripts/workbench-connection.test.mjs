@@ -42,6 +42,7 @@ function snapshot(revision, tasks = []) {
       available: false,
       reason: "none",
       activeModelRef: null,
+      activeProtocol: null,
       activeGeneration: "0",
       activeSelectionRevision: "0",
       state: "unavailable",

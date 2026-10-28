@@ -1942,6 +1942,7 @@ function decodeNewTaskAdmission(
     "available",
     "reason",
     "activeModelRef",
+    "activeProtocol",
     "activeGeneration",
     "activeSelectionRevision",
     "state",
@@ -1955,6 +1956,13 @@ function decodeNewTaskAdmission(
     item.activeGeneration,
     `${path}.activeGeneration`,
   );
+  const activeProtocol = nullableEnum(
+    item.activeProtocol,
+    `${path}.activeProtocol`,
+    protocols,
+  );
+  if ((activeModelRef === null) !== (activeProtocol === null))
+    fail(path, "active model and protocol must be present together");
   const activeSelectionRevision = wireId(
     item.activeSelectionRevision,
     `${path}.activeSelectionRevision`,
@@ -1976,6 +1984,7 @@ function decodeNewTaskAdmission(
     available,
     reason: enumValue(item.reason, `${path}.reason`, newTaskAdmissionReasons),
     activeModelRef,
+    activeProtocol,
     activeGeneration,
     activeSelectionRevision,
     state,
