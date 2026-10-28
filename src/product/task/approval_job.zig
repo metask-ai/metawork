@@ -39,9 +39,17 @@ pub const CheckpointWork = struct {
 };
 
 pub const HistoryWork = struct {
-    bytes: []u8,
+    input: HistoryInput,
     capability: persistence.Capability,
-    resolve_only: bool = false,
+};
+
+pub const HistoryInput = union(enum) {
+    candidate: persistence.OwnedCandidate,
+    resolution: persistence.CommitToken,
+    pub fn deinit(self: *HistoryInput) void {
+        if (self.* == .candidate) self.candidate.deinit();
+        self.* = undefined;
+    }
 };
 
 pub const Work = union(enum) {
@@ -114,11 +122,12 @@ pub const Job = struct {
         return record;
     }
 
-    pub fn takeHistory(self: *Job) ?[]u8 {
+    pub fn historyToken(self: *const Job) ?persistence.CommitToken {
         if (self.work != .history) return null;
-        const bytes = self.work.history.bytes;
-        self.work.history.bytes = &.{};
-        return bytes;
+        return switch (self.work.history.input) {
+            .candidate => |owned| owned.candidate.token,
+            .resolution => |token| token,
+        };
     }
 
     pub fn deinit(self: *Job) void {
@@ -129,10 +138,7 @@ pub const Job = struct {
                 work.access.deinit();
                 self.allocator.free(work.model);
             },
-            .history => |work| {
-                std.crypto.secureZero(u8, work.bytes);
-                self.allocator.free(work.bytes);
-            },
+            .history => |*work| work.input.deinit(),
             .retire => {},
         }
         self.lease.deinit();
@@ -148,7 +154,16 @@ pub const Job = struct {
     fn run(self: *Job) Outcome {
         if (self.cancelled.load(.acquire)) return fail(.cancelled, false);
         switch (self.work) {
-            .history => |work| return .{ .history = if (work.resolve_only) work.capability.resolveCommit(work.bytes) else work.capability.commitConfirmed(work.bytes) },
+            .history => |*work| {
+                const result = switch (work.input) {
+                    .resolution => |token| work.capability.resolveCommit(token),
+                    .candidate => |*owned| work.capability.commitConfirmed(&owned.candidate),
+                };
+                // Store can report an older unresolved transaction before it
+                // prepares this candidate. That gives this job no commit to
+                // confirm; reject it rather than publishing a tokenless wait.
+                return .{ .history = if (result == .outcome_unknown and self.historyToken() == null) .failed else result };
+            },
             .retire => |work| {
                 work.store.delete(work.identity);
                 return .retired;
@@ -260,7 +275,7 @@ test "queued approval cancellation publishes one completion and releases owned r
         fn notify(_: ?*anyopaque) bool {
             return true;
         }
-        fn commit(_: ?*anyopaque, _: []const u8) persistence.Commit {
+        fn commit(_: ?*anyopaque, _: *persistence.Candidate) persistence.Commit {
             return .committed;
         }
     };
@@ -271,7 +286,7 @@ test "queued approval cancellation publishes one completion and releases owned r
         .lease = try leases.acquire(),
         .notifier = .{ .context = null, .notify_fn = Harness.notify },
         .work = .{ .history = .{
-            .bytes = try std.testing.allocator.dupe(u8, "candidate"),
+            .input = .{ .candidate = try persistence.OwnedCandidate.capture(std.testing.allocator, .{ .value = .{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 7, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} } }) },
             .capability = .{ .enabled = true, .confirmed_commit_fn = Harness.commit },
         } },
     };
@@ -290,9 +305,10 @@ test "approval history worker publishes the confirmed commit disposition exactly
         fn notify(_: ?*anyopaque) bool {
             return true;
         }
-        fn commit(context: ?*anyopaque, bytes: []const u8) persistence.Commit {
+        fn commit(context: ?*anyopaque, candidate: *persistence.Candidate) persistence.Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            std.debug.assert(std.mem.eql(u8, bytes, "candidate"));
+            std.debug.assert(candidate.value.next_task_id == 7);
+            candidate.token = @splat(17);
             self.calls += 1;
             return self.result;
         }
@@ -306,7 +322,7 @@ test "approval history worker publishes the confirmed commit disposition exactly
             .lease = try leases.acquire(),
             .notifier = .{ .context = null, .notify_fn = Harness.notify },
             .work = .{ .history = .{
-                .bytes = try std.testing.allocator.dupe(u8, "candidate"),
+                .input = .{ .candidate = try persistence.OwnedCandidate.capture(std.testing.allocator, .{ .value = .{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 7, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} } }) },
                 .capability = .{ .enabled = true, .context = &harness, .confirmed_commit_fn = Harness.commit },
             } },
         };
@@ -326,15 +342,15 @@ test "approval resolution worker only reads the retained candidate and releases 
         fn notify(_: ?*anyopaque) bool {
             return true;
         }
-        fn write(context: ?*anyopaque, _: []const u8) persistence.Commit {
+        fn write(context: ?*anyopaque, _: *persistence.Candidate) persistence.Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.writes += 1;
             return .committed;
         }
-        fn read(context: ?*anyopaque, bytes: []const u8) persistence.Commit {
+        fn read(context: ?*anyopaque, token: persistence.CommitToken) persistence.Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.reads += 1;
-            std.debug.assert(std.mem.eql(u8, bytes, "retained candidate"));
+            std.debug.assert(std.mem.eql(u8, &token, &(@as(persistence.CommitToken, @splat(9)))));
             return .committed;
         }
     };
@@ -346,8 +362,7 @@ test "approval resolution worker only reads the retained candidate and releases 
         .lease = try leases.acquire(),
         .notifier = .{ .context = null, .notify_fn = Harness.notify },
         .work = .{ .history = .{
-            .bytes = try std.testing.allocator.dupe(u8, "retained candidate"),
-            .resolve_only = true,
+            .input = .{ .resolution = @splat(9) },
             .capability = .{ .enabled = true, .context = &harness, .confirmed_commit_fn = Harness.write, .resolve_commit_fn = Harness.read },
         } },
     };
@@ -357,4 +372,40 @@ test "approval resolution worker only reads the retained candidate and releases 
     try std.testing.expectEqual(@as(usize, 1), harness.reads);
     job.deinit();
     try std.testing.expectEqual(@as(usize, 0), leases.liveCount());
+}
+
+test "history worker rejects unknown without a candidate token while preserving resolution unknown" {
+    const Harness = struct {
+        fn notify(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn commit(_: ?*anyopaque, _: *persistence.Candidate) persistence.Commit {
+            return .outcome_unknown;
+        }
+        fn resolve(_: ?*anyopaque, _: persistence.CommitToken) persistence.Commit {
+            return .outcome_unknown;
+        }
+    };
+    for ([_]bool{ false, true }) |resolution| {
+        var leases: worker_lease.WorkerLeaseSet = .{};
+        const job = try std.testing.allocator.create(Job);
+        job.* = .{
+            .allocator = std.testing.allocator,
+            .lease = try leases.acquire(),
+            .notifier = .{ .context = null, .notify_fn = Harness.notify },
+            .work = .{ .history = .{
+                .input = if (resolution) .{ .resolution = @splat(9) } else .{ .candidate = try persistence.OwnedCandidate.capture(std.testing.allocator, .{ .value = .{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 1, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} } }) },
+                .capability = .{ .enabled = true, .confirmed_commit_fn = Harness.commit, .resolve_commit_fn = Harness.resolve },
+            } },
+        };
+        Job.execute(job);
+        const outcome = job.outcome.history;
+        const token_present = job.historyToken() != null;
+        const completed = job.completionReady();
+        job.deinit();
+        try std.testing.expect(completed);
+        try std.testing.expectEqual(@as(usize, 0), leases.liveCount());
+        try std.testing.expectEqual(resolution, token_present);
+        try std.testing.expectEqual(if (resolution) persistence.Commit.outcome_unknown else .failed, outcome);
+    }
 }

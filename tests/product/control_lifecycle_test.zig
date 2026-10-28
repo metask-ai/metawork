@@ -1156,6 +1156,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
 }
 
 const TaskPersistenceProbe = struct {
+    fixture_restore: ?[]const u8 = null,
     result: product_task.history.Commit = .committed,
     store_on_outcome_unknown: bool = false,
     storage: ?[]u8 = null,
@@ -1164,7 +1165,17 @@ const TaskPersistenceProbe = struct {
     main_thread: ?std.Thread.Id = null,
     main_commits: usize = 0,
 
-    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+    fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (!std.mem.eql(u8, &token, &(@as(product_task.history.CommitToken, @splat(23))))) return .outcome_unknown;
+        if (self.result == .outcome_unknown) return .outcome_unknown;
+        return if (self.store_on_outcome_unknown) .committed else .failed;
+    }
+
+    fn commit(context: ?*anyopaque, input: *product_task.history.Candidate) product_task.history.Commit {
+        input.token = @splat(23);
+        const bytes = product_task.history.encodeAlloc(std.testing.allocator, input.value, input.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+        defer std.testing.allocator.free(bytes);
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.main_thread) |thread| if (std.Thread.getCurrentId() == thread) {
@@ -1186,16 +1197,23 @@ const TaskPersistenceProbe = struct {
             .enabled = true,
             .commit_fn = commit,
             .confirmed_commit_fn = commit,
+            .resolve_commit_fn = resolve,
             .recover_fn = commit,
         };
     }
 
+    fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const bytes = self.fixture_restore orelse return null;
+        return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+    }
     fn capabilityRestored(
         self: *@This(),
         restored_bytes: []const u8,
     ) product_task.history.Capability {
         var result = self.capability();
-        result.restored_bytes = restored_bytes;
+        self.fixture_restore = restored_bytes;
+        result.restore_fn = restoreFixture;
         return result;
     }
 };
@@ -1228,7 +1246,10 @@ const CoverageCommitProbe = struct {
         self.count = 0;
     }
 
-    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+    fn commit(context: ?*anyopaque, input: *product_task.history.Candidate) product_task.history.Commit {
+        input.token = @splat(23);
+        const bytes = product_task.history.encodeAlloc(std.testing.allocator, input.value, input.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+        defer std.testing.allocator.free(bytes);
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (self.record_id == 0) return .committed;
         if (self.count == self.observations.len) return .failed;
@@ -2245,10 +2266,11 @@ test "Task model rebind confirms a full target connection and restores the origi
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = persistence.capability();
         if (unknown) configuration.task_persistence.resolve_commit_fn = struct {
-            fn resolve(context: ?*anyopaque, candidate: []const u8) product_task.history.Commit {
+            fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
+                std.debug.assert(std.mem.eql(u8, &token, &(@as(product_task.history.CommitToken, @splat(23)))));
                 const probe: *TaskPersistenceProbe = @ptrCast(@alignCast(context.?));
                 if (probe.result == .outcome_unknown) return .outcome_unknown;
-                return if (std.mem.eql(u8, candidate, probe.storage.?[0..probe.len])) .committed else .failed;
+                return if (probe.store_on_outcome_unknown) .committed else .failed;
             }
         }.resolve;
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
@@ -2607,14 +2629,17 @@ test "Task model rebind candidate close releases an earlier shared writer waiter
         close_entered: std.atomic.Value(bool) = .init(false),
         close_released: std.atomic.Value(bool) = .init(false),
 
-        fn save(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+        fn save(context: ?*anyopaque, input: *product_task.history.Candidate) product_task.history.Commit {
+            input.token = @splat(23);
+            const bytes = product_task.history.encodeAlloc(std.testing.allocator, input.value, input.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+            defer std.testing.allocator.free(bytes);
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (self.hold_writer.swap(false, .acq_rel)) {
                 self.writer_entered.store(true, .release);
                 while (!self.writer_released.load(.acquire))
                     std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
             }
-            return TaskPersistenceProbe.commit(&self.persistence, bytes);
+            return TaskPersistenceProbe.commit(&self.persistence, input);
         }
 
         fn close(context: *anyopaque) void {
@@ -4620,6 +4645,15 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     try std.testing.expectEqual(@as(u64, 2), continuation_id);
     try waitSetTaskArchived(&workbench, task_id);
     try workbench.setTaskArchived(task_id, false);
+    // Terminal publication precedes the checkpoint worker releasing its
+    // lease. Wait for that independently observable completion before asking
+    // compact to mutate the same Session.
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        if (!workbench.task_runtime.find(task_id).?.runtime.worker_leases.hasLive()) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(!workbench.task_runtime.find(task_id).?.runtime.worker_leases.hasLive());
     const compact_id = try workbench.compactTaskAtBinding(task_id, 1);
     try std.testing.expectEqual(@as(u64, 1), compact_id);
     try waitTaskSnapshot(
@@ -9487,6 +9521,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         fn cancel(_: *anyopaque) void {}
     };
     const Harness = struct {
+        fixture_restore: ?[]const u8 = null,
         storage: []u8,
         candidate: []u8,
         main_thread: std.Thread.Id,
@@ -9515,7 +9550,10 @@ test "recovery binding confirmation retains candidates and never writes on the m
             self.close_entered.store(true, .release);
             while (self.hold_close and !self.close_released.load(.acquire)) std.Thread.yield() catch {};
         }
-        fn save(context: ?*anyopaque, bytes: []const u8) Commit {
+        fn save(context: ?*anyopaque, input: *product_task.history.Candidate) Commit {
+            input.token = @splat(23);
+            const bytes = product_task.history.encodeAlloc(std.testing.allocator, input.value, input.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+            defer std.testing.allocator.free(bytes);
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (std.Thread.getCurrentId() == self.main_thread) {
                 self.main_commits += 1;
@@ -9536,8 +9574,10 @@ test "recovery binding confirmation retains candidates and never writes on the m
             self.len = bytes.len;
             return .committed;
         }
-        fn resolve(context: ?*anyopaque, bytes: []const u8) Commit {
+        fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(std.mem.eql(u8, &token, &(@as(product_task.history.CommitToken, @splat(23)))));
+            const bytes = self.candidate[0..self.candidate_len];
             std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
             std.debug.assert(std.mem.eql(u8, bytes, self.candidate[0..self.candidate_len]));
             self.resolutions += 1;
@@ -9545,13 +9585,19 @@ test "recovery binding confirmation retains candidates and never writes on the m
             std.debug.assert((self.resolved == .committed) == std.mem.eql(u8, bytes, self.storage[0..self.len]));
             return self.resolved;
         }
-        fn recover(context: ?*anyopaque, _: []const u8) Commit {
+        fn recover(context: ?*anyopaque, _: *product_task.history.Candidate) Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.recoveries += 1;
             return .failed;
         }
+        fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const bytes = self.fixture_restore orelse return null;
+            return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+        }
         fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
-            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
+            self.fixture_restore = restored;
+            return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
         }
         fn wake(_: ?*anyopaque) bool {
             return true;
@@ -9882,11 +9928,11 @@ test "recovery binding confirmation retains candidates and never writes on the m
             try std.testing.expectEqual(@as(usize, 1), history.worker_commits);
             try std.testing.expectEqual(@as(usize, 0), history.resolutions);
             var held = HeldExecutor{};
-            const copy = try std.testing.allocator.dupe(u8, retained);
-            try control.task_runtime.queueRecoveryHistory(task_id, copy, history.capability(null), true, .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, .{ .notify_fn = Harness.wake });
+            const copy = retained;
+            try control.task_runtime.queueRecoveryHistory(task_id, .{ .resolution = copy }, history.capability(null), .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, .{ .notify_fn = Harness.wake });
             try std.testing.expect(HeldExecutor.cancel(&held, held.context.?));
             control.syncLifecycle();
-            try std.testing.expectEqual(retained.ptr, restore.unknown_history.?.ptr);
+            try std.testing.expectEqualSlices(u8, &retained, &restore.unknown_history.?);
             try std.testing.expectEqual(.outcome_unknown, restore.binding_commit);
             for (0..2) |resolution| {
                 try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
@@ -9896,7 +9942,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 }
                 try std.testing.expectEqual(resolution + 1, history.resolutions);
-                if (resolution == 0) try std.testing.expectEqual(retained.ptr, restore.unknown_history.?.ptr);
+                if (resolution == 0) try std.testing.expectEqualSlices(u8, &retained, &restore.unknown_history.?);
             }
         }
         for (0..2000) |_| {
@@ -10048,6 +10094,7 @@ test "approval delegation can change while the only Run worker waits for permiss
 test "approval metadata outcomes retain both checkpoints until canonical readback decides" {
     const Commit = product_task.history.Commit;
     const Harness = struct {
+        fixture_restore: ?[]const u8 = null,
         storage: []u8,
         candidate: []u8,
         main_thread: std.Thread.Id,
@@ -10062,7 +10109,10 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         resolutions: usize = 0,
         recoveries: usize = 0,
 
-        fn commit(context: ?*anyopaque, bytes: []const u8) Commit {
+        fn commit(context: ?*anyopaque, input: *product_task.history.Candidate) Commit {
+            input.token = @splat(23);
+            const bytes = product_task.history.encodeAlloc(std.testing.allocator, input.value, input.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+            defer std.testing.allocator.free(bytes);
             const self: *@This() = @ptrCast(@alignCast(context.?));
             if (std.Thread.getCurrentId() == self.main_thread) self.main_writes += 1;
             var parsed = product_task.history.decode(std.testing.allocator, bytes, .{
@@ -10108,23 +10158,30 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
             return .committed;
         }
 
-        fn resolve(context: ?*anyopaque, expected: []const u8) Commit {
+        fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
-            std.debug.assert(std.mem.eql(u8, expected, self.candidate[0..self.candidate_len]));
+            std.debug.assert(std.mem.eql(u8, &token, &(@as(product_task.history.CommitToken, @splat(23)))));
+            const expected = self.candidate[0..self.candidate_len];
             self.resolutions += 1;
             if (self.resolutions == 1) return .outcome_unknown;
             return if (std.mem.eql(u8, self.storage[0..self.len], expected)) .committed else .failed;
         }
 
-        fn recover(context: ?*anyopaque, _: []const u8) Commit {
+        fn recover(context: ?*anyopaque, _: *product_task.history.Candidate) Commit {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.recoveries += 1;
             return .failed;
         }
 
+        fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const bytes = self.fixture_restore orelse return null;
+            return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+        }
         fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
-            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve, .recover_fn = recover };
+            self.fixture_restore = restored;
+            return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve, .recover_fn = recover };
         }
     };
     const Case = struct { result: Commit, candidate_is_canonical: bool, fault_baseline: bool = false };
@@ -10210,7 +10267,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
             try std.testing.expectEqual(@as(usize, 0), premature_restores);
             if (case.result == .outcome_unknown) {
                 try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
-                const retained = task.approval_change.?.unknown_history.?.bytes;
+                const retained = task.approval_change.?.unknown_history.?.token;
                 var cancelled: std.atomic.Value(bool) = .init(false);
                 var source = try store.openVerified(baseline, &cancelled);
                 source.deinit();
@@ -10225,7 +10282,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 }
                 try std.testing.expectEqual(@as(usize, 1), history.resolutions);
-                try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+                try std.testing.expectEqualSlices(u8, &retained, &task.approval_change.?.unknown_history.?.token);
                 try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
                 fake_core.lock();
                 const still_no_updates = fake_core.permission_mode_updates;
@@ -10280,7 +10337,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         if (case.result == .outcome_unknown) {
             try std.testing.expect(task.approval_change != null);
             try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
-            const retained = task.approval_change.?.unknown_history.?.bytes;
+            const retained = task.approval_change.?.unknown_history.?.token;
             const pending_blob = task.approval_change.?.candidate.?.blob;
             try std.testing.expect(!std.meta.eql(baseline, pending_blob));
             try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
@@ -10332,7 +10389,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             }
             try std.testing.expectEqual(@as(usize, 1), history.resolutions);
-            try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+            try std.testing.expectEqualSlices(u8, &retained, &task.approval_change.?.unknown_history.?.token);
             try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
             try std.testing.expectEqual(writes, history.mode_writes);
             try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));

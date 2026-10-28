@@ -233,11 +233,13 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     defer checkpoints.deinit();
     var history = try fixture.product_task.history.FileStore.init(std.testing.io, home);
     defer history.deinit();
+    var typed_history: History = .{ .file_store = &history };
+    defer typed_history.deinit();
     var review = ReviewProbe{};
     var configuration = fixture.productControlConfiguration();
     configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
     if (scenario == .reviewer) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
-    configuration.task_persistence = History.capability(&history);
+    configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = home;
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
@@ -565,24 +567,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         try std.testing.expect(std.mem.indexOf(u8, json, secret) == null);
 }
 
-const History = struct {
-    fn commit(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
-        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
-        return .committed;
-    }
-    fn confirmed(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
-        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        return store.commitConfirmed(std.testing.allocator, bytes);
-    }
-    fn resolve(context: ?*anyopaque, bytes: []const u8) fixture.product_task.history.Commit {
-        const store: *fixture.product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        return store.resolveCommit(std.testing.allocator, bytes);
-    }
-    fn capability(store: *fixture.product_task.history.FileStore) fixture.product_task.history.Capability {
-        return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
-    }
-};
+const History = fixture.TypedHistory;
 
 fn expectBlocked(control: *control_api.Runtime, task_id: u64, operation: []const u8) !void {
     const before = runCalls();

@@ -1085,7 +1085,7 @@ pub const ApprovalChange = struct {
     } = .waiting,
     baseline_confirmed: bool = false,
     recovery_attempt_id: ?u64 = null,
-    unknown_history: ?struct { bytes: []u8, mode_commit: bool } = null,
+    unknown_history: ?struct { token: [32]u8, mode_commit: bool } = null,
     candidate: ?checkpoint_record.Record = null,
     failure: ?ApprovalFailureReason = null,
 };

@@ -30,6 +30,7 @@ const agent_protocol = @import("product_agent_protocol_adapter");
 const permission_review = @import("product_permission_review");
 
 pub const DurableCommit = task_persistence.Commit;
+pub const HistoryInput = approval_job.HistoryInput;
 pub const RunOutcome = task_state.RunOutcome;
 pub const TerminalSummary = struct {
     outcome: RunOutcome,
@@ -1363,9 +1364,9 @@ pub const Runtime = struct {
         task.approval_change.?.phase = if (mutate) .mutation_export else .baseline_export;
     }
 
-    pub fn queueApprovalHistory(self: *Runtime, task_id: u64, bytes: []u8, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+    pub fn queueApprovalHistory(self: *Runtime, task_id: u64, candidate: task_persistence.OwnedCandidate, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(task_id, null, bytes, capability, false, executor, notifier);
+        return self.queueApprovalHistoryWork(task_id, null, .{ .candidate = candidate }, capability, executor, notifier);
     }
 
     pub fn queueApprovalResolution(self: *Runtime, task_id: u64, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
@@ -1374,29 +1375,28 @@ pub const Runtime = struct {
         const change = task.approval_change orelse return error.TaskBusy;
         if (change.phase != .outcome_unknown) return error.TaskBusy;
         const history = change.unknown_history orelse return error.ApprovalUnavailable;
-        const bytes = try self.allocator.dupe(u8, history.bytes);
-        errdefer self.allocator.free(bytes);
-        try self.queueApprovalHistoryWork(task_id, null, bytes, capability, true, executor, notifier);
+        try self.queueApprovalHistoryWork(task_id, null, .{ .resolution = history.token }, capability, executor, notifier);
     }
 
     /// A post-commit projection uses the same bounded writer and outlives the
     /// completed Task intent, like retirement of its superseded checkpoint.
-    pub fn queueApprovalProjection(self: *Runtime, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+    pub fn queueApprovalProjection(self: *Runtime, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         if (self.approvalHistoryWorkerActive()) return error.TaskBusy;
-        return self.queueApprovalHistoryWork(0, null, bytes, capability, resolve_only, executor, notifier);
+        return self.queueApprovalHistoryWork(0, null, input, capability, executor, notifier);
     }
 
     /// Recovery binding confirmation shares the same single history writer.
     /// Only immutable bytes and capabilities cross into that worker.
-    pub fn queueRecoveryHistory(self: *Runtime, task_id: u64, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+    pub fn queueRecoveryHistory(self: *Runtime, task_id: u64, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const resolve_only = input == .resolution;
         if (self.approvalHistoryWorkerActive() or (!resolve_only and self.approvalHistoryBlocked())) return error.TaskBusy;
         const task = self.find(task_id) orelse return error.UnknownTask;
         const restore = task.runtime.restore_job orelse return error.TaskBusy;
         if (resolve_only and (restore.binding_commit != .outcome_unknown or restore.unknown_history == null)) return error.TaskBusy;
-        try self.queueApprovalHistoryWork(task_id, restore.attempt.attempt_id, bytes, capability, resolve_only, executor, notifier);
+        try self.queueApprovalHistoryWork(task_id, restore.attempt.attempt_id, input, capability, executor, notifier);
     }
 
-    fn queueApprovalHistoryWork(self: *Runtime, task_id: u64, restore_attempt_id: ?u64, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+    fn queueApprovalHistoryWork(self: *Runtime, task_id: u64, restore_attempt_id: ?u64, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         const leases = if (task_id == 0) &self.approval_cleanup_leases else leases: {
             const task = self.find(task_id) orelse return error.UnknownTask;
             break :leases &task.runtime.worker_leases;
@@ -1411,7 +1411,7 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .lease = lease.take(),
             .notifier = .{ .context = notifier.context, .notify_fn = notifier.notify_fn },
-            .work = .{ .history = .{ .bytes = bytes, .capability = capability, .resolve_only = resolve_only } },
+            .work = .{ .history = .{ .input = input, .capability = capability } },
         };
         lease_live = false;
         executor.enqueue(job, job, approval_job.Job.execute, approval_job.Job.cancelQueued) catch |err| {
@@ -1499,7 +1499,6 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return;
         const change = &(task.approval_change orelse return);
         const revision = change.revision;
-        if (task.approval_change.?.unknown_history) |history| self.allocator.free(history.bytes);
         task.approval_change.?.unknown_history = null;
         if (task.approval_change.?.candidate) |*record| record.deinit(self.allocator);
         task.approval_change.?.candidate = null;
@@ -1521,12 +1520,12 @@ pub const Runtime = struct {
         self.failApprovalChange(task_id, .recovery_failed, false);
     }
 
-    pub fn markApprovalUnknown(self: *Runtime, task_id: u64, bytes: ?[]u8) void {
+    pub fn markApprovalUnknown(self: *Runtime, task_id: u64, token: ?task_persistence.CommitToken) void {
         const task = self.find(task_id) orelse unreachable;
         const change = &task.approval_change.?;
-        if (bytes) |candidate| {
+        if (token) |candidate| {
             std.debug.assert(change.unknown_history == null);
-            change.unknown_history = .{ .bytes = candidate, .mode_commit = change.phase == .mode_commit };
+            change.unknown_history = .{ .token = candidate, .mode_commit = change.phase == .mode_commit };
         }
         change.phase = .outcome_unknown;
         change.failure = .outcome_unknown;
@@ -1556,7 +1555,6 @@ pub const Runtime = struct {
             task.durable.checkpoint_attempt = .none;
         }
         _ = prepared;
-        if (task.approval_change.?.unknown_history) |history| self.allocator.free(history.bytes);
         task.approval_change.?.unknown_history = null;
         if (task.approval_change.?.phase == .baseline_commit) {
             task.approval_change.?.baseline_confirmed = true;
@@ -3730,6 +3728,29 @@ pub const Runtime = struct {
         self.retained.clearRetainingCapacity();
     }
 
+    /// Only Runtime-owned originals are replaced. Workers own separate inputs.
+    pub fn redactPreservedHistory(self: *Runtime, credential: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        for (self.retained.items) |*record| {
+            const cleaned = try task_persistence.security.redact(arena.allocator(), record.*, credential);
+            if (std.mem.eql(u8, cleaned.payload, record.payload)) continue;
+            const replacement = try self.allocator.dupe(u8, cleaned.payload);
+            std.crypto.secureZero(u8, @constCast(record.payload));
+            self.allocator.free(record.payload);
+            record.payload = replacement;
+        }
+        for (self.tasks) |entry| if (entry) |task| if (task.read_only_history) |*history| {
+            const record = task_persistence.ReadOnlyPayload{ .task_id = task.durable.id, .recent_order = history.recent_order, .payload = history.payload };
+            const cleaned = try task_persistence.security.redact(arena.allocator(), record, credential);
+            if (std.mem.eql(u8, cleaned.payload, history.payload)) continue;
+            const replacement = try self.allocator.dupe(u8, cleaned.payload);
+            std.crypto.secureZero(u8, history.payload);
+            self.allocator.free(history.payload);
+            history.payload = replacement;
+        };
+    }
+
     pub fn recordFailure(
         self: *Runtime,
         task_id: u64,
@@ -3761,12 +3782,12 @@ pub const Runtime = struct {
         read_only: []const task_persistence.ReadOnlyPayload,
         projection: task_persistence.RestoreProjection,
     ) RestoreError!usize {
-        std.debug.assert(wires.len == frames.len);
+        std.debug.assert(frames.len == 0 or wires.len == frames.len);
         for (self.tasks) |entry| std.debug.assert(entry == null);
         try self.ensureTaskSlots(wires.len);
         var restored_count: usize = 0;
         var retained: usize = 0;
-        for (wires, frames) |wire, frame| {
+        for (wires, 0..) |wire, frame_index| {
             const original: ?task_persistence.ReadOnlyPayload = for (read_only) |value| {
                 if (value.task_id == wire.id) break value;
             } else null;
@@ -3782,7 +3803,13 @@ pub const Runtime = struct {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
                         retained += 1;
-                        try self.retainRecord(frame);
+                        if (frames.len != 0) {
+                            try self.retainRecord(frames[frame_index]);
+                        } else {
+                            const bytes = if (original) |value| value.payload else try std.json.Stringify.valueAlloc(self.allocator, wire, .{});
+                            defer if (original == null) self.allocator.free(bytes);
+                            try self.retainRecord(.{ .kind = .task, .id = wire.id, .order = wire.recent_order, .payload = bytes });
+                        }
                         continue;
                     },
                 }
@@ -8921,7 +8948,6 @@ fn deinitTask(
         checkpoint.deinit(self.allocator);
     if (task.approval_change) |*change| {
         if (change.candidate) |*candidate| candidate.deinit(self.allocator);
-        if (change.unknown_history) |history| self.allocator.free(history.bytes);
     }
     if (task.read_only_history) |history| self.allocator.free(history.payload);
     task.* = undefined;

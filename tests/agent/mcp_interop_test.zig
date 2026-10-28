@@ -940,13 +940,15 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     defer checkpoints.deinit();
     var history = try product_task.history.FileStore.init(std.testing.io, home);
     defer history.deinit();
+    var typed_history: TaskSwitchHistory = .{ .file_store = &history };
+    defer typed_history.deinit();
     var enablement = try product_skill.enablement.FileStore.init(std.testing.io, home);
     defer enablement.deinit();
     var vault = TaskSwitchVault{};
     defer for (0..2) |index| std.crypto.secureZero(u8, vault.keys[index][0..vault.lengths[index]]);
     var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = if (refresh_pressure) 1 else 4, .max_tasks = 1, .max_workspaces = 1 }, .{
         .directories = .{ .canonical_user_home = home },
-        .task_persistence = TaskSwitchHistory.capability(&history),
+        .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
         .skill_enablement = .{ .file_store = &enablement },
         .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
@@ -2442,24 +2444,7 @@ test "stdio real-server timeout and cancellation terminate the child" {
     transport.close_fn(cancellation_connection);
 }
 
-const TaskSwitchHistory = struct {
-    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
-        return .committed;
-    }
-    fn confirmed(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        return store.commitConfirmed(std.testing.allocator, bytes);
-    }
-    fn resolve(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
-        return store.resolveCommit(std.testing.allocator, bytes);
-    }
-    fn capability(store: *product_task.history.FileStore) product_task.history.Capability {
-        return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
-    }
-};
+const TaskSwitchHistory = @import("lifecycle_fixture").TypedHistory;
 
 const TaskSwitchVault = struct {
     next: u8 = 0,
@@ -2674,6 +2659,8 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     defer checkpoints.deinit();
     var history = try product_task.history.FileStore.init(std.testing.io, home);
     defer history.deinit();
+    var typed_history: TaskSwitchHistory = .{ .file_store = &history };
+    defer typed_history.deinit();
     var enablement = try product_skill.enablement.FileStore.init(std.testing.io, home);
     defer enablement.deinit();
     var originals = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, home);
@@ -2682,7 +2669,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     defer for (0..2) |i| std.crypto.secureZero(u8, vault.keys[i][0..vault.lengths[i]]);
     var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4, .max_tasks = 1, .max_workspaces = 1 }, .{
         .directories = .{ .canonical_user_home = home },
-        .task_persistence = TaskSwitchHistory.capability(&history),
+        .task_persistence = typed_history.capability(),
         .checkpoint_store = .{ .file_store = &checkpoints },
         .skill_enablement = .{ .file_store = &enablement },
         .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },

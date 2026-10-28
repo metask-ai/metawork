@@ -16,7 +16,7 @@ pub const Stores = struct {
     mcp_configuration: ?mcp_configuration.FileStore = null,
     task: ?history_store.Store = null,
     task_restore_failed: bool = true,
-    task_restored_bytes: ?[]u8 = null,
+    task_restored_history: ?product_task.history.RecoveredState = null,
     checkpoint: ?product_task.checkpoint_store.FileStore = null,
     checkpoint_open_failed: bool = true,
     attachments: ?product_control.AttachmentFileStore = null,
@@ -53,8 +53,8 @@ pub const Stores = struct {
 
         self.task = history_store.Store.init(io, allocator, paths.workbenchDir()) catch null;
         self.task_restore_failed = self.task == null;
-        self.task_restored_bytes = if (self.task) |*store|
-            store.loadAlloc(allocator) catch failed: {
+        self.task_restored_history = if (self.task) |*store|
+            store.load(allocator) catch failed: {
                 self.task_restore_failed = true;
                 break :failed null;
             }
@@ -130,7 +130,7 @@ pub const Stores = struct {
         if (self.skill_management) |*store| store.deinit();
         if (self.scheduled_task_restored_bytes) |bytes| self.allocator.free(bytes);
         if (self.scheduled_task) |*store| store.deinit();
-        if (self.task_restored_bytes) |bytes| self.allocator.free(bytes);
+        if (self.task_restored_history) |*restored| restored.deinit();
         if (self.file_change) |*store| store.deinit();
         if (self.attachments) |*store| store.deinit();
         if (self.checkpoint) |*store| store.deinit();
@@ -141,11 +141,8 @@ pub const Stores = struct {
     }
 
     pub fn releaseTaskRestore(self: *Stores) void {
-        if (self.task_restored_bytes) |bytes| {
-            std.crypto.secureZero(u8, bytes);
-            self.allocator.free(bytes);
-            self.task_restored_bytes = null;
-        }
+        if (self.task_restored_history) |*restored| restored.deinit();
+        self.task_restored_history = null;
     }
 };
 
@@ -177,27 +174,36 @@ pub fn recoverScheduledTaskStore(
     return .committed;
 }
 
-pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool) product_task.history.CredentialStatus {
-    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .{ .epoch = 0, .ready = false }));
-    return store.syncCredentials(values, complete);
+pub fn takeTaskRestore(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+    const stores: *Stores = @ptrCast(@alignCast(context.?));
+    const restored = stores.task_restored_history;
+    stores.task_restored_history = null;
+    return restored;
 }
 
-pub fn commitTaskStoreGeneration(context: ?*anyopaque, bytes: []const u8, epoch: u64, confirmed: bool) product_task.history.Commit {
-    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .failed));
-    return store.commitGeneration(bytes, epoch, confirmed);
+pub fn taskStoreCredentials(context: ?*anyopaque, values: []const []const u8, complete: bool, scrub: product_task.history.CredentialScrub) product_task.history.CredentialStatus {
+    const stores: *Stores = @ptrCast(@alignCast(context orelse return .{ .epoch = 0, .ready = false }));
+    const store = if (stores.task) |*value| value else return .{ .epoch = 0, .ready = false };
+    return store.syncCredentials(values, complete, scrub);
 }
 
-pub fn resolveTaskStoreCommit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
-    const store: *history_store.Store = @ptrCast(@alignCast(context orelse return .outcome_unknown));
-    return store.resolve(bytes);
+pub fn commitTaskStoreGeneration(context: ?*anyopaque, candidate: *product_task.history.Candidate, epoch: u64, confirmed: bool) product_task.history.Commit {
+    const stores: *Stores = @ptrCast(@alignCast(context orelse return .failed));
+    const store = if (stores.task) |*value| value else return .failed;
+    return store.commitGeneration(candidate, epoch, confirmed);
+}
+
+pub fn resolveTaskStoreCommit(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
+    const stores: *Stores = @ptrCast(@alignCast(context orelse return .outcome_unknown));
+    const store = if (stores.task) |*value| value else return .outcome_unknown;
+    return store.resolve(token);
 }
 
 pub fn recoverTaskStore(
     context: ?*anyopaque,
-    bytes: []const u8,
+    candidate: *product_task.history.Candidate,
 ) product_task.history.Commit {
-    const store: *history_store.Store = @ptrCast(
-        @alignCast(context orelse return .failed),
-    );
-    return store.recover(bytes);
+    const stores: *Stores = @ptrCast(@alignCast(context orelse return .failed));
+    const store = if (stores.task) |*value| value else return .failed;
+    return store.recover(candidate);
 }
