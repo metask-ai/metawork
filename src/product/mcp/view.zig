@@ -54,17 +54,23 @@ fn mcpRuntimeServerStatus(
         .unapproved, .needs_authentication, .reauth_required => .needs_authentication,
         .invalid_catalog => .invalid_catalog,
         .eligible => status: {
-            if (mcp.activation_failed) break :status .@"unreachable";
-            const activation = mcp.activation orelse break :status .@"unreachable";
+            if (mcp.activation_failed) break :status .not_loaded;
+            const activation = mcp.activation orelse break :status .not_loaded;
             for (activation.serverHealth()) |health| {
                 if (!std.mem.eql(u8, health.id, server_id)) continue;
                 break :status switch (health.state) {
-                    .ready => .ready,
+                    .ready => fresh: {
+                        const age = activation.catalogAgeMs() orelse break :fresh .not_loaded;
+                        for (activation.catalogServers()) |server|
+                            if (std.mem.eql(u8, &server.binding_identity, &health.binding_identity))
+                                break :fresh if (server.fresh and age < server.ttl_remaining_ms) .ready else .not_loaded;
+                        break :fresh .not_loaded;
+                    },
                     .degraded => .invalid_catalog,
                     .unavailable => .@"unreachable",
                 };
             }
-            break :status .@"unreachable";
+            break :status .not_loaded;
         },
     };
 }
@@ -72,30 +78,41 @@ fn mcpRuntimeServerStatus(
 fn mcpAvailability(mcp: ?*const mcp_state.McpProductState) McpAvailability {
     const current = mcp orelse return .unavailable;
     if (!current.committed) return .unavailable;
-    switch (current.preparation.state) {
-        .empty => return .ready,
-        .available => {},
-        .unavailable => return .unavailable,
-    }
-    const registry = current.preparation.registry orelse return .unavailable;
-    for (registry.value.servers, current.preparation.server_states) |server, state| {
-        const status = mcpRuntimeServerStatus(current, server.id, state);
-        if (status == .needs_authentication or status == .@"unreachable" or
-            status == .invalid_catalog)
-            return .degraded;
-    }
+    if (current.preparation.state == .unavailable or current.activation_failed) return .unavailable;
+    const management = if (current.management) |*value| value else return .unavailable;
+    if (management.inspect().health != .ready) return .unavailable;
+    const registry = management.desiredRegistry();
+    var missing = false;
+    var observed = false;
+    var unhealthy = false;
+    if (registry) |desired| for (desired.servers) |server| {
+        switch (mcpDesiredServerRuntimeStatus(current, server)) {
+            .not_loaded => missing = true,
+            .ready => observed = true,
+            .disabled => {},
+            else => unhealthy = true,
+        }
+    };
+    if (missing and !observed and !unhealthy) return .unavailable;
+    if (missing or unhealthy or current.configuration_apply_state == .failed) return .degraded;
     return .ready;
 }
 
 fn mcpDesiredServerRuntimeStatus(
     mcp: *const mcp_state.McpProductState,
-    server_id: []const u8,
+    desired: mcp_configuration.ServerWire,
 ) McpRuntimeStatus {
+    if (!desired.enabled) return .disabled;
     const startup = mcp.preparation.registry orelse return .not_loaded;
     for (startup.value.servers, mcp.preparation.server_states) |server, state|
-        if (std.mem.eql(u8, server.id, server_id))
-            return mcpRuntimeServerStatus(mcp, server_id, state);
+        if (sameRuntimeDescriptor(server, desired))
+            return mcpRuntimeServerStatus(mcp, desired.id, state);
     return .not_loaded;
+}
+
+fn sameRuntimeDescriptor(loaded: mcp_configuration.ServerWire, desired: mcp_configuration.ServerWire) bool {
+    return std.mem.eql(u8, loaded.id, desired.id) and
+        std.mem.eql(u8, &mcp_configuration.runtimeDescriptorFingerprint(loaded), &mcp_configuration.runtimeDescriptorFingerprint(desired));
 }
 
 fn mcpToolSelectedForNewTask(
@@ -103,6 +120,7 @@ fn mcpToolSelectedForNewTask(
     server_id: []const u8,
     tool_name: []const u8,
 ) bool {
+    if (!mcp.admissionFresh()) return false;
     const ready = switch (mcp.admission) {
         .ready => |value| value,
         .blocked => return false,
@@ -118,6 +136,7 @@ fn mcpServerHasNewTaskAccess(
     mcp: *const mcp_state.McpProductState,
     server_id: []const u8,
 ) bool {
+    if (!mcp.admissionFresh()) return false;
     const ready = switch (mcp.admission) {
         .ready => |value| value,
         .blocked => return false,
@@ -132,6 +151,7 @@ fn mcpNewTaskAccess(
     mcp: *const mcp_state.McpProductState,
     server_id: []const u8,
 ) []const u8 {
+    if (mcp.admission == .ready and !mcp.admissionFresh()) return "unavailable";
     return switch (mcp.admission) {
         .ready => if (mcpServerHasNewTaskAccess(mcp, server_id))
             "available"
@@ -157,11 +177,17 @@ fn mcpToolAlreadyPublished(tools: []const []const u8, index: usize) bool {
 
 fn activationServerIndex(
     mcp: *const mcp_state.McpProductState,
-    server_id: []const u8,
+    desired: mcp_configuration.ServerWire,
 ) ?usize {
+    if (mcpDesiredServerRuntimeStatus(mcp, desired) == .not_loaded) return null;
+    const startup = mcp.preparation.registry orelse return null;
+    const matching = for (startup.value.servers) |server| {
+        if (sameRuntimeDescriptor(server, desired)) break true;
+    } else false;
+    if (!matching) return null;
     const activation = mcp.activation orelse return null;
     for (activation.serverHealth(), 0..) |server, index|
-        if (std.mem.eql(u8, server.id, server_id)) return index;
+        if (std.mem.eql(u8, server.id, desired.id)) return index;
     return null;
 }
 
@@ -203,7 +229,7 @@ fn mcpProjectionRedacted(
         for (server.tools) |tool|
             if (!mcp_configuration.publishableProductText(tool) or
                 text.containsSensitive(tool)) return true;
-        const activation_index = activationServerIndex(mcp, server.id);
+        const activation_index = activationServerIndex(mcp, server);
         if (mcp.activation) |activation| if (activation_index) |index| {
             const bound = activation.serverHealth()[index];
             for (activation.catalogTools()) |tool|
@@ -463,7 +489,7 @@ pub fn writeProjection(
     writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"configurationApply\":\"{s}\",\"authorizationOperation\":", .{
         @tagName(mcpAvailability(mcp)),
         @tagName(inspection.health),
-        if (input.refresh_job_active or mcp.refresh_pending) "refreshing" else "idle",
+        if (!mcp.refresh_schedule_failed and (input.refresh_job_active or mcp.refresh_pending) and (mcp.refresh_visible or !mcp.admissionFresh())) "refreshing" else "idle",
         @tagName(mcp.configuration_apply_state),
     }) catch return error.SnapshotTooLarge;
     try writeMcpAuthorizationOperation(writer, mcp, registry);
@@ -477,7 +503,7 @@ pub fn writeProjection(
     const servers = if (registry) |value| value.servers else &.{};
     for (servers, 0..) |server, index| {
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-        const status = mcpDesiredServerRuntimeStatus(mcp, server.id);
+        const status = mcpDesiredServerRuntimeStatus(mcp, server);
         const problem = mcp_configuration.serverProblem(server, management.limits);
         const connection_safe = !mcpConnectionContainsSensitiveText(input.text, server) and
             (problem == null or problem.? == .invalid_connection_approval);
@@ -531,8 +557,20 @@ pub fn writeProjection(
             @tagName(status),
             mcpNewTaskAccess(mcp, server.id),
         }) catch return error.SnapshotTooLarge;
-        try input.text.writeJson(writer, switch (status) {
-            .not_loaded, .ready, .disabled => "",
+        try input.text.writeJson(writer, if (mcp.refresh_schedule_failed)
+            "Automatic refresh could not be scheduled. Select Refresh to retry."
+        else if (mcp.refresh_paused)
+            "Tool catalog refresh paused after repeated failures. Select Refresh to retry."
+        else if (mcp.admission == .ready and !mcp.admissionFresh())
+            "Tool catalog expired"
+        else switch (status) {
+            .not_loaded => if (mcp.configuration_apply_state == .failed)
+                "Configuration changes were not applied. Retry the connection."
+            else if (mcp.activation_failed)
+                "Tool catalog is unavailable. Select Refresh to retry."
+            else
+                "No current tool catalog observation",
+            .ready, .disabled => "",
             .needs_authentication => "Credential is unavailable",
             .@"unreachable" => "Server is unavailable",
             .invalid_catalog => "Configuration or catalog is invalid",
@@ -552,7 +590,7 @@ pub fn writeProjection(
                 return error.SnapshotTooLarge;
         writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
         var tool_count: usize = 0;
-        const activation_index = activationServerIndex(mcp, server.id);
+        const activation_index = activationServerIndex(mcp, server);
         for (server.tools, 0..) |tool, desired_index| {
             if (!mcp_configuration.publishableProductText(tool) or
                 mcpToolAlreadyPublished(server.tools, desired_index)) continue;
@@ -621,4 +659,58 @@ test "Product MCP View filters duplicate desired tools" {
     try std.testing.expect(!mcpToolAlreadyPublished(&tools, 0));
     try std.testing.expect(!mcpToolAlreadyPublished(&tools, 1));
     try std.testing.expect(mcpToolAlreadyPublished(&tools, 2));
+}
+
+test "Product MCP View requires an official server observation before reporting unreachable" {
+    var current: mcp_state.McpProductState = .{
+        .preparation = .{ .allocator = std.testing.allocator, .state = .empty },
+        .activation = null,
+        .activation_failed = false,
+        .management = null,
+        .admission = .{ .blocked = .activation_unavailable },
+        .host_capabilities = .{},
+        .committed = true,
+    };
+    try std.testing.expectEqual(.not_loaded, mcpRuntimeServerStatus(&current, "server", .eligible));
+    current.activation_failed = true;
+    try std.testing.expectEqual(.not_loaded, mcpRuntimeServerStatus(&current, "server", .eligible));
+    try std.testing.expectEqual(.unavailable, mcpAvailability(&current));
+    try std.testing.expectEqual(.needs_authentication, mcpRuntimeServerStatus(&current, "server", .unapproved));
+}
+
+test "Product MCP View binds observations to connection provenance but not display name or allowlist" {
+    const original: mcp_configuration.ServerWire = .{
+        .id = "server",
+        .namespace = "namespace",
+        .display_name = "Original",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "streamable_http", .url = "https://first.example.test/mcp" },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{"echo"},
+    };
+    var changed = original;
+    changed.display_name = "Renamed";
+    changed.tools = &.{ "echo", "extra" };
+    try std.testing.expect(sameRuntimeDescriptor(original, changed));
+    changed.transport.url = "https://second.example.test/mcp";
+    try std.testing.expect(!sameRuntimeDescriptor(original, changed));
+    changed = original;
+    changed.namespace = "different";
+    try std.testing.expect(!sameRuntimeDescriptor(original, changed));
+    changed = original;
+    var first_arguments = [_]mcp_configuration.ValueSourceWire{.{ .literal = "first" }};
+    var second_arguments = [_]mcp_configuration.ValueSourceWire{.{ .literal = "second" }};
+    changed.transport = .{ .kind = "stdio", .command = "/bin/original", .arguments = &first_arguments };
+    const stdio = changed;
+    changed.transport.arguments = &second_arguments;
+    try std.testing.expect(!sameRuntimeDescriptor(stdio, changed));
+    changed = stdio;
+    changed.transport.command = "/bin/replaced";
+    try std.testing.expect(!sameRuntimeDescriptor(stdio, changed));
+    changed = stdio;
+    changed.transport.cwd = "/different";
+    try std.testing.expect(!sameRuntimeDescriptor(stdio, changed));
 }

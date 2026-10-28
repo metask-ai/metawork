@@ -1,0 +1,114 @@
+{
+  "id": "E-MAC-MCP-LIFECYCLE-DESKTOP-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "53beab2099ffa2cf59b2abe8f5b9169c777ce000",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "platform": "macOS 27.0.1 arm64 / Zig 0.16.0 / Node 24.21.0",
+  "sourceFilesSha256": {
+    "scripts/mcp-lifecycle-vertical.mjs": "25ac4d88e03618b34f53b348243909af0e7e362986e333db98d20e26bc433a92",
+    "scripts/test-agentcore-vertical-macos.mjs": "953280eb28d7794543a4019669b32fb98b15e58f9456c442b5f50da5e70eb4c4",
+    "src/agent/mcp/catalog.zig": "e1e8a20b2a7f6acceacab2d0a720f6827fd49e2a6e698f43a227b732b4263e5b",
+    "src/agent/session/runtime.zig": "f16e6864c586f0bf6b6a032aba171184dec95237cecc26fbb193ff72906a39fc",
+    "src/product/mcp/runtime.zig": "0d59d92d45714b5de1f801df9c5244dce031c67398daaccc64233d2ee45e88a4",
+    "src/product/mcp/view.zig": "ced33cd1f17220f7d50a7b70f65d1230ea0a4cc02f5964165839f0e98b454451",
+    "src/product/control/runtime.zig": "9eb02aa07ac58c11c2a7ffddb6f8b018fab1ff9f3b43a2a4ba05f154ba702e70"
+  },
+  "desktop": {
+    "build": "buildAutomationDebugArtifact; current Renderer and canonical verified automation Debug artifact",
+    "command": "METAWORK_MCP_ONLY=1 METAWORK_VERTICAL_PREBUILT=1 METAWORK_TEST_APP_CWD=.zig-cache/mcp-lifecycle-20261028/desktop-cwd node scripts/test-agentcore-vertical-macos.mjs aarch64-macos",
+    "exitCode": 0,
+    "normalApplicationStop": true,
+    "protocol": "2026-07-28",
+    "ttlMs": 30000,
+    "proactiveAtMs": 23358,
+    "observedDurationMs": 50062,
+    "initialToolsLists": 2,
+    "finalToolsLists": 3,
+    "actualToolCalls": 3,
+    "originalTaskRuns": 2,
+    "distinctOnceRequests": true,
+    "originalBindingPreserved": true,
+    "createdDuringRefresh": "ready(selected)",
+    "validBackgroundOperation": "idle",
+    "limits": [
+      "Local synthetic HTTP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
+    ],
+    "artifactSha256": "b9b705f1feae4a20476d42f0b30297ae61800cd292003aa8fa28f32f43e0b1f6"
+  },
+  "checks": [
+    {
+      "command": "node_modules/.bin/native test . --yes",
+      "exitCode": 0,
+      "stepsSucceeded": 236,
+      "stepsTotal": 236,
+      "passed": 1504,
+      "skipped": 9,
+      "total": 1513
+    },
+    {
+      "command": "node --test scripts/agentcore-vertical.test.mjs scripts/architecture-boundaries.test.mjs",
+      "exitCode": 0,
+      "passed": 36,
+      "total": 36
+    },
+    {
+      "command": "npm --workspace @metawork/renderer run check",
+      "exitCode": 0
+    },
+    {
+      "command": "node scripts/verify-staged-agentcore-bundle.mjs",
+      "exitCode": 0
+    }
+  ],
+  "jointNodeResults": [
+    {
+      "command": "node --test scripts/*.test.mjs",
+      "exitCode": 1,
+      "passed": 995,
+      "skipped": 2,
+      "failed": 1,
+      "total": 998,
+      "failure": "Text schedules use an Automatic Workspace without requiring a Manual Workspace: keyboard selection assertion; same suite passed 9/9 in isolation."
+    },
+    {
+      "command": "node --test --test-concurrency=1 scripts/*.test.mjs",
+      "exitCode": 1,
+      "passed": 969,
+      "skipped": 2,
+      "failed": 1,
+      "total": 972,
+      "failure": "task-panel.test.mjs process failed after 72.3 seconds, following its preview/Review independence case; no individual assertion or signal was reported. Initial concurrent run passed this suite. Cause remains unqualified."
+    },
+    {
+      "command": "node --test scripts/*.test.mjs",
+      "exitCode": 0,
+      "passed": 996,
+      "skipped": 2,
+      "failed": 0,
+      "total": 998,
+      "note": "Final ordinary-concurrency recheck; prior failed attempts remain above."
+    }
+  ],
+  "unclosed": [
+    "Canonical same-ID source replacement origin-isolation Gate and #29 full acceptance.",
+    "Final full Node graph passed, but earlier Scheduled tasks and Task Panel failures remain recorded as instability; no cause or permanent fix is claimed.",
+    "Remote OAuth/429/quota and original issue release timelines have not been qualified by this local fixture.",
+    "TinyKG P4 dependency write CycleCheckUncertain remains recorded without retry or guard weakening."
+  ],
+  "diagnostics": [
+    {
+      "command": "node --test scripts/task-panel.test.mjs",
+      "exitCode": 1,
+      "passed": 103,
+      "failed": 1,
+      "note": "Whole process failed after 71.8 seconds following preview/Review case."
+    },
+    {
+      "command": "node --test --test-timeout=15000 --test-name-pattern='^conversation file links' scripts/task-panel.test.mjs",
+      "exitCode": 0,
+      "passed": 1,
+      "total": 1,
+      "note": "The next individual case passed in 1.5 seconds; failure of the full process remains unqualified."
+    }
+  ]
+}

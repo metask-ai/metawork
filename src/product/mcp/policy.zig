@@ -361,7 +361,7 @@ pub fn selectionForNewTask(
     mcp: ?*const mcp_state.McpProductState,
 ) ?*const lifecycle.McpSelection {
     const current = mcp orelse return null;
-    if (!current.committed) return null;
+    if (!current.admissionFresh()) return null;
     return switch (current.admission) {
         .ready => |ready| ready.selection,
         .blocked => null,
@@ -370,10 +370,10 @@ pub fn selectionForNewTask(
 
 pub fn recoveryGeneration(
     mcp: ?*const mcp_state.McpProductState,
-    refresh_job_active: bool,
+    _: bool,
 ) ?u64 {
     const current = mcp orelse return null;
-    if (!current.committed or refresh_job_active or current.refresh_pending)
+    if (!current.admissionFresh())
         return null;
     return switch (current.admission) {
         .ready => |ready| ready.catalog_generation,

@@ -181,6 +181,19 @@ pub const Activation = opaque {
         return activationStorageConst(self).projection.issues();
     }
 
+    /// Elapsed monotonic time since the official descriptor observation began.
+    /// The stamp stays with its immutable catalog, including worker queue and
+    /// completion delivery delays. Missing observations cannot prove freshness.
+    pub fn catalogAgeMs(self: *const Activation) ?u64 {
+        const projection = projectionStorageConst(activationStorageConst(self).projection);
+        const io = projection.observed_io orelse return null;
+        const observed = projection.observed_at orelse return null;
+        const elapsed = observed.durationTo(.now(io, .awake)).nanoseconds;
+        if (elapsed < 0) return null;
+        const rounded = std.math.add(i96, elapsed, std.time.ns_per_ms - 1) catch return null;
+        return std.math.cast(u64, @divTrunc(rounded, std.time.ns_per_ms));
+    }
+
     pub fn takeSelection(self: *Activation) ?*Selection {
         const storage = activationStorage(self);
         const selection = storage.selection;
@@ -191,6 +204,7 @@ pub const Activation = opaque {
 
 pub const Error = error{
     RefreshFailed,
+    RefreshRejected,
     DescribeFailed,
     InvalidCatalogDescriptor,
     CatalogResourceLimit,
@@ -206,6 +220,8 @@ const ProjectionStorage = struct {
     allocator: std.mem.Allocator,
     owner_id: u64,
     generation: u64,
+    observed_io: ?std.Io = null,
+    observed_at: ?std.Io.Timestamp = null,
     servers: []const Server,
     tools: []const Tool,
     issues: []const Issue,
@@ -332,6 +348,7 @@ const ActivationStorage = struct {
 };
 
 pub fn refresh(
+    io: std.Io,
     allocator: std.mem.Allocator,
     api: sdk.Api,
     runtime: *wire.RuntimeHandle,
@@ -351,8 +368,13 @@ pub fn refresh(
     defer releaseOwned(api, &diagnostic);
     const refresh_status = sdk.Status.fromCode(refresh_code) catch
         return error.RefreshFailed;
-    if (refresh_status != .ok) return error.RefreshFailed;
+    if (refresh_status != .ok) return switch (refresh_status) {
+        // The canonical refresh entry rejects these before publication.
+        .busy, .out_of_memory, .resource_limit => error.RefreshRejected,
+        else => error.RefreshFailed,
+    };
 
+    const observed_at: std.Io.Timestamp = .now(io, .awake);
     var descriptor = emptyOwnedBytes();
     var describe_diagnostic = emptyOwnedBytes();
     const describe_code = api.mcp().describe()(
@@ -382,12 +404,15 @@ pub fn refresh(
     defer parsed.deinit();
     if (generation != parsed.value.catalog_generation)
         return error.CatalogGenerationMismatch;
-    return copyProjection(
+    const projection = try copyProjection(
         allocator,
         owner_id,
         parsed.value,
         expected_servers,
     );
+    projectionStorage(projection).observed_io = io;
+    projectionStorage(projection).observed_at = observed_at;
+    return projection;
 }
 
 pub fn createSelection(

@@ -166,6 +166,7 @@ pub const Runtime = session_runtime.Runtime;
 
 pub const McpActivationUnavailableReason = enum {
     refresh_failed,
+    refresh_rejected,
     invalid_catalog,
     resource_limit,
     generation_mismatch,
@@ -572,6 +573,7 @@ pub const Error = error{
     InvalidSkillPolicy,
     CatalogRefreshFailed,
     McpRefreshFailed,
+    McpRefreshRejected,
     InvalidMcpCatalogDescriptor,
     McpCatalogResourceLimit,
     McpCatalogGenerationMismatch,

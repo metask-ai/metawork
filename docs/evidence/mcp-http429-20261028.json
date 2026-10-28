@@ -1,0 +1,36 @@
+{
+  "id": "E-MAC-MCP-HTTP429-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "18584b5e68b709465f3a47feabe330bbc87cb510",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "tests/fixtures/mcp_server.mjs": "0bb9f730bb36526b4b0f157a7a357ae7e9ba1ada7202abc88361cd1b147114ec",
+    "tests/agent/mcp_interop_test.zig": "34e6dffe784172bbceac3c7ffe298eb2e35a5406b5ba7ddd199bae5bf3d70276",
+    "src/product/mcp/runtime.zig": "0d59d92d45714b5de1f801df9c5244dce031c67398daaccc64233d2ee45e88a4"
+  },
+  "command": "zig build test-mcp-interop test-product-mcp-runtime --summary all",
+  "exitCode": 0,
+  "passed": 50,
+  "total": 50,
+  "interopPassed": 42,
+  "observed": {
+    "actualHttp429Responses": 5,
+    "retryDelaysMs": [
+      1000,
+      2000,
+      4000,
+      8000
+    ],
+    "pausedAfterFailures": 5,
+    "repeatedTimerAndAdmissionObservations": 10,
+    "extraRequestsWhilePaused": 0,
+    "ordinaryTaskCreationWhilePaused": "succeeds, unavailable, does not reset budget",
+    "explicitRefreshAfterClearingFault": "recovers ready(selected) with failure counter 0",
+    "preexistingNullTaskAfterRecovery": "still unavailable; immutable creation authority unchanged"
+  },
+  "qualification": "Real local HTTP non-2xx responses and canonical Core; Product timer is injected to advance backoff without a wall-clock wait. Counts are taken from server trace, not inferred from job attempts. No original Run or tool is replayed.",
+  "limits": [
+    "No claim of remote OAuth provider quota/Retry-After behavior.",
+    "Canonical source-isolation Gate remains failed."
+  ]
+}

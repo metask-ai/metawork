@@ -336,6 +336,10 @@ MCP 页面与 Skill、Scheduled tasks 使用同一个全局管理页骨架：居
 
 用户模型只有两层：连接服务、选择工具。首次主流程精确收敛为 `Add server → 完成必要认证 → 自动连接并发现工具 → 选择允许的工具 → 新 Task 可用`；同一时刻至多突出一个未完成动作。Add/Edit 保存后，Host 自动完成 preparation、认证条件动作、正式 Runtime apply、MCP activation 和工具发现；普通成功路径不要求先点 Test，也不要求重启 MetaWork。连接测试保留为连接详情内的次级诊断事实，不进入列表主状态、不覆盖正式 Runtime/Admission，也不作为顶部下一步动作。详情顶部的 `Connection → MCP handshake → Choose tools` 轨迹只呈现 Host 能证明的阶段；发现工具但 allowlist 仍为空时，最后一步保持 active 并提供 `Choose tools`，不能显示成流程已完成。
 
+仍有效授权上的周期性后台目录刷新保持既有可用状态，不反复切换列表分组或显示全页刷新进度；显式刷新仍呈现其操作进度。真实到期、正式目录收缩及失败按对应事实呈现，不能以后台作业存在推断工具不可用。自动刷新调度失败或持续失败暂停时，提供明确诊断并保留可执行的显式刷新动作，不让页面永久卡在刷新中。
+
+配置应用、整体目录可用性和单服务健康分别呈现。应用失败保留用户配置与仍适用于相同来源的正式健康事实，没有该服务观测时显示未加载，不推断网络不可达；只有正式 Activation 的单服务失败可显示不可达。整体 Activation 失败不能因各行显示未加载而变成全局可用。同 ID 改变连接来源后，旧健康与工具发现不能证明新来源已连接。未接管的配置通过重试连接再次 apply；已接管但缺目录时重试刷新，孤立连接测试不恢复正式准入。
+
 ```text
 MCP                                                        [ Add server ]
 Connect external tools and choose what new tasks can use.

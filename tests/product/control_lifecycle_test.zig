@@ -22,6 +22,35 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "ordinary Task creation does not retry MCP errors on null Selection or generic Core failure" {
+    for ([_]struct { status: u32, failure: anyerror }{
+        .{ .status = wire.STATUS_MCP_NOT_REFRESHED, .failure = error.McpNotRefreshed },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.InvalidMcpSelection },
+        .{ .status = wire.STATUS_CORE_ERROR, .failure = error.CoreCallFailed },
+    }) |case| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_workspaces = 1,
+        }, productControlConfiguration());
+        defer control.deinit();
+        try installControlExecution(&control);
+        fake_core.forced_session_create_status = case.status;
+        try std.testing.expectError(case.failure, control.createTask(productControlTaskInput()));
+        try std.testing.expectEqual(@as(usize, 0), fake_core.session_created);
+        const task = try control.createTask(productControlTaskInput());
+        try std.testing.expectEqual(@as(u64, 1), task);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+    }
+}
+
 test "history capacity executes more than sixteen Runs through worker retirement" {
     const scenario = try ReviewScenario.initForInput(.controlled);
     defer scenario.deinit();
@@ -11359,6 +11388,59 @@ test "file delivery Run authority survives preparation changes until worker and 
     try settleInputScenario(scenario);
     try std.testing.expect(run.file_delivery == null);
     try std.testing.expectEqual(@as(usize, 1), probe.released);
+}
+
+test "MCP apply barrier never releases an unrelated idle Session as capacity recovery" {
+    fake_core.reset();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    var history: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 2,
+        .max_workspaces = 1,
+    }, configuration);
+    defer control.deinit();
+    try installControlExecution(&control);
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    const waiter_id = try control.createTask(input);
+    const waiter = control.task_runtime.find(waiter_id).?;
+    try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, waiter_id));
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (waiter.runtime.attachment == .detached and waiter.runtime.close_thread == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    const other_id = try control.createTask(input);
+    const other = control.task_runtime.find(other_id).?;
+    const destroyed = fake_core.session_destroyed;
+    runtime.mcp_refresh_running = true;
+    runtime.mcp_configuration_applying = true;
+    defer {
+        runtime.mcp_configuration_applying = false;
+        runtime.mcp_refresh_running = false;
+    }
+    try std.testing.expectError(error.RecoveryUnavailable, control.restoreTaskConversation(waiter_id, waiter.durable.binding_epoch));
+    try std.testing.expect(other.runtime.hasAttachedSession());
+    try std.testing.expect(other.runtime.close_thread == null);
+    try std.testing.expect(!other.runtime.close_requested);
+    try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
 }
 
 test "Session pressure never cancels busy work or automatically retries a failed close" {

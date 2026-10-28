@@ -12,7 +12,7 @@ function retryable(message) {
 }
 export async function readProbeProductState(
   invoke,
-  { forbidden = [], observeTaskView, taskId } = {},
+  { forbidden = [], observeTaskView, taskId, mcpOnly = false } = {},
 ) {
   async function read(scope) {
     const next = await fetchWorkbenchSnapshot(async (command, payload) => {
@@ -26,6 +26,7 @@ export async function readProbeProductState(
       throw new Error("Host credential reached a projection probe");
     return next;
   }
+  if (mcpOnly) return read({ ...initialViewScope, management: "mcp" });
   const index = await read(initialViewScope);
   const tasks = [];
   for (const summary of index.taskIndex) {

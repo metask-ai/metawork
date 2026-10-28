@@ -1,0 +1,44 @@
+{
+  "id": "E-MAC-MCP-WORKER-PRESSURE-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "ae8cb11349fb456dedcf7afcf81cc029afdf88d3",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "src/product/control/runtime.zig": "57a03ff5c693fd33c7d11087a341007dc65d1ee30bcf5aa9ca59eaada9c68bb8",
+    "tests/agent/mcp_interop_test.zig": "83546f4002806b6f5a60fe1a548a8e0bb73a722c75a27c12a0451ee2d8dbdebb"
+  },
+  "before": {
+    "productionRevision": "ae8cb113",
+    "test": "real Product refresh progresses while the only Run worker waits for permission and its queue is full",
+    "result": "FAILED QueueFull from control/executor.zig enqueue through enqueueMcpJob/startPendingRefresh/requestRefresh/control.refreshMcpCatalog. One actual MCP permission request held the only Run worker; an owned probe filled its one queue slot.",
+    "command": "zig build test-mcp-interop --summary all",
+    "passed": 38,
+    "failed": 1,
+    "total": 39,
+    "qualification": "Production at named base; regression was newly added and subsequently extended with a separate shutdown variant before the passing run."
+  },
+  "change": "Control owns an optional dedicated MCP refresh Executor, one worker and one queued slot, created only with a Product MCP aggregate. Existing job, policy, immutable inputs and apply/OAuth/refresh serialization remain; shutdown cancels admission and queued work, joins this lane before releasing completion, Runtime and transports. No Run uses this lane.",
+  "after": {
+    "command": "zig build test-mcp-interop test-lifecycle test-product-control-mcp --summary all",
+    "exitCode": 0,
+    "passed": 328,
+    "total": 328,
+    "interopPassed": 40,
+    "architecture": {
+      "command": "node --test scripts/architecture-boundaries.test.mjs",
+      "exitCode": 0,
+      "passed": 33,
+      "total": 33
+    }
+  },
+  "observed": [
+    "Catalog generation changes while the same permission request remains unanswered and the queued Run probe has not executed.",
+    "Once answered, the original Run completes and exactly one actual tools/call occurs.",
+    "A second refresh is held in real tools/list IO while the Run is still waiting. Main-thread shutdown waits for independent fixture release, joins refresh, drops its outcome and keeps admission shutting_down.",
+    "Shutdown leaves no Activation or refresh job; further Refresh is rejected; the unanswered Run produces zero tools/call."
+  ],
+  "limits": [
+    "Current canonical origin-isolation Gate remains failed.",
+    "Dedicated lane does not claim remote provider/quota acceptance."
+  ]
+}

@@ -350,6 +350,8 @@ pub const FakeCore = struct {
     permission_mode_updates: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
+    forced_session_create_status: ?u32 = null,
+    malformed_session_create_handle: bool = false,
     forced_skill_update_status: ?u32 = null,
     forced_set_model_status: ?u32 = null,
     forced_mcp_update_status: ?u32 = null,
@@ -1021,6 +1023,13 @@ pub fn sessionCreate(
     }
     fake_core.lock();
     defer fake_core.unlock();
+    if (fake_core.forced_session_create_status) |status| {
+        fake_core.forced_session_create_status = null;
+        out_session.?.* = if (fake_core.malformed_session_create_handle) @ptrCast(&fake_core) else null;
+        fake_core.malformed_session_create_handle = false;
+        diagnostic(out_error);
+        return status;
+    }
     if (fake_core.session_create_failures > 0) {
         fake_core.session_create_failures -= 1;
         diagnostic(out_error);

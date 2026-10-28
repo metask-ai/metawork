@@ -1127,6 +1127,7 @@ fn addMcpInteropTests(
         .optimize = modules.app.optimize,
         .link_libc = link_libc,
     });
+    cases.addImport("lifecycle_fixture", createLifecycleFixture(b, modules, link_libc));
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
     cases.addImport("metawork_product_models_contract", modules.models_contract);

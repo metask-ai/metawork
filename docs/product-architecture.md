@@ -281,6 +281,12 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 
 普通 Text Task admission 不属于 MCP 边界：MCP 未就绪、refresh/apply/OAuth 在途或 freshness failure 都不得拒绝 Task 创建。创建时只复制当刻安全可用的 Selection；不可用时以 null Selection 创建，并在 Task 的进程期 immutable authority fact 中区分 `ready(selected)`、`ready(none)` 与 `unavailable`。该事实进入 Snapshot 和 create result，不进入 Task persistence，冷启动恢复的历史 Task 为 `unavailable`，Renderer 不得据此热附加 MCP。freshness failure 必须使旧 MCP Admission fail closed 并触发现有异步 refresh；原 restore 或 mutation 不自动重放。边界忙时必须保留 runtime authorization failure 与 refresh pending 事实；refresh enqueue 失败必须由 owner timer 有界重试。关闭时先停止 MCP management、OAuth/refresh timer 与新 MCP admission，再 settle/join worker，释放 Admission 与 Activation，最后由 Agent owner 释放 transport 与 Runtime。
 
+纯目录主动刷新不撤销仍有效的已发布 Admission；创建及恢复可以在原来源、配置、授权 ceiling 和保守 deadline 内继续借用它，Core 的正式收缩或拒绝仍是强制结果。Selection 与创建时 authority fact 必须在同一准入观察中取得，不能因两次 freshness 读取跨过 deadline 而彼此矛盾。deadline 从 Agent 的官方 descriptor 观测派生，并扣除排队与 completion 交付耗时；不能从安装时间重置 TTL。到期及时收缩，不以正在刷新或重试频率限制延长有效期。只有明确的未发布拒绝可保留旧目录至原 deadline；未知失败不能据此保留。恢复准入中的 MCP 事务屏障与 Runtime 不可用不得走 Session 容量回收路径。
+
+Product MCP 的自动刷新共享单一作业并合并重复请求；极短 TTL 受最小网络间隔约束，持续失败有有界退避和暂停，普通 Task 输入不能重置预算或跳过退避。显式刷新或新配置可以恢复尝试；队列、timer/wake 与网络失败分别保留可诊断事实。查询只观察当前 freshness，不登记网络或恢复工作；正常推进由 Host timer、控制入口和 completion 承担。
+
+Product Control 为该共享刷新作业持有独立于 Run 池的有界控制执行容量，所有 Run worker 等待人工审批或 Run 队列已满时，目录刷新仍须推进；此容量不执行 Run，不改变 MCP apply/OAuth/refresh 的既有串行化边界。关闭先停止 MCP admission/timer 并取消尚未开始的刷新，join 在途刷新后才接纳或丢弃其 completion、释放对应 owner；Agent Runtime 和 transport 必须活到该 join 完成。
+
 ### 2.6 文件 attachment staging
 
 Attachment staging 是 Product Control 内部候选资源 owner，原件存储属于 Product 附件能力，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 组装 store、持有独占 writer lock，并注入公开 Native SDK 图片预览能力；Product 决定分类、配额、接纳与清理。输入可以是系统 picker/Native SDK 拖放提供的本地路径，或 Renderer 从本次 DOM File 提取的有界字节块。Bridge 只拥有 source/window/connection authority、批次关联及 Renderer opaque token 到 Product identity 的 grant，不缓存正文、原路径或 Product 指针。

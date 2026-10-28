@@ -519,29 +519,34 @@ test "recovery capacity observation counts only an owned route scheduled for rel
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(0));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(std.math.maxInt(u64)));
+    try std.testing.expect(runtime.restoreAdmission(null) == .available);
+    try std.testing.expect(runtime.restoreAdmission(0) != .available);
+    try std.testing.expectEqual(.unavailable, runtime.restoreAdmission(std.math.maxInt(u64)));
     const session = try openSession(runtime);
     const route = session.id;
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route + 1));
-    // Projection cannot bypass the existing Runtime refresh fence.
+    try std.testing.expect(runtime.restoreAdmission(null) != .available);
+    try std.testing.expect(runtime.restoreAdmission(route) == .available);
+    try std.testing.expect(runtime.restoreAdmission(route + 1) != .available);
+    // Pure refresh preserves admission. Apply has a distinct busy result,
+    // which must never be interpreted as Session capacity pressure.
     runtime.mcp_refresh_running = true;
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expectEqual(.available, runtime.restoreAdmission(route));
+    runtime.mcp_configuration_applying = true;
+    try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(route));
+    try std.testing.expectEqual(.mcp_busy, runtime.restoreAdmission(null));
+    runtime.mcp_configuration_applying = false;
     runtime.mcp_refresh_running = false;
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(runtime.restoreAdmission(route) != .available);
+    try std.testing.expect(runtime.restoreAdmission(null) == .available);
     const next = try openSession(runtime);
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
-    try std.testing.expect(runtime.restoreAdmissionAvailable(next.id));
+    try std.testing.expect(runtime.restoreAdmission(route) != .available);
+    try std.testing.expect(runtime.restoreAdmission(next.id) == .available);
     const next_route = next.id;
     try runtime.shutdown();
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
-    try std.testing.expect(!runtime.restoreAdmissionAvailable(next_route));
+    try std.testing.expect(runtime.restoreAdmission(null) != .available);
+    try std.testing.expect(runtime.restoreAdmission(next_route) != .available);
 }
 
 const CheckpointCollector = struct {
@@ -949,6 +954,23 @@ test "MCP refresh failure immediately invalidates the previous selection generat
         error.StaleMcpSelection,
         runtime.createMcpSelection(projection, &.{}),
     );
+}
+
+test "MCP typed refresh rejection retains the published generation without extending it" {
+    for ([_]u32{ wire.STATUS_BUSY, wire.STATUS_OUT_OF_MEMORY, wire.STATUS_RESOURCE_LIMIT }) |status| {
+        fake_core.reset();
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const projection = try runtime.refreshMcpCatalog();
+        defer projection.deinit();
+        fake_core.forceNextMcpRefreshStatus(status);
+        try std.testing.expectError(error.McpRefreshRejected, runtime.refreshMcpCatalog());
+        const retained = try runtime.createMcpSelection(projection, &.{});
+        retained.deinit();
+    }
 }
 
 test "MCP catalog refresh binds explicit Session selection and idle replacement" {
@@ -4370,6 +4392,30 @@ test "Core Session creation failure releases diagnostics and leaves capacity reu
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), creates);
     try std.testing.expectEqual(@as(usize, 1), releases);
+}
+
+test "Session create preserves typed MCP rejections and fails closed for other statuses" {
+    for ([_]struct { status: u32, failure: anyerror, malformed_handle: bool = false }{
+        .{ .status = wire.STATUS_MCP_NOT_REFRESHED, .failure = error.McpNotRefreshed },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.InvalidMcpSelection },
+        .{ .status = wire.STATUS_INVALID_MCP_SELECTION, .failure = error.CoreCallFailed, .malformed_handle = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .failure = error.CoreCallFailed },
+        .{ .status = 0xffffffff, .failure = error.CoreCallFailed },
+    }) |case| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        fake_core.forced_session_create_status = case.status;
+        fake_core.malformed_session_create_handle = case.malformed_handle;
+        try std.testing.expectError(case.failure, openSession(runtime));
+        const session = try openSession(runtime);
+        try closeSession(session, .session_close);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.buffer_releases);
+    }
 }
 
 test "closed Session storage is reused only after explicit Runtime release" {

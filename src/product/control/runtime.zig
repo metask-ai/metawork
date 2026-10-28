@@ -1286,6 +1286,7 @@ pub const Runtime = struct {
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     approval_executor: *executor_impl.Executor,
+    mcp_executor: ?*executor_impl.Executor = null,
     attachment_executor: *executor_impl.Executor,
     attachment_lane: *attachment_staging.Lane,
     attachment_io: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
@@ -1628,6 +1629,15 @@ pub const Runtime = struct {
         errdefer if (skill_owned) skill.deinit();
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
+        // A Run holds its worker while a synchronous permission callback
+        // waits for a person. Catalog freshness must progress independently
+        // even when every Run worker and queue slot is occupied.
+        const mcp_executor = if (mcp_startup != null)
+            try executor_impl.Executor.create(io, allocator, .{ .worker_count = 1, .queue_capacity = 1 })
+        else
+            null;
+        var mcp_executor_owned = true;
+        errdefer if (mcp_executor_owned) if (mcp_executor) |lane| lane.deinit();
         var control: Runtime = .{
             .allocator = allocator,
             .io = io,
@@ -1653,6 +1663,7 @@ pub const Runtime = struct {
             }) catch unreachable,
             .executor = executor,
             .approval_executor = approval_executor,
+            .mcp_executor = mcp_executor,
             .attachment_executor = attachment_executor,
             .attachment_lane = attachment_lane,
             .preview_executor = preview_executor,
@@ -1711,7 +1722,7 @@ pub const Runtime = struct {
         if (mcp_startup) |*startup| {
             control.mcp = startup.takeRuntime(
                 productMcpPorts(
-                    executor,
+                    mcp_executor.?,
                     agent_runtime,
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
@@ -1724,6 +1735,7 @@ pub const Runtime = struct {
         }
         preview_lane_owned = false;
         file_change_lane_owned = false;
+        mcp_executor_owned = false;
         return control;
     }
 
@@ -4255,15 +4267,12 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
-        var mcp_selection = if (self.mcp) |*mcp|
+        const mcp_admission: mcp_runtime.NewTaskAdmission = if (self.mcp) |*mcp|
             mcp.selectionForNewTask()
         else
-            null;
-        var mcp_authority: product_task.McpAuthorityAtCreation = if (self.mcp) |*mcp|
-            if (mcp.newTaskAuthorityReady())
-                if (mcp_selection == null) .ready_without_selection else .ready_with_selection
-            else
-                .unavailable
+            .{ .available = false, .selection = null };
+        var mcp_authority: product_task.McpAuthorityAtCreation = if (mcp_admission.available)
+            if (mcp_admission.selection == null) .ready_without_selection else .ready_with_selection
         else
             .unavailable;
         var task_input: task_runtime.CreateTaskInput = .{
@@ -4290,7 +4299,7 @@ pub const Runtime = struct {
             .canonical_user_home = self.canonical_user_home orelse "",
             .skill_catalog = catalog_lease,
             .granted_skill_ids = granted_skill_ids.items,
-            .mcp_selection = mcp_selection,
+            .mcp_selection = mcp_admission.selection,
             .mcp_authority = mcp_authority,
             .pinned_catalog = &pinned_catalog,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
@@ -4311,11 +4320,13 @@ pub const Runtime = struct {
         };
         const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => return self.sessionPressureError(null),
-            error.McpNotRefreshed => retry: {
+            error.McpNotRefreshed, error.InvalidMcpSelection, error.StaleMcpSelection => retry: {
+                // Only an MCP-bearing candidate may lose its optional
+                // authority. A malformed null create is not recoverable here.
+                if (task_input.mcp_selection == null) return err;
                 self.recoverExpiredMcpCatalogNoFail();
-                mcp_selection = null;
                 mcp_authority = .unavailable;
-                task_input.mcp_selection = mcp_selection;
+                task_input.mcp_selection = null;
                 task_input.mcp_authority = mcp_authority;
                 break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
                     error.SessionCapacity => return self.sessionPressureError(null),
@@ -4632,8 +4643,10 @@ pub const Runtime = struct {
                     error.SessionCapacity => return self.sessionPressureError(task_id),
                     else => return err,
                 };
-                if (!self.agent_runtime.restoreAdmissionAvailable(null)) {
-                    return self.sessionPressureError(task_id);
+                switch (self.agent_runtime.restoreAdmission(null)) {
+                    .available => {},
+                    .capacity_reached => return self.sessionPressureError(task_id),
+                    .mcp_busy, .unavailable => return error.RecoveryUnavailable,
                 }
             }
             if (target) |*value| if (task.runtime.attachment == .detached or
@@ -7023,6 +7036,8 @@ pub const Runtime = struct {
         if (request.task_id) |id| if (self.task_runtime.taskHasActiveOperation(id)) {
             self.encoded_views.invalidate(.taskPage);
         };
+        if (request.management == .mcp) if (self.mcp) |*mcp|
+            if (mcp.admissionExpired() or mcp.catalogObservationExpired()) self.encoded_views.invalidate(.management);
         inline for (std.meta.fields(view_cache.Kind)) |field| {
             const kind: view_cache.Kind = @enumFromInt(field.value);
             const key = viewKey(request, kind);
@@ -7784,6 +7799,7 @@ pub const Runtime = struct {
         self.output_checks.deinit();
         self.executor.deinit();
         self.approval_executor.deinit();
+        if (self.mcp_executor) |lane| lane.deinit();
         for (&self.preview_images) |*slot| if (slot.*) |image| {
             self.preview_lane.release(image.taken);
             slot.* = null;
@@ -7855,6 +7871,7 @@ pub const Runtime = struct {
             .context = self,
             .cancel_fn = cancelApprovalRuntimeExecutor,
         });
+        if (self.mcp_executor) |lane| lane.shutdown();
         self.executor.shutdown();
         self.approval_executor.shutdown();
         self.executor_shutdown = true;
@@ -8091,13 +8108,19 @@ pub const Runtime = struct {
             .execution_admission = if (execution_available) .available else .unavailable,
             .workspace_identity_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
-            .runtime_admission = if (self.shutting_down)
-                .shutting_down
-            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id) or
-                (if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route| self.agent_runtime.restoreAdmissionAvailable(route) else false))
-                .available
-            else
-                .capacity_reached,
+            .runtime_admission = admission: {
+                if (self.shutting_down) break :admission .shutting_down;
+                switch (self.agent_runtime.restoreAdmission(releasing_route_id)) {
+                    .available => break :admission .available,
+                    .mcp_busy => break :admission .busy,
+                    .unavailable => break :admission .unavailable,
+                    .capacity_reached => {},
+                }
+                if (self.task_runtime.idleReleaseRouteId(query.task_id)) |route|
+                    if (self.agent_runtime.restoreAdmission(route) == .available)
+                        break :admission .available;
+                break :admission .capacity_reached;
+            },
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
@@ -9482,7 +9505,8 @@ pub const Runtime = struct {
 
     fn commitMcpRefreshJobNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
-        return runtime.syncRefreshJob();
+        const changed = runtime.syncRefreshJob();
+        return runtime.syncFreshness() or changed;
     }
 
     fn workspaceHasTasks(self: *const Runtime, workspace_id: u64) bool {
@@ -20612,7 +20636,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"configurationApply\":\"failed\"",
     ) != null);
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.refreshing,
+        McpAdmissionBlockReason.pending_restart,
         mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending);
@@ -20768,7 +20792,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
 
-test "MCP startup health commits a safe degraded Runtime projection" {
+test "MCP startup activation failure stays globally unavailable without inventing network failures" {
     const ManagementEffects = struct {
         fn journal(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
             return .committed;
@@ -20874,7 +20898,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
+        "\"availability\":\"unavailable\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -21026,7 +21050,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 1,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -21063,7 +21086,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 2,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -21082,7 +21104,6 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 4,
-        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,

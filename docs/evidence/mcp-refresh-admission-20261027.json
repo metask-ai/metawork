@@ -1,0 +1,134 @@
+{
+  "id": "E-MAC-MCP-REFRESH-ADMISSION-20261027",
+  "date": "2026-10-27",
+  "purpose": "Qualification of the MCP plan review; no product runtime fix or issue closure claimed.",
+  "platform": {
+    "os": "macOS",
+    "version": "27.0.1",
+    "build": "26A434",
+    "architecture": "arm64",
+    "zig": "0.16.0"
+  },
+  "source": {
+    "baseRevision": "5087f2cc6695952cda64b7da3f4fdf43c047624f",
+    "worktreeState": "Uncommitted test and fixture changes; exact source files below.",
+    "filesSha256": {
+      "build.zig": "122e0510adebefe07dea9757c556a09b30c3ad61b958a1dc0434d16681ed5afa",
+      "tests/agent/mcp_interop_test.zig": "254ab41870e4f1c9dbdbf87c066e9a4b583144a5ab49357ed4f7c72e9e192c57",
+      "tests/fixtures/mcp_server.mjs": "0571ef5ad68864766b3eac4b576966a3dfb43f4bb4e968b8b6d9877042c5f4c1"
+    }
+  },
+  "canonicalCore": {
+    "lock": "build_support/agentcore-bundle.macos-aarch64.lock.json",
+    "lockSha256": "fc30a6545c5938d38f1499bbd7862b0e021209b45f20b465be598f53b659ea4a",
+    "version": "0.11.0-dev+e75ad43c4557",
+    "sourceCommit": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+    "target": "aarch64-macos",
+    "abi": {
+      "binary_abi_status": "experimental",
+      "binary_abi_version": 1,
+      "binary_abi_revision": 24,
+      "binary_abi_table_size": 80
+    },
+    "linkedStaticLibrarySha256": "5118d660a1d71fe67c334181b6d8d598a6e44595ad84c91e1a24849d6006456b",
+    "verifier": {
+      "command": "node scripts/verify-staged-agentcore-bundle.mjs",
+      "exitCode": 0
+    }
+  },
+  "qualification": {
+    "entry": "zig build test-mcp-interop --summary all",
+    "abiCase": "canonical MCP ABI accepts original selectors during refresh and after publication",
+    "method": "Existing approved lifecycle fixture exposes the official SDK. Raw create/restore bypass Host admission guards only in this test to qualify Core behavior. One original selector and one original checkpoint are reused. Refresh is paused at tools/list with a fixture barrier.",
+    "phases": [
+      {
+        "phase": "before refresh",
+        "create": "ok",
+        "restore": "ok",
+        "restoreHealth": "complete",
+        "mcpTools": 1
+      },
+      {
+        "phase": "refresh tools/list held",
+        "create": "ok",
+        "restore": "ok",
+        "restoreHealth": "complete",
+        "mcpTools": 1
+      },
+      {
+        "phase": "new catalog published; generation changed",
+        "create": "ok",
+        "restore": "ok",
+        "restoreHealth": "complete",
+        "mcpTools": 1
+      },
+      {
+        "phase": "tools/list failure published as unavailable catalog",
+        "create": "invalid_mcp_selection",
+        "restore": "ok",
+        "restoreHealth": "degraded",
+        "mcpTools": 0,
+        "invalidatedBindings": 1
+      }
+    ],
+    "sameSessionCase": "canonical MCP catalog refresh restores the original Session without selection replacement",
+    "sameSessionResult": "After TTL expiry, official Runtime activation restores actual echo RPC on the original Session and asks allow once again; no selection replacement or checkpoint restoration in that case.",
+    "interpretation": [
+      "The SDK selection wire has selectors, not the Host catalog generation. This does not authorize arbitrary stale Host generations.",
+      "A background refresh need not fence valid existing authority. Host provenance, original deadline, and official Core refusal still apply.",
+      "A per-server refresh error can publish a replacement catalog withdrawing that server. Such a publication cannot be treated as an unchanged old catalog."
+    ]
+  },
+  "checks": [
+    {
+      "command": "zig build test-mcp-interop --summary all",
+      "exitCode": 0,
+      "passed": 28,
+      "total": 28,
+      "stepsSucceeded": 8,
+      "summary": "Build Summary: 8/8 steps succeeded; 28/28 tests passed\ntest-mcp-interop success\n+- run test metawork-mcp-interop 28 pass (28 total) 25s MaxRSS:89M\n   +- compile test metawork-mcp-interop Debug native-macos.13.0 success 7s MaxRSS:1G\n      +- options cached\n      +- options cached\n      +- options cached\n      +- options cached\n      +- options cached"
+    },
+    {
+      "command": "node --test scripts/architecture-boundaries.test.mjs",
+      "exitCode": 0,
+      "passed": 33,
+      "failed": 0
+    },
+    {
+      "command": "node_modules/.bin/native test . --yes",
+      "exitCode": 1,
+      "passed": 1449,
+      "total": 1459,
+      "skipped": 9,
+      "crashed": 1,
+      "stepsSucceeded": 232,
+      "stepsTotal": 236,
+      "sourceScope": "Same build and fixture wiring, before the final raw ABI assertion tightening. The final interop check above binds the exact source hashes.",
+      "failure": {
+        "case": "runtime.test.Product view partial encoded cache fill is discarded on cancellation invalidation or allocation failure",
+        "root": "metawork-product-control",
+        "observation": "No completion for over 10 minutes. One-second thread sample showed allocator stack capture entering a segmentation-fault handler and waiting on the debug symbol mutex. Only this test process was terminated with SIGTERM; Native then returned failure.",
+        "stderr": "Segmentation fault at address 0x16ad7ff80",
+        "sampledStack": [
+          "runtime.maximumProjectionFixtureWithTools",
+          "runtime.Runtime.init",
+          "heap.debug_allocator.DebugAllocator.alloc",
+          "debug.captureCurrentStackTrace",
+          "debug.Dwarf.SelfUnwinder.computeRules",
+          "debug.handleSegfaultPosix",
+          "debug.writeCurrentStackTrace",
+          "debug.SelfInfo.MachO.findModule",
+          "Io.Mutex.lock",
+          "__ulock_wait2"
+        ],
+        "cause": "Not established; no product implementation changed in this review response. Full Native verification is not passed."
+      }
+    }
+  ],
+  "limits": [
+    "Not a real remote provider, HTTP/OAuth quota test, desktop vertical, distribution acceptance, or original user-task timeline verification.",
+    "Source replacement, schema changes, tool expansion, and global refresh failure without publication still require the remaining P0 qualification.",
+    "Host create/restore/rebind during refresh and completion handoff are planned P1 acceptance cases; the raw ABI result does not claim those Host paths are fixed.",
+    "Critical premises are reproducible in the tracked test entry; no ignored cache report or log is required to reproduce them."
+  ]
+}

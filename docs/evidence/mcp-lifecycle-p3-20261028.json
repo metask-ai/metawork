@@ -1,0 +1,53 @@
+{
+  "id": "E-MAC-MCP-LIFECYCLE-P3-20261028",
+  "date": "2026-10-28",
+  "baseRevision": "0eb6cb0f908c14d359dba0a5736ea4e526d7b9ef",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "frontend/src/features/mcp/McpPage.tsx": "48b70015163bc48f3bb304733fd8492c1e02694e28714ad1b80246b48e39b4ae",
+    "scripts/mcp-page.test.mjs": "49ad2bd109e926b938f1501f6c4bf646e7258ba427d7c3de101e3b4bf674b310",
+    "src/product/control/runtime.zig": "9eb02aa07ac58c11c2a7ffddb6f8b018fab1ff9f3b43a2a4ba05f154ba702e70",
+    "src/product/mcp/runtime.zig": "0d59d92d45714b5de1f801df9c5244dce031c67398daaccc64233d2ee45e88a4",
+    "src/product/mcp/view.zig": "ced33cd1f17220f7d50a7b70f65d1230ea0a4cc02f5964165839f0e98b454451",
+    "tests/agent/mcp_interop_test.zig": "3053e347c2a804afda278c0af0260d32fbdc63043618fa1af0bf7bc5491a3e34"
+  },
+  "checks": [
+    {
+      "command": "zig build test-lifecycle test-mcp-interop test-product-control-mcp test-product-mcp-view test-product-mcp-runtime --summary all",
+      "exitCode": 0,
+      "passed": 338,
+      "total": 338
+    },
+    {
+      "command": "node --test scripts/mcp-page.test.mjs scripts/workbench-contract.test.mjs",
+      "exitCode": 0,
+      "passed": 105,
+      "total": 105
+    },
+    {
+      "command": "npm --workspace @metawork/renderer run check",
+      "exitCode": 0
+    },
+    {
+      "command": "node --test scripts/architecture-boundaries.test.mjs",
+      "exitCode": 0,
+      "passed": 33,
+      "total": 33
+    }
+  ],
+  "observed": [
+    "Cold mixed configuration: canonical atomic apply rejects; global unavailable and both rows not_loaded, without invented network failures.",
+    "Adding an unreachable server to a healthy Runtime: apply rejects; unchanged-origin healthy observation remains ready, new server is not_loaded, global degraded, new MCP admission remains blocked.",
+    "Disabling the bad descriptor remains durable after apply failure without trying to rebuild fenced old authority; a complete new apply and activation recover healthy admission.",
+    "Replacing endpoint under the same ID suppresses prior healthy status and discovered tools; global availability cannot accidentally become ready.",
+    "No official activation or missing per-server observation projects not_loaded; a global activation failure stays unavailable.",
+    "Only official per-server unavailable projects unreachable.",
+    "Renderer retries apply for unapplied configuration, refresh for a loaded Runtime without a catalog; global catalog failure does not disable the Refresh recovery action.",
+    "Cached management views expire old health even when admission is already blocked."
+  ],
+  "limits": [
+    "Canonical origin isolation Gate remains failed as recorded in P0.",
+    "No wire or persistence format changed.",
+    "Formal Native and all Node tests are separate joint verification; an unrelated scheduled-tasks keyboard test failed in the concurrent Node run and passed 9/9 in isolation. This record does not claim the full Node run passed."
+  ]
+}
