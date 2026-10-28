@@ -3573,16 +3573,19 @@ pub const Runtime = struct {
         // Live Tasks keep their owned ExecutionConfig until their own runtime
         // lifecycle releases it, so their references cannot block this gate.
         try self.execution_state.beginIdentityReplacement();
+        self.schedule.cancelTimer();
     }
 
     pub fn beginDefaultExecutionReplacement(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.execution_state.beginDefaultReplacement();
+        self.schedule.cancelTimer();
     }
 
     pub fn endExecutionReplacementNoFail(self: *Runtime) void {
         self.execution_state.endReplacementNoFail();
+        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
     }
 
     pub fn executionReplacementPending(self: *const Runtime) bool {
@@ -5653,11 +5656,11 @@ pub const Runtime = struct {
         id: u64,
         expected_epoch: u64,
         enabled: bool,
-    ) Error!void {
+    ) Error!bool {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.schedule.setEnabled(
+        return self.schedule.setEnabled(
             id,
             expected_epoch,
             enabled,
@@ -8390,6 +8393,7 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .has_active_fn = scheduleTaskHasActive,
+            .preflight_fn = scheduleTaskPreflight,
             .launch_fn = scheduleTaskLaunch,
             .observe_fn = scheduleTaskObservation,
         };
@@ -8400,21 +8404,32 @@ pub const Runtime = struct {
         return self.task_runtime.taskHasActiveOperation(task_id);
     }
 
-    fn scheduleTaskLaunch(
-        context: *anyopaque,
-        input: product_schedule.TaskLaunch,
-    ) product_schedule.TaskLaunchOutcome {
+    fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
             .selection_revision = input.selection_revision,
             .protocol = input.protocol,
-        }) catch |err| return .{ .rejected = .{
-            .cause = err,
-            .reason = scheduledFailure(err),
-            .task_id = 0,
-        } };
+        }) catch |err| {
+            if (err == error.ExecutionUnavailable) {
+                if (self.canCreateTask()) {
+                    self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+                    self.bumpRevision();
+                }
+                self.schedule.cancelTimer();
+            }
+            return err;
+        };
+    }
+
+    fn scheduleTaskLaunch(
+        context: *anyopaque,
+        input: product_schedule.TaskLaunch,
+    ) product_schedule.TaskLaunchOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        // The same main-thread occurrence already resolved its exact Models
+        // authority in preflight, before Schedule committed its claim.
         var prepared = self.prepareScheduledAdmission(input) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -11150,8 +11165,6 @@ fn scheduledTaskOutcome(
 
 fn scheduledFailure(err: anyerror) product_schedule.FailureReason {
     return switch (err) {
-        error.ExecutionUnavailable,
-        error.ExecutionInUse,
         error.ExecutionGenerationMismatch,
         => .execution_changed,
         error.UnknownWorkspace,
@@ -14114,6 +14127,60 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     stale = binding;
     stale.protocol = .anthropic_messages;
     try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+
+    var automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, directory_storage[0..directory_len]);
+    defer automatic_root.deinit();
+    product_workspace.testing.installAutomaticRoot(&control.workspace, &automatic_root);
+    var clock: TestScheduleClock = .{ .now = 1000 };
+    const storage = try std.testing.allocator.alloc(u8, product_schedule.testing.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    var persistence: TestSchedulePersistence = .{ .storage = storage };
+    product_schedule.testing.configure(&control.schedule, clock.timer(), persistence.capability(), .ready);
+    defer product_schedule.testing.configure(&control.schedule, .{}, .{}, .unavailable);
+    const id = try control.createScheduledTask(.{
+        .title = "Replacement",
+        .binding = binding,
+        .permission_profile = .approval_required,
+        .input = "Inspect",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
+    });
+    control.setScheduleBackgroundAvailableNoFail(true);
+    const commits = persistence.commits;
+    // Normal timer expiry inside either replacement window must never claim.
+    for ([_]bool{ false, true }) |identity| {
+        if (identity) try control.beginExecutionReplacement() else try control.beginDefaultExecutionReplacement();
+        try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+        clock.now = 2000;
+        control.onScheduledTaskTimer();
+        try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
+        try std.testing.expectEqual(commits, persistence.commits);
+        try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+        try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+        control.endExecutionReplacementNoFail();
+    }
+    // canCreateTask is still true, but resolveDefault can now fail reading its
+    // credential. This must be observed before any durable claim.
+    vault.read_fails = true;
+    control.onScheduledTaskTimer();
+    try std.testing.expectEqual(commits, persistence.commits);
+    try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
+    try std.testing.expect(!control.canCreateTask());
+    vault.read_fails = false;
+    control.reconcileModelsDefaultNoFail(true, false);
+    control.finishDefaultExecutionCommitNoFail();
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
+    // A missing Models authority can also precede Control's alignment wake.
+    // Exercise that second full-preflight branch with local admission ready.
+    try std.testing.expect(control.custom_providers.clearDefault().accepted);
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
+    try std.testing.expectEqual(commits, persistence.commits);
+    try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
+    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -14215,7 +14282,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
-    try control.setScheduledTaskEnabled(id, item.epoch, false);
+    try std.testing.expect(!try control.setScheduledTaskEnabled(id, item.epoch, false));
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(

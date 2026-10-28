@@ -439,7 +439,12 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
     (await client.createScheduledTask(mutation)).scheduledTaskId,
     "8",
   );
-  await client.setScheduledTaskEnabled("8", "1", false);
+  // A requested restore can reconcile back to attention. The ACK is state,
+  // not an echo of the request.
+  assert.equal(
+    (await client.setScheduledTaskEnabled("8", "1", true)).enabled,
+    false,
+  );
   assert.equal((await client.runScheduledTaskNow("8", "2")).taskId, "9");
   await client.deleteScheduledTask("8", "2");
   assert.deepEqual(
@@ -455,6 +460,6 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   assert.deepEqual(calls[1].payload, {
     scheduledTaskId: "8",
     expectedEpoch: "1",
-    enabled: false,
+    enabled: true,
   });
 });

@@ -6635,7 +6635,6 @@ export function decodeScheduledTaskMutationResult(
 export function decodeScheduledTaskEnabledResult(
   value: unknown,
   expectedId: string,
-  expectedEnabled: boolean,
 ) {
   const item = object(value, "$", ["scheduledTaskId", "epoch", "enabled"]);
   const scheduledTaskId = positiveWireId(
@@ -6645,7 +6644,6 @@ export function decodeScheduledTaskEnabledResult(
   if (scheduledTaskId !== expectedId)
     fail("$.scheduledTaskId", "response identity mismatch");
   const enabled = booleanValue(item.enabled, "$.enabled");
-  if (enabled !== expectedEnabled) fail("$.enabled", "response state mismatch");
   return {
     scheduledTaskId,
     epoch: positiveWireId(item.epoch, "$.epoch"),

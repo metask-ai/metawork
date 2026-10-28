@@ -1132,7 +1132,6 @@ export class BridgeClient {
         enabled,
       }),
       scheduledTaskId,
-      enabled,
     );
   }
   async runScheduledTaskNow(scheduledTaskId: string, expectedEpoch: string) {

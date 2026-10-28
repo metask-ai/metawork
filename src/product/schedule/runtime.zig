@@ -280,6 +280,7 @@ pub const TaskLaunchOutcome = union(enum) {
 pub const TaskEffects = struct {
     context: *anyopaque,
     has_active_fn: *const fn (*anyopaque, u64) bool,
+    preflight_fn: *const fn (*anyopaque, TaskLaunch) anyerror!void,
     launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
     observe_fn: *const fn (*anyopaque, u64) TaskObservation,
 
@@ -468,13 +469,13 @@ pub const Runtime = struct {
         enabled: bool,
         binding: ExecutionBinding,
         redaction: Redaction,
-    ) Error!void {
+    ) Error!bool {
         const current = self.timer.now() orelse return error.ScheduleTimerUnavailable;
         const existing = self.store.find(id) orelse
             return error.UnknownScheduledTask;
         if (expected_epoch == 0 or existing.epoch != expected_epoch)
             return error.ScheduledTaskEpochMismatch;
-        if (enabled and existing.health == .needs_attention)
+        if (existing.health == .needs_attention)
             return error.ScheduledTaskNeedsAttention;
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
@@ -485,6 +486,7 @@ pub const Runtime = struct {
         self.replace(&candidate);
         owned = false;
         _ = self.rearmNoFail(binding, redaction);
+        return self.store.find(id).?.enabled;
     }
 
     pub fn delete(
@@ -523,6 +525,8 @@ pub const Runtime = struct {
         ) catch |err| {
             if (err == error.ScheduledOccurrenceCapacity)
                 self.stopForOccurrenceCapacity(id, redaction);
+            if (err == error.ExecutionUnavailable or err == error.ExecutionInUse)
+                self.timer.cancelCurrent();
             return err;
         };
     }
@@ -542,8 +546,15 @@ pub const Runtime = struct {
             tasks,
             redaction,
         ) catch |err| {
-            if (err == error.ScheduledOccurrenceCapacity)
+            if (err == error.ScheduledOccurrenceCapacity) {
                 self.stopForOccurrenceCapacity(due.id, redaction);
+            } else {
+                // No claim may have been committed. Leave its cursor intact
+                // and wait for an authority/lifecycle wake, never arm the same
+                // overdue point again from this failed callback.
+                self.timer.cancelCurrent();
+                return;
+            }
         };
         _ = self.rearmNoFail(binding, redaction);
     }
@@ -576,6 +587,8 @@ pub const Runtime = struct {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch)
             return error.ScheduledTaskEpochMismatch;
+        if (item.health == .needs_attention)
+            return error.ScheduledTaskNeedsAttention;
     }
 
     fn dueNow(
@@ -583,6 +596,10 @@ pub const Runtime = struct {
         binding: ExecutionBinding,
         redaction: Redaction,
     ) ?Due {
+        if (!self.background_available or self.persistence_health != .ready or !binding.available) {
+            self.timer.cancelCurrent();
+            return null;
+        }
         const current = self.timer.now() orelse return null;
         const item = self.store.earliestDue() orelse return null;
         const planned = item.next_run_at_unix_seconds orelse return null;
@@ -593,7 +610,11 @@ pub const Runtime = struct {
         return .{
             .id = item.id,
             .epoch = item.epoch,
-            .planned_at_unix_seconds = planned,
+            .planned_at_unix_seconds = switch (item.recurrence) {
+                .once => planned,
+                .interval => |interval| interval.start_at_unix_seconds +
+                    ((current - interval.start_at_unix_seconds) / interval.every_seconds) * interval.every_seconds,
+            },
             .triggered_at_unix_seconds = current,
         };
     }
@@ -809,6 +830,21 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) anyerror!u64 {
         const blocking_task_id = try self.activeTaskId(id, tasks);
+        if (blocking_task_id == 0) {
+            const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+            const binding = item.bindingView();
+            // Control resolves the complete source authority before the
+            // durable claim. No credential or live capability enters Schedule.
+            try tasks.preflight_fn(tasks.context, .{
+                .title = item.title,
+                .input = item.input.borrowed(),
+                .model_ref = binding.model_ref,
+                .source_generation = binding.source_generation,
+                .selection_revision = binding.selection_revision,
+                .protocol = binding.protocol,
+                .permission_profile = item.permission_profile,
+            });
+        }
         const begin = try self.beginOccurrence(
             id,
             planned_at_unix_seconds,
@@ -892,6 +928,8 @@ pub const Runtime = struct {
         binding: ExecutionBinding,
         redaction: Redaction,
     ) bool {
+        // Timer admission can change without any durable definition changing.
+        defer _ = self.rearmNoFail(binding, redaction);
         if (self.persistence_health != .ready) return false;
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
@@ -900,7 +938,6 @@ pub const Runtime = struct {
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
         owned = false;
-        _ = self.rearmNoFail(binding, redaction);
         return true;
     }
 
@@ -1221,6 +1258,12 @@ const TestTasks = struct {
     unavailable_task_id: u64 = 0,
     terminal_task_id: u64 = 0,
     active_task_id: u64 = 0,
+    preflight_error: ?anyerror = null,
+
+    fn preflight(context: *anyopaque, _: TaskLaunch) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.preflight_error) |err| return err;
+    }
 
     fn hasActive(context: *anyopaque, id: u64) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
@@ -1250,6 +1293,7 @@ const TestTasks = struct {
         return .{
             .context = self,
             .has_active_fn = hasActive,
+            .preflight_fn = preflight,
             .launch_fn = launch,
             .observe_fn = observe,
         };
@@ -1426,6 +1470,103 @@ test "full protected history stops without eviction or an overdue timer retry" {
             .outcome_unknown => try std.testing.expectEqual(PersistenceHealth.outcome_unknown, runtime.persistenceHealth()),
         }
     }
+}
+
+test "preflight refusal leaves no claim and cancels overdue timer until authority returns" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{ .preflight_error = error.ExecutionUnavailable };
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("preflight", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    const commits = effects.commits;
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    try std.testing.expectEqual(commits, effects.commits);
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+    try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
+    try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, redaction, tasks.effects()));
+    try std.testing.expectEqual(commits, effects.commits);
+    tasks.preflight_error = null;
+    _ = runtime.refreshBindingNoFail(testBinding(), redaction);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+}
+
+test "unavailable binding cancels an armed timer without invalidating a due definition" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("replacement", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    const commits = effects.commits;
+    var unavailable = testBinding();
+    unavailable.available = false;
+    _ = runtime.refreshBindingNoFail(unavailable, redaction);
+    try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(unavailable, redaction, tasks.effects());
+    try std.testing.expectEqual(commits, effects.commits);
+    try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+}
+
+test "late timer claims only the latest due interval and advances past wake time" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("late", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 399;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(@as(usize, 1), item.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 380), item.last_occurrence.?.planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(u64, 399), item.last_occurrence.?.triggered_at_unix_seconds);
+    try std.testing.expectEqual(@as(?u64, 440), effects.armed_at);
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+}
+
+test "attention requires editing while enable acknowledgements describe reconciled state" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("attention", "inspect"), testBinding(), redaction);
+    try std.testing.expect(!try runtime.setEnabled(id, 1, false, testBinding(), redaction));
+    var changed = testBinding();
+    changed.selection_revision += 1;
+    try std.testing.expect(!try runtime.setEnabled(id, 2, true, changed, redaction));
+    const epoch = try runtime.epoch(id);
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.setEnabled(id, epoch, false, changed, redaction));
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.setEnabled(id, epoch, true, changed, redaction));
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.runNow(id, epoch, redaction, tasks.effects()));
+    try std.testing.expectEqual(@as(u64, 42), tasks.next_task_id);
+    try runtime.update(id, epoch, testDefinition("confirmed", "inspect"), testBinding(), redaction);
+    try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
 }
 
 test "selection revision prevents default-binding ABA from launching" {

@@ -420,6 +420,7 @@ pub const Store = struct {
         now_unix_seconds: u64,
     ) Error!void {
         const item = try self.require(id, expected_epoch);
+        if (item.health == .needs_attention) return error.ScheduledTaskNeedsAttention;
         if (item.enabled == enabled and
             ((enabled and item.health == .ready) or
                 (!enabled and item.health == .paused)))

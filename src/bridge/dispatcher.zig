@@ -5094,13 +5094,13 @@ pub const Dispatcher = struct {
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const workbench = try self.requireProductControl();
-        try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
+        const enabled = try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
         const next_epoch = try workbench.scheduledTaskEpoch(id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
             "{{\"scheduledTaskId\":\"{d}\",\"epoch\":\"{d}\",\"enabled\":{}}}",
-            .{ id, next_epoch, parsed.value.enabled },
+            .{ id, next_epoch, enabled },
         );
     }
 
