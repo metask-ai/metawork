@@ -52,7 +52,7 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
 
-资源生成器使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记，保持严格整包字节比较。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 同输入产物比对。
+资源生成器写入产物时使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记。`--check` 使用项目支持的 Node 版本，无须匹配生成器的 Node/zlib 精确版本；将现有 gzip 完整解压后与源码生成的完整 tar 逐字节比较，覆盖内容、顺序、header 与 padding，压缩编码差异不影响结果，损坏压缩包仍须失败。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 使用锁定工具链的同输入产物字节比对。
 
 私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`，macOS 使用 `python3`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格与引号路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。可传 `--target windows-x86_64|windows-aarch64|macos-aarch64|macos-x86_64`，默认当前原生目标；请求其他目标明确失败，不能把静态检查报告为执行通过。macOS 先并发准备 Python，再并发准备 Node，并验证 Node 已就绪时无需 Python 即可复用。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。
 

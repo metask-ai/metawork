@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +12,37 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
+
+function resourceFixture(t) {
+  const root = mkdtempSync(path.join(tmpdir(), "office-resources-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const name of [
+    "scripts/build-office-skills.mjs",
+    "scripts/office-environment.mjs",
+    "build_support/office-environment.json",
+    "src/product/skill/assets",
+    "src/product/skill/office_environment",
+    "src/product/control/resources/archive.py",
+    "src/app/office-skills.tar.gz",
+  ]) {
+    const destination = path.join(root, name);
+    mkdirSync(path.dirname(destination), { recursive: true });
+    cpSync(name, destination, { recursive: true });
+  }
+  return root;
+}
+
+function reportedVersions(versions) {
+  return `data:text/javascript,${encodeURIComponent(
+    Object.entries(versions)
+      .map(
+        ([name, value]) =>
+          `Object.defineProperty(process.versions, ${JSON.stringify(name)}, { value: ${JSON.stringify(value)} });`,
+      )
+      .join("\n"),
+  )}`;
+}
 
 test("shipped full Office archive matches canonical Skills, helpers and locked environments", () => {
   execFileSync(
@@ -23,6 +55,85 @@ test("shipped full Office archive matches canonical Skills, helpers and locked e
     ["scripts/build-office-skills.mjs", "--check"],
     { stdio: "pipe" },
   );
+});
+
+test("Office resource check accepts different compression and Node/zlib versions without writing", (t) => {
+  const root = resourceFixture(t);
+  const file = path.join(root, "src/app/office-skills.tar.gz");
+  const original = readFileSync(file);
+  const recompressed = gzipSync(gunzipSync(original), { level: 1 });
+  recompressed[9] = 3;
+  assert.notDeepEqual(recompressed, original);
+  writeFileSync(file, recompressed);
+  execFileSync(
+    process.execPath,
+    [
+      "--import",
+      reportedVersions({ node: "0.0.0", zlib: "different-zlib" }),
+      "scripts/build-office-skills.mjs",
+      "--check",
+    ],
+    { cwd: root, stdio: "pipe" },
+  );
+  assert.deepEqual(readFileSync(file), recompressed);
+});
+
+test("Office resource check rejects changed tar content, metadata, padding and corrupt gzip", (t) => {
+  const root = resourceFixture(t);
+  const file = path.join(root, "src/app/office-skills.tar.gz");
+  const original = readFileSync(file);
+  const tar = gunzipSync(original);
+  for (const offset of [512, 100, tar.length - 1]) {
+    const changed = Buffer.from(tar);
+    changed[offset] ^= 1;
+    writeFileSync(file, gzipSync(changed));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          ["scripts/build-office-skills.mjs", "--check"],
+          { cwd: root, stdio: "pipe" },
+        ),
+      (error) =>
+        error.stderr.toString().includes("Office Skill archive is stale"),
+    );
+  }
+  writeFileSync(file, original.subarray(0, original.length - 4));
+  assert.throws(() =>
+    execFileSync(
+      process.execPath,
+      ["scripts/build-office-skills.mjs", "--check"],
+      { cwd: root, stdio: "pipe" },
+    ),
+  );
+});
+
+test("Office resource generation still requires both locked Node and zlib versions", (t) => {
+  const root = resourceFixture(t);
+  const file = path.join(root, "src/app/office-skills.tar.gz");
+  const original = readFileSync(file);
+  const { generator } = JSON.parse(
+    readFileSync(path.join(root, "build_support/office-environment.json")),
+  );
+  for (const name of ["node", "zlib"]) {
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [
+            "--import",
+            reportedVersions({ ...generator, [name]: "0.0.0" }),
+            "scripts/build-office-skills.mjs",
+          ],
+          { cwd: root, stdio: "pipe" },
+        ),
+      (error) =>
+        error.stderr
+          .toString()
+          .includes("Use the canonical Office resource generator Node/zlib"),
+    );
+    assert.deepEqual(readFileSync(file), original);
+  }
 });
 
 test("Office dependencies are complete minimal locks, independent of application development packages", () => {

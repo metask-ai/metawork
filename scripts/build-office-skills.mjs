@@ -3,14 +3,16 @@ import { environment } from "./office-environment.mjs";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const common = "src/product/skill/office_environment";
 const sources = environment(root);
+const check = process.argv.includes("--check");
 if (
-  process.versions.node !== sources.generator.node ||
-  process.versions.zlib !== sources.generator.zlib
+  !check &&
+  (process.versions.node !== sources.generator.node ||
+    process.versions.zlib !== sources.generator.zlib)
 )
   throw Error(
     "Use the canonical Office resource generator Node/zlib from the manifest",
@@ -186,19 +188,19 @@ if (
   files.reduce((sum, f) => sum + f.data.length, 0) > 8 * 1024 * 1024
 )
   throw new Error("Office resource budget");
-const archive = gzipSync(
-  Buffer.concat([...files.map(tarFile), Buffer.alloc(1024)]),
-  { level: 9 },
-);
-// RFC 1952 unknown OS: remove the sole host-specific gzip header byte.
-archive[9] = 255;
+const tar = Buffer.concat([...files.map(tarFile), Buffer.alloc(1024)]);
 const destination = path.join(root, "src/app/office-skills.tar.gz");
-if (process.argv.includes("--check")) {
-  if (!readFileSync(destination).equals(archive))
+const archive = check ? readFileSync(destination) : gzipSync(tar, { level: 9 });
+if (check) {
+  if (!gunzipSync(archive).equals(tar))
     throw new Error(
       "Office Skill archive is stale; run node scripts/build-office-skills.mjs",
     );
-} else writeFileSync(destination, archive);
+} else {
+  // RFC 1952 unknown OS: remove the sole host-specific gzip header byte.
+  archive[9] = 255;
+  writeFileSync(destination, archive);
+}
 console.log(
   `Office Skills: ${files.length} files, ${archive.length} compressed bytes; ${Object.keys(sources.targets).length} targets`,
 );
