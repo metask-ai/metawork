@@ -1,0 +1,78 @@
+{
+  "id": "E-MAC-MCP-LIFECYCLE-JOINT-20261028",
+  "date": "2026-10-28",
+  "implementationRevision": "92c0123fdc9cba009562c4bae1068d9a1d84991d",
+  "branch": "feat/mcp-lifecycle",
+  "canonicalLock": "build_support/agentcore-bundle.macos-aarch64.lock.json",
+  "canonicalSource": "e75ad43c45577e1382292f4b256eba338f5b1ea6",
+  "sourceFilesSha256": {
+    "src/agent/mcp/catalog.zig": "e1e8a20b2a7f6acceacab2d0a720f6827fd49e2a6e698f43a227b732b4263e5b",
+    "src/agent/session/runtime.zig": "f16e6864c586f0bf6b6a032aba171184dec95237cecc26fbb193ff72906a39fc",
+    "src/product/control/runtime.zig": "9eb02aa07ac58c11c2a7ffddb6f8b018fab1ff9f3b43a2a4ba05f154ba702e70",
+    "src/product/mcp/runtime.zig": "0d59d92d45714b5de1f801df9c5244dce031c67398daaccc64233d2ee45e88a4",
+    "src/product/mcp/state.zig": "66cea3b2d4d5e26bac3d9bdb37dfdef61c53261e6ddb6158b4022a59e2627a7e",
+    "src/product/mcp/view.zig": "ced33cd1f17220f7d50a7b70f65d1230ea0a4cc02f5964165839f0e98b454451",
+    "frontend/src/features/mcp/McpPage.tsx": "48b70015163bc48f3bb304733fd8492c1e02694e28714ad1b80246b48e39b4ae",
+    "scripts/mcp-lifecycle-vertical.mjs": "25ac4d88e03618b34f53b348243909af0e7e362986e333db98d20e26bc433a92",
+    "tests/agent/mcp_interop_test.zig": "3053e347c2a804afda278c0af0260d32fbdc63043618fa1af0bf7bc5491a3e34"
+  },
+  "native": {
+    "command": "node_modules/.bin/native test . --yes",
+    "exitCode": 0,
+    "steps": 236,
+    "passed": 1504,
+    "skipped": 9,
+    "total": 1513
+  },
+  "node": {
+    "command": "node --test scripts/*.test.mjs",
+    "exitCode": 0,
+    "passed": 996,
+    "skipped": 2,
+    "total": 998,
+    "previousFailures": "See ordered attempts and diagnostics in mcp-lifecycle-desktop-20261028.json; final pass does not erase them."
+  },
+  "rendererTypecheck": {
+    "command": "npm --workspace @metawork/renderer run check",
+    "exitCode": 0
+  },
+  "canonicalVerifier": {
+    "command": "node scripts/verify-staged-agentcore-bundle.mjs",
+    "exitCode": 0
+  },
+  "desktopEvidence": "mcp-lifecycle-desktop-20261028.json",
+  "evidenceSourceBindingsVerified": {
+    "mcp-lifecycle-p0-20261028.json": "ad9a931a",
+    "mcp-lifecycle-p1-20261028.json": "5b1865d0",
+    "mcp-lifecycle-p3-20261028.json": "53beab20",
+    "mcp-lifecycle-desktop-20261028.json": "92c0123f"
+  },
+  "issueDisposition": {
+    "18": "Host freshness and admission fixes plus real default-TTL desktop RPC passed. Original release timeline/remote service reproduction has not been performed; issue not closed.",
+    "26": "Atomic rejection, cold mixed/warm added-bad-server projections, durable disabling and full re-apply recovery passed through real Product/Core; issue not closed.",
+    "29": "Same-origin original Session and once/allow/deny continuity passed; origin-isolation Gate FAILED under same ID/schema with replaced endpoint, requiring a canonical Core release. Full acceptance not closed."
+  },
+  "dag": {
+    "root": 1012,
+    "completed": [
+      1013,
+      1014,
+      1015,
+      1016,
+      1017,
+      1018,
+      1019,
+      1027,
+      1030
+    ],
+    "acceptanceTask": 1020,
+    "acceptanceState": "open; no safety acceptance claim",
+    "metadataGap": "P4 depends_on P2 returned CycleCheckUncertain; subsequent P4->P3 edge was not attempted. No retry, alternate edge, or guard modification."
+  },
+  "remaining": [
+    "Canonical AgentCore Session/materialization/checkpoint source binding fix and exact artifact negative tests.",
+    "Original issue release timelines and remote OAuth/quota/429 acceptance.",
+    "Unqualified Node instability retained despite final complete pass."
+  ],
+  "gitPolicy": "Local commits only; no push, merge or issue closure."
+}

@@ -32,7 +32,8 @@
     "validBackgroundOperation": "idle",
     "limits": [
       "Local synthetic HTTP and Provider; does not qualify remote OAuth quotas or canonical origin isolation."
-    ]
+    ],
+    "artifactSha256": "b9b705f1feae4a20476d42f0b30297ae61800cd292003aa8fa28f32f43e0b1f6"
   },
   "checks": [
     {
@@ -77,12 +78,37 @@
       "failed": 1,
       "total": 972,
       "failure": "task-panel.test.mjs process failed after 72.3 seconds, following its preview/Review independence case; no individual assertion or signal was reported. Initial concurrent run passed this suite. Cause remains unqualified."
+    },
+    {
+      "command": "node --test scripts/*.test.mjs",
+      "exitCode": 0,
+      "passed": 996,
+      "skipped": 2,
+      "failed": 0,
+      "total": 998,
+      "note": "Final ordinary-concurrency recheck; prior failed attempts remain above."
     }
   ],
   "unclosed": [
     "Canonical same-ID source replacement origin-isolation Gate and #29 full acceptance.",
-    "Full Node graph is not green; fixture instability/Task Panel process failure is not treated as a pass.",
+    "Final full Node graph passed, but earlier Scheduled tasks and Task Panel failures remain recorded as instability; no cause or permanent fix is claimed.",
     "Remote OAuth/429/quota and original issue release timelines have not been qualified by this local fixture.",
     "TinyKG P4 dependency write CycleCheckUncertain remains recorded without retry or guard weakening."
+  ],
+  "diagnostics": [
+    {
+      "command": "node --test scripts/task-panel.test.mjs",
+      "exitCode": 1,
+      "passed": 103,
+      "failed": 1,
+      "note": "Whole process failed after 71.8 seconds following preview/Review case."
+    },
+    {
+      "command": "node --test --test-timeout=15000 --test-name-pattern='^conversation file links' scripts/task-panel.test.mjs",
+      "exitCode": 0,
+      "passed": 1,
+      "total": 1,
+      "note": "The next individual case passed in 1.5 seconds; failure of the full process remains unqualified."
+    }
   ]
 }
