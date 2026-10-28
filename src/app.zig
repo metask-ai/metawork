@@ -253,7 +253,7 @@ const App = struct {
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
-        self.control_configuration.task_persistence.restored_bytes = null;
+        self.control_configuration.task_persistence.restore_fn = null;
         if (self.history_restore_owner) |stores| stores.releaseTaskRestore();
         self.history_restore_owner = null;
 
@@ -691,9 +691,9 @@ pub fn run(init: std.process.Init) !void {
             .recover_fn = app_stores.recoverScheduledTaskStore,
         },
         .task_persistence = .{
-            .context = if (stores_state.task) |*store| store else null,
+            .context = &stores_state,
             .enabled = stores_state.task != null,
-            .restored_bytes = stores_state.task_restored_bytes,
+            .restore_fn = app_stores.takeTaskRestore,
             .restore_failed = stores_state.task_restore_failed,
             .restore_degraded = if (stores_state.task) |store| store.import_degraded else false,
             .restore_incompatible = if (stores_state.task) |store| store.incompatible else false,

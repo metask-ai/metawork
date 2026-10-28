@@ -1685,19 +1685,23 @@ pub const Runtime = struct {
         attachment_executor_owned = false;
         attachment_lane_owned = false;
         preview_executor_owned = false;
-        if ((control.task_persistence_health == .ready or
-            control.task_persistence_health == .degraded) and
-            configuration.task_persistence.restored_bytes != null)
-        {
-            control.restoreTaskState(
-                configuration.task_persistence.restored_bytes.?,
-            ) catch |err| {
-                control.clearRestoredTaskStateNoFail();
-                switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => control.task_persistence_health = .corrupt,
+        if (control.task_persistence_health == .ready or control.task_persistence_health == .degraded) {
+            if (configuration.task_persistence.restore_fn) |restore| {
+                const loaded = restore(configuration.task_persistence.context) catch |err| failed: {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    control.task_persistence_health = .corrupt;
+                    break :failed null;
+                };
+                if (loaded) |value| {
+                    var recovered = value;
+                    defer recovered.deinit();
+                    control.restoreTaskState(&recovered) catch |err| {
+                        control.clearRestoredTaskStateNoFail();
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        control.task_persistence_health = .corrupt;
+                    };
                 }
-            };
+            }
         }
         if (control.workspace.automaticRootPath()) |root| {
             control.workspace.validateAutomaticRootCandidate(root) catch {
@@ -1705,7 +1709,7 @@ pub const Runtime = struct {
                 control.automatic_root_configuration.health = .path_unavailable;
             };
         }
-        control.task_persistence.restored_bytes = null;
+        control.task_persistence.restore_fn = null;
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
         // Skill records name Workspace ids; the allocator must never hand out
@@ -8667,15 +8671,9 @@ pub const Runtime = struct {
         self.freeTrackedText(target);
     }
 
-    fn restoreTaskState(self: *Runtime, bytes: []const u8) Error!void {
+    fn restoreTaskState(self: *Runtime, recovered: *task_persistence.RecoveredState) Error!void {
         std.debug.assert(self.workspace.historyCount() == 0);
         std.debug.assert(self.task_runtime.taskCount() == 0);
-        var recovered = try task_persistence.decodeRecovering(
-            self.allocator,
-            bytes,
-            self.taskPersistenceLimits(),
-        );
-        defer recovered.deinit();
         try self.skill.reserveWorkspaceCapacity(recovered.value.workspaces.len);
         // Defaults are a preference, not history; an unreadable value falls
         // back instead of discarding every restorable record.
@@ -8686,13 +8684,13 @@ pub const Runtime = struct {
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.preserved.retained) |record|
             try self.task_runtime.retainRecord(record);
-        for (recovered.value.workspaces, recovered.workspace_frames) |workspace, frame| {
+        for (recovered.value.workspaces, 0..) |workspace, frame_index| {
             const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
             var skill_root_owned = true;
             defer if (skill_root_owned) self.allocator.free(skill_root);
             const kind = task_persistence.parseEnum(WorkspaceKind, workspace.kind) orelse {
                 recovered.dropped_workspaces += 1;
-                try self.task_runtime.retainRecord(frame);
+                try self.retainRestoredWorkspace(recovered, frame_index);
                 continue;
             };
             self.workspace.restore(.{
@@ -8707,7 +8705,7 @@ pub const Runtime = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     recovered.dropped_workspaces += 1;
-                    try self.task_runtime.retainRecord(frame);
+                    try self.retainRestoredWorkspace(recovered, frame_index);
                     continue;
                 },
             };
@@ -8734,9 +8732,9 @@ pub const Runtime = struct {
             const workspace = self.workspace.automaticBindingAt(index) orelse continue;
             if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
             // The owner Task was retained, so its automatic scope is too.
-            for (recovered.value.workspaces, recovered.workspace_frames) |value, frame| {
+            for (recovered.value.workspaces, 0..) |value, frame_index| {
                 if (value.id == workspace.id) {
-                    try self.task_runtime.retainRecord(frame);
+                    try self.retainRestoredWorkspace(recovered, frame_index);
                     break;
                 }
             }
@@ -8757,6 +8755,14 @@ pub const Runtime = struct {
         );
         if (recovered.degraded or recovered.dropped_workspaces != 0 or recovered.dropped_tasks != 0)
             self.task_persistence_health = .degraded;
+    }
+
+    fn retainRestoredWorkspace(self: *Runtime, recovered: *const task_persistence.RecoveredState, index: usize) Error!void {
+        if (recovered.workspace_frames.len != 0) return self.task_runtime.retainRecord(recovered.workspace_frames[index]);
+        const value = recovered.value.workspaces[index];
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        defer self.allocator.free(payload);
+        try self.task_runtime.retainRecord(.{ .kind = .workspace, .id = value.id, .order = value.recent_order, .payload = payload });
     }
 
     fn recordTaskFailure(
@@ -12332,6 +12338,7 @@ const TestSchedulePersistence = struct {
 };
 
 const TestTaskPersistence = struct {
+    fixture_restore: ?[]const u8 = null,
     storage: []u8,
     len: usize = 0,
     commits: usize = 0,
@@ -12353,14 +12360,21 @@ const TestTaskPersistence = struct {
         return .committed;
     }
 
+    fn restoreFixture(context: ?*anyopaque) anyerror!?task_persistence.RecoveredState {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const bytes = self.fixture_restore orelse return null;
+        return try task_persistence.decodeRecovering(std.testing.allocator, bytes, persistenceLimits(.{}, 16));
+    }
+
     fn capability(
         self: *@This(),
         restored_bytes: ?[]const u8,
     ) TaskPersistence {
+        self.fixture_restore = restored_bytes;
         return .{
             .context = self,
             .enabled = true,
-            .restored_bytes = restored_bytes,
+            .restore_fn = restoreFixture,
             .commit_fn = commit,
             .confirmed_commit_fn = commit,
             .resolve_commit_fn = resolve,

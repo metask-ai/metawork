@@ -12,7 +12,7 @@ const history = struct {
         return schema.codec.batchFor(allocator, state, limits);
     }
     pub fn load(allocator: std.mem.Allocator, database: sql.Database) !wire.StateWire {
-        return schema.codec.load(allocator, database, limits);
+        return schema.codec.load(allocator, std.testing.allocator, database, limits);
     }
 };
 
@@ -1204,7 +1204,7 @@ test "SQL history preserves opaque and read-only legacy bytes exactly" {
     defer database.destroy() catch unreachable;
     const batch = try schema.codec.batchForPreserving(allocator, state, preserved, history.limits);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(batch.mutations.items));
-    const restored = try schema.codec.loadPreserving(allocator, database.capability(), history.limits);
+    const restored = try schema.codec.loadPreserving(allocator, std.testing.allocator, database.capability(), history.limits);
     try std.testing.expectEqual(@as(usize, 1), restored.preserved.retained.len);
     try std.testing.expectEqualSlices(u8, payload, restored.preserved.retained[0].payload);
     try std.testing.expectEqualSlices(u8, readonly, restored.preserved.read_only_tasks[0].payload);
@@ -1506,7 +1506,7 @@ test "repository Task deletion and insertion do not renumber unrelated identitie
     try std.testing.expectEqual(@as(usize, 2), inserted.changed_rows);
     for (inserted.mutations) |m| try std.testing.expect(std.mem.indexOf(u8, m.statement.sql, "ordinal=ordinal+") == null);
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&inserted));
-    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    const loaded = try schema.codec.loadPreserving(a, std.testing.allocator, database.capability(), history.limits);
     try repository.seed(loaded.value, loaded.preserved);
     var unchanged = try repository.prepare(state, .{}, @splat(4));
     defer unchanged.deinit();
@@ -1565,7 +1565,7 @@ test "repository preserves witness atomicity beyond 128 retained-record statemen
     try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, repository.commit(&prepared));
     try std.testing.expectEqual(@as(u64, 0), (try schema.repository.readWitness(database.capability())).generation);
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&prepared));
-    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    const loaded = try schema.codec.loadPreserving(a, std.testing.allocator, database.capability(), history.limits);
     try std.testing.expectEqual(@as(usize, 140), loaded.preserved.retained.len);
     var deletion = try repository.prepare(state, .{}, @splat(2));
     defer deletion.deinit();
@@ -1592,7 +1592,7 @@ test "repository preserves multiple opaque frame occurrences with the same ident
     var prepared = try repository.prepare(state, .{ .retained = &records }, @splat(1));
     defer prepared.deinit();
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&prepared));
-    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    const loaded = try schema.codec.loadPreserving(a, std.testing.allocator, database.capability(), history.limits);
     try std.testing.expectEqual(@as(usize, records.len), loaded.preserved.retained.len);
     for (records, loaded.preserved.retained) |expected, actual| {
         try std.testing.expectEqual(expected.order, actual.order);

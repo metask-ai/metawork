@@ -1156,6 +1156,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
 }
 
 const TaskPersistenceProbe = struct {
+    fixture_restore: ?[]const u8 = null,
     result: product_task.history.Commit = .committed,
     store_on_outcome_unknown: bool = false,
     storage: ?[]u8 = null,
@@ -1201,12 +1202,18 @@ const TaskPersistenceProbe = struct {
         };
     }
 
+    fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const bytes = self.fixture_restore orelse return null;
+        return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+    }
     fn capabilityRestored(
         self: *@This(),
         restored_bytes: []const u8,
     ) product_task.history.Capability {
         var result = self.capability();
-        result.restored_bytes = restored_bytes;
+        self.fixture_restore = restored_bytes;
+        result.restore_fn = restoreFixture;
         return result;
     }
 };
@@ -9441,6 +9448,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         fn cancel(_: *anyopaque) void {}
     };
     const Harness = struct {
+        fixture_restore: ?[]const u8 = null,
         storage: []u8,
         candidate: []u8,
         main_thread: std.Thread.Id,
@@ -9509,9 +9517,14 @@ test "recovery binding confirmation retains candidates and never writes on the m
             self.recoveries += 1;
             return .failed;
         }
-
+        fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const bytes = self.fixture_restore orelse return null;
+            return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+        }
         fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
-            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
+            self.fixture_restore = restored;
+            return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
         }
         fn wake(_: ?*anyopaque) bool {
             return true;
@@ -10008,6 +10021,7 @@ test "approval delegation can change while the only Run worker waits for permiss
 test "approval metadata outcomes retain both checkpoints until canonical readback decides" {
     const Commit = product_task.history.Commit;
     const Harness = struct {
+        fixture_restore: ?[]const u8 = null,
         storage: []u8,
         candidate: []u8,
         main_thread: std.Thread.Id,
@@ -10087,8 +10101,14 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
             return .failed;
         }
 
+        fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const bytes = self.fixture_restore orelse return null;
+            return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+        }
         fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
-            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve, .recover_fn = recover };
+            self.fixture_restore = restored;
+            return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve, .recover_fn = recover };
         }
     };
     const Case = struct { result: Commit, candidate_is_canonical: bool, fault_baseline: bool = false };

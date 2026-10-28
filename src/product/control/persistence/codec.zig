@@ -237,6 +237,23 @@ const Records = struct {
         };
         try self.values.append(self.allocator, values);
     }
+    fn adopt(self: *@This(), source: *const Records) !void {
+        if (source.values.items.len == 0) return;
+        if (self.columns.len == 0) {
+            const names = try self.allocator.alloc([]const u8, source.columns.len);
+            for (names, source.columns) |*name, value| name.* = try self.allocator.dupe(u8, value);
+            self.columns = names;
+        }
+        for (source.values.items) |row_values| {
+            const values = try self.allocator.alloc(sql.Value, row_values.len);
+            for (values, row_values) |*value, incoming| value.* = switch (incoming) {
+                .blob => |bytes| .{ .blob = try self.allocator.dupe(u8, bytes) },
+                .text => |bytes| .{ .text = try self.allocator.dupe(u8, bytes) },
+                else => incoming,
+            };
+            try self.values.append(self.allocator, values);
+        }
+    }
     fn row(self: *const @This(), index: usize) Record {
         return .{ .allocator = self.allocator, .columns = self.columns, .values = self.values.items[index] };
     }
@@ -320,9 +337,31 @@ fn query(allocator: std.mem.Allocator, database: sql.Database, statement: []cons
     return records;
 }
 
+// The sink may have received rows before Storage reports its byte limit.
+// Adopt only a successful whole page; release failed attempts before retrying.
+fn pageQuery(allocator: std.mem.Allocator, temporary: std.mem.Allocator, database: sql.Database, text: []const u8, params: []const sql.Value, page_limit: *usize) !Records {
+    while (true) {
+        var arena = std.heap.ArenaAllocator.init(temporary);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const statement = try std.fmt.allocPrint(a, "{s} LIMIT {d}", .{ text, page_limit.* });
+        var page: Records = .{ .allocator = a };
+        const outcome = database.query(statement, params, .{ .context = &page, .receive_fn = Records.receive });
+        if (page.failed) return error.OutOfMemory;
+        if (outcome == .resource_exhausted and page_limit.* > 1) {
+            page_limit.* = @max(1, page_limit.* / 2);
+            continue;
+        }
+        if (outcome != .ok) return error.QueryFailed;
+        var result: Records = .{ .allocator = allocator };
+        try result.adopt(&page);
+        return result;
+    }
+}
+
 // A single largest legal row fits the SQL result budget; a whole Task need
 // not. Use indexed identity/position keysets, never partial-result adoption.
-fn ordered(allocator: std.mem.Allocator, database: sql.Database, comptime table: []const u8, parents: []const sql.Value) !Records {
+fn ordered(allocator: std.mem.Allocator, temporary: std.mem.Allocator, database: sql.Database, comptime table: []const u8, parents: []const sql.Value) !Records {
     const identity = comptime std.mem.eql(u8, table, "workspaces") or std.mem.eql(u8, table, "tasks") or std.mem.eql(u8, table, "run_additional_inputs");
     const key = if (identity) "id" else "ordinal";
     const condition = switch (parents.len) {
@@ -331,14 +370,14 @@ fn ordered(allocator: std.mem.Allocator, database: sql.Database, comptime table:
         2 => "WHERE task_id=?1 AND run_id=?2 AND " ++ key ++ ">?3",
         else => return error.Invalid,
     };
-    const text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s} LIMIT 1", .{ table, condition, key });
+    const text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s}", .{ table, condition, key });
     const initial_condition = switch (parents.len) {
         0 => "",
         1 => "WHERE task_id=?1",
         2 => "WHERE task_id=?1 AND run_id=?2",
         else => unreachable,
     };
-    const initial_text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s} LIMIT 1", .{ table, initial_condition, key });
+    const initial_text = try std.fmt.allocPrint(allocator, "SELECT * FROM {s} {s} ORDER BY {s}", .{ table, initial_condition, key });
     const params = try allocator.alloc(sql.Value, parents.len + 1);
     @memcpy(params[0..parents.len], parents);
     var result = Records{ .allocator = allocator };
@@ -346,23 +385,25 @@ fn ordered(allocator: std.mem.Allocator, database: sql.Database, comptime table:
     var last_id: u64 = 0;
     var identity_bytes: [8]u8 = @splat(0);
     var first = true;
+    var page_limit: usize = 64;
     while (true) {
         if (identity) std.mem.writeInt(u64, &identity_bytes, last_id, .big);
         params[parents.len] = if (identity) .{ .blob = &identity_bytes } else .{ .integer = cursor };
-        const page = try query(allocator, database, if (first) initial_text else text, if (first) parents else params);
+        const page = try pageQuery(allocator, temporary, database, if (first) initial_text else text, if (first) parents else params, &page_limit);
         if (page.values.items.len == 0) break;
-        if (page.values.items.len != 1) return error.Invalid;
-        if (identity) {
-            const next = try page.row(0).u("id");
-            if (next <= last_id) return error.Invalid;
-            last_id = next;
-        } else {
-            const next = try page.row(0).i("ordinal");
-            if (next != result.values.items.len or next >= 2147483648) return error.Invalid;
-            cursor = @intCast(next);
+        for (0..page.values.items.len) |index| {
+            if (identity) {
+                const next = try page.row(index).u("id");
+                if (next <= last_id) return error.Invalid;
+                last_id = next;
+            } else {
+                const next = try page.row(index).i("ordinal");
+                if (next != result.values.items.len + index or next >= 2147483648) return error.Invalid;
+                cursor = @intCast(next);
+            }
         }
-        result.columns = page.columns;
-        try result.values.append(allocator, page.values.items[0]);
+        if (result.columns.len == 0) result.columns = page.columns;
+        try result.values.appendSlice(allocator, page.values.items);
         first = false;
     }
     return result;
@@ -440,12 +481,12 @@ fn build(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.Pr
 
 pub const Loaded = struct { value: wire.StateWire, preserved: wire.PreservedFrames = .{} };
 
-pub fn load(allocator: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !wire.StateWire {
-    return (try loadPreserving(allocator, database, limits)).value;
+pub fn load(allocator: std.mem.Allocator, temporary: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !wire.StateWire {
+    return (try loadPreserving(allocator, temporary, database, limits)).value;
 }
 
-pub fn loadPreserving(allocator: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !Loaded {
-    const state = try loadRows(allocator, database, limits);
+pub fn loadPreserving(allocator: std.mem.Allocator, temporary: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !Loaded {
+    const state = try loadRows(allocator, temporary, database, limits);
     var retained: std.ArrayList(wire.RetainedRecord) = .empty;
     var readonly: std.ArrayList(wire.ReadOnlyPayload) = .empty;
     var bindings: Batch = .{ .allocator = allocator };
@@ -453,35 +494,37 @@ pub fn loadPreserving(allocator: std.mem.Allocator, database: sql.Database, limi
         var cursor: u64 = 0;
         var last_occurrence: i64 = -1;
         var first = true;
+        var page_limit: usize = 64;
         while (true) {
-            const text = if (first) "SELECT * FROM retained_records WHERE kind=?1 ORDER BY id,occurrence LIMIT 1" else "SELECT * FROM retained_records WHERE kind=?1 AND (id,occurrence)>(?2,?3) ORDER BY id,occurrence LIMIT 1";
-            const rows = try query(allocator, database, text, if (first) &.{t(kind)} else &.{ t(kind), try bindings.u(cursor), .{ .integer = last_occurrence } });
+            const text = if (first) "SELECT * FROM retained_records WHERE kind=?1 ORDER BY id,occurrence" else "SELECT * FROM retained_records WHERE kind=?1 AND (id,occurrence)>(?2,?3) ORDER BY id,occurrence";
+            const rows = try pageQuery(allocator, temporary, database, text, if (first) &.{t(kind)} else &.{ t(kind), try bindings.u(cursor), .{ .integer = last_occurrence } }, &page_limit);
             if (rows.values.items.len == 0) break;
-            if (rows.values.items.len != 1) return error.Invalid;
-            const row = rows.row(0);
-            const id = try row.u("id");
-            const order = try row.u("recent_order");
-            const occurrence = try row.i("occurrence");
-            if (id == 0 or (!first and id < cursor)) return error.Invalid;
-            const expected: u64 = if (first or id != cursor) 0 else @intCast(last_occurrence + 1);
-            if (occurrence != expected or occurrence >= 2147483648) return error.Invalid;
-            const raw = try row.value("payload");
-            if (raw != .blob) return error.Invalid;
-            if (std.mem.eql(u8, kind, "read_only_task")) {
-                if (occurrence != 0) return error.Invalid;
-                var found = false;
-                for (state.tasks) |task| {
-                    if (task.id == id) {
-                        found = true;
-                        break;
+            for (0..rows.values.items.len) |index| {
+                const row = rows.row(index);
+                const id = try row.u("id");
+                const order = try row.u("recent_order");
+                const occurrence = try row.i("occurrence");
+                if (id == 0 or (!first and id < cursor)) return error.Invalid;
+                const expected: u64 = if (first or id != cursor) 0 else @intCast(last_occurrence + 1);
+                if (occurrence != expected or occurrence >= 2147483648) return error.Invalid;
+                const raw = try row.value("payload");
+                if (raw != .blob) return error.Invalid;
+                if (std.mem.eql(u8, kind, "read_only_task")) {
+                    if (occurrence != 0) return error.Invalid;
+                    var found = false;
+                    for (state.tasks) |task| {
+                        if (task.id == id) {
+                            found = true;
+                            break;
+                        }
                     }
-                }
-                if (!found) return error.Invalid;
-                try readonly.append(allocator, .{ .task_id = id, .recent_order = order, .payload = raw.blob });
-            } else try retained.append(allocator, .{ .kind = if (std.mem.eql(u8, kind, "workspace")) .workspace else .task, .id = id, .order = order, .payload = raw.blob });
-            cursor = id;
-            last_occurrence = @intCast(occurrence);
-            first = false;
+                    if (!found) return error.Invalid;
+                    try readonly.append(allocator, .{ .task_id = id, .recent_order = order, .payload = raw.blob });
+                } else try retained.append(allocator, .{ .kind = if (std.mem.eql(u8, kind, "workspace")) .workspace else .task, .id = id, .order = order, .payload = raw.blob });
+                cursor = id;
+                last_occurrence = @intCast(occurrence);
+                first = false;
+            }
         }
     }
     const total = try query(allocator, database, "SELECT COUNT(*) AS total FROM retained_records", &.{});
@@ -493,7 +536,7 @@ pub fn loadPreserving(allocator: std.mem.Allocator, database: sql.Database, limi
 
 /// The Product history owner holds its writer/admission gate throughout load.
 /// Rows are candidates until full Product validation succeeds.
-fn loadRows(allocator: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !wire.StateWire {
+fn loadRows(allocator: std.mem.Allocator, temporary: std.mem.Allocator, database: sql.Database, limits: wire.Limits) !wire.StateWire {
     const roots = try query(allocator, database, "SELECT * FROM history_state", &.{});
     if (roots.values.items.len == 0) {
         const existing = try query(allocator, database, "SELECT (SELECT COUNT(*) FROM workspaces)+(SELECT COUNT(*) FROM tasks)+(SELECT COUNT(*) FROM runs)+(SELECT COUNT(*) FROM run_tools)+(SELECT COUNT(*) FROM run_file_changes)+(SELECT COUNT(*) FROM task_compacts)+(SELECT COUNT(*) FROM task_ui_history)+(SELECT COUNT(*) FROM task_input_submissions)+(SELECT COUNT(*) FROM run_additional_inputs)+(SELECT COUNT(*) FROM retained_records) AS total", &.{});
@@ -502,50 +545,50 @@ fn loadRows(allocator: std.mem.Allocator, database: sql.Database, limits: wire.L
     }
     if (roots.values.items.len != 1) return error.Invalid;
     var state = try readState(roots.row(0));
-    const workspaces = try ordered(allocator, database, "workspaces", &.{});
+    const workspaces = try ordered(allocator, temporary, database, "workspaces", &.{});
     state.workspaces = try allocator.alloc(wire.WorkspaceWire, workspaces.values.items.len);
     for (state.workspaces, 0..) |*value, index| value.* = try readWorkspace(workspaces.row(index));
-    const tasks = try ordered(allocator, database, "tasks", &.{});
+    const tasks = try ordered(allocator, temporary, database, "tasks", &.{});
     state.tasks = try allocator.alloc(wire.TaskWire, tasks.values.items.len);
     var bindings = Batch{ .allocator = allocator };
     for (state.tasks, 0..) |*task, index| {
         task.* = try readTask(tasks.row(index));
         const task_params = &.{try bindings.u(task.id)};
-        const compacts = try ordered(allocator, database, "task_compacts", task_params);
+        const compacts = try ordered(allocator, temporary, database, "task_compacts", task_params);
         task.compacts = try allocator.alloc(wire.CompactWire, compacts.values.items.len);
         for (task.compacts, 0..) |*v, i| {
             v.* = try compacts.row(i).json(wire.CompactWire, "payload");
             if (v.id != try compacts.row(i).u("id")) return error.Invalid;
         }
-        const decisions = try ordered(allocator, database, "task_ui_history", task_params);
+        const decisions = try ordered(allocator, temporary, database, "task_ui_history", task_params);
         task.ui_history = try allocator.alloc(wire.UiRecordWire, decisions.values.items.len);
         for (task.ui_history, 0..) |*v, i| {
             v.* = try decisions.row(i).json(wire.UiRecordWire, "payload");
             if (v.request_id != try decisions.row(i).u("request_id")) return error.Invalid;
         }
-        const submissions = try ordered(allocator, database, "task_input_submissions", task_params);
+        const submissions = try ordered(allocator, temporary, database, "task_input_submissions", task_params);
         task.input_submissions = try allocator.alloc(wire.InputSubmissionWire, submissions.values.items.len);
         for (task.input_submissions, 0..) |*v, i| {
             v.* = try submissions.row(i).json(wire.InputSubmissionWire, "payload");
             if (!std.mem.eql(u8, v.submission.operation_id, try submissions.row(i).b("operation_id"))) return error.Invalid;
         }
 
-        const runs = try ordered(allocator, database, "runs", task_params);
+        const runs = try ordered(allocator, temporary, database, "runs", task_params);
         task.runs = try allocator.alloc(wire.RunWire, runs.values.items.len);
         for (task.runs, 0..) |*run, run_index| {
             run.* = try readRun(runs.row(run_index));
             const run_params = &.{ try bindings.u(task.id), try bindings.u(run.id) };
-            const inputs = try ordered(allocator, database, "run_additional_inputs", run_params);
+            const inputs = try ordered(allocator, temporary, database, "run_additional_inputs", run_params);
             run.additional_inputs = try allocator.alloc(wire.AdditionalInputWire, inputs.values.items.len);
             for (run.additional_inputs, 0..) |*v, i| {
                 v.* = try inputs.row(i).json(wire.AdditionalInputWire, "payload");
                 if (v.id != try inputs.row(i).u("id")) return error.Invalid;
             }
 
-            const tools = try ordered(allocator, database, "run_tools", run_params);
+            const tools = try ordered(allocator, temporary, database, "run_tools", run_params);
             run.tools = try allocator.alloc(wire.ToolWire, tools.values.items.len);
             for (run.tools, 0..) |*value, child| value.* = try readTool(tools.row(child));
-            const changes = try ordered(allocator, database, "run_file_changes", run_params);
+            const changes = try ordered(allocator, temporary, database, "run_file_changes", run_params);
             if (run.file_change_observation != null) {
                 const values = try allocator.alloc(wire.FileChangeWire, changes.values.items.len);
                 for (values, 0..) |*value, child| value.* = try readChange(changes.row(child));

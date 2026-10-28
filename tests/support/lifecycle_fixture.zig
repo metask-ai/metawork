@@ -17,12 +17,19 @@ pub const wire = sdk.types;
 
 /// Framed storage is a test double here; production history uses typed SQLite.
 pub const TypedHistory = struct {
+    fixture_restore: ?[]const u8 = null,
     file_store: *product_task.history.FileStore,
     pending: ?[]u8 = null,
     token: product_task.history.CommitToken = @splat(0),
 
+    fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const bytes = self.fixture_restore orelse return null;
+        return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+    }
+
     pub fn capability(self: *@This()) product_task.history.Capability {
-        return .{ .context = self, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve };
+        return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve };
     }
     pub fn deinit(self: *@This()) void {
         if (self.pending) |bytes| std.testing.allocator.free(bytes);

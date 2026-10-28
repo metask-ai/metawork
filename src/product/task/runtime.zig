@@ -3782,12 +3782,12 @@ pub const Runtime = struct {
         read_only: []const task_persistence.ReadOnlyPayload,
         projection: task_persistence.RestoreProjection,
     ) RestoreError!usize {
-        std.debug.assert(wires.len == frames.len);
+        std.debug.assert(frames.len == 0 or wires.len == frames.len);
         for (self.tasks) |entry| std.debug.assert(entry == null);
         try self.ensureTaskSlots(wires.len);
         var restored_count: usize = 0;
         var retained: usize = 0;
-        for (wires, frames) |wire, frame| {
+        for (wires, 0..) |wire, frame_index| {
             const original: ?task_persistence.ReadOnlyPayload = for (read_only) |value| {
                 if (value.task_id == wire.id) break value;
             } else null;
@@ -3803,7 +3803,13 @@ pub const Runtime = struct {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
                         retained += 1;
-                        try self.retainRecord(frame);
+                        if (frames.len != 0) {
+                            try self.retainRecord(frames[frame_index]);
+                        } else {
+                            const bytes = if (original) |value| value.payload else try std.json.Stringify.valueAlloc(self.allocator, wire, .{});
+                            defer if (original == null) self.allocator.free(bytes);
+                            try self.retainRecord(.{ .kind = .task, .id = wire.id, .order = wire.recent_order, .payload = bytes });
+                        }
                         continue;
                     },
                 }

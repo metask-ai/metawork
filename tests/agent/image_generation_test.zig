@@ -1431,7 +1431,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     defer std.testing.allocator.free(restored);
     try std.testing.expect(std.mem.indexOf(u8, restored, "synthetic-image-key") == null);
     try std.testing.expect(std.mem.indexOf(u8, restored, "image_execution") == null);
-    configuration.task_persistence.restored_bytes = restored;
+    typed_history.fixture_restore = restored;
     control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1, .max_runs_per_task = 4 }, configuration);
     control_live = true;
     control.setAccountProjectionCredentials(account.accessTokenProjection());
@@ -1830,7 +1830,7 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
     const saved = (try history.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "file_delivery") == null);
-    configuration.task_persistence.restored_bytes = saved;
+    typed_history.fixture_restore = saved;
     control = try image_product.control_api.Runtime.init(std.testing.allocator, std.testing.io, h.runtime, limits, configuration);
     control_live = true;
     const restored = control.task_runtime.find(task_id).?;

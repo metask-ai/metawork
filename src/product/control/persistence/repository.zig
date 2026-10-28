@@ -373,7 +373,7 @@ pub const Repository = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const loaded = try codec.loadPreserving(a, self.database, self.limits);
+        const loaded = try codec.loadPreserving(a, self.allocator, self.database, self.limits);
         const cleaned = try redact(a, loaded, credential);
         var prepared = try self.prepare(cleaned.value, cleaned.preserved, token);
         defer prepared.deinit();
