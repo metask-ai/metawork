@@ -188,13 +188,11 @@ const ReviewScenario = struct {
         var input = productControlTaskInput();
         input.approval_mode = .manual;
         self.task_id = try self.control.createTask(input);
-        // A fresh test home has no Skill directory. Ordinary text admission
-        // waits for initial discovery, but does not require a ready catalog.
-        for (0..5000) |_| {
-            self.control.syncLifecycle();
-            if (self.control.task_runtime.catalogProjection(self.task_id).?.availability != .loading) break;
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        }
+        // Task catalog readiness does not prove Workspace discovery has
+        // vacated the one-slot executor queue. Finish both setup operations
+        // before this fixture starts the Run whose approval it exercises.
+        try waitInitialTaskCatalog(&self.control, self.task_id);
+        try settleWorkspaceSkillQueries(&self.control, try self.control.taskWorkspaceId(self.task_id));
         _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, if (plan == .ui_wait) "\"currentRunPhase\":\"waiting_ui\"" else "\"inputReady\":true");
         return self;

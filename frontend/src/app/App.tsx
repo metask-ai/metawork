@@ -678,7 +678,9 @@ export default function App() {
           "[data-task-panel-tab-id]",
         ),
       ].find((candidate) => candidate.dataset.taskPanelTabId === tabId);
-      (tab ?? taskPanelToggle.current)?.focus({
+      // Closing or invalidating the tab before this frame must not move
+      // focus to an unrelated control.
+      tab?.focus({
         preventScroll: true,
       });
     });

@@ -194,7 +194,8 @@ test("Queued recovery failure preserves the blocking Task with strict conditiona
     const { blockingTaskId, ...withoutBlocker } = submission;
     snapshot.taskPage.task.inputSubmissions = [{ ...withoutBlocker, reason }];
     assert.equal(
-      decodeWorkbenchSnapshot(snapshot).taskPage.task.inputSubmissions[0].reason,
+      decodeWorkbenchSnapshot(snapshot).taskPage.task.inputSubmissions[0]
+        .reason,
       reason,
     );
     snapshot.taskPage.task.inputSubmissions[0].blockingTaskId = "7";
@@ -207,7 +208,9 @@ test("Queued recovery failure preserves the blocking Task with strict conditiona
     "07",
     "18446744073709551616",
   ]) {
-    snapshot.taskPage.task.inputSubmissions = [{ ...submission, blockingTaskId }];
+    snapshot.taskPage.task.inputSubmissions = [
+      { ...submission, blockingTaskId },
+    ];
     assert.throws(() => decodeWorkbenchSnapshot(snapshot));
   }
   for (const state of ["waiting", "cancelled", "interrupted"]) {

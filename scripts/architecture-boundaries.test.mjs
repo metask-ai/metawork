@@ -1667,7 +1667,10 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(appStores, /history_store\.Store/);
   const appHistory = read("src/app/history_store.zig");
   assert.match(appHistory, /legacy: wire\.FileStore/);
-  const businessWrites = appHistory.slice(appHistory.indexOf("    pub fn commit("), appHistory.indexOf("    pub fn credential("));
+  const businessWrites = appHistory.slice(
+    appHistory.indexOf("    pub fn commit("),
+    appHistory.indexOf("    pub fn credential("),
+  );
   assert.doesNotMatch(businessWrites, /self\.legacy\.(?:commit|recover)\(/);
   assert.doesNotMatch(appHistory, /self\.legacy\.recover\(/);
   assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
