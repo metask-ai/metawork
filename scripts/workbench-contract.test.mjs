@@ -1427,6 +1427,15 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
 
+  const blockerHistory = clone(scheduled);
+  blockerHistory.scheduledTasks[0].occurrences = JSON.parse(readFileSync(
+    new URL("../frontend/src/bridge/__fixtures__/scheduled-occurrences.fixture", import.meta.url), "utf8",
+  ));
+  assert.deepEqual(decodeWorkbenchSnapshot(blockerHistory), blockerHistory);
+  const invalidBlocker = clone(blockerHistory);
+  invalidBlocker.scheduledTasks[0].occurrences[1].reason = "capacity_reached";
+  assert.throws(() => decodeWorkbenchSnapshot(invalidBlocker), /blocker Task/);
+
   const retiredMigrationShape = clone(scheduled);
   retiredMigrationShape.scheduledTasks[0].enabled = false;
   retiredMigrationShape.scheduledTasks[0].health = "needs_attention";

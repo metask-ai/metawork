@@ -4264,11 +4264,13 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
       if (
         result === "skipped" &&
-        (taskId !== null || reason === null || taskOutcome !== null)
+        ((taskId !== null && reason !== "previous_task_running") ||
+          reason === null ||
+          taskOutcome !== null)
       )
         fail(
           occurrencePath,
-          "skipped occurrence requires only a rejection reason",
+          "skipped occurrence permits a blocker Task only for previous_task_running",
         );
       if (result === "rejected" && (reason === null || taskOutcome !== null))
         fail(

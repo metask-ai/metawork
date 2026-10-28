@@ -13005,6 +13005,38 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     try std.testing.expectEqualStrings(expected, try control.writeAggregateFixture(&storage));
 }
 
+test "Schedule blocker projection matches the shared Renderer fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const id = try control.schedule.store.create(.{
+        .title = "History",
+        .permission_profile = .approval_required,
+        .binding = .{
+            .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" },
+            .source_generation = 1,
+            .selection_revision = 1,
+            .protocol = .openai_chat_completions,
+        },
+        .input = "Inspect",
+        .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2000, .every_seconds = 3600 } },
+    }, 1000);
+    const item = control.schedule.store.find(id).?;
+    try control.schedule.store.markSubmitted(item, 2000, 2001, .timer, 3);
+    try control.schedule.store.markSkipped(item, 5600, 5601, 3);
+    try control.schedule.store.markSkipped(item, 9200, 9201, 0);
+    var storage: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try control.schedule.writeProjection(&writer, .{
+        .context = &control,
+        .write_json_fn = Runtime.writeScheduleViewJson,
+    });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const history = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.array.items[0].object.get("occurrences").?, .{});
+    defer std.testing.allocator.free(history);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.scheduled_occurrences, "\r\n"), history);
+}
+
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

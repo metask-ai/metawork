@@ -520,7 +520,11 @@ pub const Runtime = struct {
             .manual,
             tasks,
             redaction,
-        );
+        ) catch |err| {
+            if (err == error.ScheduledOccurrenceCapacity)
+                self.stopForOccurrenceCapacity(id, redaction);
+            return err;
+        };
     }
 
     pub fn onTimer(
@@ -537,7 +541,10 @@ pub const Runtime = struct {
             .timer,
             tasks,
             redaction,
-        ) catch {};
+        ) catch |err| {
+            if (err == error.ScheduledOccurrenceCapacity)
+                self.stopForOccurrenceCapacity(due.id, redaction);
+        };
         _ = self.rearmNoFail(binding, redaction);
     }
 
@@ -597,12 +604,11 @@ pub const Runtime = struct {
         planned_at: u64,
         triggered_at: u64,
         source: OccurrenceSource,
-        previous_task_active: bool,
+        blocking_task_id: u64,
         redaction: Redaction,
     ) Error!BeginOutcome {
-        const current = self.store.find(id) orelse return error.UnknownScheduledTask;
-        const previous_task_id = if (current.last_occurrence) |last| last.task_id else 0;
-        if (previous_task_id != 0 and previous_task_active) {
+        _ = self.store.find(id) orelse return error.UnknownScheduledTask;
+        if (blocking_task_id != 0) {
             if (source != .timer) return error.PreviousTaskActive;
             var skipped = try self.store.clone(self.allocator);
             var owned = true;
@@ -611,17 +617,18 @@ pub const Runtime = struct {
                 skipped.find(id).?,
                 planned_at,
                 triggered_at,
+                blocking_task_id,
             );
             try self.commitCandidate(&skipped, redaction);
             self.replace(&skipped);
             owned = false;
             _ = self.notifier.notify(.{
                 .scheduled_task_id = id,
-                .task_id = previous_task_id,
+                .task_id = blocking_task_id,
                 .title = self.store.find(id).?.title,
                 .kind = .skipped,
             });
-            return .{ .skipped = previous_task_id };
+            return .{ .skipped = blocking_task_id };
         }
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
@@ -663,9 +670,37 @@ pub const Runtime = struct {
         } };
     }
 
-    fn previousTaskId(self: *Runtime, id: u64) Error!u64 {
+    fn activeTaskId(self: *Runtime, id: u64, tasks: TaskEffects) Error!u64 {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
-        return if (item.last_occurrence) |last| last.task_id else 0;
+        var index = item.occurrence_count;
+        while (index != 0) {
+            index -= 1;
+            const occurrence = item.occurrence_history[index];
+            if (occurrence.task_id != 0 and tasks.hasActive(occurrence.task_id))
+                return occurrence.task_id;
+        }
+        return 0;
+    }
+
+    fn stopForOccurrenceCapacity(self: *Runtime, id: u64, redaction: Redaction) void {
+        self.timer.cancelCurrent();
+        var candidate = self.store.clone(self.allocator) catch {
+            self.persistence_health = .write_failed;
+            self.changed = true;
+            return;
+        };
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        candidate.markNeedsAttention(candidate.find(id) orelse return, .capacity_reached);
+        self.commitCandidate(&candidate, redaction) catch {
+            if (self.persistence_health == .ready) {
+                self.persistence_health = .write_failed;
+                self.changed = true;
+            }
+            return;
+        };
+        self.replace(&candidate);
+        owned = false;
     }
 
     fn retainExternalResult(
@@ -773,15 +808,13 @@ pub const Runtime = struct {
         tasks: TaskEffects,
         redaction: Redaction,
     ) anyerror!u64 {
-        const previous_task_id = try self.previousTaskId(id);
-        const previous_task_active = previous_task_id != 0 and
-            tasks.hasActive(previous_task_id);
+        const blocking_task_id = try self.activeTaskId(id, tasks);
         const begin = try self.beginOccurrence(
             id,
             planned_at_unix_seconds,
             triggered_at_unix_seconds,
             source,
-            previous_task_active,
+            blocking_task_id,
             redaction,
         );
         var claim = switch (begin) {
@@ -1113,17 +1146,23 @@ const TestEffects = struct {
     notifications: usize = 0,
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
+    armed_at: ?u64 = null,
 
     fn clock(context: ?*anyopaque) ?u64 {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
         return self.now;
     }
 
-    fn arm(_: ?*anyopaque, _: u64) bool {
+    fn arm(context: ?*anyopaque, at: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at = at;
         return true;
     }
 
-    fn cancel(_: ?*anyopaque) void {}
+    fn cancel(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at = null;
+    }
 
     fn commit(context: ?*anyopaque, _: []const u8) PersistenceCommit {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
@@ -1181,9 +1220,11 @@ const TestTasks = struct {
     next_task_id: u64 = 42,
     unavailable_task_id: u64 = 0,
     terminal_task_id: u64 = 0,
+    active_task_id: u64 = 0,
 
-    fn hasActive(_: *anyopaque, _: u64) bool {
-        return false;
+    fn hasActive(context: *anyopaque, id: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.active_task_id != 0 and self.active_task_id == id;
     }
 
     fn launch(context: *anyopaque, input: TaskLaunch) TaskLaunchOutcome {
@@ -1299,7 +1340,7 @@ test "occurrence claim owns launch facts across later store replacement" {
         200,
         200,
         .manual,
-        false,
+        0,
         redaction,
     )) {
         .claimed => |value| value,
@@ -1313,6 +1354,78 @@ test "occurrence claim owns launch facts across later store replacement" {
     );
     try std.testing.expectEqualStrings("first", claim.title);
     try std.testing.expectEqualStrings("launch input", claim.input);
+}
+
+test "consecutive skips retain the active Task and pending completion beyond history capacity" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("long running", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    tasks.active_task_id = 42;
+    for (1..state.max_occurrence_history * 2) |n| {
+        effects.now = 200 + @as(u64, @intCast(n)) * 60;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+        try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, redaction, tasks.effects()));
+    }
+    const item = runtime.store.find(id).?;
+    try std.testing.expectEqual(state.max_occurrence_history, item.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 42), item.last_occurrence.?.task_id);
+    try std.testing.expect(runtime.hasPendingSubmittedOccurrence(42));
+    // A previously valid empty skipped Task id must not erase the retained blocker.
+    item.occurrence_history[item.occurrence_count - 1].task_id = 0;
+    item.last_occurrence.?.task_id = 0;
+    try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, redaction, tasks.effects()));
+    tasks.active_task_id = 0;
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
+    try std.testing.expectEqual(@as(u64, 43), try runtime.runNow(id, 1, redaction, tasks.effects()));
+}
+
+test "full protected history stops without eviction or an overdue timer retry" {
+    for ([_]PersistenceCommit{ .committed, .failed, .outcome_unknown }) |result| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
+            .timer = effects.timer(),
+            .persistence = effects.persistence(),
+        });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("protected", "inspect"), testBinding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+        const item = runtime.store.find(id).?;
+        for (0..state.max_occurrence_history) |n|
+            try runtime.store.claim(item, 101 + @as(u64, @intCast(n)), 101 + @as(u64, @intCast(n)), .manual);
+        effects.commit_result = result;
+        effects.now = 200;
+        runtime.onTimer(testBinding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
+        try std.testing.expectEqual(@as(u64, 42), tasks.next_task_id);
+        const retained = runtime.store.find(id).?;
+        try std.testing.expectEqual(state.max_occurrence_history, retained.occurrence_count);
+        for (retained.occurrences()) |occurrence|
+            try std.testing.expectEqual(state.OccurrenceResult.claimed, occurrence.result);
+        switch (result) {
+            .committed => {
+                try std.testing.expectEqual(Health.needs_attention, retained.health);
+                try std.testing.expectEqual(FailureReason.capacity_reached, retained.failure_reason.?);
+            },
+            .failed => try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth()),
+            .outcome_unknown => try std.testing.expectEqual(PersistenceHealth.outcome_unknown, runtime.persistenceHealth()),
+        }
+    }
 }
 
 test "selection revision prevents default-binding ABA from launching" {

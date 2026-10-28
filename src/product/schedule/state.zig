@@ -12,6 +12,7 @@ pub const Error = std.mem.Allocator.Error || error{
     UnknownScheduledTask,
     ScheduledTaskEpochMismatch,
     ScheduledTaskNeedsAttention,
+    ScheduledOccurrenceCapacity,
     InvalidSchedule,
     InvalidScheduledTaskRestore,
     ProjectionCapacity,
@@ -481,9 +482,9 @@ pub const Store = struct {
         triggered_at_unix_seconds: u64,
         source: OccurrenceSource,
         task_id: u64,
-    ) error{InvalidSchedule}!void {
+    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
         std.debug.assert(task_id != 0);
-        self.recordOccurrence(item, .{
+        try self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
@@ -500,8 +501,8 @@ pub const Store = struct {
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
         source: OccurrenceSource,
-    ) error{InvalidSchedule}!void {
-        self.recordOccurrence(item, .{
+    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
+        try self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
@@ -607,12 +608,14 @@ pub const Store = struct {
         item: *Item,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
-    ) error{InvalidSchedule}!void {
-        self.recordOccurrence(item, .{
+        blocking_task_id: u64,
+    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
+        try self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = .timer,
             .result = .skipped,
+            .task_id = blocking_task_id,
             .reason = .previous_task_running,
         });
         try advanceAfterTimer(item, triggered_at_unix_seconds);
@@ -636,8 +639,8 @@ pub const Store = struct {
         triggered_at_unix_seconds: u64,
         source: OccurrenceSource,
         reason: FailureReason,
-    ) void {
-        self.recordOccurrence(item, .{
+    ) error{ScheduledOccurrenceCapacity}!void {
+        try self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = source,
@@ -651,12 +654,17 @@ pub const Store = struct {
         _: *Store,
         item: *Item,
         occurrence: Occurrence,
-    ) void {
+    ) error{ScheduledOccurrenceCapacity}!void {
         if (item.occurrence_count == max_occurrence_history) {
+            const evict = for (item.occurrences(), 0..) |prior, index| {
+                if (prior.result != .claimed and
+                    (prior.result != .submitted or prior.notification_sent))
+                    break index;
+            } else return error.ScheduledOccurrenceCapacity;
             std.mem.copyForwards(
                 Occurrence,
-                item.occurrence_history[0 .. max_occurrence_history - 1],
-                item.occurrence_history[1..max_occurrence_history],
+                item.occurrence_history[evict .. max_occurrence_history - 1],
+                item.occurrence_history[evict + 1 .. max_occurrence_history],
             );
             item.occurrence_count -= 1;
         }
@@ -831,7 +839,7 @@ fn validOccurrence(occurrence: Occurrence) bool {
             (occurrence.reason == null or
                 (occurrence.reason == .permission_required and
                     occurrence.task_outcome != null)),
-        .skipped => occurrence.task_id == 0 and occurrence.reason != null and
+        .skipped => (occurrence.task_id == 0 or occurrence.reason == .previous_task_running) and occurrence.reason != null and
             occurrence.task_outcome == null,
         .rejected => occurrence.reason != null and
             occurrence.task_outcome == null,

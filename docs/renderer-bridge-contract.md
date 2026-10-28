@@ -303,6 +303,8 @@ Renderer 在发送及等待 Snapshot 时锁定同 Task 的重复选择；模式�
 
 Scheduled Task create/update mutation 的模型字段精确为 `binding: { modelRef: { sourceId, modelId }, sourceGeneration, selectionRevision, protocol }`，不得携带 `expectedExecutionGeneration`。Renderer 只能从同一 snapshot 的 Models global default 与 `newTaskAdmission` active authority 构造它；source/model、source generation、selection revision、protocol 或 active authority 任一不一致时禁用保存。Host 在 mutation 和每次 occurrence 前重新做相同精确校验并当次 resolve。Host 不发布或接受缺少完整 source-qualified identity 的旧 binding，也不提供 Renderer 重绑迁移状态。occurrence `taskOutcome` 精确接受 `completed | stopped | cancelled | interrupted | failed | dependency_contract_failure | unavailable | null`；`unavailable` 表示该 occurrence 引用的真实 Task 已不再存在，不得伪装成 Task terminal cause。
 
+Scheduled Task 的 skipped occurrence 可携带 `taskId`，仅当 reason 为 `previous_task_running` 时表示阻塞它的真实 Task，不代表新建 Task；此前没有记录 blocker 的 null 值仍有效。
+
 `metawork.tasks.delete` 只接受 `{ taskId }`，仅对已归档 Task 开放。成功返回 `{ taskId, deleting: true }`，表示 Product Control 已受理唯一删除意图；它不声称 Task 已经物理删除。Task snapshot 以 `deletionStatus = idle | deleting | failed` 发布该 runtime-only 产品用例：`deleting` 时 Renderer 等待后续 snapshot 移除 Task，`failed` 时保留归档 Task 并重新开放显式删除动作。Product Control 自行收口 Attachment、等待 worker/checkpoint quiescence、提交 Task store；Renderer 不重复提交正常推进、不编排 Session teardown，也不解析 checkpoint、close failure 或 worker reference。
 
 每个 Task snapshot 必须发布 `unreadCompletionRunId: canonical decimal u64 | null`。非空时必须精确引用该 Task `runs` 中最新的 terminal Run，且其 `terminal.outcome = completed`；不存在成功完成、最新 terminal 是其他 outcome，或该 Run 已由 Product receipt 确认时必须为 null。Renderer 不从 Run 数组另建未读真源。
