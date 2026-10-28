@@ -430,13 +430,15 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 ### 4.3 `workbench-history.store`
 
-`<MetaWork data dir>/workbench/workbench-history.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
+`<MetaWork data dir>/workbench/workbench-history-v1.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
 
 Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普通工具文字、文件引用和 File Changes 不构成成果。记录归属其 Task/Run 与 Workspace，只保存非零成果身份、Workspace 相对 locator、交付时的大小和 SHA-256，不保存文件字节或组件版本。相同身份与相同内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。记录随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
 
 成果文件操作由 Product Control 按 Task/Run 与成果身份解析当前可信记录，拒绝尚未退出删除事务的 Task、失效 Workspace 以及脱敏或含已知 credential 的 locator。进入异步文件工作前须复制根路径、相对 locator、交付摘要和大小、Workspace 身份及安全代次；不得借用 Task 内部指针。该 owned 输入只是一次操作的冻结事实，不是持续授权：在 worker 返回后、发布内容或执行系统动作前，必须重新核对 Task/Run/成果、Workspace 根与代次、locator、交付内容身份和安全代次。文件读取还须独立证明实际字节；两项检查不能互相代替，也不替代 Bridge connection/window 的有效性检查。当前字节校验消费 Application 冻结的文件读取能力，使用独立、懒启动且有界的 worker，不占 File Preview lane；校验结果只包含状态，不持有文件内容。请求期限、取消与 shutdown 都须先停止执行并观测物理静止，再由主线程释放 effect 和冻结输入。定位源文件只在当前读取字节与交付大小、摘要一致、当前 Product authority 通过且 Bridge 请求仍有效之后，在主线程通过 Application 注入的窄 effect 调用 Native SDK Runtime；读取校验、显示路径或先前 ready 结果不能单独触发定位。取消、断连或安全代次变化不得在 worker 返回后补发系统动作。另存由 Application 的系统保存对话框选择目标，并返回只持有冻结源身份及所选目标的 owned effect；Product 和 Renderer 不接收该目标路径。worker 将实际读取的同一份字节校验后暂存，再等待主线程核对当前 Product authority 和 Bridge 请求；主线程的一次性发布决定是保存提交点。提交前撤销会唤醒 worker 丢弃，提交后取消须被拒绝，shutdown 等待已提交的发布完成。保存终态据实际 I/O 返回，不因之后的 Task、连接或安全代次变化虚构 cancelled；该结果不授予未来读取权限。失败保留已有目标，暂存清理失败必须单独报告。
 
 正式 SQL 不存在时，单向导入旧 canonical framed store，保留合法事实、只读 payload、无法解释的完整记录及身份高水位；不读取更早的 JSON envelope 或开发期废弃格式。导入在同目录临时库中完成，经完整 loader 校验、WAL TRUNCATE 和连接关闭后才 rename 发布。原 framed 文件保留为受管迁移材料，仅安全维护可以清洗它。正式 SQL 一旦存在就不退回旧 store。缺 canonical 但存在恢复证据不是首次启动；未知 schema 版本不得保存、quarantine 或替换正式库，即使显式恢复也必须拒绝。损坏或不可读的当前版本历史不自动覆盖，沿既有显式恢复入口保全原件和现存 DB/WAL/SHM 组件，再发布经验证的关闭候选。
+
+framed 恢复分类必须包含实际 Task 恢复约束：仅解码或局部校验通过、但完整恢复失败的 Task 继续保留原帧，不能使整批导入或随后携带保留帧的正常保存失败。同 kind、同身份的多条保留帧仍是不同 occurrence，必须保留各自 payload、顺序事实和重复次数，不能按身份覆盖或按内容去重。Automatic Workspace 的 owner 无法恢复时，其 scope 原帧一并保留；只读映射只引用已恢复的 Task，高水位不因降级而倒退。默认审批偏好的导入回退复用 Runtime 判定并反馈启动降级事实，不改变历史 Task/Run 的权限；执行资源、I/O 或提交失败仍中止导入，不发布空候选代替有效记录。当前 SQL 加载与业务候选继续严格校验，导入恢复不构成静默 SQL 修复路径。
 
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 

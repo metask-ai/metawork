@@ -321,7 +321,7 @@ pub const Repository = struct {
                 // Opaque legacy payloads can approach 16MiB. Bind them as BLOB,
                 // rather than doubling them through the bulk hex transport.
                 if (std.mem.eql(u8, table, "retained_records")) {
-                    try mutations.append(a, .{ .statement = .{ .sql = "INSERT INTO retained_records(kind,id,recent_order,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(kind,id) DO UPDATE SET recent_order=excluded.recent_order,payload=excluded.payload", .params = try cloneValues(a, row.values) } });
+                    try mutations.append(a, .{ .statement = .{ .sql = "INSERT INTO retained_records(kind,id,occurrence,recent_order,payload) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(kind,id,occurrence) DO UPDATE SET recent_order=excluded.recent_order,payload=excluded.payload", .params = try cloneValues(a, row.values) } });
                     changed += 1;
                 } else try group.append(a, row);
             }

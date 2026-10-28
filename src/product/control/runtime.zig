@@ -1498,7 +1498,7 @@ pub const Runtime = struct {
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
         errdefer product_tasks.deinitStorage();
         var task_persistence_health: TaskPersistenceHealth =
-            if (configuration.task_persistence.enabled) .ready else .unavailable;
+            if (!configuration.task_persistence.enabled) .unavailable else if (configuration.task_persistence.restore_degraded) .degraded else .ready;
         if (configuration.task_persistence.restore_failed)
             task_persistence_health = .read_failed;
         const checkpoint_store_health: checkpoint_store.Health =
@@ -8663,17 +8663,9 @@ pub const Runtime = struct {
         try self.skill.reserveWorkspaceCapacity(recovered.value.workspaces.len);
         // Defaults are a preference, not history; an unreadable value falls
         // back instead of discarding every restorable record.
-        const default_profile = task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse profile: {
-            recovered.degraded = true;
-            break :profile PermissionProfile.approval_required;
-        };
-        self.default_approval_mode = if (recovered.value.default_approval_mode) |mode|
-            task_persistence.parseEnum(ApprovalMode, mode) orelse mode: {
-                recovered.degraded = true;
-                break :mode ApprovalMode.fromFacts(default_profile, false);
-            }
-        else
-            ApprovalMode.fromFacts(default_profile, false);
+        const defaults = task_persistence.recoveredDefaults(recovered.value);
+        self.default_approval_mode = defaults.mode;
+        recovered.degraded = recovered.degraded or defaults.degraded;
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.preserved.retained) |record|
@@ -21769,6 +21761,16 @@ test "Account image token protects Custom Provider views between Runs and rotati
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
     control.syncAccountProjectionCredentialNoFail();
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+}
+
+test "history import degradation survives normalized startup metadata" {
+    var bytes: [96 * 1024]u8 = undefined;
+    var history: TestTaskPersistence = .{ .storage = &bytes };
+    var capability = history.capability(null);
+    capability.restore_degraded = true;
+    var control = try testRuntimeWith(.{ .task_persistence = capability });
+    defer control.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.degraded, control.task_persistence_health);
 }
 
 test "rejected credential-bearing history frees the encoded candidate on every attempt" {

@@ -86,6 +86,7 @@ pub const Capability = struct {
     enabled: bool = false,
     restored_bytes: ?[]const u8 = null,
     restore_failed: bool = false,
+    restore_degraded: bool = false,
     restore_incompatible: bool = false,
     // Callback-scoped acquisition/retirement notice. Concrete history storage
     // owns any bounded copy needed until sanitizing retired disk versions.
@@ -1548,6 +1549,55 @@ pub const RestoreProjection = struct {
     }
 };
 
+/// Runs the real restore checks without adopting its interrupted projection.
+/// Used by framed recovery and strict SQL validation; input facts stay intact.
+pub fn validateRestorableTask(allocator: std.mem.Allocator, value: TaskWire, limits: Limits) RestoreError!void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var restore = Restore{ .allocator = arena.allocator() };
+    _ = try restoreTask(.{
+        .context = &restore,
+        .allocator = restore.allocator,
+        .limits = limits,
+        .copy_fn = Restore.copy,
+        .alloc_fn = Restore.alloc,
+        .append_text_fn = Restore.append,
+        .free_fn = Restore.free,
+        .free_text_fn = Restore.freeText,
+        .reserve_bytes_fn = Restore.reserveBytes,
+        .release_bytes_fn = Restore.releaseBytes,
+    }, value);
+}
+
+const Restore = struct {
+    allocator: std.mem.Allocator,
+
+    fn reserveBytes(_: *anyopaque, _: usize) error{ProjectionCapacity}!void {}
+    fn releaseBytes(_: *anyopaque, _: usize) void {}
+
+    fn from(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+    fn copy(context: *anyopaque, value: []const u8, max: usize) ProjectionError![]u8 {
+        if (value.len > max) return error.ProjectionCapacity;
+        return from(context).allocator.dupe(u8, value);
+    }
+    fn alloc(context: *anyopaque, capacity: usize) ProjectionError![]u8 {
+        return from(context).allocator.alloc(u8, capacity);
+    }
+    fn append(context: *anyopaque, target: *RestoreText, suffix: []const u8, max: usize) ProjectionError!void {
+        if (target.list.items.len > max or suffix.len > max - target.list.items.len) return error.ProjectionCapacity;
+        try target.list.appendSlice(from(context).allocator, suffix);
+    }
+    fn free(context: *anyopaque, value: []u8) void {
+        from(context).allocator.free(value);
+    }
+    fn freeText(context: *anyopaque, target: *RestoreText) void {
+        target.list.deinit(from(context).allocator);
+        target.* = .{};
+    }
+};
+
 pub fn restoreTask(
     projection: RestoreProjection,
     wire: TaskWire,
@@ -2479,6 +2529,32 @@ const MetaWire = struct {
     next_task_recent_order: u64,
 };
 
+/// Preferences follow Runtime recovery policy, independently of Task facts.
+pub fn recoveredDefaults(state: StateWire) struct { mode: task_state.ApprovalMode, degraded: bool } {
+    var degraded = false;
+    const profile = parseEnum(task_state.PermissionProfile, state.default_permission_profile) orelse profile: {
+        degraded = true;
+        break :profile task_state.PermissionProfile.approval_required;
+    };
+    const mode = if (state.default_approval_mode) |value|
+        parseEnum(task_state.ApprovalMode, value) orelse mode: {
+            degraded = true;
+            break :mode task_state.ApprovalMode.fromFacts(profile, false);
+        }
+    else
+        task_state.ApprovalMode.fromFacts(profile, false);
+    return .{ .mode = mode, .degraded = degraded };
+}
+
+/// Only import normalizes retired metadata; ordinary SQL candidates stay strict.
+pub fn normalizeRecoveredDefaults(state: *StateWire) bool {
+    const defaults = recoveredDefaults(state.*);
+    state.default_permission_profile = @tagName(defaults.mode.profile());
+    if (state.default_approval_mode != null or defaults.degraded)
+        state.default_approval_mode = @tagName(defaults.mode);
+    return defaults.degraded;
+}
+
 test "approval mode metadata only accepts JSON strings" {
     for ([_][]const u8{ "0", "\"0\"", "[97,117,116,111,95,114,101,118,105,101,119]" }) |invalid| {
         const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"default_permission_profile\":\"approval_required\",\"default_approval_mode\":{s},\"next_workspace_id\":1,\"next_workspace_recent_order\":1,\"next_task_id\":1,\"next_task_recent_order\":1}}", .{invalid});
@@ -2623,6 +2699,21 @@ pub const testing = if (builtin.is_test) struct {
         .{ "run_tools", "state", task_state.ToolState },
         .{ "run_file_changes", "kind", task_state.FileChangeKind },
         .{ "run_file_changes", "status", task_state.FileChangeStatus },
+    };
+    pub const json_enums = .{
+        .{ "compact_phase", task_state.CompactPhase },
+        .{ "compact_cause", task_state.CompactCause },
+        .{ "additional_state", task_state.AdditionalInputState },
+        .{ "attachment_kind", task_state.AttachmentKind },
+        .{ "attachment_format", task_state.AttachmentFormat },
+        .{ "locator_kind", task_state.FileReferenceLocatorKind },
+        .{ "ui_kind", task_state.UiRecordKind },
+        .{ "ui_state", task_state.UiRecordState },
+        .{ "submission_state", @FieldType(task_state.InputSubmission, "state") },
+        .{ "permission_decision", agent.PermissionDecision },
+        .{ "permission_source", agent.PermissionDecisionSource },
+        .{ "permission_callback", agent.PermissionCallbackOutcome },
+        .{ "permission_namespace", agent.PermissionToolNamespace },
     };
 
     pub fn setConfirmationSyncFailure(store: *FileStore, failed: bool) void {
@@ -2780,7 +2871,8 @@ pub fn decodeRecovering(
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = true },
-                ) catch {
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     degraded = true;
                     offset = payload_end;
                     continue;
@@ -2813,7 +2905,8 @@ pub fn decodeRecovering(
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = false },
-                ) catch {
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     degraded = true;
                     try retained_values.append(arena_allocator, frame);
                     offset = payload_end;
@@ -2837,14 +2930,16 @@ pub fn decodeRecovering(
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = false },
-                ) catch lenient: {
+                ) catch |err| lenient: {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     read_only = true;
                     break :lenient std.json.parseFromSliceLeaky(
                         TaskWire,
                         arena_allocator,
                         payload,
                         .{ .ignore_unknown_fields = true },
-                    ) catch {
+                    ) catch |lenient_err| {
+                        if (lenient_err == error.OutOfMemory) return error.OutOfMemory;
                         degraded = true;
                         try retained_values.append(arena_allocator, frame);
                         offset = payload_end;
@@ -2882,7 +2977,8 @@ pub fn decodeRecovering(
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = false },
-                ) catch {
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     dropped_failures += 1;
                     degraded = true;
                     offset = payload_end;
@@ -2932,13 +3028,27 @@ pub fn decodeRecovering(
     }
     var task_len: usize = 0;
     for (task_storage, task_frame_storage, task_read_only_storage) |task, frame, read_only| {
-        if (task_len >= limits.max_tasks or
-            std.meta.isError(validateRecoveredTask(task, limits, workspace_storage[0..workspace_len], task_storage[0..task_len])))
-        {
+        if (task_len >= limits.max_tasks) {
             degraded = true;
             try retained_values.append(arena_allocator, frame);
             continue;
         }
+        validateRecoveredTask(task, limits, workspace_storage[0..workspace_len], task_storage[0..task_len]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                degraded = true;
+                try retained_values.append(arena_allocator, frame);
+                continue;
+            },
+        };
+        validateRestorableTask(arena_allocator, task, limits) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                degraded = true;
+                try retained_values.append(arena_allocator, frame);
+                continue;
+            },
+        };
         task_storage[task_len] = task;
         task_frame_storage[task_len] = frame;
         task_read_only_storage[task_len] = read_only;

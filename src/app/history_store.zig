@@ -5,8 +5,9 @@ const builtin = @import("builtin");
 const storage = @import("storage");
 const product = @import("metawork_product_control");
 const wire = @import("metawork_product_task").history;
-pub const file_name = "workbench-history.sqlite";
-const import_name = ".workbench-history.import.sqlite";
+pub const file_name = "workbench-history-v1.sqlite";
+const import_name = ".workbench-history-v1.import.sqlite";
+const recovery_prefix = ".workbench-history-v1.recovery.";
 const Credential = struct {
     bytes: [4096]u8 = @splat(0),
     length: usize = 0,
@@ -41,6 +42,7 @@ pub const Store = struct {
     security_epoch: u64 = 1,
     requires_reopen: bool = false,
     legacy_import_failed: bool = false,
+    import_degraded: bool = false,
     recovery_fault: enum { none, after_close, after_quarantine } = .none,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, directory: []const u8) !Store {
@@ -95,6 +97,7 @@ pub const Store = struct {
     pub fn loadAlloc(self: *Store, allocator: std.mem.Allocator) !?[]u8 {
         self.restore_failed = true;
         self.legacy_import_failed = false;
+        self.import_degraded = false;
         errdefer self.restore_failed = true;
         if (!try self.exists(file_name)) {
             if (try self.hasSqlRecoveryEvidence()) return error.RecoveryPending;
@@ -109,6 +112,8 @@ pub const Store = struct {
                     return err;
                 };
                 defer recovered.deinit();
+                const defaults_degraded = wire.normalizeRecoveredDefaults(&recovered.value);
+                self.import_degraded = recovered.degraded or defaults_degraded;
                 try self.publish(recovered.value, recovered.preserved, false, digestBytes(bytes));
             } else {
                 try self.publish(.{ .next_workspace_id = 1, .next_workspace_recent_order = 1, .next_task_id = 1, .next_task_recent_order = 1, .workspaces = &.{}, .tasks = &.{} }, .{}, false, digestBytes("empty history"));
@@ -152,9 +157,9 @@ pub const Store = struct {
         defer directory.close(self.io);
         var iterator = directory.iterate();
         while (try iterator.next(self.io)) |entry| {
-            if (!std.mem.startsWith(u8, entry.name, ".workbench-history.recovery.")) continue;
-            if (std.mem.endsWith(u8, entry.name, ".tmp") or std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite.bak") or
-                std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite-wal.bak") or std.mem.endsWith(u8, entry.name, ".workbench-history.sqlite-shm.bak") or
+            if (!std.mem.startsWith(u8, entry.name, recovery_prefix)) continue;
+            if (std.mem.endsWith(u8, entry.name, ".tmp") or std.mem.endsWith(u8, entry.name, "." ++ file_name ++ ".bak") or
+                std.mem.endsWith(u8, entry.name, "." ++ file_name ++ "-wal.bak") or std.mem.endsWith(u8, entry.name, "." ++ file_name ++ "-shm.bak") or
                 std.mem.endsWith(u8, entry.name, ".workbench-history.store.bak")) return true;
         }
         return false;
@@ -169,7 +174,7 @@ pub const Store = struct {
         var nonce: [8]u8 = undefined;
         try std.Io.randomSecure(self.io, &nonce);
         const stage_name = if (recovering)
-            try std.fmt.allocPrint(self.allocator, ".workbench-history.recovery.{s}.tmp", .{std.fmt.bytesToHex(nonce, .lower)})
+            try std.fmt.allocPrint(self.allocator, recovery_prefix ++ "{s}.tmp", .{std.fmt.bytesToHex(nonce, .lower)})
         else
             import_name;
         defer if (recovering) self.allocator.free(stage_name);
@@ -206,7 +211,7 @@ pub const Store = struct {
             // recovery evidence, never interpreted as an empty first launch.
             for ([_][]const u8{ file_name, file_name ++ "-wal", file_name ++ "-shm", wire.file_name }) |name| {
                 if (std.mem.eql(u8, name, wire.file_name) and !retire_legacy) continue;
-                const quarantine = try std.fmt.allocPrint(self.allocator, ".workbench-history.recovery.{s}.{s}.bak", .{ hex, name });
+                const quarantine = try std.fmt.allocPrint(self.allocator, recovery_prefix ++ "{s}.{s}.bak", .{ hex, name });
                 defer self.allocator.free(quarantine);
                 self.legacy.dir.rename(name, self.legacy.dir, quarantine, self.io) catch |err| switch (err) {
                     error.FileNotFound => {},
@@ -491,6 +496,182 @@ test "SQLite history Application roundtrip and legacy import" {
     }
 }
 
+test "SQLite history imports restore-only failures as exact retained scopes and keeps saving" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |readonly| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var state = try testHistory(aa, 2, 1, "original facts");
+        var automatic = state.workspaces[0];
+        automatic.id = 2;
+        automatic.kind = "automatic";
+        automatic.visible = false;
+        automatic.recent_order = 0;
+        automatic.canonical_root = if (builtin.os.tag == .windows) "C:/automatic" else "/automatic";
+        state.workspaces = try aa.dupe(wire.WorkspaceWire, &.{ state.workspaces[0], automatic });
+        state.next_workspace_id = 3;
+        const bad = &state.tasks[1];
+        bad.workspace_id = 2;
+        bad.workspace_root = automatic.canonical_root;
+        bad.checkpoint_anchor = "available";
+        bad.checkpoint = .{
+            .blob = .{ .generation = 1, .byte_size = 1, .digest = "00" ** 32 },
+            .session = .{ .logical_session_id = "original-session", .last_run_id = 1, .last_compact_id = 0, .model = "model" },
+            .anchor = .{ .terminal = .{ .kind = "run", .id = 999 }, .binding_epoch = 1 },
+        };
+        const limits = product.persistenceLimits(.{}, 16);
+        const duplicate_bad = wire.RetainedRecord{ .kind = .task, .id = bad.id, .order = bad.recent_order, .payload = try std.json.Stringify.valueAlloc(aa, bad.*, .{}) };
+        const plain = try wire.encodeAlloc(aa, state, .{ .retained = &.{duplicate_bad} }, limits);
+        const source = if (readonly) try wire.testing.addTaskField(try aa.alloc(u8, plain.len + 256), plain, "\"future_field\":true") else plain;
+        var original = try wire.decodeRecovering(aa, source, limits);
+        defer original.deinit();
+        try std.testing.expectEqual(@as(usize, 1), original.value.tasks.len);
+        try std.testing.expectEqual(@as(usize, 3), original.preserved.retained.len);
+        {
+            var store = try Store.init(std.testing.io, a, directory);
+            defer store.deinit();
+            try store.legacy.commit(source);
+            if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+            try std.testing.expect(store.import_degraded);
+            const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+            try std.testing.expectEqual(@as(usize, 1), loaded.value.tasks.len);
+            try std.testing.expectEqual(@as(usize, 1), loaded.value.workspaces.len);
+            try std.testing.expectEqual(@as(u64, 3), loaded.value.next_task_id);
+            try std.testing.expectEqual(@as(u64, 3), loaded.value.next_workspace_id);
+            try std.testing.expectEqual(@as(usize, @intFromBool(readonly)), loaded.preserved.read_only_tasks.len);
+            for (original.preserved.retained) |expected| {
+                var found = false;
+                for (loaded.preserved.retained) |actual| if (expected.id == actual.id and expected.kind == actual.kind) {
+                    try std.testing.expectEqualSlices(u8, expected.payload, actual.payload);
+                    found = true;
+                };
+                try std.testing.expect(found);
+            }
+            var next = loaded.value;
+            next.default_approval_mode = "manual";
+            const candidate = try wire.encodeAlloc(aa, next, loaded.preserved, store.limits);
+            try std.testing.expectEqual(wire.Commit.committed, store.commit(candidate, true));
+            const legacy = (try store.legacy.loadAlloc(a)).?;
+            defer a.free(legacy);
+            try std.testing.expectEqualSlices(u8, source, legacy);
+        }
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+        try std.testing.expectEqual(@as(usize, 3), loaded.preserved.retained.len);
+        try std.testing.expectEqualStrings("manual", loaded.value.default_approval_mode.?);
+        for (original.preserved.retained) |expected| {
+            for (loaded.preserved.retained) |actual| if (expected.id == actual.id and expected.kind == actual.kind) {
+                try std.testing.expectEqualSlices(u8, expected.payload, actual.payload);
+            };
+        }
+    }
+}
+
+test "SQLite history preference recovery matches Runtime without changing Task permissions" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "approval_required", @as(?[]const u8, "unknown"), "manual", true },
+        .{ "unknown", @as(?[]const u8, null), "manual", true },
+        .{ "full_access", @as(?[]const u8, "auto_review"), "auto_review", false },
+        .{ "full_access", @as(?[]const u8, null), "full_access", false },
+        .{ "unknown", @as(?[]const u8, "full_access"), "full_access", true },
+    };
+    inline for (cases) |case| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var state = try testHistory(aa, 1, 1, "permission provenance");
+        state.default_permission_profile = case[0];
+        state.default_approval_mode = case[1];
+        const source = try wire.testing.encodeUnchecked(try aa.alloc(u8, 64 * 1024), state);
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        try store.legacy.commit(source);
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        try std.testing.expectEqual(case[3], store.import_degraded);
+        const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+        try std.testing.expectEqualStrings(case[2], @tagName(wire.recoveredDefaults(loaded.value).mode));
+        try std.testing.expectEqualStrings("approval_required", loaded.value.tasks[0].permission_profile);
+        try std.testing.expectEqualStrings("approval_required", loaded.value.tasks[0].runs[0].permission_profile);
+    }
+}
+
+test "SQLite history unpublished filename cut ignores development database and its recovery namespace" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const state = try testHistory(aa, 1, 1, "published framed source");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const source = try wire.encodeAlloc(aa, state, .{}, store.limits);
+    try store.legacy.commit(source);
+    const old_files = [_][]const u8{ "workbench-history.sqlite", "workbench-history.sqlite-wal", "workbench-history.sqlite-shm", ".workbench-history.import.sqlite", ".workbench-history.recovery.development.tmp", ".workbench-history.recovery.development.workbench-history.sqlite.bak" };
+    for (old_files) |name| try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "unpublished development bytes" });
+    if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+    const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+    try std.testing.expectEqualStrings("published framed source", loaded.value.tasks[0].runs[0].assistant);
+    for (old_files) |name| {
+        const bytes = try store.legacy.dir.readFileAlloc(std.testing.io, name, a, .limited(1024));
+        defer a.free(bytes);
+        try std.testing.expectEqualStrings("unpublished development bytes", bytes);
+    }
+}
+
+test "SQLite history failed reopen and explicit publication both allow a new Task without renumbering" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |recovering| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        var state = try testHistory(aa, 2, 1, "original");
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        state.tasks[0].title = "pending change";
+        const before = try wire.encodeAlloc(aa, state, .{}, store.limits);
+        if (recovering) {
+            try std.testing.expectEqual(wire.Commit.committed, store.recover(before));
+        } else {
+            store.database.?.test_hooks.fail_before_commit = true;
+            try std.testing.expectEqual(wire.Commit.failed, store.commit(before, false));
+            try std.testing.expect(store.requires_reopen);
+        }
+        var added = state.tasks[0];
+        added.id = 3;
+        added.recent_order = 3;
+        added.title = "new Task";
+        state.tasks = try aa.dupe(wire.TaskWire, &.{ added, state.tasks[1], state.tasks[0] });
+        state.next_task_id = 4;
+        state.next_task_recent_order = 4;
+        try std.testing.expectEqual(wire.Commit.committed, store.commit(try wire.encodeAlloc(aa, state, .{}, store.limits), true));
+        const loaded = try product.loadHistory(aa, store.database.?.capability(), store.limits);
+        try std.testing.expectEqual(@as(usize, 3), loaded.value.tasks.len);
+        try std.testing.expectEqualStrings("pending change", loaded.value.tasks[0].title);
+        try std.testing.expectEqualStrings("new Task", loaded.value.tasks[2].title);
+    }
+}
+
 fn testHistory(a: std.mem.Allocator, task_count: usize, run_count: usize, body: []const u8) !wire.StateWire {
     const workspaces = try a.alloc(wire.WorkspaceWire, 1);
     workspaces[0] = .{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = if (builtin.os.tag == .windows) "C:/history" else "/history", .display_name = "history", .visible = true, .recent_order = 1 };
@@ -710,28 +891,31 @@ test "SQLite history 100 Tasks and 256 Runs exceed old store size and survive re
 }
 
 test "SQLite history newer schema cannot be replaced through recovery" {
-    const a = std.testing.allocator;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
-    defer a.free(directory);
-    const path = try std.fs.path.join(a, &.{ directory, file_name });
-    defer a.free(path);
-    {
+    for ([_]bool{ false, true }) |json_marker| {
+        const a = std.testing.allocator;
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(directory);
+        const path = try std.fs.path.join(a, &.{ directory, file_name });
+        defer a.free(path);
+        {
+            var store = try Store.init(std.testing.io, a, directory);
+            defer store.deinit();
+            if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        }
+        const newer = product.history_migrations[0..1].* ++ [_]storage.sql.Migration{.{ .version = 2, .name = "future_history", .sql = if (json_marker) "-- Typed JSON acceptance changed, no DDL required.\nSELECT 1;" else "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
+        const database = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
+        try database.destroy();
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
-        if (try store.loadAlloc(a)) |bytes| a.free(bytes);
+        try std.testing.expectError(error.VersionUnknown, store.loadAlloc(a));
+        try std.testing.expect(store.incompatible);
+        try std.testing.expectEqual(wire.Commit.failed, store.commit("not a candidate", false));
+        try std.testing.expectEqual(wire.Commit.failed, store.recover("not a candidate"));
+        const reopened = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
+        try reopened.destroy();
     }
-    const newer = product.history_migrations[0..1].* ++ [_]storage.sql.Migration{.{ .version = 2, .name = "future_history", .sql = "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
-    const database = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
-    try database.destroy();
-    var store = try Store.init(std.testing.io, a, directory);
-    defer store.deinit();
-    try std.testing.expectError(error.VersionUnknown, store.loadAlloc(a));
-    try std.testing.expect(store.incompatible);
-    try std.testing.expectEqual(wire.Commit.failed, store.recover("not a candidate"));
-    const reopened = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
-    try reopened.destroy();
 }
 
 test "SQLite history recovery publication unknown is confirmed before a newer candidate" {
@@ -820,7 +1004,7 @@ test "SQLite history partial quarantine prevents reimport and preserves the old 
     defer store.deinit();
     const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
     try store.legacy.commit(bytes);
-    const evidence = ".workbench-history.recovery.interrupted.workbench-history.sqlite.bak";
+    const evidence = recovery_prefix ++ "interrupted." ++ file_name ++ ".bak";
     try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = evidence, .data = "old database evidence" });
     try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = file_name ++ "-wal", .data = "old WAL evidence" });
     try std.testing.expectError(error.RecoveryPending, store.loadAlloc(a));

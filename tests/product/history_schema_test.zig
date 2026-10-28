@@ -321,6 +321,25 @@ test "history loader refuses invalid domain data instead of silently producing e
     }
 }
 
+fn recoveringAllocationCase(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var recovered = try history.wire.decodeRecovering(allocator, bytes, history.limits);
+    defer recovered.deinit();
+    // Resource failure is an error, never a successful partial import.
+    try std.testing.expect(!recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(usize, 0), recovered.preserved.retained.len);
+}
+
+test "framed recovery never converts allocation failure into successful data loss" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try history.fixture(a);
+    state.failures = &.{};
+    const bytes = try history.wire.encodeAlloc(a, state, .{}, history.limits);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, recoveringAllocationCase, .{bytes});
+}
+
 test "merged history payloads retain Product validation after removing child constraints" {
     const Case = enum {
         compact_run,
@@ -1014,6 +1033,106 @@ test "history schema accepts every owner relational enum in a valid Product aggr
     }
 }
 
+test "history typed JSON accepts owner enums without losing their Product semantics" {
+    inline for (history.wire.testing.json_enums) |binding| {
+        for (std.meta.tags(binding[1])) |tag| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const state = try history.fixture(a);
+            const task = &state.tasks[0];
+            const run = &task.runs[0];
+            task.archived = false;
+            task.completion_seen_run_id = 0;
+            task.checkpoint = null;
+            task.checkpoint_anchor = "none";
+            const value = @tagName(tag);
+            if (comptime std.mem.eql(u8, binding[0], "compact_phase")) {
+                task.compacts[0].phase = value;
+                task.compacts[0].cause = null;
+                if (tag == .queued or tag == .compacting or tag == .stopping) {
+                    task.compacts[0].coverage = "pending";
+                    task.active_operation = .{ .kind = "compact", .id = task.compacts[0].id };
+                } else if (tag == .aborted or tag == .failed) task.compacts[0].cause = "agent_failure";
+            } else if (comptime std.mem.eql(u8, binding[0], "compact_cause")) {
+                task.compacts[0].phase = "failed";
+                task.compacts[0].cause = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "additional_state")) {
+                const input = &run.additional_inputs[0];
+                input.state = value;
+                if (tag == .transferred) {
+                    var target = run.*;
+                    target.id = 14;
+                    target.generation = 14;
+                    target.additional_inputs = &.{};
+                    target.tools = &.{};
+                    target.file_change_observation = null;
+                    target.file_changes = null;
+                    target.outputs = &.{};
+                    target.submission = null;
+                    input.transferred_to_run_id = 14;
+                    task.runs = try a.dupe(history.wire.RunWire, &.{ run.*, target });
+                    task.next_run_generation = 14;
+                }
+            } else if (comptime std.mem.eql(u8, binding[0], "attachment_kind") or std.mem.eql(u8, binding[0], "attachment_format")) {
+                const image = if (comptime std.mem.eql(u8, binding[0], "attachment_format")) true else tag == .image;
+                const format = if (comptime std.mem.eql(u8, binding[0], "attachment_format")) value else "png";
+                run.input = .{ .kind = "multimodal", .text = null, .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .redacted = false, .attachments = try a.dupe(history.wire.AttachmentWire, &.{.{ .kind = if (image) "image" else "file", .format = if (image) format else null, .display_name = "attachment", .size_bytes = 1, .redacted = false }}) };
+            } else if (comptime std.mem.eql(u8, binding[0], "locator_kind")) {
+                run.tools[0].file_refs.?[0].locator_kind = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "ui_kind")) {
+                task.ui_history[0].kind = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "ui_state")) {
+                task.ui_history[0].state = value;
+                task.ui_history[0].answered_by = null;
+                task.ui_history[0].review_reason = null;
+            } else if (comptime std.mem.eql(u8, binding[0], "submission_state")) {
+                task.input_submissions[0].state = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "permission_decision")) {
+                task.ui_history[0].permission.?.decision = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "permission_source")) {
+                task.ui_history[0].permission.?.source = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "permission_callback")) {
+                task.ui_history[0].permission.?.callback_outcome = value;
+            } else if (comptime std.mem.eql(u8, binding[0], "permission_namespace")) {
+                task.ui_history[0].permission.?.tool_namespace = value;
+            } else @compileError("New JSON enum requires a valid fixture");
+            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+            defer database.destroy() catch unreachable;
+            _ = try save(a, database.capability(), state);
+            try expectSame(a, database.capability(), state);
+            const statement, const payload = if (comptime std.mem.eql(u8, binding[0], "compact_phase") or std.mem.eql(u8, binding[0], "compact_cause")) blk: {
+                if (comptime std.mem.eql(u8, binding[0], "compact_phase")) task.compacts[0].phase = "unknown" else task.compacts[0].cause = "unknown";
+                break :blk .{ "UPDATE task_compacts SET payload=?1", try std.json.Stringify.valueAlloc(a, task.compacts[0], .{}) };
+            } else if (comptime std.mem.eql(u8, binding[0], "additional_state")) blk: {
+                task.runs[0].additional_inputs[0].state = "future";
+                break :blk .{ "UPDATE run_additional_inputs SET payload=?1", try std.json.Stringify.valueAlloc(a, task.runs[0].additional_inputs[0], .{}) };
+            } else if (comptime std.mem.eql(u8, binding[0], "attachment_kind") or std.mem.eql(u8, binding[0], "attachment_format")) blk: {
+                if (comptime std.mem.eql(u8, binding[0], "attachment_kind")) run.input.attachments.?[0].kind = "unknown" else run.input.attachments.?[0].format = "unknown";
+                break :blk .{ "UPDATE runs SET input_json=?1", try std.json.Stringify.valueAlloc(a, run.input, .{}) };
+            } else if (comptime std.mem.eql(u8, binding[0], "locator_kind")) blk: {
+                run.tools[0].file_refs.?[0].locator_kind = "unknown";
+                break :blk .{ "UPDATE run_tools SET file_refs_json=?1", try std.json.Stringify.valueAlloc(a, run.tools[0].file_refs, .{}) };
+            } else if (comptime std.mem.eql(u8, binding[0], "submission_state")) blk: {
+                task.input_submissions[0].state = "unknown";
+                break :blk .{ "UPDATE task_input_submissions SET payload=?1", try std.json.Stringify.valueAlloc(a, task.input_submissions[0], .{}) };
+            } else blk: {
+                if (comptime std.mem.eql(u8, binding[0], "ui_kind")) task.ui_history[0].kind = "unknown";
+                if (comptime std.mem.eql(u8, binding[0], "ui_state")) task.ui_history[0].state = "unknown";
+                if (comptime std.mem.eql(u8, binding[0], "permission_decision")) task.ui_history[0].permission.?.decision = "unknown";
+                if (comptime std.mem.eql(u8, binding[0], "permission_source")) task.ui_history[0].permission.?.source = "unknown";
+                if (comptime std.mem.eql(u8, binding[0], "permission_callback")) task.ui_history[0].permission.?.callback_outcome = "unknown";
+                if (comptime std.mem.eql(u8, binding[0], "permission_namespace")) task.ui_history[0].permission.?.tool_namespace = "unknown";
+                break :blk .{ "UPDATE task_ui_history SET payload=?1", try std.json.Stringify.valueAlloc(a, task.ui_history[0], .{}) };
+            };
+            try std.testing.expect(history.wire.validateCandidate(&state, history.limits) != null);
+            // JSON syntax remains valid; nested domain meaning belongs to Product.
+            try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = statement, .params = &.{.{ .text = payload }} }, .expected_changes = .{ .exactly = 1 } }}));
+            if (history.load(a, database.capability())) |_| return error.UnknownJsonEnumAccepted else |_| {}
+        }
+    }
+}
+
 test "history file reference JSON preserves Host image provenance and defaults old records to false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1097,7 +1216,7 @@ test "retained rows without a root are untrusted rather than empty history" {
     defer arena.deinit();
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO retained_records VALUES('task',X'0000000000000001',X'0000000000000001',X'ff')" } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO retained_records(kind,id,occurrence,recent_order,payload) VALUES('task',X'0000000000000001',0,X'0000000000000001',X'ff')" } }}));
     try std.testing.expectError(error.MissingState, history.load(arena.allocator(), database.capability()));
 }
 
@@ -1282,6 +1401,42 @@ test "history loader rejects committed temporary positions and gaps" {
     }
 }
 
+test "history first keyset page rejects invalid keys instead of hiding them behind a sentinel" {
+    for ([_]bool{ false, true }) |identity| {
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const path = try temporaryPath(a, temporary.dir);
+        const state = try history.fixture(a);
+        if (identity) {
+            const task = &state.tasks[0];
+            task.runs = &.{};
+            task.compacts = &.{};
+            task.ui_history = &.{};
+            task.input_submissions = &.{};
+            task.checkpoint = null;
+            task.checkpoint_anchor = "none";
+            task.completion_seen_run_id = 0;
+        }
+        {
+            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+            defer database.destroy() catch unreachable;
+            _ = try save(a, database.capability(), state);
+        }
+        // Isolated migration injects a broken row; production DDL is unchanged.
+        const corrupt = if (identity)
+            "ALTER TABLE tasks DROP CONSTRAINT tasks_id_domain;UPDATE tasks SET id=X'0000000000000000';"
+        else
+            "ALTER TABLE runs DROP CONSTRAINT runs_ordinal_domain;UPDATE runs SET ordinal=-1;";
+        const migrations = [_]sql.Migration{ schema.migrations[0], .{ .version = 2, .name = "broken_first_key", .sql = corrupt } };
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+        defer database.destroy() catch unreachable;
+        if (history.load(a, database.capability())) |_| return error.InvalidFirstKeyHidden else |_| {}
+    }
+}
+
 const IndexedPlan = struct {
     searches: usize = 0,
     correlated: bool = false,
@@ -1416,4 +1571,39 @@ test "repository preserves witness atomicity beyond 128 retained-record statemen
     defer deletion.deinit();
     try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&deletion));
     try expectSame(a, database.capability(), state);
+}
+
+test "repository preserves multiple opaque frame occurrences with the same identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state = try history.fixture(a);
+    state.next_task_id = 101;
+    state.next_task_recent_order = 103;
+    const records = [_]history.wire.RetainedRecord{
+        .{ .kind = .task, .id = 100, .order = 100, .payload = "{\"future\":1}" },
+        .{ .kind = .task, .id = 100, .order = 101, .payload = "{\"future\":2}" },
+        .{ .kind = .task, .id = 100, .order = 101, .payload = "{\"future\":2}" },
+    };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    var prepared = try repository.prepare(state, .{ .retained = &records }, @splat(1));
+    defer prepared.deinit();
+    try std.testing.expectEqual(sql.MutationOutcome.committed, repository.commit(&prepared));
+    const loaded = try schema.codec.loadPreserving(a, database.capability(), history.limits);
+    try std.testing.expectEqual(@as(usize, records.len), loaded.preserved.retained.len);
+    for (records, loaded.preserved.retained) |expected, actual| {
+        try std.testing.expectEqual(expected.order, actual.order);
+        try std.testing.expectEqualSlices(u8, expected.payload, actual.payload);
+    }
+    const bytes = try history.wire.encodeAlloc(a, loaded.value, loaded.preserved, history.limits);
+    var recovered = try history.wire.decodeRecovering(a, bytes, history.limits);
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, records.len), recovered.preserved.retained.len);
+    try repository.seed(loaded.value, loaded.preserved);
+    var same = try repository.prepare(loaded.value, loaded.preserved, @splat(2));
+    defer same.deinit();
+    try std.testing.expectEqual(@as(usize, 0), same.changed_rows);
 }
