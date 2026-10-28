@@ -4618,6 +4618,15 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     try std.testing.expectEqual(@as(u64, 2), continuation_id);
     try waitSetTaskArchived(&workbench, task_id);
     try workbench.setTaskArchived(task_id, false);
+    // Archiving the terminal Run is allowed before its checkpoint worker
+    // returns the final lease; compact requires that worker to be quiescent.
+    const task = workbench.task_runtime.find(task_id).?;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
     const compact_id = try workbench.compactTaskAtBinding(task_id, 1);
     try std.testing.expectEqual(@as(u64, 1), compact_id);
     try waitTaskSnapshot(
