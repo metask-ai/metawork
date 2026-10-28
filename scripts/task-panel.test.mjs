@@ -6355,15 +6355,52 @@ test("conversation file links preview directly without expanding tools and retur
   await act(async () => previews[0].resolve(ready("stale A")));
   assert.ok(screen.getByText("B content"));
   assert.equal(screen.queryByText("stale A"), null);
-  fireEvent.keyDown(screen.getByRole("heading", { name: "b.txt" }), {
+  const tab = screen.getByRole("tab", { name: "b.txt" });
+  await waitFor(() => assert.ok(document.activeElement === tab));
+  fireEvent.keyDown(tab, {
     key: "Escape",
   });
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  assert.equal(document.activeElement, second);
+  assert.ok(
+    document.activeElement === second,
+    `Expected the preview opener to regain focus; received ${document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName}`,
+  );
   assertTaskPanelShellHidden();
   assert.equal(document.querySelector(".run-process-files"), null);
+});
+
+test("Escape before deferred tab focus preserves the preview opener", async (ctx) => {
+  const { previews } = await renderAppFixture(ctx);
+  await selectRecentTask(/First task/);
+  const frames = [];
+  ctx.mock.method(window, "requestAnimationFrame", (callback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  const opener = filePreviewOpener("a.txt");
+  // fireEvent.click does not perform the browser's pointer focus step.
+  opener.focus();
+  fireEvent.click(opener);
+  assert.ok(frames.length > 0);
+  fireEvent.keyDown(opener, { key: "Escape" });
+  assertTaskPanelShellHidden();
+  await act(async () => {
+    for (const callback of frames.splice(0)) callback(0);
+  });
+  assert.ok(
+    document.activeElement === opener,
+    "A deferred tab focus must not move focus after the panel closes",
+  );
+  await act(async () =>
+    previews[0].resolve({
+      state: "missing",
+      content: "",
+      truncated: false,
+      redacted: false,
+    }),
+  );
 });
 
 test("Markdown preview mode is isolated per tab and inactive content is unmounted", async (ctx) => {
