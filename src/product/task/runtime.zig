@@ -1931,6 +1931,12 @@ pub const Runtime = struct {
             deinitRunInput(self, effects.release, &previous.input);
             effects.release.releaseProjectionBytes(task_state.additional_input_projection_bytes);
         }
+        // A newly accepted message owns a new preparation boundary. A direct
+        // tasks.run caller may have abandoned a catalog_loading retry, leaving
+        // a completed ticket behind. Keep tickets owned by existing queued or
+        // continuation work so additional messages cannot restart its query.
+        if (!hasWaitingInputs(task) and self.inputContinuation(task_id) == null)
+            task.skill_preparation = null;
         task.input_submissions.appendAssumeCapacity(.{ .submission = submission, .input = safe, .payload = payload });
         self.pending_input_bytes += payload.bytes.len;
         if (task.deletion == .failed) task.deletion = .idle;
@@ -9660,8 +9666,10 @@ test "Task receives ordered owned messages during maintenance and stop only canc
     var first = "message A".*;
     _ = try runtime.receiveInput(1, "A", .{ .text = &first }, effects);
     @memset(&first, 'x');
+    task.skill_preparation = .{ .generation = 7, .binding_epoch = 1 };
     task.runtime.active_operation = .{ .restore = .{ .id = 8 } };
     _ = try runtime.receiveInput(1, "B", .{ .text = "message B" }, effects);
+    try std.testing.expectEqual(@as(u64, 7), task.skill_preparation.?.generation);
     try std.testing.expectEqual(@as(?u64, 1), task.input_submissions.items[0].submission.presentation_order);
     try std.testing.expectEqual(@as(?u64, 2), task.input_submissions.items[1].submission.presentation_order);
     try std.testing.expectEqual(@as(?u64, 1), task.input_submissions.items[0].submission.presentation_order);

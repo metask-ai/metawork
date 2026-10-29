@@ -5962,6 +5962,59 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try closeSession(rejected, .session_close);
 }
 
+test "new accepted input does not inherit an abandoned direct Run preparation" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement_store.deinit();
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.skill_enablement = .{ .file_store = &enablement_store };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+    }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    _ = try waitCatalogReady(&workbench, workspace_id);
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+    var probe: WorkspaceSkillQueryProbe = .{};
+    probe.attach(&workbench);
+    defer probe.hold_queries.store(false, .release);
+
+    // A synchronous caller can leave after catalog_loading without retrying.
+    try std.testing.expectError(error.CatalogLoading, workbench.runTask(task_id, .{ .text = "abandoned request" }));
+    try settleWorkspaceSkillQueries(&workbench, workspace_id);
+    try probe.expectQueries(1);
+    try std.testing.expect(workbench.task_runtime.find(task_id).?.skill_preparation != null);
+
+    // The later message is a separate intent, possibly after files changed.
+    // Hold its fresh query to prove admission cannot use the earlier result.
+    probe.hold_queries.store(true, .release);
+    const result = try workbench.sendInput("independent-message", task_id, .{ .text = "new request" });
+    try std.testing.expectEqual(.accepted, result.outcome);
+    const task = workbench.task_runtime.find(task_id).?;
+    try std.testing.expect(task.durable.runs[0] == null);
+    try std.testing.expectEqual(.waiting, task.input_submissions.items[0].state);
+    probe.hold_queries.store(false, .release);
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    try settleWorkspaceSkillQueries(&workbench, workspace_id);
+    try probe.expectQueries(2);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+}
+
 test "Skill input is accepted once while fresh preparation waits and failed freshness withdraws grants" {
     fake_core.reset();
     fake_core.setCatalogPlan(.degraded);
