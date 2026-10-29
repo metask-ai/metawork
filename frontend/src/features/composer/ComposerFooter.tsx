@@ -876,6 +876,8 @@ export function ComposerFooter({
                 </Button>
               )}
               {approvalModeControl}
+            </div>
+            <div className="composer-model-actions">
               {modelLabel && (
                 <span className="composer-model-context">
                   <span className="sr-only">{t("account.model")}</span>
@@ -892,10 +894,58 @@ export function ComposerFooter({
                   />
                 </span>
               )}
-            </div>
-            {stopAction ? (
-              <div className="composer-run-actions">
-                {composerDraftHasContent(draft) ? (
+              {stopAction ? (
+                <div className="composer-run-actions">
+                  {composerDraftHasContent(draft) ? (
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="icon"
+                      ref={sendButtonRef}
+                      className="composer-send"
+                      aria-label={t("run.submit")}
+                      title={t(sendDisabledReason ?? "run.submit")}
+                      disabled={!sendEnabled}
+                      onClick={submitPrimary}
+                    >
+                      <Icon name="send" />
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      ref={stopButtonRef}
+                      className="composer-stop"
+                      aria-label={t(
+                        stopAction === "compact" ? "compact.stop" : "task.stop",
+                      )}
+                      title={t(
+                        stopAction === "compact" ? "compact.stop" : "task.stop",
+                      )}
+                      disabled={stopDisabled}
+                      onClick={onStop}
+                    >
+                      <Icon name="stop" />
+                    </Button>
+                  )}
+                  {composerDraftHasContent(draft) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="composer-stop"
+                      aria-label={t("task.stop")}
+                      title={t("task.stop")}
+                      disabled={stopDisabled}
+                      onClick={onStop}
+                    >
+                      <Icon name="stop" />
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <div className="composer-send-group">
                   <Button
                     type="button"
                     variant="primary"
@@ -909,57 +959,9 @@ export function ComposerFooter({
                   >
                     <Icon name="send" />
                   </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="danger"
-                    size="icon"
-                    ref={stopButtonRef}
-                    className="composer-stop"
-                    aria-label={t(
-                      stopAction === "compact" ? "compact.stop" : "task.stop",
-                    )}
-                    title={t(
-                      stopAction === "compact" ? "compact.stop" : "task.stop",
-                    )}
-                    disabled={stopDisabled}
-                    onClick={onStop}
-                  >
-                    <Icon name="stop" />
-                  </Button>
-                )}
-                {composerDraftHasContent(draft) && (
-                  <Button
-                    type="button"
-                    variant="danger"
-                    size="icon"
-                    className="composer-stop"
-                    aria-label={t("task.stop")}
-                    title={t("task.stop")}
-                    disabled={stopDisabled}
-                    onClick={onStop}
-                  >
-                    <Icon name="stop" />
-                  </Button>
-                )}
-              </div>
-            ) : (
-              <div className="composer-send-group">
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="icon"
-                  ref={sendButtonRef}
-                  className="composer-send"
-                  aria-label={t("run.submit")}
-                  title={t(sendDisabledReason ?? "run.submit")}
-                  disabled={!sendEnabled}
-                  onClick={submitPrimary}
-                >
-                  <Icon name="send" />
-                </Button>
-              </div>
-            )}
+                </div>
+              )}
+            </div>
           </div>
         </Composer>
         {attachmentError && (
