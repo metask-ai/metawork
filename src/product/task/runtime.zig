@@ -2032,6 +2032,7 @@ pub const Runtime = struct {
     /// Freeze the current batch by changing its records, never a sticky Task flag.
     pub fn cancelWaitingInputs(self: *Runtime, task_id: u64, reason: SendInputReason) bool {
         const task = self.find(task_id) orelse return false;
+        task.skill_preparation = null;
         var changed = false;
         for (task.input_submissions.items) |*record| {
             if (record.state != .waiting) continue;
@@ -2059,6 +2060,7 @@ pub const Runtime = struct {
         std.debug.assert(blocking_task_id == null or blocking_task_id.? != 0);
         const record = self.pendingInput(task_id, index) orelse return;
         if (record.state != .waiting) return;
+        self.find(task_id).?.skill_preparation = null;
         record.state = .failed;
         record.reason = reason;
         record.blocking_task_id = blocking_task_id;
@@ -2280,6 +2282,7 @@ pub const Runtime = struct {
             self.discardInputPayloads(run);
             changed = true;
         };
+        if (changed) task.skill_preparation = null;
         return changed;
     }
 
@@ -2350,6 +2353,7 @@ pub const Runtime = struct {
         source.input_continuation_pending = false;
         source.input_continuation_attempted = true;
         const text = self.mergeInputContinuation(source, max_bytes) catch |err| {
+            task.skill_preparation = null;
             source.input_continuation_failure = if (err == error.InputContinuationTooLarge) .combined_input_too_large else .resource_limit;
             self.discardInputPayloads(source);
             return .ended;
@@ -3321,7 +3325,7 @@ pub const Runtime = struct {
         if (task.durable.binding_epoch != expected_binding_epoch)
             return error.BindingEpochMismatch;
         if (task_policy.taskLifecycle(task) != .open or
-            task_policy.hasActiveOperation(task) or task.runtime.worker_leases.hasLive())
+            task_policy.hasActiveOperation(task))
             return error.TaskBusy;
         return .{
             .workspace_id = task.durable.workspace_id,
@@ -9702,7 +9706,9 @@ test "Task message acceptance rejects real limits atomically without depending o
     runtime.find(1).?.durable.archived = true;
     try std.testing.expectError(error.TaskClosing, runtime.receiveInput(1, "archived", .{ .text = "third" }, effects));
     runtime.find(1).?.durable.archived = false;
+    runtime.find(1).?.skill_preparation = .{ .generation = 7, .binding_epoch = 1 };
     _ = runtime.stopInputs(1);
+    try std.testing.expect(runtime.find(1).?.skill_preparation == null);
     _ = try runtime.receiveInput(1, "after-stop", .{ .text = "new intent" }, effects);
     try std.testing.expectEqual(@as(usize, 1), runtime.find(1).?.input_submissions.items.len);
     try std.testing.expectEqualStrings("after-stop", runtime.find(1).?.input_submissions.items[0].submission.operationId());

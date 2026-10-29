@@ -343,6 +343,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         const accepted = try control.sendInput("in-flight", old_id, .{ .text = "Finish the existing Run." });
         try std.testing.expectEqual(.accepted, accepted.outcome);
         for (0..5000) |_| {
+            try wake_loop.drain(&control);
             if (runCalls() == 2) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.RunDidNotStart;

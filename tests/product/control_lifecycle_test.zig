@@ -3196,22 +3196,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     try std.testing.expectEqual(@as(u64, 3), try runPreparedTask(&restored, id, .{ .text = "continue after the crash" }));
 }
 
-// tasks.run is synchronous: a fresh catalog wait returns no Run identity.
-// Only successful direct-admission fixtures wait and retry that public command;
-// sendInput tests below exercise one-shot reception and Host-owned preparation.
-fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput) !u64 {
-    for (0..5000) |_| {
-        return workbench.runTask(task_id, input) catch |err| switch (err) {
-            error.CatalogLoading => {
-                try workbench.drainAgentEvents();
-                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-                continue;
-            },
-            else => return err,
-        };
-    }
-    return error.TestUnexpectedResult;
-}
+const runPreparedTask = fixture.runPreparedTask;
 
 fn waitCatalogReady(
     workbench: *product_control.Runtime,
@@ -4803,6 +4788,9 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     const blocker_two = try restored.createTask(productControlTaskInput());
     try restored.renameTask(blocker_one, "restore blocker one");
     try restored.renameTask(blocker_two, "restore blocker two");
+    // Begin the second command's catalog preparation while the worker is free.
+    try std.testing.expectError(error.CatalogLoading, restored.runTask(blocker_two, .{ .text = "fill recovery queue" }));
+    try settleWorkspaceSkillQueries(&restored, workspace_id);
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     var blockers_released = false;
@@ -6081,6 +6069,8 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
     try std.testing.expect(input_matches);
     // The query failure retains a useful chooser view, but grants no execution.
     try settleWorkspaceSkillQueries(&workbench, workspace_id);
+    try probe.expectQueries(1);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.catalog_refreshes);
     fake_core.setCatalogPlan(.query_failure);
     const visible = try workbench.workspaceCatalog(workspace_id);
     const failed = try workbench.sendInput("unavailable-skill", task_id, .{ .skill = .{
@@ -8774,6 +8764,9 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
 
     const blocker_task = try first.createTask(productControlTaskInput());
     try first.renameTask(blocker_task, "executor blocker");
+    // A Run can occupy the executor queue only after its Skill query completes.
+    try std.testing.expectError(error.CatalogLoading, first.runTask(continuation_task, .{ .text = "never entered AgentCore" }));
+    try settleWorkspaceSkillQueries(&first, try first.taskWorkspaceId(continuation_task));
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     _ = try runPreparedTask(&first, blocker_task, .{ .text = "occupy executor" });

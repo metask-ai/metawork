@@ -1342,7 +1342,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     }
     try std.testing.expectEqual(.custom_provider, control.execution_state.activeSource().?);
     const projection_epoch = control.projectionSecurityEpoch();
-    const first_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
+    const first_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
     if (!logout_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     const task = control.task_runtime.find(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
@@ -1458,7 +1458,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         defer access.deinit();
         try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
-    const second_id = try control.runTask(task_id, .{ .text = "Generate the fixture image." });
+    const second_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
     try std.testing.expect(recovered.durable.runs[1].?.image_execution == null);
     try image_product.finish(&control, task_id, second_id, null);
     try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));
@@ -1806,7 +1806,7 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
         if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
-    const id = try control.runTask(task_id, .{ .text = "Explicitly deliver the finished file." });
+    const id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Explicitly deliver the finished file." });
     try image_product.finish(&control, task_id, id, null);
     const task = control.task_runtime.find(task_id).?;
     const run = &task.durable.runs[0].?;
@@ -1883,7 +1883,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     const before_run_search = control.task_runtime.searchRevision();
-    const run_id = try control.runTask(first, .{ .text = "Deliver the finished file before releasing this Session." });
+    const run_id = try @import("lifecycle_fixture").runPreparedTask(&control, first, .{ .text = "Deliver the finished file before releasing this Session." });
     try std.testing.expect(control.task_runtime.searchRevision() > before_run_search);
     const streaming_search = control.task_runtime.searchRevision();
     try image_product.finish(&control, first, run_id, null);

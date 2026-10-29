@@ -387,8 +387,7 @@ export default function App() {
     useState<ApprovalMode | null>(null);
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
-  const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
-  const composerCatalogRefreshPending = useRef(false);
+  const composerCatalogRefreshPending = useRef(new Set<string>());
   const skillRefreshPending = useRef(new Set<string>());
   const [skillRefreshRequests, setSkillRefreshRequests] =
     useState<SkillRefreshRequests>({});
@@ -1270,8 +1269,7 @@ export default function App() {
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
-    skillDraftCurrent &&
-    (composerDraft.kind !== "skill" || !skillCatalogBusy);
+    skillDraftCurrent;
   // Unknown results still own their local record, including in other Tasks.
   const localSubmissionCount = localSubmissions.filter(
     (entry) =>
@@ -2856,15 +2854,10 @@ export default function App() {
     };
   }
   async function refreshComposerSkillCatalog() {
-    if (
-      composerCatalogRefreshPending.current ||
-      bridgeUnavailable ||
-      !composerWorkspace ||
-      !composerWorkspaceId
-    )
-      return;
-    composerCatalogRefreshPending.current = true;
-    setSkillCatalogBusy(true);
+    if (bridgeUnavailable || !composerWorkspace || !composerWorkspaceId) return;
+    const key = `${composerWorkspaceId}:${composerWorkspace.epoch}`;
+    if (composerCatalogRefreshPending.current.has(key)) return;
+    composerCatalogRefreshPending.current.add(key);
     const audience: StatusAudience = {
       scope: "workspace",
       workspaceId: composerWorkspaceId,
@@ -2889,8 +2882,7 @@ export default function App() {
         }),
       );
     } finally {
-      composerCatalogRefreshPending.current = false;
-      setSkillCatalogBusy(false);
+      composerCatalogRefreshPending.current.delete(key);
     }
   }
   async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {

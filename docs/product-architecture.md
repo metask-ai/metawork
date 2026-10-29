@@ -227,7 +227,7 @@ Personal 或 Workspace 的 committed Skill authority 必须不可分地拥有 im
 
 Enablement mutation 先构造受影响 authority 的完整 candidate，再提交无 secret policy store，最后 no-fail 替换 committed authority。明确 write failure 保持旧 authority；outcome unknown 必须冻结新的 Skill authority mutation 和 Skill admission，不能降级为全启用。尚无 committed authority 的 Workspace 不得锁死无关 scope 的 mutation，但以后取得 catalog 时必须按最新 committed policy 编译。
 
-交互 Task 的 Skill authority 在每个新 Run 的准备边界自动更新。Product Control 在消息接收、必要的 Conversation 恢复或模型切换完成后，以 owning Workspace 的 root/home/epoch 查询当前目录并应用 committed policy；只有 Session 空闲、原 operation 与 worker 静止时才原子绑定 catalog 和 grants，再创建 Run。已经接纳的 Run 与其插话保留原绑定；排队输入和自动接续形成新 Run 时重新准备。相同 catalog/selection 不重复绑定。Conversation recovery 不以 Skill readiness 为资格，恢复事务保持原有能力上限，新的运行准备在恢复安装完成后独立进行。Schedule 不因此取得 Skill 或启动 catalog job。
+交互 Task 的 Skill authority 在每个新 Run 的准备边界自动更新。Product Control 在消息接收、必要的 Conversation 恢复或模型切换完成后，以 owning Workspace 的 root/home/epoch 查询当前目录并应用 committed policy；只有 Session 空闲、原 Run 等共享 Session 的 operation 已收口时才原子绑定 catalog 和 grants，再创建 Run。已经接纳的 Run 与其插话保留原绑定；排队输入和自动接续形成新 Run 时重新准备。相同 catalog/selection 不重复绑定。Conversation recovery 不以 Skill readiness 为资格，恢复事务保持原有能力上限，新的运行准备在恢复安装完成后独立进行。Schedule 不因此取得 Skill 或启动 catalog job。
 
 Composer 的下一轮候选来自 owning Workspace current authority；Session 的 pinned snapshot 只表示当前安装的执行绑定，不要求用户手动推进。显式 Skill 消息先按用户看到的 revision pair 和 concrete identity 验证，再捕获 Core 提供的逻辑 policy key、参数定义与 owned 参数；运行准备从当前 resolved winners 编译该逻辑选择，不根据显示名称或文件路径猜测。内容更新或无关目录变化可自动跟随；参数定义改变须保留输入并要求检查，禁用、删除或冲突不得执行。历史 Run 保存实际执行的身份与 revision，不重写旧历史，也不恢复或重放未执行的原文。
 

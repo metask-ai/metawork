@@ -761,7 +761,7 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
 
-Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；有效输入与失败/未知提交的恢复继续遵守既有草稿合同。草稿按 Core 逻辑 policy key 关联当前候选：参数定义不变时自动更新具体身份和双 revision，保留参数；参数定义改变时保留内容并提示检查，缺失、禁用或冲突时显示真实不可用原因。无关 Skill 更新不使草稿失效。用户发送后由 Host 接收并串行完成新 Run 的目录查询、恢复与绑定准备，Renderer 不执行“先刷新 Workspace、再刷新 Task”的两步流程，也不自动重放已发送命令。普通文字保持可编辑与可接收；刷新仅作为主动重查与异常恢复动作。
+Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；有效输入与失败/未知提交的恢复继续遵守既有草稿合同。草稿按 Core 逻辑 policy key 关联当前候选：参数定义不变时自动更新具体身份和双 revision，保留参数；参数定义改变时保留内容并提示检查，缺失、禁用或冲突时显示真实不可用原因。无关 Skill 更新不使草稿失效。旧 session 草稿没有逻辑 key 时，只能在原 concrete ID 与双 revision 仍精确匹配当前候选后补齐；否则保留参数并要求重选，不能按名称或路径迁移。用户发送后由 Host 接收并串行完成新 Run 的目录查询、恢复与绑定准备，Renderer 不执行“先刷新 Workspace、再刷新 Task”的两步流程，也不自动重放已发送命令。普通文字保持可编辑与可接收；刷新仅作为主动重查与异常恢复动作。
 
 | Task state                                        | Composer behavior                                   |
 | ------------------------------------------------- | --------------------------------------------------- |

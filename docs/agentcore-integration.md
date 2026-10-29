@@ -68,7 +68,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 | `context_warning`          | 更新当前 attached Conversation 的 context pressure                                                                                                                     | 不持久化，不跨 attachment                                                          |
 | `auto_compact`             | 清除 pressure 并记录当前 Conversation 最近一次 compact observation                                                                                                     | 不持久化，不跨 attachment                                                          |
 | `permission_provenance`    | 更新 Run/UI permission summary                                                                                                                                         | 随对应 UI history 保存                                                             |
-| `prompt_manifest`          | Agent 使用官方 typed decoder 校验并有界消费；Product 显式忽略，不改变 Task/Run 状态                                                                                    | 不持久化、不投影                                                                   |
+| `prompt_manifest`          | Agent 使用官方 typed decoder 校验并有界消费；Product 显式忽略，不改变 Task/Run 状态 | 不持久化、不投影 |
 
 unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork 猜测其 payload。
 
@@ -86,19 +86,19 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 
 ## 3. 当前协议表面
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                                  |
+| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                     |
 | ----------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                                  |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                              |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                                          |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                                          |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                                          |
-| `RunResult`       | Core → Host | status OK 时完整有效；两个 input counts 在所有已定义返回状态有效；checkpoint budget pre-admission status 另定义 budget 字段                       |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                                           |
-| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                                    |
-| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                                           |
-| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                                   |
-| Skill catalog     | 双向借用    | Runtime query 返回 opaque lease；Session create/idle update 同步借用并保留 Host 引用，最后一个引用释放时才调用 Core release                       |
+| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                     |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                 |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                             |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                             |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                             |
+| `RunResult`       | Core → Host | status OK 时完整有效；两个 input counts 在所有已定义返回状态有效；checkpoint budget pre-admission status 另定义 budget 字段                                                      |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                              |
+| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                       |
+| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                              |
+| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                      |
+| Skill catalog     | 双向借用    | Runtime query 返回 opaque lease；Session create/idle update 同步借用并保留 Host 引用，最后一个引用释放时才调用 Core release |
 | Skill policy      | Host → Core | fresh create 与 idle update 提交完整 replacement；冷恢复为 null；同进程恢复使用原 pinned catalog 与精确默认拒绝 grant 集合，可按当前 ceiling 收缩 |
 
 MetaWork 不调用 `UiBackend.poll()` 注入输入。Agent 对已开始的普通 Run 提供 typed `RunControlLease.submitInput`；generation、输入窗口与提交调用登记由同一 Session lock 校验，SDK 在锁外调用。只有 validated Core starting observation 才开放输入；关闭窗口与登记同锁，Run 收尾须等待已登记提交、callback 和 abort 静止后才能进行 checkpoint 或下一次 Core 操作。lease 只保证对象存活，不代替调用静止屏障。输入关联只保存有界 identity、receipt 与采纳事实，不保存稍后投递的文本。Product 的输入交互及后续 Run 准入由 Product 合同定义，Agent 不调度后续 Run；停止沿已有 abort 路径。
@@ -330,7 +330,7 @@ Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界�
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及查询用途、root/home/epoch/Runtime owner 绑定；只有 Workspace 用途可绑定 Session。每个 owned Host 引用由原 Runtime 消费一次；最后一个引用才精确调用一次 Core release，即使该调用报告失败也不重复释放。
 
-projection 与 lease 引用的生命周期独立，释放 query owner 不使已经复制的 projection 或 Session 持有的原 snapshot 失效。Create、Agent restore 与 idle refresh 均须拒绝管理用途或其他 Runtime、Workspace、home、epoch 的 lease。Session 在成功 create/restore/idle replacement 时保留原 lease 和 grant IDs 的 owned 副本，失败保持原输入；Session close 收口自己的引用，独立捕获的输入继续保留原 query snapshot。来源集合不是 Session identity；显式 idle refresh 可以替换同一绑定下的 catalog。Skill policy 仍由 Product 根据稳定 skill_policy_key 编译为 concrete ID；Agent 捕获精确 default-deny grant 集合，narrow 只取该集合与当前 Host ceiling 的交集，不绑定更宽的当前全局目录。冷恢复可用 null catalog/policy 并在恢复后显式准备；同进程切换必须使用原 captured 输入或经明确收缩的副本，不能把丢失输入视为正常空能力。Runtime shutdown 阻止新 query，等待调用收敛并关闭 Sessions；任何仍存活的外部捕获引用继续触发 CatalogLeasesOutstanding，上层释放后重试 shutdown。Agent 不拥有启用 policy、持久 revision、UI 或文件监听，permission_rules 保持 null。
+projection 与 lease 引用的生命周期独立，释放 query owner 不使已经复制的 projection 或 Session 持有的原 snapshot 失效。Create、Agent restore 与 idle refresh 均须拒绝管理用途或其他 Runtime、Workspace、home、epoch 的 lease。Session 在成功 create/restore/idle replacement 时保留原 lease 和 grant IDs 的 owned 副本，失败保持原输入；Session close 收口自己的引用，独立捕获的输入继续保留原 query snapshot。来源集合不是 Session identity；显式 idle refresh 可以替换同一绑定下的 catalog。Skill policy 仍由 Product 根据稳定 skill_policy_key 编译为 concrete ID；Agent 捕获精确 default-deny grant 集合，narrow 只取该集合与当前 Host ceiling 的交集，不绑定更宽的当前全局目录。冷恢复可用 null catalog/policy，后续交互 Run 按 Product Skill 合同自动准备；同进程切换必须使用原 captured 输入或经明确收缩的副本，不能把丢失输入视为正常空能力。Runtime shutdown 阻止新 query，等待调用收敛并关闭 Sessions；任何仍存活的外部捕获引用继续触发 CatalogLeasesOutstanding，上层释放后重试 shutdown。Agent 不拥有启用 policy、持久 revision、UI 或文件监听，permission_rules 保持 null。
 
 可删除的内置组件来源必须随 query 提供进程内 source lifetime：调用方在查询期间保留其引用，成功 acquisition 由 Agent 再保留一次，直到对应 Core catalog 的最后一个 Host 引用被消费才释放，包括 Session 和同进程捕获的恢复输入。查询失败不留下引用；最终 Core release 报错仍遵守已消费 handle 的一次释放语义。回调只允许 thread-safe、nonblocking 的引用计数，不执行文件、分配、Product mutation 或 Agent 重入。该引用不编码到 SDK、checkpoint、Task 或 Session 持久数据，也不授予来源解析或 winner authority。
 
