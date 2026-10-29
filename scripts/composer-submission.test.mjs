@@ -650,7 +650,7 @@ test("App first accepted send clears its original version after Task handoff wit
   assert.equal(fixture.textarea.value, "follow-up");
 });
 
-test("App Composer scopes model choices to its Provider and preserves the actual Run model", async (ctx) => {
+test("App new Task lists all Providers while existing Tasks preserve their source and actual Run model", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const provider = fixture.snapshot.models.providers[0];
   const model = provider.models[0];
@@ -690,7 +690,31 @@ test("App Composer scopes model choices to its Provider and preserves the actual
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
   const user = userEvent.setup({ document });
   await user.click(selector);
-  assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
+  const customOption = await screen.findByRole("option", {
+    name: /gpt-5.6-sol/,
+  });
+  assert.equal(customOption.textContent, "gpt-5.6-sol");
+  const customGroup = screen.getByRole("group", { name: "Custom models" });
+  assert.equal(customOption.closest('[role="group"]'), customGroup);
+  assert.equal(customGroup.querySelector("small"), null);
+  assert.deepEqual(
+    screen
+      .getAllByRole("option")
+      .map(
+        (option) =>
+          option.querySelector(".selection-menu-item-copy").textContent,
+      ),
+    ["minimax-m3", "glm-5.3-flash", "gpt-5.6-sol"],
+  );
+  await user.click(customOption);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-model-trigger").textContent,
+      "gpt-5.6-sol",
+    ),
+  );
+  assert.deepEqual(fixture.snapshot.models.defaultSelection, defaultModel);
+  await user.click(selector);
   await user.click(
     await screen.findByRole("option", { name: /glm-5.3-flash/ }),
   );
@@ -788,11 +812,38 @@ test("App Composer scopes model choices to its Provider and preserves the actual
     screen.getByRole("button", { name: "New task", exact: true }),
   );
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  assert.ok(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
-  assert.equal(
-    screen.queryByRole("option", { name: /minimax-m3|glm-5.3-flash/ }),
-    null,
+  assert.ok(await screen.findByRole("option", { name: /minimax-m3/ }));
+  assert.ok(screen.getByRole("option", { name: /glm-5.3-flash/ }));
+  assert.deepEqual(
+    screen
+      .getAllByRole("option")
+      .map(
+        (option) =>
+          option.querySelector(".selection-menu-item-copy").textContent,
+      ),
+    ["minimax-m3", "glm-5.3-flash", "gpt-5.6-sol"],
   );
+  await user.click(screen.getByRole("option", { name: /gpt-5.6-sol/ }));
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-model-trigger").textContent,
+      "gpt-5.6-sol",
+    ),
+  );
+  await user.type(fixture.textarea, "Use my custom Provider{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  assert.deepEqual(
+    BridgeClient.prototype.createTask.mock.calls[1].arguments[3],
+    {
+      targetModelRef: { sourceId: "cc", modelId: "gpt-5.6-sol" },
+      expectedSourceGeneration: "23",
+      expectedCatalogGeneration: "29",
+    },
+  );
+  assert.deepEqual(fixture.snapshot.models.defaultSelection, {
+    sourceId: "cc",
+    modelId: "gpt-5.6-sol",
+  });
 });
 
 test("App late send result preserves another Task's draft and focus", async (ctx) => {

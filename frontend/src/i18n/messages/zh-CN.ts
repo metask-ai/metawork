@@ -1240,6 +1240,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_remove_confirm":
     "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
   "settings.custom_provider_removing": "正在删除…",
+  "settings.custom_models": "自定义模型",
   "settings.custom_model_testing": "正在测试…",
   "settings.custom_provider_state.configuring": "尚未测试",
   "settings.custom_provider_state.ready": "可用",

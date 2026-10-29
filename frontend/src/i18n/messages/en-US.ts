@@ -1408,6 +1408,7 @@ export const enUS = {
   "settings.custom_provider_remove_confirm":
     "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
   "settings.custom_provider_removing": "Removing…",
+  "settings.custom_models": "Custom models",
   "settings.custom_model_testing": "Testing…",
   "settings.custom_provider_state.configuring": "Not tested",
   "settings.custom_provider_state.ready": "Ready",

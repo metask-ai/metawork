@@ -180,6 +180,7 @@ export function ComposerFooter({
     selectionId: string;
     displayName: string;
     triggerLabel?: string;
+    group?: "custom";
   }[];
   selectedModelId: string;
   modelEditable: boolean;

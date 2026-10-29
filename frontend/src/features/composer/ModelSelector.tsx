@@ -17,6 +17,7 @@ export function ModelSelector({
     selectionId: string;
     displayName: string;
     triggerLabel?: string;
+    group?: "custom";
   }[];
   selectedId: string;
   editable: boolean;
@@ -38,12 +39,16 @@ export function ModelSelector({
   return (
     <SelectionMenu
       value={selectedId}
-      options={options.map((model) => ({
+      options={options.map((model, index) => ({
         value: model.selectionId,
         label:
           model.displayName || model.selectionId || t("account.model_fallback"),
         triggerLabel:
           model.selectionId === selectedId ? label : model.triggerLabel,
+        groupLabel:
+          model.group === "custom" && options[index - 1]?.group !== "custom"
+            ? t("settings.custom_models")
+            : undefined,
       }))}
       placeholder={label || t("account.choose_model")}
       ariaLabel={t("settings.default_model")}

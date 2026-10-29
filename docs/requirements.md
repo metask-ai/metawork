@@ -111,7 +111,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 同一 source identity、source generation 与 protocol 内改变 global default model 只推进 selection revision，不改变 opaque Product execution generation；credential、endpoint、protocol 或 source authority 变化才建立新的 execution generation。新 Task 未显式选模型时，创建必须同时校验默认执行 snapshot 的 generation 与 selection revision；显式选择则独立校验所选来源与目录，解析完整配置并建立自身 execution generation。已有 Task 保留自己的模型并继续使用原 generation。
 
-New task Composer 在当前已选 Provider 内选择模型，来源可以是 Metask 或 Custom Provider，不混合其他来源的候选，不修改全局默认值。来源 identity 与 model id 共同区分候选，同名模型不得串用连接；明确选择即使恰与默认相同也保持该 Task 的意图，目标失效时保留草稿并要求重选，不能回退默认模型。创建成功后 Task 持久保存明确的模型来源、模型 id 与初始 selection revision。
+New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，允许直接选择任一可用来源的模型，不修改全局默认值，也不要求先配置全局默认值。来源 identity 与 model id 共同区分候选，同名模型不得串用连接；明确选择即使恰与默认相同也保持该 Task 的意图，目标失效时保留草稿并要求重选，不能回退默认模型或自动选择其他来源。创建成功后 Task 持久保存明确的模型来源、模型 id 与初始 selection revision。
 
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask 模型用途与当前模型设置、Composer 的展示资格只由 `capabilities.endpoints` 判定：`messages`、`responses` 或 `chat_completions` 至少一个明确 `supported = true`，且 `images_generations`、`videos` 均未声明支持，才属于当前可选对话目录；同时支持对话和媒体生成端点的混合模型也排除。端点缺失、null 或 false 按不支持处理；全局及端点内部的 input/output、其他能力字段和模型名称不作为第二套用途判定。协议优先级由 [Models source 合同](product-architecture.md#21-models-aggregate-与-account-handoff)拥有。图片等输入能力不影响展示资格，Host 对设置选择与新的执行解析使用同一合格目录。

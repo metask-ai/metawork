@@ -246,6 +246,26 @@ test("Global search keeps focus in its combobox and restores the opener", async 
   opener.remove();
 });
 
+test("SelectionMenu labels the custom group without adding a selectable item or interrupting keyboard navigation", async () => {
+  const selected = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  renderMenu((value) => selected.push(value), "alpha", {
+    options: [
+      { value: "alpha", label: "Official model" },
+      { value: "custom-one", label: "Custom one", groupLabel: "Custom models" },
+      { value: "custom-two", label: "Custom two" },
+    ],
+  });
+  const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
+  trigger.focus();
+  await user.keyboard("{Enter}");
+  const customGroup = screen.getByRole("group", { name: "Custom models" });
+  assert.equal(customGroup.querySelectorAll('[role="option"]').length, 2);
+  assert.equal(screen.getAllByRole("option").length, 3);
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(selected, ["custom-one"]);
+});
+
 test("SelectionMenu closes on Escape and restores trigger focus", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   renderMenu(() => undefined);

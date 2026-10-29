@@ -12,6 +12,7 @@ export type NewTaskModelOption = {
   sourceGeneration: string;
   catalogGeneration: string;
   displayName: string;
+  group?: "custom";
   metadata: ModelMetadata | null;
 };
 
@@ -32,7 +33,13 @@ export function newTaskModelSelectionState(
 ): NewTaskModelSelectionState {
   const selected =
     requested ?? admission.activeModelRef ?? models.defaultSelection;
-  const options = readyModelOptions(models, selected?.sourceId ?? null);
+  const options = [...models.providers, ...models.customProviders].flatMap(
+    (provider) =>
+      readyModelOptions(models, provider.id).map((option) => ({
+        ...option,
+        group: provider.id === "metask" ? undefined : ("custom" as const),
+      })),
+  );
   const requestedOption = requested
     ? options.find(
         (option) =>
