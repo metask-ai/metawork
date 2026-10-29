@@ -1330,12 +1330,21 @@ export const enUS = {
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
     "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
+  "settings.api_key": "API key",
+  "settings.custom_provider_protocol": "Protocol",
+  "settings.custom_provider_endpoint": "Request URL (Endpoint)",
   "settings.custom_model_protocol_detected": "Detected API: {protocol}",
   "settings.custom_model_protocol_automatic":
     "Enter the complete request URL to detect the API format automatically.",
   "settings.custom_model_base_url": "Base URL",
   "settings.custom_model_gemini_address_help":
     "Enter the service root URL. Gemini model paths are generated automatically.",
+  "settings.custom_models": "Custom models",
+  "settings.model_connection_provider": "Model vendor",
+  "settings.model_connection_choose_provider": "Choose a model vendor",
+  "settings.model_connection_custom": "Custom / other service",
+  "settings.model_connection_help":
+    "Add a third-party model, then test it before using it in a task.",
   "settings.custom_model_root_help":
     "Enter the complete endpoint. If this is a Gemini Native service root, confirm below.",
   "settings.custom_model_gemini_confirm":
@@ -1346,19 +1355,16 @@ export const enUS = {
     "Use HTTPS. HTTP is supported only for localhost.",
   "settings.custom_model_address_error.path":
     "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
-  "settings.api_key": "API key",
-  "settings.custom_provider_protocol": "Protocol",
-  "settings.custom_provider_endpoint": "Request URL (Endpoint)",
-  "settings.model_connection_save": "Save connection settings",
-  "settings.provider_save_api_key": "Save API key",
-  "settings.custom_models": "Custom models",
-  "settings.model_connection_provider": "Model vendor",
-  "settings.model_connection_choose_provider": "Choose a model vendor",
-  "settings.model_connection_custom": "Custom / other service",
-  "settings.model_connection_help":
-    "Add a third-party model, then test it before using it in a task.",
+  "settings.custom_model_test_start_failed":
+    "Could not start the test for {model}. Try again.",
+  "settings.custom_model_remove_failed":
+    "Could not delete the model. Try again.",
+  "settings.model_edit_partial":
+    "Some changes were saved ({fields}). Review the remaining fields and re-enter the API key if needed before saving again.",
+  "settings.model_edit_review":
+    "The configuration changed or the save result could not be confirmed. Reopen the model to review its latest configuration.",
   "settings.model_connection_edit_help":
-    "Edit the model ID or update the API key.",
+    "Save changes to the model. Leave the API key blank to keep it unchanged.",
   "settings.model_connection_dialog_help":
     "Choose a vendor or custom service, enter the model, and save.",
   "settings.model_connection_empty": "No custom models yet.",

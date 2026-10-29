@@ -1168,12 +1168,21 @@ export const zhCN: Record<MessageId, string> = {
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "直接执行会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
+  "settings.api_key": "API Key",
+  "settings.custom_provider_protocol": "协议",
+  "settings.custom_provider_endpoint": "请求地址（Endpoint）",
   "settings.custom_model_protocol_detected": "已识别接口：{protocol}",
   "settings.custom_model_protocol_automatic":
     "填写完整请求地址，自动识别接口类型。",
   "settings.custom_model_base_url": "服务地址（Base URL）",
   "settings.custom_model_gemini_address_help":
     "填写服务根地址，Gemini 的模型路径由应用自动生成。",
+  "settings.custom_models": "自定义模型",
+  "settings.model_connection_provider": "模型厂商",
+  "settings.model_connection_choose_provider": "选择模型厂商",
+  "settings.model_connection_custom": "自定义 / 其他服务",
+  "settings.model_connection_help":
+    "添加第三方模型，测试通过后即可在任务中使用。",
   "settings.custom_model_root_help":
     "请填写完整请求端点；如果这是 Gemini 原生接口的服务根地址，请在下方确认。",
   "settings.custom_model_gemini_confirm": "这是 Gemini 原生接口的服务根地址",
@@ -1183,18 +1192,14 @@ export const zhCN: Record<MessageId, string> = {
     "请使用 HTTPS；仅本机地址支持 HTTP。",
   "settings.custom_model_address_error.path":
     "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
-  "settings.api_key": "API Key",
-  "settings.custom_provider_protocol": "协议",
-  "settings.custom_provider_endpoint": "请求地址（Endpoint）",
-  "settings.model_connection_save": "保存连接设置",
-  "settings.provider_save_api_key": "保存 API Key",
-  "settings.custom_models": "自定义模型",
-  "settings.model_connection_provider": "模型厂商",
-  "settings.model_connection_choose_provider": "选择模型厂商",
-  "settings.model_connection_custom": "自定义 / 其他服务",
-  "settings.model_connection_help":
-    "添加第三方模型，测试通过后即可在任务中使用。",
-  "settings.model_connection_edit_help": "修改模型 ID 或更新 API Key。",
+  "settings.custom_model_test_start_failed": "无法开始测试 {model}，请重试。",
+  "settings.custom_model_remove_failed": "删除失败，请重试。",
+  "settings.model_edit_partial":
+    "部分修改已保存（{fields}）。请检查未完成的字段，必要时重新填写 API Key 后再保存。",
+  "settings.model_edit_review":
+    "配置已变化或保存结果尚未确认，请重新打开模型查看最新配置。",
+  "settings.model_connection_edit_help":
+    "修改模型信息后保存；不更换 API Key 时留空。",
   "settings.model_connection_dialog_help":
     "选择模型厂商或自定义服务，填写模型后保存。",
   "settings.model_connection_empty": "还没有自定义模型。",

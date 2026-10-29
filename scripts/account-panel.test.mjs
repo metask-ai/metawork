@@ -189,7 +189,7 @@ function renderSettings(account, models = readyModels, options = {}) {
       customProviderCapabilities: {
         management: false,
         secretCapture: false,
-        connectionTest: false,
+        modelTest: false,
       },
       permissionProfiles: {
         enabled: false,
@@ -203,11 +203,16 @@ function renderSettings(account, models = readyModels, options = {}) {
       executionDisabled: false,
       cancelDisabled: false,
       onCreateCustomProvider: async () => false,
-      onUpdateCustomProvider: async () => false,
-      onAddCustomModel: async () => false,
-      onRemoveCustomProvider: async () => false,
-      onTestCustomModel() {},
-      onSelectCustomProvider() {},
+      onCreateBuiltinProvider: async () => false,
+      onSaveCustomModel: async () => ({
+        accepted: false,
+        applied: [],
+        source: null,
+        modelId: "",
+        reviewRequired: true,
+      }),
+      onRemoveCustomModel: async () => false,
+      onTestCustomModel: async () => false,
       onResetModels: async () => false,
       onChooseAutomaticWorkspaceRoot: async () => false,
       onResetAutomaticWorkspaceRoot: async () => false,
@@ -519,7 +524,7 @@ test("Account usage formatting preserves decimal precision without number coerci
   assert.equal(formatAccountSyncedAt("18446744073709551615", "en-US"), null);
 });
 
-test("Models canonical recovery preserves Account identity and freezes selectors", () => {
+test("Models canonical recovery preserves Account identity without restoring default selectors", () => {
   const accountMarkup = renderSettings(readyAccount, readyModels, {
     initialSection: "account",
   });
@@ -533,9 +538,9 @@ test("Models canonical recovery preserves Account identity and freezes selectors
     { initialSection: "models" },
   );
   assert.match(accountMarkup, /Metask User/);
-  assert.match(modelsMarkup, /Model configuration needs attention/);
+  assert.match(modelsMarkup, /Model configuration cannot be read/);
   assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
-  assert.match(modelsMarkup, /id="settings-model"[^>]*disabled/);
+  assert.doesNotMatch(modelsMarkup, /id="settings-model"/);
   assert.match(modelsMarkup, />Recover model configuration</);
 });
 
@@ -551,7 +556,7 @@ test("Models without a persistence capability do not offer destructive reset", (
     { initialSection: "models" },
   );
   assert.doesNotMatch(markup, />Recover model configuration</);
-  assert.match(markup, /id="settings-model"[^>]*disabled/);
+  assert.doesNotMatch(markup, /id="settings-model"/);
 });
 
 test("Execution commands never enter the Account busy or error scope", () => {
@@ -561,31 +566,7 @@ test("Execution commands never enter the Account busy or error scope", () => {
   );
   assert.match(
     appSource,
-    /runExecutionCommand\(\(\) =>\s*client\.selectModelsDefault/,
-  );
-});
-
-test("Metask model selection refreshes canonical CAS inputs before selecting global default", () => {
-  const start = appSource.indexOf("async function selectMetaskModel");
-  const end = appSource.indexOf("async function cancelAccountOperation", start);
-  assert.ok(start >= 0 && end > start);
-  const selectionFlow = appSource.slice(start, end);
-  const configure = selectionFlow.indexOf("client.configureMetaskSelection");
-  const refresh = selectionFlow.indexOf("latestSnapshotRef.current");
-  assert.doesNotMatch(selectionFlow, /client\.fetchSnapshot/);
-  const selectDefault = selectionFlow.indexOf("client.selectModelsDefault");
-  assert.ok(configure >= 0 && refresh > configure && selectDefault > refresh);
-  assert.match(
-    selectionFlow,
-    /expectedSelectionRevision:\s*current\.models\.selectionRevision/,
-  );
-  assert.match(
-    selectionFlow,
-    /expectedSourceGeneration:\s*currentProvider\.sourceGeneration/,
-  );
-  assert.match(
-    selectionFlow,
-    /expectedCatalogGeneration:\s*currentProvider\.catalogGeneration/,
+    /runExecutionCommand\(\(\) =>\s*client\.createCustomProvider/,
   );
 });
 
@@ -619,7 +600,7 @@ test("signed-out settings keep local history reachable and expose sign-in", () =
   assert.doesNotMatch(markup, /id="settings-signout-title"/);
 });
 
-test("authenticated settings project current catalog defaults", () => {
+test("authenticated settings keep the official catalog out of model management", () => {
   const accountMarkup = renderSettings(readyAccount, readyModels, {
     initialSection: "account",
   });
@@ -628,11 +609,11 @@ test("authenticated settings project current catalog defaults", () => {
   });
   assert.match(accountMarkup, /Metask User/);
   assert.match(accountMarkup, /id="settings-signout-title">Sign out<\/h3>/);
-  assert.match(modelsMarkup, /Model One/);
+  assert.doesNotMatch(modelsMarkup, /Model One|Default model|Sync again/);
   assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-custom-providers/);
 });
 
-test("catalog failure remains an authenticated retryable settings state", () => {
+test("official catalog failure does not add obsolete retry or default controls to Models", () => {
   const markup = renderSettings(
     readyAccount,
     {
@@ -648,8 +629,10 @@ test("catalog failure remains an authenticated retryable settings state", () => 
     },
     { initialSection: "models" },
   );
-  assert.match(markup, /Model configuration needs attention/);
-  assert.match(markup, /Sync again/);
+  assert.doesNotMatch(
+    markup,
+    /Model configuration needs attention|Sync again|Default model/,
+  );
   assert.doesNotMatch(markup, /Sign in again/);
 });
 

@@ -2,6 +2,7 @@ import {
   localReadingAnchor,
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
+import { editCustomModel } from "./edit-custom-model.ts";
 import { UserInputMessage } from "../features/tasks/UserInputMessage.tsx";
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
 import { BrandLogo } from "../components/ui/BrandLogo.tsx";
@@ -4272,26 +4273,31 @@ export default function App() {
             onCreateBuiltinProvider={(input) =>
               runExecutionCommand(() => client.createBuiltinProvider(input))
             }
-            onUpdateCustomProvider={(input) =>
-              runExecutionCommand(() =>
-                client.updateCustomProvider({
-                  providerId: input.providerId,
-                  expectedProviderRevision: input.expectedProviderRevision,
-                  displayName: input.displayName,
-                  protocol: input.protocol,
-                  normalizedBaseUrl: input.normalizedBaseUrl,
-                }),
-              )
-            }
-            onReplaceCustomProviderCredential={(providerId, revision, apiKey) =>
-              runExecutionCommand(() =>
-                client.replaceCustomProviderCredential(
-                  providerId,
-                  revision,
-                  apiKey,
-                ),
-              )
-            }
+            onSaveCustomModel={async (input) => {
+              let outcome: Awaited<ReturnType<typeof editCustomModel>> = {
+                accepted: false,
+                applied: [],
+                source: null,
+                modelId: input.modelId,
+                reviewRequired: true,
+              };
+              await runExecutionCommand(async () => {
+                outcome = await editCustomModel(
+                  client,
+                  snapshot.models,
+                  async () => {
+                    await refreshSnapshot();
+                    return latestSnapshotRef.current!.models;
+                  },
+                  input,
+                );
+                return {
+                  accepted: outcome.accepted,
+                  errorCode: outcome.accepted ? "none" : "invalid_provider",
+                };
+              });
+              return outcome;
+            }}
             onRemoveCustomModel={(
               providerId,
               providerRevision,
@@ -4306,22 +4312,6 @@ export default function App() {
                 }),
               )
             }
-            onReplaceCustomModel={(
-              providerId,
-              providerRevision,
-              catalogGeneration,
-              modelId,
-              replacementId,
-            ) =>
-              runExecutionCommand(() =>
-                client.replaceCustomModel({
-                  selection: { sourceId: providerId, modelId },
-                  expectedProviderRevision: providerRevision,
-                  expectedCatalogGeneration: catalogGeneration,
-                  replacement: { id: replacementId },
-                }),
-              )
-            }
             onTestCustomModel={(
               providerId,
               revision,
@@ -4329,7 +4319,7 @@ export default function App() {
               sourceGeneration,
               catalogGeneration,
             ) =>
-              void runExecutionCommand(() =>
+              runExecutionCommand(() =>
                 client.testCustomModel(
                   providerId,
                   revision,

@@ -111,6 +111,7 @@ const { ModelSetupNotice } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -469,19 +470,21 @@ function settingsElement(account, overrides = {}) {
       onCreateBuiltinProvider() {
         return Promise.resolve(false);
       },
-      onUpdateCustomProvider() {
-        return Promise.resolve(false);
-      },
-      onAddCustomModel() {
-        return Promise.resolve(false);
-      },
-      onReplaceCustomModel() {
-        return Promise.resolve(false);
+      onSaveCustomModel() {
+        return Promise.resolve({
+          accepted: false,
+          applied: [],
+          source: null,
+          modelId: "",
+          reviewRequired: true,
+        });
       },
       onRemoveCustomModel() {
         return Promise.resolve(false);
       },
-      onTestCustomModel() {},
+      onTestCustomModel() {
+        return Promise.resolve(false);
+      },
       onBeginLogin() {},
       onOpenRecharge() {},
       onLogout() {},
@@ -789,7 +792,14 @@ test("Add model uses the Host recipe and saves the first model with its official
     },
   });
   await user.click(screen.getByRole("button", { name: "Add model" }));
-  const dialog = await chooseModelSource(user, "DeepSeek");
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(dialog).getByRole("combobox", { name: "Model vendor" }),
+  );
+  await screen.findByRole("option", { name: "DeepSeek", exact: true });
+  await user.click(
+    screen.getByRole("option", { name: "DeepSeek", exact: true }),
+  );
   assert.equal(within(dialog).queryByText("Connection settings"), null);
   assert.equal(
     within(dialog).queryByRole("textbox", { name: "Request URL (Endpoint)" }),
@@ -909,10 +919,9 @@ test("closing or losing the model configuration gate clears an unfinished creden
   assert.ok(screen.getByRole("heading", { name: "Models" }));
 });
 
-test("model rows edit the exact model and expose shared credential replacement without recovering a saved key", async () => {
+test("model editing saves all changes once and clears credentials after a partial failure", async () => {
   const user = userEvent.setup({ document });
-  const changes = [],
-    credentials = [];
+  const changes = [];
   const source = {
     id: "source-edit",
     builtinProviderId: null,
@@ -938,13 +947,25 @@ test("model rows edit the exact model and expose shared credential replacement w
   };
   const view = renderModelSettings({
     models: { ...readySettingsModels, customProviders: [source] },
-    onReplaceCustomModel: async (...input) => {
+    onSaveCustomModel: async (input) => {
       changes.push(input);
-      return false;
-    },
-    onReplaceCustomProviderCredential: async (...input) => {
-      credentials.push(input);
-      return false;
+      const updatedSource = {
+        ...source,
+        normalizedBaseUrl: input.endpoint,
+        protocol: input.protocol,
+        providerRevision: "8",
+      };
+      view.rerenderModels({
+        ...readySettingsModels,
+        customProviders: [updatedSource],
+      });
+      return {
+        accepted: false,
+        applied: ["address"],
+        source: updatedSource,
+        modelId: "model-a",
+        reviewRequired: false,
+      };
     },
   });
   assert.ok(screen.getByText("Model A"));
@@ -956,31 +977,60 @@ test("model rows edit the exact model and expose shared credential replacement w
     within(dialog).queryByRole("combobox", { name: "Model vendor" }),
     null,
   );
-  assert.match(dialog.textContent, /Edit the model ID or update the API key/);
+  assert.match(dialog.textContent, /Save changes to the model/);
   assert.doesNotMatch(
     dialog.textContent,
     /choose a preset|\bprovider\b|\bdefault\b/i,
   );
 
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Request URL (Endpoint)" })
+      .value,
+    source.normalizedBaseUrl,
+  );
   const model = within(dialog).getByRole("textbox", { name: "Model ID" });
   await user.clear(model);
   await user.type(model, "model-b");
-  await user.click(
-    within(dialog).getByRole("button", { name: "Save", exact: true }),
-  );
-  assert.deepEqual(changes, [["source-edit", "7", "13", "model-a", "model-b"]]);
   const key = within(dialog).getByLabelText("API key");
   assert.equal(key.type, "password");
   assert.equal(key.value, "");
-  assert.doesNotMatch(dialog.textContent, /shared by 1 models/);
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  assert.ok(
+    address.compareDocumentPosition(key) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    key.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  await user.clear(address);
+  await user.type(address, "https://other.example/v1/messages");
+  assert.doesNotMatch(dialog.textContent, /shared by/);
   await user.type(key, "  replacement secret  ");
   await user.click(
-    within(dialog).getByRole("button", { name: "Save API key" }),
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
-  assert.deepEqual(credentials, [
-    ["source-edit", "7", "  replacement secret  "],
+  assert.deepEqual(changes, [
+    {
+      providerId: "source-edit",
+      expectedProviderRevision: "7",
+      expectedCatalogGeneration: "13",
+      modelId: "model-a",
+      nextModelId: "model-b",
+      protocol: "anthropic_messages",
+      endpoint: "https://other.example/v1/messages",
+      apiKey: "  replacement secret  ",
+    },
   ]);
   assert.equal(key.value, "");
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Some changes were saved/,
+  );
+  assert.equal(
+    within(dialog).queryByRole("button", { name: "Save API key" }),
+    null,
+  );
   await user.click(
     within(dialog).getByRole("button", { name: "Cancel", exact: true }),
   );
@@ -995,15 +1045,25 @@ test("model rows edit the exact model and expose shared credential replacement w
   );
   const addDialog = await chooseModelSource(user, "Custom / other service");
   assert.equal(
-    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" }).value,
+    within(addDialog).queryByRole("combobox", {
+      name: "Connection",
+      exact: true,
+    }),
+    null,
+  );
+  assert.equal(
+    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" })
+      .value,
     "",
   );
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
   assert.ok(within(addDialog).getByRole("textbox", { name: "Model ID" }));
 });
 
 test("Editing an official model permits credential replacement without exposing connection settings", async () => {
   const user = userEvent.setup({ document });
   const credentials = [];
+  const creations = [];
   const recipe = presetModels.find((preset) => preset.id === "deepseek");
   renderModelSettings({
     models: {
@@ -1035,9 +1095,23 @@ test("Editing an official model permits credential replacement without exposing 
         },
       ],
     },
-    onReplaceCustomProviderCredential: async (...input) => {
-      credentials.push(input);
+    onCreateBuiltinProvider: async (input) => {
+      creations.push(input);
       return false;
+    },
+    onSaveCustomModel: async (input) => {
+      credentials.push(input);
+      return {
+        accepted: false,
+        applied: [],
+        source: {
+          id: "official-source",
+          providerRevision: "7",
+          catalogGeneration: "13",
+        },
+        modelId: "deepseek-flash",
+        reviewRequired: false,
+      };
     },
   });
   await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
@@ -1055,12 +1129,37 @@ test("Editing an official model permits credential replacement without exposing 
   assert.equal(key.value, "");
   await user.type(key, "replacement-secret");
   await user.click(
-    within(dialog).getByRole("button", { name: "Save API key" }),
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
-  assert.deepEqual(credentials, [
-    ["official-source", "7", "replacement-secret"],
-  ]);
+  assert.equal(credentials.length, 1);
+  assert.equal(credentials[0].providerId, "official-source");
+  assert.equal(credentials[0].apiKey, "replacement-secret");
+  assert.equal(credentials[0].nextModelId, "deepseek-flash");
   assert.equal(key.value, "");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Cancel", exact: true }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
+  );
+  const add = await chooseModelSource(user, "DeepSeek");
+  assert.equal(within(add).getByLabelText("API key").value, "");
+  await user.type(within(add).getByLabelText("API key"), "independent-key");
+  await user.click(within(add).getByRole("combobox", { name: "Model ID" }));
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  );
+  await user.click(
+    within(add).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(creations, [
+    {
+      providerId: "deepseek",
+      baseUrl: recipe.defaultBaseUrl,
+      apiKey: "independent-key",
+      model: { id: "deepseek-flash" },
+    },
+  ]);
 });
 
 test("custom model addresses are submitted directly for every protocol", async () => {
@@ -1154,6 +1253,7 @@ test("custom model addresses are submitted directly for every protocol", async (
     view.unmount();
   }
 });
+
 test("a service root needs explicit Gemini confirmation and an endpoint replaces that choice", async () => {
   const user = userEvent.setup({ document });
   const submissions = [];
@@ -1204,6 +1304,7 @@ test("a service root needs explicit Gemini confirmation and an endpoint replaces
     "https://example.com/v1/responses",
   );
 });
+
 test("invalid endpoints explain the problem before submission and keep the other fields", async () => {
   const user = userEvent.setup({ document });
   const submitted = [];
@@ -1242,6 +1343,87 @@ test("invalid endpoints explain the problem before submission and keep the other
     false,
   );
   assert.equal(submitted.length, 0);
+});
+
+test("model test rejection and exceptions produce an actionable local message", async () => {
+  const user = userEvent.setup({ document });
+  let attempts = 0;
+  const source = {
+    id: "test-source",
+    displayName: "Hidden provider",
+    builtinProviderId: null,
+    enabled: true,
+    credentialStatus: "ready",
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [{ id: "model-a", displayName: "Model A", testStatus: "untested" }],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onTestCustomModel: async () => {
+      attempts++;
+      if (attempts === 1) return false;
+      throw Error("disconnected");
+    },
+  });
+  for (let i = 0; i < 2; i++) {
+    await user.click(
+      screen.getByRole("button", { name: "Test model", exact: true }),
+    );
+    assert.match(
+      screen.getByRole("alert").textContent,
+      /Could not start the test for Model A/,
+    );
+  }
+  assert.equal(attempts, 2);
+});
+
+test("delete confirmation uses current revisions and recovers focus when the row disappears", async () => {
+  const user = userEvent.setup({ document });
+  const calls = [];
+  const source = {
+    id: "delete-source",
+    displayName: "Hidden provider",
+    builtinProviderId: null,
+    enabled: true,
+    credentialStatus: "ready",
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [{ id: "model-a", displayName: "Model A", testStatus: "untested" }],
+  };
+  const view = renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onRemoveCustomModel: async (...input) => {
+      calls.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Remove", exact: true }));
+  const dialog = screen.getByRole("alertdialog");
+  view.rerenderModels({
+    ...readySettingsModels,
+    customProviders: [
+      { ...source, providerRevision: "8", catalogGeneration: "14" },
+    ],
+  });
+  await user.click(
+    within(dialog).getByRole("button", { name: "Remove", exact: true }),
+  );
+  assert.deepEqual(calls, [["delete-source", "8", "14", "model-a"]]);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Could not delete/,
+  );
+  view.rerenderModels({ ...readySettingsModels, customProviders: [] });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Add model" }),
+  );
+  assert.equal(calls.length, 1);
 });
 
 test("Models manages user-added models without an official catalog or default selection", () => {

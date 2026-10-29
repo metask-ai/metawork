@@ -49,10 +49,8 @@ export function SettingsPage({
   onCancel,
   onCreateCustomProvider,
   onCreateBuiltinProvider,
-  onUpdateCustomProvider,
-  onReplaceCustomProviderCredential,
+  onSaveCustomModel,
   onRemoveCustomModel,
-  onReplaceCustomModel,
   onTestCustomModel,
   onBeginLogin,
   onRetryRefresh,
@@ -682,11 +680,7 @@ export function SettingsPage({
                   disabled={disabled || executionDisabled}
                   onCreateCustomProvider={onCreateCustomProvider}
                   onCreateBuiltinProvider={onCreateBuiltinProvider}
-                  onUpdateCustomProvider={onUpdateCustomProvider}
-                  onReplaceCustomProviderCredential={
-                    onReplaceCustomProviderCredential
-                  }
-                  onReplaceCustomModel={onReplaceCustomModel}
+                  onSaveCustomModel={onSaveCustomModel}
                   onRemoveCustomModel={onRemoveCustomModel}
                   onTestCustomModel={onTestCustomModel}
                 />

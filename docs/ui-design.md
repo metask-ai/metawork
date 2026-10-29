@@ -1024,7 +1024,7 @@ Account
 Models
 └── Custom models（capability-gated）
     ├── Model list（test / edit / remove）
-    └── Add model dialog（provider preset / saved service / custom）
+    └── Add model dialog（vendor preset / custom service）
 
 Archived tasks
 ├── Search by task name
@@ -1072,7 +1072,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 管理页与对话 Composer 只呈现对话模型，不设置生图模型选择区域、生成按钮或连接测试。生图模型由 Host 自动解析，Renderer 不渲染图片目录或维护第二份配置。生成可能收费及失败后不自动重试的事实使用既有工具说明和审批详情呈现；结果沿既有工具详情提供真实文件引用或不可用原因，不伪造图片预览、图库或模型已看过图的事实；
 - Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的 credential 通过 Models 内专用服务配置表单管理，不要求先选择默认模型，已保存 secret 永不显示或回填；
 
-- 添加模型时选择厂商或已有服务只准备表单，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
+- 添加模型时选择厂商或自定义服务只准备表单，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
 - 模型管理不提交模型选择 mutation。New task Composer 直接列出所有来源的 ready 模型；缺少选择但已有可用候选时，恢复动作直接打开输入区模型列表，不能再要求用户进入管理页设置默认值；
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
@@ -1104,11 +1104,11 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 `Models` 中的自定义模型管理规则：
 
 - Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest`；只有三者均为 true 才显示自定义模型分组。Host 从实际 management、credential storage 与模型测试能力发布全 true 或全 false，不按平台名决定产品可见性；不得提供缺少 credential 写入或测试能力的局部路径；
-- 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行只显示模型名和最新测试状态，状态以简短标签放在模型名称右侧，窄窗空间不足时允许换行，不显示 Provider 或服务名称，测试、编辑和删除使用三个图标按钮，保留本地化 accessible name、键盘焦点和 hover/focus tooltip；测试中显示加载状态并禁用重复测试，删除仍需明确确认，弹层使用独立短标题和包含目标模型名称的影响说明，不重复标题与正文，也不把内部 Provider 身份当作模型删除对象；没有模型的旧服务配置不作为模型列表项显示，但在添加模型时仍可显式复用，不因隐藏而删除持久配置；
+- 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行只显示模型名和最新测试状态，状态以简短标签放在模型名称右侧，窄窗空间不足时允许换行，不显示 Provider 或服务名称，测试、编辑和删除使用三个图标按钮，保留本地化 accessible name、键盘焦点和 hover/focus tooltip；测试中显示加载状态并禁用重复测试，无法启动测试时显示包含模型名的可重试提示；删除仍需明确确认，弹层使用独立短标题和包含目标模型名称的影响说明，不重复标题与正文，也不把内部 Provider 身份当作模型删除对象；删除最后一个模型时连同其连接配置与 API Key 一起清理，不留下空服务入口；删除确认消费最新 revision，目标消失时关闭，完成后焦点返回仍存在的原按钮或新增入口；
 - 添加与编辑弹窗使用同一 Foundation Dialog、Select 与表单组件，各自提供对应操作的说明，不复用旧 Provider 配置步骤或默认模型说明。模型配置恢复只定位同一个 Models 设置分区，不保留独立 Provider 导航或焦点入口。先选择内置厂商预设或自定义服务；内置厂商使用 Host 发布的固定官方 Base URL、protocol 和模型 ID 列表；只展示 API Key 和模型选择，不展示连接设置、地址、协议或实际 endpoint。填写 API Key 并选择模型即可保存。自定义服务直接填写完整请求地址、API Key 和模型 ID；标准 endpoint 的 protocol 由确定性路径识别，无效地址在字段旁解释原因；Gemini Native 使用服务根地址并单独确认。每次添加都保存独立模型配置，不因同厂商或同地址而复用已有凭据或增加已有 Provider 的模型；不存在“连接”“填写新连接”或“使用已有服务”选择步骤。创建新来源与首个模型使用同一 typed command，成功后以 Snapshot 为准，不猜测新来源 identity；
 - 内置模型列表是填写建议，不授予授权、能力或 readiness，不做自动模型发现。保存后须明确测试；未通过测试的模型不能用于新任务选择。新增模型或进入编辑不隐式修改 global default；
 - 添加自定义模型的字段依次为模型厂商、请求地址、API Key、模型 ID；请求地址位于 API Key 上方，直接平铺展示，不放入“连接设置”等折叠区域；自定义服务开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native。前三种协议的地址字段标为“请求地址（Endpoint）”，直接显示并提交完整请求 URL，不补路径、不剥离已有路径，也不重复显示推算的地址预览。完整 URL 的 path 分别以 `/chat/completions`、`/responses`、`/v1/messages` 结束时自动识别对应 protocol 并显示只读接口提示，不提供协议选择；空地址不预选 protocol；仅有效的根地址提供 Gemini Native 确认，未确认时禁止提交。无效 URL、非本机 HTTP、携带凭据、query 或 fragment，以及不支持的路径在失焦后显示具体错误并禁止提交。改写地址重新识别并清除旧的 Gemini 确认。不根据 hostname、query、fragment、模型名或请求试错猜测 protocol。Gemini Native 明确标为服务根地址，并说明模型路径由应用生成；不把它伪装成完整 endpoint。自定义服务显示 API Key 的目标 host；Host 独立校验 scheme、host、协议路径、长度与控制字符；
-- 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；连接或凭据修改说明对同源模型的共同影响。地址保存与 API Key 替换分别为显式、独立的 revision-bound mutation，不能假装成一笔原子表单。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；
+- 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；新模型的连接与凭据独立管理；既有共享配置只有在同源存在多个模型时才说明共同影响。弹窗使用一个“保存”动作，按地址、非空 API Key、模型 ID 的实际变化顺序提交现有 revision-bound mutation；每步须重新读取 canonical Models 并核对 revision、catalog 与目标模型后才继续，不假装为原子事务。明确失败时说明已保存的字段，保留其余非 secret 草稿并更新 revision；结果未知或配置发生冲突时停止，清除临时 secret，并提示重新打开确认，不自动重放。API Key 留空表示保留已有凭据。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；
 - endpoint、protocol 或 credential authority 变化推进 source generation 并使同源全部模型回到待验证状态；普通模型 add/replace/remove 只推进对应 revision/catalog generation。Provider 可在模型集合为空时持久处于 configuring，不把模型伪装成 Provider identity 的一部分；
 - `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；generation readiness 与最新测试状态分别显示。ready 模型失败重测不撤销已验证 generation、默认选择或既有 owned binding；
 - 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
@@ -1347,8 +1347,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 原生目录 picker 确认后直接完成 Manual Workspace 注册，不出现第二次 trust / `Use this folder` 请求，Renderer 不提交 `trusted` boolean；
 - New task Composer 始终显示当前模型和 Workspace，上下文缺失时提供明确下一步而非静默 disabled；
 - New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
-- 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
-- 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
+- 模型管理中的添加、编辑、测试与删除结果与 Composer 的可用模型候选一致；模型切换 pending/error 在任务输入区呈现；
+- 模型设置页只管理用户添加的模型，厂商预设只准备表单；没有默认 API、默认模型或独立 Provider 配置步骤，任务模型在输入区选择，不自动改绑已有 Task；
 - 已有 live Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；detached Task 的 Conversation restore 可按 §6.4 为兼容 credential target 建立 adoption epoch，任意 protocol/model 变化仍只有未来的显式 rebind 可以建立新 epoch；
 - Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 保持普通输入形态，用户发送时在同一意图内执行 restore→Run，required、restoring 与 failed/retry 不形成独立恢复控件或文案。不得因导航自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
 - API 只在设置中显示脱敏名称、protocol 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；

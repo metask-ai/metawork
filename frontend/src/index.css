@@ -3130,6 +3130,22 @@ button.run-process-tool:hover {
 }
 
 @media (max-width: 620px) {
+  .settings-model-list-heading > button,
+  .settings-model-dialog .settings-model-form-actions > button,
+  .settings-model-dialog .delete-confirmation-actions > button {
+    min-height: 44px;
+  }
+
+  .settings-model-row {
+    gap: 4px;
+  }
+  .settings-model-identity {
+    flex-basis: 100%;
+  }
+  .settings-model-row .settings-custom-provider-actions {
+    margin-left: auto;
+  }
+
   .settings-header {
     grid-template-columns: 1fr;
     min-height: 0;

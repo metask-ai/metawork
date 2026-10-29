@@ -75,6 +75,24 @@ const examples: Record<Protocol, string> = {
   anthropic_messages: "https://api.anthropic.com/v1/messages",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
+export type ModelEditPart = "address" | "api_key" | "model_id";
+export type CustomModelEditInput = {
+  providerId: string;
+  expectedProviderRevision: string;
+  expectedCatalogGeneration: string;
+  modelId: string;
+  nextModelId: string;
+  protocol: Protocol;
+  endpoint: string;
+  apiKey: string;
+};
+export type CustomModelEditResult = {
+  accepted: boolean;
+  applied: ModelEditPart[];
+  source: CustomProviderView | null;
+  modelId: string;
+  reviewRequired: boolean;
+};
 export type CustomModelActions = {
   onCreateCustomProvider: (input: {
     displayName: string;
@@ -89,25 +107,9 @@ export type CustomModelActions = {
     apiKey: string;
     model: { id: string };
   }) => Promise<boolean>;
-  onUpdateCustomProvider: (input: {
-    providerId: string;
-    expectedProviderRevision: string;
-    displayName: string;
-    protocol: Protocol;
-    normalizedBaseUrl: string;
-  }) => Promise<boolean>;
-  onReplaceCustomProviderCredential: (
-    providerId: string,
-    revision: string,
-    apiKey: string,
-  ) => Promise<boolean>;
-  onReplaceCustomModel: (
-    providerId: string,
-    revision: string,
-    catalogGeneration: string,
-    modelId: string,
-    replacementId: string,
-  ) => Promise<boolean>;
+  onSaveCustomModel: (
+    input: CustomModelEditInput,
+  ) => Promise<CustomModelEditResult>;
   onRemoveCustomModel: (
     providerId: string,
     revision: string,
@@ -120,7 +122,7 @@ export type CustomModelActions = {
     modelId: string,
     sourceGeneration: string,
     catalogGeneration: string,
-  ) => void;
+  ) => Promise<boolean>;
 };
 type Draft = {
   choice: string;
@@ -161,7 +163,14 @@ export function CustomModelsSettings({
     modelId: string;
   } | null>(null);
   const [failed, setFailed] = useState(false);
+  const [savedParts, setSavedParts] = useState<ModelEditPart[]>([]);
   const [addressTouched, setAddressTouched] = useState(false);
+  const [testFailure, setTestFailure] = useState<{
+    sourceId: string;
+    modelId: string;
+    name: string;
+  } | null>(null);
+  const [reviewNotice, setReviewNotice] = useState(false);
   const dialogVersion = useRef(0);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -194,7 +203,9 @@ export function CustomModelsSettings({
         : addButton.current;
     dialogVersion.current += 1;
     setFailed(false);
+    setSavedParts([]);
     setAddressTouched(false);
+    setReviewNotice(false);
     setDraft(
       source
         ? {
@@ -214,7 +225,7 @@ export function CustomModelsSettings({
     );
   }
   useEffect(() => {
-    if (!draft?.providerId) return;
+    if (!draft?.providerId || pending) return;
     const current = models.customProviders.find(
       (item) => item.id === draft.providerId,
     );
@@ -222,14 +233,34 @@ export function CustomModelsSettings({
       !current ||
       current.providerRevision !== draft.revision ||
       current.catalogGeneration !== draft.catalogGeneration
-    )
+    ) {
       close();
+      setReviewNotice(true);
+    }
   }, [
     models.customProviders,
     draft?.providerId,
     draft?.revision,
     draft?.catalogGeneration,
+    pending,
   ]);
+  useEffect(() => {
+    if (!removal || pending) return;
+    const current = models.customProviders.find(
+      (item) => item.id === removal.source.id,
+    );
+    if (
+      !current ||
+      !current.models.some((model) => model.id === removal.modelId)
+    )
+      setRemoval(null);
+    else if (
+      current.providerRevision !== removal.source.providerRevision ||
+      current.catalogGeneration !== removal.source.catalogGeneration
+    ) {
+      setRemoval({ ...removal, source: current });
+    }
+  }, [models.customProviders, removal, pending]);
   function choose(value: string) {
     const recipe = models.builtinProviderPresets.find(
       (item) => value === `preset:${item.id}`,
@@ -271,17 +302,61 @@ export function CustomModelsSettings({
       return;
     const protocol = draft.protocol;
     const modelId = draft.modelId.trim();
-    if (editing && modelId === draft.originalModelId) return;
-    if (provider && editing) {
-      await perform(() =>
-        actions.onReplaceCustomModel(
-          provider.id,
-          provider.providerRevision,
-          provider.catalogGeneration,
-          draft.originalModelId!,
-          modelId,
-        ),
-      );
+    if (
+      editing &&
+      provider &&
+      modelId === draft.originalModelId &&
+      !draft.apiKey &&
+      draft.protocol === provider.protocol &&
+      draft.baseUrl.trim() === provider.normalizedBaseUrl
+    )
+      return;
+    if (editing) {
+      if (!provider) return;
+      const version = dialogVersion.current;
+      setPending(true);
+      setFailed(false);
+      setSavedParts([]);
+      try {
+        const outcome = await actions.onSaveCustomModel({
+          providerId: provider.id,
+          expectedProviderRevision: draft.revision!,
+          expectedCatalogGeneration: draft.catalogGeneration!,
+          modelId: draft.originalModelId!,
+          nextModelId: modelId,
+          protocol,
+          endpoint: draft.baseUrl.trim(),
+          apiKey: draft.apiKey,
+        });
+        if (version !== dialogVersion.current) return;
+        if (outcome.accepted) close();
+        else if (outcome.reviewRequired || !outcome.source) {
+          close();
+          setReviewNotice(true);
+        } else {
+          const source = outcome.source;
+          setDraft((current) =>
+            current
+              ? {
+                  ...current,
+                  apiKey: "",
+                  revision: source.providerRevision,
+                  catalogGeneration: source.catalogGeneration,
+                  originalModelId: outcome.modelId,
+                }
+              : null,
+          );
+          setFailed(true);
+          setSavedParts(outcome.applied);
+        }
+      } catch {
+        if (version === dialogVersion.current) {
+          close();
+          setReviewNotice(true);
+        }
+      } finally {
+        setPending(false);
+      }
     } else if (preset) {
       await perform(() =>
         actions.onCreateBuiltinProvider({
@@ -316,7 +391,10 @@ export function CustomModelsSettings({
       value: `preset:${recipe.id}`,
       label: recipe.displayName,
     })),
-    { value: "custom", label: t("settings.model_connection_custom") },
+    {
+      value: "custom",
+      label: t("settings.model_connection_custom"),
+    },
   ];
   async function remove() {
     if (!removal || busy) return;
@@ -364,6 +442,23 @@ export function CustomModelsSettings({
           {t("settings.custom_model_add")}
         </Button>
       </div>
+      {reviewNotice && (
+        <p role="alert" className="text-sm text-(--ui-content-muted)">
+          {t("settings.model_edit_review")}
+        </p>
+      )}
+      {testFailure &&
+        rows.some(
+          ({ source, model }) =>
+            source.id === testFailure.sourceId &&
+            model.id === testFailure.modelId,
+        ) && (
+          <p role="alert">
+            {t("settings.custom_model_test_start_failed", {
+              model: testFailure.name,
+            })}
+          </p>
+        )}
       <div className="settings-model-list">
         {rows.map(({ source, model }) => (
           <div
@@ -391,15 +486,30 @@ export function CustomModelsSettings({
                   source.credentialStatus !== "ready" ||
                   model.testStatus === "testing"
                 }
-                onClick={() =>
-                  actions.onTestCustomModel(
-                    source.id,
-                    source.providerRevision,
-                    model.id,
-                    source.sourceGeneration,
-                    source.catalogGeneration,
-                  )
-                }
+                onClick={async () => {
+                  setTestFailure(null);
+                  try {
+                    const accepted = await actions.onTestCustomModel(
+                      source.id,
+                      source.providerRevision,
+                      model.id,
+                      source.sourceGeneration,
+                      source.catalogGeneration,
+                    );
+                    if (accepted === false)
+                      setTestFailure({
+                        sourceId: source.id,
+                        modelId: model.id,
+                        name: model.displayName || model.id,
+                      });
+                  } catch {
+                    setTestFailure({
+                      sourceId: source.id,
+                      modelId: model.id,
+                      name: model.displayName || model.id,
+                    });
+                  }
+                }}
               />
               <ModelAction
                 icon="edit"
@@ -413,6 +523,10 @@ export function CustomModelsSettings({
                 disabled={busy}
                 onClick={() => {
                   setFailed(false);
+                  returnFocus.current =
+                    document.activeElement instanceof HTMLElement
+                      ? document.activeElement
+                      : addButton.current;
                   setRemoval({ source, modelId: model.id });
                 }}
               />
@@ -474,7 +588,7 @@ export function CustomModelsSettings({
                         "settings.model_connection_choose_provider",
                       )}
                       ariaLabel={t("settings.model_connection_provider")}
-                      disabled={busy || editing}
+                      disabled={busy}
                       onValueChange={choose}
                     />
                   </label>
@@ -598,33 +712,6 @@ export function CustomModelsSettings({
                             </p>
                           )}
                         </div>
-                        {provider && editing && (
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled={
-                              busy ||
-                              !draft.baseUrl.trim() ||
-                              !draft.protocol ||
-                              addressInvalid
-                            }
-                            onClick={() =>
-                              void perform(() =>
-                                actions.onUpdateCustomProvider({
-                                  providerId: provider.id,
-                                  expectedProviderRevision:
-                                    provider.providerRevision,
-                                  displayName: provider.displayName,
-                                  protocol: draft.protocol!,
-                                  normalizedBaseUrl: draft.baseUrl.trim(),
-                                }),
-                              )
-                            }
-                          >
-                            {t("settings.model_connection_save")}
-                          </Button>
-                        )}
                       </>
                     )}
                     {!provider && (
@@ -678,23 +765,6 @@ export function CustomModelsSettings({
                             }
                           />
                         </label>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          disabled={busy || !draft.apiKey}
-                          onClick={() =>
-                            void perform(() =>
-                              actions.onReplaceCustomProviderCredential(
-                                provider.id,
-                                provider.providerRevision,
-                                draft.apiKey,
-                              ),
-                            )
-                          }
-                        >
-                          {t("settings.provider_save_api_key")}
-                        </Button>
                       </div>
                     )}
                     <label className="settings-model-form-field">
@@ -757,7 +827,28 @@ export function CustomModelsSettings({
                     )}
                   </>
                 )}
-                {failed && <p role="alert">{t("execution.command_failed")}</p>}
+                {failed && (
+                  <p role="alert">
+                    {t(
+                      savedParts.length > 0
+                        ? "settings.model_edit_partial"
+                        : "execution.command_failed",
+                      {
+                        fields: savedParts
+                          .map((part) =>
+                            t(
+                              part === "address"
+                                ? "settings.custom_provider_endpoint"
+                                : part === "api_key"
+                                  ? "settings.api_key"
+                                  : "settings.custom_model_id",
+                            ),
+                          )
+                          .join("、"),
+                      },
+                    )}
+                  </p>
+                )}
                 <div className="settings-model-form-actions">
                   <Button
                     type="button"
@@ -776,7 +867,10 @@ export function CustomModelsSettings({
                       !draft.protocol ||
                       addressInvalid ||
                       (editing &&
-                        draft.modelId.trim() === draft.originalModelId) ||
+                        draft.modelId.trim() === draft.originalModelId &&
+                        !draft.apiKey &&
+                        draft.protocol === provider?.protocol &&
+                        draft.baseUrl.trim() === provider?.normalizedBaseUrl) ||
                       (!provider && (!draft.apiKey || !draft.baseUrl.trim()))
                     }
                   >
@@ -796,7 +890,14 @@ export function CustomModelsSettings({
       >
         <AlertDialog.Portal>
           <AlertDialog.Backdrop className="settings-model-dialog-backdrop" />
-          <AlertDialog.Popup className="settings-model-dialog">
+          <AlertDialog.Popup
+            className="settings-model-dialog"
+            finalFocus={() =>
+              returnFocus.current?.isConnected
+                ? returnFocus.current
+                : addButton.current
+            }
+          >
             <AlertDialog.Title>
               {t("settings.custom_model_remove_confirm")}
             </AlertDialog.Title>
@@ -810,7 +911,9 @@ export function CustomModelsSettings({
                   "",
               })}
             </AlertDialog.Description>
-            {failed && <p role="alert">{t("execution.command_failed")}</p>}
+            {failed && (
+              <p role="alert">{t("settings.custom_model_remove_failed")}</p>
+            )}
             <div className="delete-confirmation-actions">
               <Button
                 autoFocus
