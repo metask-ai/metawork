@@ -6144,6 +6144,8 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
     access.deinit();
     defer restore_inputs.deinit() catch unreachable;
     try std.testing.expectEqual(@as(usize, 0), restore_inputs.skill.?.borrow().policy.granted_skill_ids.len);
+    const withdrawn_refreshes = fake_core.catalog_refreshes;
+    try std.testing.expectEqual(@as(usize, 1), withdrawn_refreshes);
     const ordinary = try workbench.sendInput("text-without-skills", task_id, .{ .text = "Continue without Skill grants" });
     try std.testing.expectEqual(.accepted, ordinary.outcome);
     for (0..5000) |_| {
@@ -6152,6 +6154,9 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+    // A second failed query still permits text, without rebinding an already
+    // empty policy (or adding a second opportunity for Core mutation failure).
+    try std.testing.expectEqual(withdrawn_refreshes, fake_core.catalog_refreshes);
 }
 
 test "Workspace incomplete catalog refresh preserves the committed last-good authority" {

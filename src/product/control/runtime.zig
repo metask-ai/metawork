@@ -5127,7 +5127,6 @@ pub const Runtime = struct {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
         _ = self.task_runtime.stopInputs(task_id);
-        task.skill_preparation = null;
         try self.stopTaskOperation(task_id);
         self.reapTaskInputResources();
         self.commitTaskStateNoFail();

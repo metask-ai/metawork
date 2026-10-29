@@ -1164,12 +1164,19 @@ pub const Session = struct {
     /// remains an owned snapshot; it is never presented as a fresh empty one.
     pub fn clearSkillPolicy(self: *Session) (Error || std.mem.Allocator.Error)!void {
         self.lock();
-        const captured = if (self.skill_restore_inputs) |inputs| inputs.clone() catch |err| {
+        const installed = self.skill_restore_inputs orelse {
+            self.unlock();
+            return;
+        };
+        if (installed.borrow().policy.granted_skill_ids.len == 0) {
+            self.unlock();
+            return;
+        }
+        const inputs = installed.clone() catch |err| {
             self.unlock();
             return err;
-        } else null;
+        };
         self.unlock();
-        const inputs = captured orelse return;
         const result = self.refreshSkillCatalog(inputs.borrow().catalog, .{ .granted_skill_ids = &.{} });
         inputs.deinit() catch {
             self.lock();
