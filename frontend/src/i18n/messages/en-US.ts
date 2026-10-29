@@ -37,17 +37,16 @@ export const enUS = {
   "model_setup.loading": "Loading models…",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
-  "model_setup.choose_action": "Open model settings",
   "model_setup.catalog_failed":
     "Models could not be loaded. Retry loading them.",
   "model_setup.no_models":
     "No conversation models are available for this Metask account. Retry or review Models settings.",
   "model_setup.model_unavailable":
-    "The selected model is unavailable. Review model settings before sending.",
+    "The selected model is unavailable. Choose another available model or review its configuration.",
   "model_setup.provider_unavailable":
     "Your model service is not ready. Review its configuration and test a model.",
   "model_setup.execution_unavailable":
-    "The current default execution configuration is unavailable. Review the model selection.",
+    "The selected model is unavailable. Choose an available model or review its configuration.",
   "model_setup.view_schedules": "View scheduled tasks",
   "model_setup.schedule_unavailable":
     "Schedule storage is unavailable, so the execution configuration could not be updated.",
@@ -199,17 +198,17 @@ export const enUS = {
   "account.recharge_open_failed":
     "MetaWork could not open the Metask recharge page. Try again shortly.",
   "execution.command_rejected":
-    "The default model source was not updated. Refresh execution state and try again.",
+    "The model settings were not updated. Refresh and try again.",
   "execution.command_failed":
-    "MetaWork could not complete the default model source action. Use the recovery action shown in Execution.",
+    "MetaWork could not update the model settings. Review the configuration and try again.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
     "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
-  "execution.updated": "Default model source updated.",
+  "execution.updated": "Model settings updated.",
   "operation.account": "Updating the Metask account",
-  "operation.execution": "Updating the default model source",
+  "operation.execution": "Updating model settings",
   "operation.account_cancel": "Cancelling the Metask account action",
   "command.timeout_reconciled":
     "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
@@ -1357,8 +1356,6 @@ export const enUS = {
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
     "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
-  "settings.default_model_for_new_tasks": "Default model for new tasks",
-  "settings.current_default": "Current",
   "settings.provider": "Provider",
   "settings.provider_help":
     "Choose the service, then select one of its available models.",
@@ -1369,10 +1366,6 @@ export const enUS = {
     "Managed through your Metask account",
   "settings.api_key": "API key",
   "settings.manage_models": "Manage models",
-  "settings.default_selection_missing":
-    "No executable default model is selected",
-  "settings.default_model_unavailable":
-    "The previous default model is no longer in the available catalog. Choose another default model.",
   "settings.providers_help":
     "Connect a model service or manage its address, API key, and models.",
   "settings.providers_empty": "No custom APIs yet.",
@@ -1404,7 +1397,7 @@ export const enUS = {
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
   "settings.custom_provider_replace_credential": "Update API key",
   "settings.custom_provider_remove_confirm":
-    "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
+    "Remove this service and its stored credential? Its models will no longer be available for new tasks. Existing tasks keep their current binding.",
   "settings.custom_provider_removing": "Removing…",
   "settings.custom_models": "Custom models",
   "settings.model_connection_provider": "Model provider",
@@ -1414,7 +1407,7 @@ export const enUS = {
   "settings.model_connection_help":
     "Add a third-party model, then test it before using it in a task.",
   "settings.model_connection_dialog_help":
-    "Choose a preset or an existing service, enter the model, and save. This does not change your default model.",
+    "Choose a preset or an existing service, enter the model, and save.",
   "settings.model_connection_incomplete": "No model added yet",
   "settings.model_connection_empty": "No custom models yet.",
   "settings.model_connection_edit": "Edit model",
@@ -1442,17 +1435,9 @@ export const enUS = {
   "settings.catalog_count": "Models {models}",
   "settings.loading_models": "Loading available models",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.default_model": "Default model",
-  "settings.default_model_help":
-    "Choose the model used by new tasks. Existing tasks keep their own model.",
-  "settings.new_task_model_help":
-    "Choose the model for this new task without changing the global default.",
+  "settings.new_task_model_help": "Choose the model for this new task.",
   "settings.new_task_model_invalid":
     "The previously selected model is no longer available. Choose another model before sending.",
-  "settings.only_model_help":
-    "This configuration currently provides only one available model.",
-  "settings.model_menu_help":
-    "Choose from models available to the selected provider.",
   "settings.custom_model_add_help":
     "Enter the model ID exposed by this provider. It will be tested before it can become the default.",
   "settings.custom_model_add": "Add model",
@@ -1466,26 +1451,6 @@ export const enUS = {
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",
   "settings.model_loading": "Loading models…",
-  "settings.switch.pending_label": "Pending change",
-  "settings.switch.saving_label": "Saving",
-  "settings.switch.preparing_model": "Preparing {model}",
-  "settings.switch.saving": "Saving the new default",
-  "settings.switch.saving_detail":
-    "{api} · {model} will be used for new tasks when saving finishes.",
-  "settings.switch.current_preserved":
-    "Your current default stays active until this finishes.",
-  "settings.switch.current_model_preserved":
-    "Your current default model, {model}, stays active until this finishes.",
-  "settings.switch.refreshing":
-    "Your current default stays active while account options refresh.",
-  "settings.switch.working":
-    "Account changes remain locked until this action finishes.",
-  "settings.switch.cancelled":
-    "Change cancelled. {api} · {model} remains your default.",
-  "settings.switch.failure_preserved":
-    "No default was changed. {api} · {model} remains active.",
-  "settings.existing_tasks_unchanged":
-    "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out",
   "settings.signout_help":
     "Sign in again to create new tasks using Metask models. Your custom models, local tasks, and workspace files will remain.",
@@ -1821,7 +1786,7 @@ export const enUS = {
   "scheduled.reason.previous_task_running":
     "The previous task is still running.",
   "scheduled.reason.execution_changed":
-    "The default model or connection changed. Edit and confirm.",
+    "The model or connection changed. Edit and confirm.",
   "scheduled.reason.workspace_unavailable":
     "Automatic workspaces are unavailable. Check settings, then edit and confirm.",
   "scheduled.reason.capacity_reached":

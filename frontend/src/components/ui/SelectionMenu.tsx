@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 import { Icon } from "./Icon.tsx";
 import { Select } from "./select.tsx";
@@ -18,6 +18,7 @@ export function SelectionMenu({
   value,
   options,
   triggerId,
+  triggerRef,
   placeholder,
   ariaLabel,
   title,
@@ -34,6 +35,7 @@ export function SelectionMenu({
   value: string;
   options: SelectionMenuOption[];
   triggerId?: string;
+  triggerRef?: Ref<HTMLButtonElement>;
   placeholder: string;
   ariaLabel: string;
   title?: string;
@@ -66,6 +68,7 @@ export function SelectionMenu({
     >
       <Select.Trigger
         id={triggerId}
+        ref={triggerRef}
         className={`selection-trigger focus-ring ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
         aria-busy={busy || undefined}

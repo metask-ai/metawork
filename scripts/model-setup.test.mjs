@@ -469,7 +469,7 @@ test("Host preparation, failures and default selection are not first-use setup",
   state.account.state = "signed_out";
   assert.deepEqual(classify(state, { hasReadyModels: true }), {
     reason: "choose",
-    action: "models",
+    action: "choose_model",
   });
   state.models.availability = "loading";
   assert.deepEqual(classify(state), { reason: "loading", action: null });
@@ -598,7 +598,7 @@ test("login leaves setup, permits cancellation and never sends the preserved dra
   assert.equal(app.calls.input, 0);
 });
 
-test("configure opens model services and default selection in Models and preserves the draft", async (ctx) => {
+test("configure opens Models for user-added model management and preserves the draft", async (ctx) => {
   const app = await renderApp(ctx);
   const user = userEvent.setup({ document: dom.window.document });
   let dialog = await screen.findByRole("dialog");
@@ -623,7 +623,7 @@ test("configure opens model services and default selection in Models and preserv
     ),
   );
   assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
-  assert.ok(screen.getByRole("combobox", { name: "Default model" }));
+  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
   await screen.findByRole("heading", { name: "Models" });
   await user.click(screen.getByRole("button", { name: "Back to workbench" }));
   await waitFor(() =>
@@ -733,6 +733,29 @@ test("signed-out users with a ready custom model can send without seeing setup",
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
   assert.equal(app.calls.login, 0);
   assert.equal(app.calls.select, 0);
+});
+
+test("an available model is selected in the task input rather than model management", async (ctx) => {
+  const state = customModels();
+  state.models.defaultSelection = null;
+  state.newTaskAdmission.available = false;
+  state.newTaskAdmission.activeModelRef = null;
+  const app = await renderApp(ctx, state);
+  const user = userEvent.setup({ document: dom.window.document });
+  const textarea = document.querySelector(".composer-bar textarea");
+  fireEvent.change(textarea, {
+    target: { value: "Keep this draft while choosing" },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Choose a model", exact: true }),
+  );
+  const option = await screen.findByRole("option", { name: /Fixture model/ });
+  await user.click(option);
+  assert.equal(textarea.value, "Keep this draft while choosing");
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
+  assert.equal(screen.queryByRole("dialog", { name: "Settings" }), null);
+  assert.equal(app.calls.select, 0);
+  assert.equal(app.calls.create, 0);
 });
 
 test("a service missing its credential goes to Providers regardless of Account state", () => {

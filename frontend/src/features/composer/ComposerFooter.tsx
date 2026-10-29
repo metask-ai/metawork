@@ -115,6 +115,7 @@ export function ComposerFooter({
   selectedWorkspaceOptionId,
   workspaceEditable,
   modelLabel,
+  modelTriggerRef,
   modelOptions,
   selectedModelId,
   modelEditable,
@@ -176,6 +177,7 @@ export function ComposerFooter({
   selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
   modelLabel: string | null;
+  modelTriggerRef?: RefObject<HTMLButtonElement | null>;
   modelOptions: {
     selectionId: string;
     displayName: string;
@@ -855,6 +857,7 @@ export function ComposerFooter({
                 <span className="composer-model-context">
                   <span className="sr-only">{t("account.model")}</span>
                   <ModelSelector
+                    triggerRef={modelTriggerRef}
                     label={modelLabel}
                     options={modelOptions}
                     selectedId={selectedModelId}

@@ -33,15 +33,14 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.loading": "正在加载模型…",
   "model_setup.preparing": "正在准备模型…",
   "model_setup.choose": "选择可用模型后即可发送。",
-  "model_setup.choose_action": "查看模型设置",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
   "model_setup.no_models":
     "当前 Metask 账号没有可用对话模型，请重试或查看模型设置。",
-  "model_setup.model_unavailable": "所选模型暂不可用，请查看模型设置。",
+  "model_setup.model_unavailable": "所选模型暂不可用，请重新选择或检查配置。",
   "model_setup.provider_unavailable":
     "自己的模型服务尚未就绪，请检查配置并测试模型。",
   "model_setup.execution_unavailable":
-    "当前默认执行配置暂不可用，请检查模型选择。",
+    "所选模型暂不可用，请选择可用模型或检查配置。",
   "model_setup.view_schedules": "查看定时任务",
   "model_setup.schedule_unavailable":
     "定时任务存储不可用，暂时无法更新执行配置。",
@@ -171,16 +170,15 @@ export const zhCN: Record<MessageId, string> = {
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.recharge_open_failed": "无法打开 Metask 充值页面，请稍后重试。",
-  "execution.command_rejected": "默认模型来源未更新，请刷新执行状态后重试。",
-  "execution.command_failed":
-    "MetaWork 无法完成默认模型来源操作，请使用执行区域显示的恢复操作。",
+  "execution.command_rejected": "模型配置未更新，请刷新后重试。",
+  "execution.command_failed": "MetaWork 无法更新模型配置，请检查配置后重试。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
   "account.updated": "Metask 账号已更新。",
-  "execution.updated": "默认模型来源已更新。",
+  "execution.updated": "模型配置已更新。",
   "operation.account": "更新 Metask 账号",
-  "operation.execution": "更新默认模型来源",
+  "operation.execution": "更新模型配置",
   "operation.account_cancel": "取消 Metask 账号操作",
   "command.timeout_reconciled":
     "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",
@@ -1195,8 +1193,6 @@ export const zhCN: Record<MessageId, string> = {
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "直接执行会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
-  "settings.default_model_for_new_tasks": "新任务默认模型",
-  "settings.current_default": "当前默认",
   "settings.provider": "Provider",
   "settings.provider_help": "先选择提供模型的服务，再选择可用模型。",
   "settings.choose_provider": "选择 Provider",
@@ -1205,9 +1201,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.provider_managed_description": "通过 Metask 账号管理",
   "settings.api_key": "API Key",
   "settings.manage_models": "管理模型",
-  "settings.default_selection_missing": "未设置可执行的默认模型",
-  "settings.default_model_unavailable":
-    "原默认模型已不在当前可用目录中。请重新选择默认模型。",
   "settings.providers_help": "连接模型服务，或管理服务地址、API Key 和模型。",
   "settings.providers_empty": "还没有自定义 API。",
   "settings.providers_unavailable": "当前版本无法管理 Provider。",
@@ -1235,7 +1228,7 @@ export const zhCN: Record<MessageId, string> = {
     "修改协议或 Base URL 后需要重新测试该 Provider 的模型；已保存的 API Key 不会回填。",
   "settings.custom_provider_replace_credential": "更新 API Key",
   "settings.custom_provider_remove_confirm":
-    "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
+    "删除这个服务及其保存的凭据？它的模型将无法再用于新任务，已有任务仍保留当前绑定。",
   "settings.custom_provider_removing": "正在删除…",
   "settings.custom_models": "自定义模型",
   "settings.model_connection_provider": "模型厂商",
@@ -1244,7 +1237,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_help":
     "添加第三方模型，测试通过后即可在任务中使用。",
   "settings.model_connection_dialog_help":
-    "选择厂商预设或已有服务，填写模型后保存；不会修改默认模型。",
+    "选择厂商预设或已有服务，填写模型后保存。",
   "settings.model_connection_incomplete": "尚未添加模型",
   "settings.model_connection_empty": "还没有自定义模型。",
   "settings.model_connection_edit": "编辑模型",
@@ -1272,17 +1265,11 @@ export const zhCN: Record<MessageId, string> = {
   "settings.catalog_count": "模型 {models}",
   "settings.loading_models": "正在加载可用模型",
   "settings.language_help": "更改会立即应用到这台设备。",
-  "settings.default_model": "默认模型",
-  "settings.default_model_help":
-    "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
-  "settings.new_task_model_help":
-    "选择这个新任务使用的模型；不会修改全局默认模型。",
+  "settings.new_task_model_help": "选择这个新任务使用的模型。",
   "settings.new_task_model_invalid":
     "之前选择的模型已不可用；请重新选择模型后再发送。",
-  "settings.only_model_help": "当前配置只提供这一个可用模型。",
-  "settings.model_menu_help": "从所选 Provider 的可用模型中选择。",
   "settings.custom_model_add_help":
-    "输入这个 Provider 开放的模型 ID；测试通过后才能设为默认模型。",
+    "输入服务支持的模型 ID，测试通过后即可在任务中使用。",
   "settings.custom_model_add": "添加模型",
   "settings.custom_model_adding": "正在添加…",
   "settings.custom_model_test": "测试模型",
@@ -1294,21 +1281,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",
   "settings.model_loading": "正在加载模型…",
-  "settings.switch.pending_label": "待应用更改",
-  "settings.switch.saving_label": "正在保存",
-  "settings.switch.preparing_model": "正在准备 {model}",
-  "settings.switch.saving": "正在保存新的默认配置",
-  "settings.switch.saving_detail": "保存完成后，新任务将使用 {api} · {model}。",
-  "settings.switch.current_preserved": "完成前，当前默认配置仍然有效。",
-  "settings.switch.current_model_preserved":
-    "完成前，当前默认模型 {model} 仍然有效。",
-  "settings.switch.refreshing": "同步账号选项期间，当前默认配置仍然有效。",
-  "settings.switch.working": "此操作完成前，相关账号设置会保持锁定。",
-  "settings.switch.cancelled": "已取消更改，{api} · {model} 仍为默认配置。",
-  "settings.switch.failure_preserved":
-    "默认配置未被修改，{api} · {model} 仍然有效。",
-  "settings.existing_tasks_unchanged":
-    "默认配置只影响新任务。已有任务的绑定和历史不会被改写。",
   "settings.signout_title": "退出登录",
   "settings.signout_help":
     "退出后，创建使用 Metask 模型的新任务需要重新登录。自定义模型、本地任务和工作区文件会保留。",
@@ -1597,7 +1569,7 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.occurrence.interrupted": "已中断",
   "scheduled.occurrence.delayed": "延迟触发，原计划时间：{time}",
   "scheduled.reason.previous_task_running": "上一次任务仍在运行。",
-  "scheduled.reason.execution_changed": "默认模型或连接已变更，请编辑并确认。",
+  "scheduled.reason.execution_changed": "模型或连接已变更，请编辑并确认。",
   "scheduled.reason.workspace_unavailable":
     "自动工作区不可用，请检查设置后编辑确认。",
   "scheduled.reason.capacity_reached": "运行容量不足，请释放容量后编辑确认。",

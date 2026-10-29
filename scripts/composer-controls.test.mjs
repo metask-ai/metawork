@@ -466,7 +466,6 @@ function settingsElement(account, overrides = {}) {
         return Promise.resolve(false);
       },
       onCancel() {},
-      onSelectModel() {},
       onCreateCustomProvider() {
         return Promise.resolve(false);
       },
@@ -489,7 +488,6 @@ function settingsElement(account, overrides = {}) {
         return Promise.resolve(false);
       },
       onTestCustomModel() {},
-      onSelectCustomModel() {},
       onBeginLogin() {},
       onOpenRecharge() {},
       onLogout() {},
@@ -1061,179 +1059,17 @@ test("Provider Base URLs map to all four existing protocol endpoints", () => {
   );
 });
 
-test("Settings selects a default model without a Provider step", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount);
-
-  assert.equal(screen.queryByRole("combobox", { name: "Provider" }), null);
-  assert.equal(screen.queryByRole("combobox", { name: "Image model" }), null);
-  assert.equal(screen.queryByRole("combobox", { name: "API key" }), null);
-  assert.match(screen.getByText("Models 2").textContent, /Models 2/);
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-  assert.deepEqual(view.selections.model, ["model-2"]);
-
-  view.rerenderModels(
-    settingsModels(
-      {
-        catalogState: "loading",
-        models: [{ id: "model-2", displayName: "Model Two" }],
-      },
-      { operation: "refreshing_catalog" },
-    ),
-  );
-  assert.match(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("status").textContent,
-    /Preparing Model Two/,
-  );
-  assert.match(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("status").textContent,
-    /current default model, model-1/i,
-  );
-  const model = screen.getByRole("combobox", { name: "Default model" });
-  assert.equal(model.getAttribute("aria-busy"), "true");
-  assert.equal(model.hasAttribute("disabled"), true);
-
-  view.rerenderModels(
-    settingsModels(
-      { models: [{ id: "model-2", displayName: "Model Two" }] },
-      {
-        metaskSelection: { sourceId: "metask", modelId: "model-2" },
-        defaultSelection: { sourceId: "metask", modelId: "model-2" },
-      },
-    ),
-  );
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model Two/,
-  );
-  assert.equal(screen.queryByText("Pending change"), null);
-  assert.equal(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).queryByRole("status"),
-    null,
-  );
-});
-
-test("Settings keeps a model choice visibly pending without declaring it committed", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount);
-
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-
-  assert.deepEqual(view.selections.model, ["model-2"]);
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model Two/,
-  );
-  assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
-});
-
-test("Settings keeps Metask available while a custom provider is the default", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const customSelections = [];
-  const view = renderSettings(readySettingsAccount, {
-    models: {
-      ...readySettingsModels,
-      defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
-      customProviders: [
-        {
-          id: "provider-1",
-          builtinProviderId: null,
-          displayName: "Team OpenAI",
-          protocol: "openai_chat_completions",
-          normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
-          state: "ready",
-          credentialStatus: "ready",
-          enabled: true,
-          models: [
-            {
-              id: "gpt-5",
-              displayName: "GPT-5",
-              metadata: readySettingsModels.providers[0].models[0].metadata,
-              metadataProvenance: "user_declared",
-              testStatus: "connected",
-              ready: true,
-            },
-            {
-              id: "gpt-5-mini",
-              displayName: "GPT-5 mini",
-              metadata: readySettingsModels.providers[0].models[0].metadata,
-              metadataProvenance: "user_declared",
-              testStatus: "connected",
-              ready: true,
-            },
-          ],
-          providerRevision: "1",
-          sourceGeneration: "1",
-          catalogGeneration: "1",
-        },
-      ],
-    },
-    onSelectCustomModel(...selection) {
-      customSelections.push(selection);
-    },
-  });
-
-  const defaultModel = screen.getByRole("combobox", {
-    name: "Default model",
-  });
-  assert.match(defaultModel.textContent, /GPT-5/);
-  await user.click(defaultModel);
-  await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
-  assert.deepEqual(customSelections, [["provider-1", "1", "gpt-5-mini"]]);
-
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model One/ }));
-  assert.deepEqual(view.selections.model, ["model-1"]);
-});
-
-test("Settings keeps custom models selectable during Metask refresh and retains full identity for duplicate model IDs", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const selected = [];
-  renderSettings(readySettingsAccount, {
-    accountDisabled: true,
-    models: {
-      ...readySettingsModels,
-      operation: "refreshing_catalog",
-      customProviders: [
-        {
-          id: "custom-source",
-          builtinProviderId: null,
-          displayName: "Custom API",
-          protocol: "openai_responses",
-          normalizedBaseUrl: "https://example.com/responses",
-          enabled: true,
-          state: "ready",
-          credentialStatus: "ready",
-          providerRevision: "4",
-          sourceGeneration: "2",
-          catalogGeneration: "3",
-          models: [
-            {
-              ...readySettingsModels.providers[0].models[0],
-              ready: true,
-              metadataProvenance: "user_declared",
-              testStatus: "connected",
-            },
-          ],
-        },
-      ],
-    },
-    onSelectCustomModel: (...selection) => selected.push(selection),
-  });
-  const picker = screen.getByRole("combobox", { name: "Default model" });
-  assert.equal(picker.disabled, false);
-  await user.click(picker);
-  const group = screen.getByRole("group", { name: "Custom models" });
-  await user.click(within(group).getByRole("option", { name: /Model One/ }));
-  assert.deepEqual(selected, [["custom-source", "4", "model-1"]]);
+test("Models manages user-added models without an official catalog or default selection", () => {
+  const view = renderModelSettings();
+  assert.ok(screen.getByRole("heading", { name: "Models", exact: true }));
+  assert.ok(screen.getByRole("heading", { name: "Custom models" }));
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
+  assert.equal(screen.queryByText("Model One"), null);
+  assert.equal(screen.queryByText("Model Two"), null);
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
+  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
+  assert.equal(screen.queryByText("Current default"), null);
+  assert.deepEqual(view.selections.model, []);
 });
 
 test("Models keeps adding and removing models after the first provider model", async () => {
@@ -1314,12 +1150,7 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
     },
   );
 
-  assert.equal(
-    screen
-      .getByRole("combobox", { name: "Default model" })
-      .hasAttribute("disabled"),
-    true,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
 
   await user.click(screen.getByRole("link", { name: "General" }));
   assert.equal(
@@ -1336,21 +1167,15 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   assert.equal(cancellations, 1);
 });
 
-test("Settings reports Models failure without changing Account identity", async () => {
+test("Official catalog failures do not affect model management or Account identity", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount, {
     models: settingsModels({}, { errorCode: "catalog_unavailable" }),
     initialSection: "models",
   });
 
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model One/,
-  );
-  assert.match(
-    screen.getByRole("alert").textContent,
-    /Model configuration needs attention/,
-  );
+  assert.equal(screen.queryByText("Model One"), null);
+  assert.equal(screen.queryByRole("alert"), null);
 
   await user.click(screen.getByRole("link", { name: "Account" }));
   assert.match(screen.getByText("Metask User").textContent, /Metask User/);
@@ -1474,7 +1299,6 @@ function renderComposer(overrides = {}) {
       onRefreshSkillCatalog() {},
       onConfirmAccess() {},
       onSelectWorkspace() {},
-      onSelectModel() {},
       ...overrides,
       draft,
       onDraftChange(value) {
@@ -1553,10 +1377,10 @@ test("Composer model notice explains the blocker and opens its recovery action",
   renderComposer({
     canSubmit: false,
     modelNotice: createElement(ModelSetupNotice, {
-      notice: { reason: "choose", action: "models" },
+      notice: { reason: "choose", action: "choose_model" },
       disabled: false,
       onAction(action) {
-        assert.equal(action, "models");
+        assert.equal(action, "choose_model");
         opens += 1;
       },
     }),
@@ -1566,16 +1390,13 @@ test("Composer model notice explains the blocker and opens its recovery action",
     /Choose an available model/,
   );
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
-  await user.click(screen.getByRole("button", { name: "Open model settings" }));
+  await user.click(screen.getByRole("button", { name: "Choose a model" }));
   assert.equal(opens, 1);
 });
 
 test("Composer does not show model recovery for a ready selection", () => {
   renderComposer();
-  assert.equal(
-    screen.queryByRole("button", { name: "Open model settings" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Choose a model" }), null);
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {
@@ -2363,44 +2184,27 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
   assert.equal(selected, 0);
 });
 
-test("Models lets an unavailable default be replaced from the current Host catalog", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount, {
-    models: settingsModels({
-      models: [{ id: "model-2", displayName: "Model Two" }],
-    }),
-  });
-  assert.match(
-    screen.getByRole("alert").textContent,
-    /Choose another default model/,
-  );
-  assert.deepEqual(view.selections.model, []);
-  const selector = screen.getByRole("combobox", { name: "Default model" });
-  assert.equal(selector.disabled, false);
-  await user.click(selector);
-  assert.equal(screen.queryByRole("option", { name: /Model One/ }), null);
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-  assert.deepEqual(view.selections.model, ["model-2"]);
-});
-
-test("Models reports an authoritative empty conversation catalog without signing out", () => {
-  const view = renderSettings(readySettingsAccount, {
+test("Models keeps user-added model management available when the official catalog is empty", () => {
+  const view = renderModelSettings({
     models: settingsModels(
       { models: [], errorCode: "no_models" },
       { errorCode: "no_models" },
     ),
   });
-  assert.match(screen.getByRole("alert").textContent, /No conversation models/);
-  assert.equal(
-    screen.getByRole("combobox", { name: "Default model" }).disabled,
-    true,
-  );
-  assert.ok(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("button", { name: "Sync again" }),
-  );
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
   assert.deepEqual(view.selections.model, []);
+});
+
+test("Models keeps canonical storage recovery available without official model settings", () => {
+  renderModelSettings({
+    models: settingsModels({}, { persistenceHealth: "recovery_required" }),
+  });
+  assert.ok(
+    screen.getByRole("button", { name: "Recover model configuration" }),
+  );
+  assert.equal(screen.queryByText("Model One"), null);
 });
 
 test("current Run keeps Stop reachable alongside Send and preserves IME", () => {

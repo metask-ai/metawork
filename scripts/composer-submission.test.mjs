@@ -686,7 +686,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   fixture.snapshot.models.defaultSelection = defaultModel;
   fixture.snapshot.newTaskAdmission.activeModelRef = defaultModel;
   await fixture.publish();
-  const selector = screen.getByRole("combobox", { name: "Default model" });
+  const selector = screen.getByRole("combobox", { name: "Model" });
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
   const user = userEvent.setup({ document });
   await user.click(selector);
@@ -782,7 +782,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   fixture.snapshot.newTaskAdmission.activeModelRef =
     fixture.snapshot.models.defaultSelection;
   await fixture.publish();
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
   assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
   await user.click(await screen.findByRole("option", { name: /minimax-m3/ }));
   await waitFor(() => {
@@ -811,7 +811,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   await user.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
   assert.ok(await screen.findByRole("option", { name: /minimax-m3/ }));
   assert.ok(screen.getByRole("option", { name: /glm-5.3-flash/ }));
   assert.deepEqual(

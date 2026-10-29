@@ -80,11 +80,6 @@ export type CustomModelActions = {
     sourceGeneration: string,
     catalogGeneration: string,
   ) => void;
-  onSelectCustomModel: (
-    providerId: string,
-    revision: string,
-    modelId: string,
-  ) => void;
 };
 type Draft = {
   choice: string;

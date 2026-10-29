@@ -28,15 +28,8 @@ export type SettingsFocusTarget =
   // "providers" focuses the custom-model group within Models.
   "title" | "account" | "models" | "providers" | "archived";
 type SettingsSection = "general" | "account" | "models" | "archived";
-type RequestedSelection = { selectionId: string; label: string };
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
-function modelLabel(
-  model: ModelsView["providers"][number]["models"][number],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  return model.displayName.trim() || model.id;
-}
 export function SettingsPage({
   archiveManagement,
   account,
@@ -50,13 +43,11 @@ export function SettingsPage({
   executionDisabled,
   cancelDisabled,
   onBack,
-  onRefresh,
   onResetModels,
   onChooseAutomaticWorkspaceRoot,
   onResetAutomaticWorkspaceRoot,
   onRetryAutomaticWorkspaceRoot,
   onCancel,
-  onSelectModel,
   onCreateCustomProvider,
   onCreateBuiltinProvider,
   onUpdateCustomProvider,
@@ -66,7 +57,6 @@ export function SettingsPage({
   onReplaceCustomModel,
   onRemoveCustomProvider,
   onTestCustomModel,
-  onSelectCustomModel,
   onBeginLogin,
   onRetryRefresh,
   onRefreshAccountSummary,
@@ -89,7 +79,6 @@ export function SettingsPage({
   executionDisabled: boolean;
   cancelDisabled: boolean;
   onBack: () => void;
-  onRefresh: () => void;
   onResetModels: () => Promise<boolean>;
   onChooseAutomaticWorkspaceRoot: (
     expectedGeneration: string,
@@ -101,7 +90,6 @@ export function SettingsPage({
     expectedGeneration: string,
   ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
-  onSelectModel: (id: string) => void;
   onBeginLogin: () => void;
   onRetryRefresh: () => void;
   onRefreshAccountSummary: () => void;
@@ -115,8 +103,6 @@ export function SettingsPage({
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
-  const [requestedModel, setRequestedModel] =
-    useState<RequestedSelection | null>(null);
   const [automaticRootPending, setAutomaticRootPending] = useState<{
     action: AutomaticWorkspaceRootAction;
     generation: string;
@@ -136,49 +122,6 @@ export function SettingsPage({
   const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
   const automaticRootGeneration = useRef(automaticWorkspaceRoot.generation);
   automaticRootGeneration.current = automaticWorkspaceRoot.generation;
-  const metaskProvider = models.providers.find(
-    (provider) => provider.id === "metask",
-  );
-  const metaskModels = metaskProvider?.models ?? [];
-  const metaskCatalogState =
-    metaskProvider?.catalogState ?? "needs_authentication";
-  const selectedModelId = models.metaskSelection?.modelId ?? "";
-  const committedProviderId = models.defaultSelection
-    ? models.defaultSelection.sourceId === "metask"
-      ? "metask"
-      : models.defaultSelection.sourceId
-    : "";
-  const committedCustomProvider = models.customProviders.find(
-    (provider) => provider.id === committedProviderId,
-  );
-  const committedDefaultModel = models.defaultSelection
-    ? committedProviderId === "metask"
-      ? metaskModels.find(
-          (model) => model.id === models.defaultSelection?.modelId,
-        )
-      : committedCustomProvider?.models.find(
-          (model) => model.id === models.defaultSelection?.modelId,
-        )
-    : null;
-  const metaskDefaultUnavailable =
-    models.defaultSelection?.sourceId === "metask" &&
-    metaskCatalogState === "ready" &&
-    !committedDefaultModel;
-  const currentDefaultLabel = models.defaultSelection
-    ? `${
-        committedProviderId === "metask"
-          ? "Metask"
-          : (committedCustomProvider?.displayName ?? committedProviderId)
-      } · ${committedDefaultModel?.displayName || models.defaultSelection.modelId}`
-    : t("settings.default_selection_missing");
-  const committedModel = metaskModels.find(
-    (model) => model.id === selectedModelId,
-  );
-  const candidateModelId = requestedModel?.selectionId ?? "";
-  const candidateModel =
-    metaskModels.find((model) => model.id === candidateModelId) ?? null;
-  const modelCatalogLoading = models.operation === "refreshing_catalog";
-  const modelBusy = modelCatalogLoading;
   const authenticated = account.state === "authenticated";
   const accountIdentityTitle = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
@@ -193,9 +136,6 @@ export function SettingsPage({
       : account.state === "authorizing"
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
-  const modelsPersistenceReady = models.persistenceHealth === "ready";
-  const providerIsMetask =
-    requestedModel !== null || committedProviderId === "metask";
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -206,114 +146,6 @@ export function SettingsPage({
     ],
     [t],
   );
-  const modelChoices = useMemo(
-    () => [
-      ...metaskModels.map((model) => ({
-        sourceId: "metask",
-        modelId: model.id,
-        option: {
-          value: JSON.stringify(["metask", model.id]),
-          label: modelLabel(model, t),
-          disabled:
-            accountDisabled ||
-            modelBusy ||
-            !authenticated ||
-            (metaskCatalogState !== "ready" &&
-              metaskCatalogState !== "choosing"),
-        } as SelectionMenuOption,
-      })),
-      ...models.customProviders.flatMap((source) =>
-        source.models.map((model) => ({
-          sourceId: source.id,
-          modelId: model.id,
-          option: {
-            value: JSON.stringify([source.id, model.id]),
-            label: model.displayName || model.id,
-            disabled:
-              !source.enabled ||
-              source.state !== "ready" ||
-              source.credentialStatus !== "ready" ||
-              !model.ready,
-          } as SelectionMenuOption,
-        })),
-      ),
-    ],
-    [
-      metaskModels,
-      models.customProviders,
-      accountDisabled,
-      modelBusy,
-      authenticated,
-      metaskCatalogState,
-      t,
-    ],
-  );
-  const modelOptions = modelChoices.map((choice, index) => ({
-    ...choice.option,
-    ...(choice.sourceId !== "metask" &&
-    (index === 0 || modelChoices[index - 1].sourceId === "metask")
-      ? { groupLabel: t("settings.custom_models") }
-      : {}),
-  }));
-  const displayedModelId = requestedModel
-    ? JSON.stringify(["metask", requestedModel.selectionId])
-    : models.defaultSelection
-      ? JSON.stringify([
-          models.defaultSelection.sourceId,
-          models.defaultSelection.modelId,
-        ])
-      : "";
-  const modelIsOnlyOption =
-    modelOptions.length === 1 && modelOptions[0].value === displayedModelId;
-  const canChooseModel =
-    modelsPersistenceReady && modelOptions.some((option) => !option.disabled);
-  const modelPlaceholder =
-    modelCatalogLoading && modelOptions.length === 0
-      ? t("settings.model_loading")
-      : t("account.choose_model");
-  const committedModelName =
-    (committedModel ? modelLabel(committedModel, t) : "") ||
-    selectedModelId ||
-    t("account.model_fallback");
-  const candidateModelName =
-    (candidateModel ? modelLabel(candidateModel, t) : "") ||
-    (requestedModel?.selectionId === candidateModelId
-      ? requestedModel.label
-      : candidateModelId) ||
-    t("account.model_fallback");
-  const modelHasPendingChange =
-    candidateModelId.length > 0 && candidateModelId !== selectedModelId;
-  const transactionStatus = (() => {
-    if (!providerIsMetask) return null;
-    switch (metaskCatalogState) {
-      case "needs_authentication":
-        return null;
-      case "loading":
-        if (modelHasPendingChange) {
-          return {
-            title: t("settings.switch.preparing_model", {
-              model: candidateModelName,
-            }),
-            detail: t("settings.switch.current_model_preserved", {
-              model: committedModelName,
-            }),
-          };
-        }
-        return {
-          title: t("settings.loading_models"),
-          detail: t("settings.switch.refreshing"),
-        };
-      case "choosing":
-        return {
-          title: t("account.choose_model"),
-          detail: t("settings.default_model_help"),
-        };
-      case "unavailable":
-      case "ready":
-      case "failed":
-        return null;
-    }
-  })();
   useEffect(() => {
     if (focusTarget === "archived") {
       setActiveSection("archived");
@@ -417,21 +249,6 @@ export function SettingsPage({
     automaticWorkspaceRoot.canonicalRoot === null
       ? "settings.automatic_workspace.health.write_failed_no_active"
       : `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`;
-  useEffect(() => {
-    if (
-      models.errorCode !== "none" ||
-      account.state !== "authenticated" ||
-      (metaskCatalogState === "ready" && !disabled)
-    ) {
-      setRequestedModel(null);
-    }
-  }, [
-    models.errorCode,
-    metaskCatalogState,
-    models.metaskSelection,
-    account.state,
-    disabled,
-  ]);
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
     window.requestAnimationFrame(() => signOut.current?.focus());
@@ -848,207 +665,46 @@ export function SettingsPage({
                   {t("settings.models")}
                 </h2>
               </div>
-
-              <div className="settings-group">
-                <h3
-                  id="settings-execution-title"
-                  className="settings-group-label"
-                >
-                  {t("settings.default_model_for_new_tasks")}
-                </h3>
-                <div
-                  className="settings-execution-group"
-                  role="group"
-                  aria-labelledby="settings-execution-title"
-                >
-                  <div className="settings-execution-header">
-                    <span className="settings-current-default">
-                      <span>{t("settings.current_default")}</span>
-                      <strong>{currentDefaultLabel}</strong>
-                    </span>
-                    <div className="settings-execution-actions">
-                      <span className="settings-catalog-count">
-                        {t("settings.catalog_count", {
-                          models: modelChoices.length,
-                        })}
-                      </span>
-                      <button
-                        className="settings-refresh-button focus-ring"
-                        disabled={
-                          disabled ||
-                          accountDisabled ||
-                          !authenticated ||
-                          modelBusy
-                        }
-                        onClick={onRefresh}
-                      >
-                        <Icon name="refresh" />
-                        {t("account.refresh_catalog")}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="settings-field">
-                    <div className="settings-field-copy">
-                      <label htmlFor="settings-model">
-                        {t("settings.default_model")}
-                      </label>
-                      <p>
-                        {t(
-                          modelIsOnlyOption
-                            ? "settings.only_model_help"
-                            : "settings.default_model_help",
-                        )}
-                      </p>
-                    </div>
-                    <div className="settings-control-stack">
-                      <SelectionMenu
-                        triggerId="settings-model"
-                        value={displayedModelId}
-                        options={modelOptions}
-                        placeholder={modelPlaceholder}
-                        ariaLabel={t("settings.default_model")}
-                        helper={t("settings.model_menu_help")}
-                        actionLabel={t(
-                          modelIsOnlyOption
-                            ? "settings.view_selection"
-                            : displayedModelId
-                              ? "settings.change_selection"
-                              : "settings.choose_selection",
-                        )}
-                        disabled={
-                          disabled ||
-                          executionDisabled ||
-                          !canChooseModel ||
-                          modelOptions.length === 0
-                        }
-                        busy={providerIsMetask && modelBusy}
-                        leading={<Icon name="model" />}
-                        triggerClassName="settings-control"
-                        contentClassName="settings-selection-menu"
-                        onValueChange={(value) => {
-                          const choice = modelChoices.find(
-                            (item) => item.option.value === value,
-                          );
-                          if (!choice || choice.option.disabled) return;
-                          if (choice.sourceId !== "metask") {
-                            const source = models.customProviders.find(
-                              (item) => item.id === choice.sourceId,
-                            );
-                            if (!source) return;
-                            setRequestedModel(null);
-                            onSelectCustomModel(
-                              source.id,
-                              source.providerRevision,
-                              choice.modelId,
-                            );
-                            return;
-                          }
-                          const model = metaskModels.find(
-                            (candidate) => candidate.id === choice.modelId,
-                          );
-                          if (!model) return;
-                          setRequestedModel({
-                            selectionId: model.id,
-                            label: modelLabel(model, t),
-                          });
-                          onSelectModel(model.id);
-                        }}
-                      />
-                      {providerIsMetask && modelHasPendingChange && (
-                        <span className="settings-pending-label">
-                          <span aria-hidden="true" />
-                          {t("settings.switch.pending_label")}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {transactionStatus && (
-                    <div
-                      className="settings-operation"
-                      role="status"
-                      aria-live="polite"
-                    >
-                      <span
-                        className="settings-operation-dot"
-                        aria-hidden="true"
-                      />
-                      <span className="settings-operation-copy">
-                        <strong>{transactionStatus.title}</strong>
-                        <span>{transactionStatus.detail}</span>
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                <p className="settings-binding-note">
-                  <Icon name="check" />
-                  {t("settings.existing_tasks_unchanged")}
-                </p>
-
-                {models.persistenceHealth === "recovery_required" && (
-                  <ConfirmationNotice
-                    className="task-persistence-error settings-model-reset-notice"
-                    message={t("settings.models_reset_message")}
-                    detail={t("settings.models_reset_detail")}
-                    actionLabel={t("settings.models_reset_action")}
-                    dialogTitle={t("settings.models_reset_dialog_title")}
-                    dialogDescription={t("settings.models_reset_dialog_body")}
-                    cancelLabel={t("common.cancel")}
-                    confirmLabel={t("settings.models_reset_confirm")}
-                    pendingLabel={t("settings.models_reset_pending")}
-                    failureMessage={t("settings.models_reset_failed")}
-                    actionAvailable
-                    disabled={disabled || executionDisabled}
-                    onConfirm={async () =>
-                      (await onResetModels())
-                        ? null
-                        : t("settings.models_reset_failed")
-                    }
-                  />
-                )}
-
-                {((models.errorCode !== "none" &&
-                  models.errorCode !== "authorization_unavailable") ||
-                  metaskDefaultUnavailable) && (
-                  <div className="settings-error" role="alert">
-                    <Icon name="warning" />
-                    <span className="settings-error-copy">
-                      <strong>{t("settings.models_error")}</strong>
-                      <span>
-                        {t(
-                          models.errorCode === "no_models"
-                            ? "account.error.no_models"
-                            : metaskDefaultUnavailable
-                              ? "settings.default_model_unavailable"
-                              : "settings.models_error_help",
-                        )}
-                      </span>
-                    </span>
-                  </div>
-                )}
-              </div>
+              {models.persistenceHealth === "recovery_required" && (
+                <ConfirmationNotice
+                  className="task-persistence-error settings-model-reset-notice"
+                  message={t("settings.models_reset_message")}
+                  detail={t("settings.models_reset_detail")}
+                  actionLabel={t("settings.models_reset_action")}
+                  dialogTitle={t("settings.models_reset_dialog_title")}
+                  dialogDescription={t("settings.models_reset_dialog_body")}
+                  cancelLabel={t("common.cancel")}
+                  confirmLabel={t("settings.models_reset_confirm")}
+                  pendingLabel={t("settings.models_reset_pending")}
+                  failureMessage={t("settings.models_reset_failed")}
+                  actionAvailable
+                  disabled={disabled || executionDisabled}
+                  onConfirm={async () =>
+                    (await onResetModels())
+                      ? null
+                      : t("settings.models_reset_failed")
+                  }
+                />
+              )}
+              {customProviderSettingsAvailable && (
+                <CustomModelsSettings
+                  models={models}
+                  disabled={disabled || executionDisabled}
+                  headingRef={providersHeading}
+                  onCreateCustomProvider={onCreateCustomProvider}
+                  onCreateBuiltinProvider={onCreateBuiltinProvider}
+                  onUpdateCustomProvider={onUpdateCustomProvider}
+                  onReplaceCustomProviderCredential={
+                    onReplaceCustomProviderCredential
+                  }
+                  onAddCustomModel={onAddCustomModel}
+                  onReplaceCustomModel={onReplaceCustomModel}
+                  onRemoveCustomModel={onRemoveCustomModel}
+                  onRemoveCustomProvider={onRemoveCustomProvider}
+                  onTestCustomModel={onTestCustomModel}
+                />
+              )}
             </section>
-          )}
-          {activeSection === "models" && customProviderSettingsAvailable && (
-            <CustomModelsSettings
-              models={models}
-              disabled={disabled || executionDisabled}
-              headingRef={providersHeading}
-              onCreateCustomProvider={onCreateCustomProvider}
-              onCreateBuiltinProvider={onCreateBuiltinProvider}
-              onUpdateCustomProvider={onUpdateCustomProvider}
-              onReplaceCustomProviderCredential={
-                onReplaceCustomProviderCredential
-              }
-              onAddCustomModel={onAddCustomModel}
-              onReplaceCustomModel={onReplaceCustomModel}
-              onRemoveCustomModel={onRemoveCustomModel}
-              onRemoveCustomProvider={onRemoveCustomProvider}
-              onTestCustomModel={onTestCustomModel}
-              onSelectCustomModel={onSelectCustomModel}
-            />
           )}
         </div>
       </div>

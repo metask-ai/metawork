@@ -463,6 +463,7 @@ export default function App() {
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerModelTrigger = useRef<HTMLButtonElement>(null);
   const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
   const newTaskSubmissionInstance = useRef(0);
   const localSubmissionSequence = useRef(0);
@@ -1459,6 +1460,10 @@ export default function App() {
       case "providers":
         if (customProvidersAvailable) openSettings("providers");
         break;
+      case "choose_model":
+        composerModelTrigger.current?.focus();
+        composerModelTrigger.current?.click();
+        break;
       case "models":
         openSettings("models");
         break;
@@ -2221,43 +2226,6 @@ export default function App() {
     } finally {
       endTaskPendingOperation(scope);
     }
-  }
-  async function selectMetaskModel(modelId: string) {
-    const provider = metaskProvider;
-    if (!provider) return;
-    const configured = await runExecutionCommand(() =>
-      client.configureMetaskSelection({
-        sourceId: "metask",
-        modelId,
-        expectedMetaskSelectionRevision:
-          snapshot.models.metaskSelectionRevision,
-        expectedCatalogGeneration: provider.catalogGeneration,
-      }),
-    );
-    if (!configured) return;
-    // The connection installs the committed view before resolving its refresh.
-    // Use that view for the second CAS through the same serialized read owner.
-    const current = latestSnapshotRef.current;
-    if (!current) return;
-    const currentProvider = current.models.providers.find(
-      (candidate) => candidate.id === "metask",
-    );
-    const currentSelection = current.models.metaskSelection;
-    if (
-      !currentProvider ||
-      !currentSelection ||
-      currentSelection.modelId !== modelId
-    )
-      return;
-    await runExecutionCommand(() =>
-      client.selectModelsDefault({
-        sourceId: currentSelection.sourceId,
-        modelId,
-        expectedSelectionRevision: current.models.selectionRevision,
-        expectedSourceGeneration: currentProvider.sourceGeneration,
-        expectedCatalogGeneration: currentProvider.catalogGeneration,
-      }),
-    );
   }
   async function cancelAccountOperation() {
     if (
@@ -3639,6 +3607,7 @@ export default function App() {
         <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
       <ComposerFooter
+        modelTriggerRef={composerModelTrigger}
         textareaRef={composer}
         sendDisabledReason={inputDisabledReason}
         approvalModeControl={
@@ -4279,9 +4248,6 @@ export default function App() {
             executionDisabled={executionBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onBack={closeSettings}
-            onRefresh={() =>
-              void runExecutionCommand(() => client.refreshModelsCatalog())
-            }
             onResetModels={() =>
               runExecutionCommand(() =>
                 client.resetModelsStore(snapshot.revision),
@@ -4303,7 +4269,6 @@ export default function App() {
               )
             }
             onCancel={() => void cancelAccountOperation()}
-            onSelectModel={(id) => void selectMetaskModel(id)}
             onCreateCustomProvider={(input) =>
               runExecutionCommand(() => client.createCustomProvider(input))
             }
@@ -4395,23 +4360,6 @@ export default function App() {
                   sourceGeneration,
                   catalogGeneration,
                 ),
-              )
-            }
-            onSelectCustomModel={(providerId, generation, modelId) =>
-              void runExecutionCommand(() =>
-                client.selectModelsDefault({
-                  sourceId: providerId,
-                  modelId,
-                  expectedSelectionRevision: snapshot.models.selectionRevision,
-                  expectedSourceGeneration:
-                    snapshot.models.customProviders.find(
-                      (connection) => connection.id === providerId,
-                    )?.sourceGeneration ?? "0",
-                  expectedCatalogGeneration:
-                    snapshot.models.customProviders.find(
-                      (connection) => connection.id === providerId,
-                    )?.catalogGeneration ?? "0",
-                }),
               )
             }
             onBeginLogin={() =>

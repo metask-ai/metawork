@@ -1,9 +1,11 @@
+import type { Ref } from "react";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export function ModelSelector({
   label,
+  triggerRef,
   options,
   selectedId,
   editable,
@@ -13,6 +15,7 @@ export function ModelSelector({
   onSelect,
 }: {
   label: string;
+  triggerRef?: Ref<HTMLButtonElement>;
   options: {
     selectionId: string;
     displayName: string;
@@ -38,6 +41,7 @@ export function ModelSelector({
 
   return (
     <SelectionMenu
+      triggerRef={triggerRef}
       value={selectedId}
       options={options.map((model, index) => ({
         value: model.selectionId,
@@ -51,7 +55,7 @@ export function ModelSelector({
             : undefined,
       }))}
       placeholder={label || t("account.choose_model")}
-      ariaLabel={t("settings.default_model")}
+      ariaLabel={t("account.model")}
       title={contextTitle}
       helper={contextTitle}
       disabled={disabled}
