@@ -997,9 +997,6 @@ pub const Runtime = struct {
         base_url: []const u8,
         initial_model: ?contract.CustomModelInput,
     ) contract.CommandResult {
-        for (self.registry.views()) |provider|
-            if (provider.builtin_provider_id == provider_id)
-                return .rejected(.invalid_provider);
         const definition = builtin_providers.find(provider_id);
         const endpoint = contract.completionEndpointFromBaseUrlAlloc(
             self.allocator,
@@ -1745,6 +1742,15 @@ test "Models Runtime creates a connection and its first model in the same durabl
         try std.testing.expectEqual(@as(usize, 1), restored.views()[0].models.len);
         try std.testing.expectEqualStrings("deepseek-flash", restored.views()[0].models[0].id);
         try std.testing.expect(!restored.views()[0].models[0].ready);
+        const saved = restored.views()[0];
+        try std.testing.expect(restored.submitCommand(.{ .remove_custom_model = .{
+            .selection = .{ .source_id = saved.id, .model_id = "deepseek-flash" },
+            .expected_provider_revision = saved.provider_revision,
+            .expected_catalog_generation = saved.catalog_generation,
+        } }).accepted);
+        try std.testing.expectEqual(@as(usize, 0), restored.views().len);
+        try std.testing.expectEqual(@as(usize, 0), restored.registry.credentialDeletions().len);
+        try std.testing.expect(!vault.present);
     }
 }
 
@@ -1790,7 +1796,7 @@ test "Models Runtime durably creates a Provider before its first model" {
     }
 }
 
-test "built-in Provider recipe creates a fixed provider and reuses model management" {
+test "built-in recipe fixes protocol and endpoint while rejecting credential slot collisions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1813,6 +1819,7 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
         contract.BuiltinProviderId.deepseek,
         runtime.views()[0].builtin_provider_id.?,
     );
+    // The fixture deliberately generates the same credential slot again.
     try std.testing.expect(!runtime.createBuiltinWithCredential(
         "second-secret",
         .deepseek,

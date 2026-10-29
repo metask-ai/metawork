@@ -1338,15 +1338,14 @@ export const enUS = {
   "settings.provider_save_api_key": "Save API key",
   "settings.custom_models": "Custom models",
   "settings.model_connection_provider": "Model vendor",
-  "settings.model_connection_choose_provider":
-    "Choose a vendor or saved connection",
+  "settings.model_connection_choose_provider": "Choose a model vendor",
   "settings.model_connection_custom": "Custom / other service",
   "settings.model_connection_help":
     "Add a third-party model, then test it before using it in a task.",
   "settings.model_connection_edit_help":
     "Edit the model ID or update the API key.",
   "settings.model_connection_dialog_help":
-    "Choose a preset or an existing service, enter the model, and save.",
+    "Choose a vendor or custom service, enter the model, and save.",
   "settings.model_connection_empty": "No custom models yet.",
   "settings.model_connection_edit": "Edit model",
   "settings.model_connection_details": "Connection settings",

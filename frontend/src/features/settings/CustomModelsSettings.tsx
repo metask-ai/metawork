@@ -100,12 +100,6 @@ export type CustomModelActions = {
     revision: string,
     apiKey: string,
   ) => Promise<boolean>;
-  onAddCustomModel: (
-    providerId: string,
-    revision: string,
-    catalogGeneration: string,
-    modelId: string,
-  ) => Promise<boolean>;
   onReplaceCustomModel: (
     providerId: string,
     revision: string,
@@ -199,7 +193,9 @@ export function CustomModelsSettings({
       source
         ? {
             ...emptyDraft(),
-            choice: `saved:${source.id}`,
+            choice: source.builtinProviderId
+              ? `preset:${source.builtinProviderId}`
+              : "custom",
             providerId: source.id,
             revision: source.providerRevision,
             catalogGeneration: source.catalogGeneration,
@@ -229,9 +225,6 @@ export function CustomModelsSettings({
     draft?.catalogGeneration,
   ]);
   function choose(value: string) {
-    const source = models.customProviders.find(
-      (item) => value === `saved:${item.id}`,
-    );
     const recipe = models.builtinProviderPresets.find(
       (item) => value === `preset:${item.id}`,
     );
@@ -239,14 +232,8 @@ export function CustomModelsSettings({
     setDraft({
       ...emptyDraft(),
       choice: value,
-      providerId: source?.id ?? null,
-      revision: source?.providerRevision ?? null,
-      catalogGeneration: source?.catalogGeneration ?? null,
-      protocol:
-        source?.protocol ?? recipe?.protocol ?? "openai_chat_completions",
-      baseUrl: source
-        ? customProviderBaseUrl(source)
-        : (recipe?.defaultBaseUrl ?? ""),
+      protocol: recipe?.protocol ?? "openai_chat_completions",
+      baseUrl: recipe?.defaultBaseUrl ?? "",
     });
   }
   async function perform(operation: () => Promise<boolean>) {
@@ -276,26 +263,16 @@ export function CustomModelsSettings({
     if (!draft || !draft.modelId.trim()) return;
     const modelId = draft.modelId.trim();
     if (editing && modelId === draft.originalModelId) return;
-    if (provider) {
-      if (editing)
-        await perform(() =>
-          actions.onReplaceCustomModel(
-            provider.id,
-            provider.providerRevision,
-            provider.catalogGeneration,
-            draft.originalModelId!,
-            modelId,
-          ),
-        );
-      else
-        await perform(() =>
-          actions.onAddCustomModel(
-            provider.id,
-            provider.providerRevision,
-            provider.catalogGeneration,
-            modelId,
-          ),
-        );
+    if (provider && editing) {
+      await perform(() =>
+        actions.onReplaceCustomModel(
+          provider.id,
+          provider.providerRevision,
+          provider.catalogGeneration,
+          draft.originalModelId!,
+          modelId,
+        ),
+      );
     } else if (preset) {
       await perform(() =>
         actions.onCreateBuiltinProvider({
@@ -329,21 +306,10 @@ export function CustomModelsSettings({
     }
   }
   const choiceOptions = [
-    ...models.builtinProviderPresets.map((recipe) => {
-      const saved = models.customProviders.find(
-        (source) => source.builtinProviderId === recipe.id,
-      );
-      return {
-        value: saved ? `saved:${saved.id}` : `preset:${recipe.id}`,
-        label: recipe.displayName,
-      };
-    }),
-    ...models.customProviders
-      .filter((source) => source.builtinProviderId === null)
-      .map((source) => ({
-        value: `saved:${source.id}`,
-        label: source.displayName,
-      })),
+    ...models.builtinProviderPresets.map((recipe) => ({
+      value: `preset:${recipe.id}`,
+      label: recipe.displayName,
+    })),
     { value: "custom", label: t("settings.model_connection_custom") },
   ];
   async function remove() {
@@ -531,14 +497,10 @@ export function CustomModelsSettings({
                         <SelectionMenu
                           triggerClassName="settings-control"
                           value={draft.modelId}
-                          options={preset.modelIds
-                            .filter(
-                              (id) =>
-                                !provider?.models.some(
-                                  (item) => item.id === id,
-                                ),
-                            )
-                            .map((id) => ({ value: id, label: id }))}
+                          options={preset.modelIds.map((id) => ({
+                            value: id,
+                            label: id,
+                          }))}
                           placeholder={t("account.choose_model")}
                           ariaLabel={t("settings.custom_model_id")}
                           disabled={busy}

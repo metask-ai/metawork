@@ -1176,13 +1176,13 @@ export const zhCN: Record<MessageId, string> = {
   "settings.provider_save_api_key": "保存 API Key",
   "settings.custom_models": "自定义模型",
   "settings.model_connection_provider": "模型厂商",
-  "settings.model_connection_choose_provider": "选择厂商或已有服务",
+  "settings.model_connection_choose_provider": "选择模型厂商",
   "settings.model_connection_custom": "自定义 / 其他服务",
   "settings.model_connection_help":
     "添加第三方模型，测试通过后即可在任务中使用。",
   "settings.model_connection_edit_help": "修改模型 ID 或更新 API Key。",
   "settings.model_connection_dialog_help":
-    "选择厂商预设或已有服务，填写模型后保存。",
+    "选择模型厂商或自定义服务，填写模型后保存。",
   "settings.model_connection_empty": "还没有自定义模型。",
   "settings.model_connection_edit": "编辑模型",
   "settings.model_connection_details": "连接设置",

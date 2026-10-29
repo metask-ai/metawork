@@ -992,7 +992,11 @@ test("model rows edit the exact model and expose shared credential replacement w
   await user.click(
     screen.getByRole("button", { name: "Add model", exact: true }),
   );
-  const addDialog = await chooseModelSource(user, "Team");
+  const addDialog = await chooseModelSource(user, "Custom / other service");
+  assert.equal(
+    within(addDialog).getByRole("textbox", { name: "Base URL" }).value,
+    "",
+  );
   assert.ok(within(addDialog).getByRole("textbox", { name: "Model ID" }));
 });
 
@@ -1102,8 +1106,9 @@ test("Models manages user-added models without an official catalog or default se
   assert.deepEqual(view.selections.model, []);
 });
 
-test("Models keeps adding and removing models after the first provider model", async () => {
+test("Models adds a model independently without listing or reusing legacy providers", async () => {
   const user = userEvent.setup({ document: dom.window.document });
+  const creations = [];
   const additions = [];
   const removals = [];
   renderSettings(readySettingsAccount, {
@@ -1136,6 +1141,10 @@ test("Models keeps adding and removing models after the first provider model", a
         },
       ],
     },
+    onCreateCustomProvider(input) {
+      creations.push(input);
+      return Promise.resolve(false);
+    },
     onAddCustomModel(...input) {
       additions.push(input);
       return Promise.resolve(false);
@@ -1147,16 +1156,59 @@ test("Models keeps adding and removing models after the first provider model", a
   });
 
   await user.click(screen.getByRole("button", { name: "Add model" }));
-  const dialog = await chooseModelSource(user, "Multi-model provider");
+  const addDialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(addDialog).getByRole("combobox", { name: "Model vendor" }),
+  );
+  await screen.findByRole("option", {
+    name: "Custom / other service",
+    exact: true,
+  });
+  assert.deepEqual(
+    screen.getAllByRole("option").map((option) => option.textContent),
+    ["Custom / other service"],
+  );
+  assert.equal(
+    screen.queryByText("Multi-model provider", { exact: true }),
+    null,
+  );
+  await user.click(
+    screen.getByRole("option", { name: "Custom / other service", exact: true }),
+  );
+  assert.equal(
+    within(addDialog).queryByRole("combobox", {
+      name: "Connection",
+      exact: true,
+    }),
+    null,
+  );
+  assert.equal(
+    within(addDialog).queryByRole("option", { name: /api.openai.com/ }),
+    null,
+  );
+  await user.type(within(addDialog).getByLabelText("API key"), "new-model-key");
   await user.type(
-    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    within(addDialog).getByRole("textbox", { name: "Base URL" }),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  await user.type(
+    within(addDialog).getByRole("textbox", { name: "Model ID" }),
     "gpt-5.6-sol",
   );
   await user.click(
-    within(dialog).getByRole("button", { name: "Save", exact: true }),
+    within(addDialog).getByRole("button", { name: "Save", exact: true }),
   );
-  assert.deepEqual(additions, [["provider-multi", "3", "7", "gpt-5.6-sol"]]);
-
+  assert.deepEqual(additions, []);
+  assert.deepEqual(creations, [
+    {
+      displayName: "api.openai.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+      apiKey: "new-model-key",
+      model: { id: "gpt-5.6-sol" },
+    },
+  ]);
+  const dialog = addDialog;
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await user.click(screen.getByRole("button", { name: "Remove" }));
   const confirmation = screen.getByRole("alertdialog");

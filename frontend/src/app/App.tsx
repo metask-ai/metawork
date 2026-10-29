@@ -4292,21 +4292,6 @@ export default function App() {
                 ),
               )
             }
-            onAddCustomModel={(
-              providerId,
-              providerRevision,
-              catalogGeneration,
-              modelId,
-            ) =>
-              runExecutionCommand(() =>
-                client.addCustomModel({
-                  providerId,
-                  expectedProviderRevision: providerRevision,
-                  expectedCatalogGeneration: catalogGeneration,
-                  model: { id: modelId },
-                }),
-              )
-            }
             onRemoveCustomModel={(
               providerId,
               providerRevision,

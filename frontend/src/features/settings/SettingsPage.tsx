@@ -51,7 +51,6 @@ export function SettingsPage({
   onCreateBuiltinProvider,
   onUpdateCustomProvider,
   onReplaceCustomProviderCredential,
-  onAddCustomModel,
   onRemoveCustomModel,
   onReplaceCustomModel,
   onTestCustomModel,
@@ -687,7 +686,6 @@ export function SettingsPage({
                   onReplaceCustomProviderCredential={
                     onReplaceCustomProviderCredential
                   }
-                  onAddCustomModel={onAddCustomModel}
                   onReplaceCustomModel={onReplaceCustomModel}
                   onRemoveCustomModel={onRemoveCustomModel}
                   onTestCustomModel={onTestCustomModel}
