@@ -2727,12 +2727,14 @@ summary::-webkit-details-marker {
   color: var(--ui-content-primary);
 }
 
-.assistant-output-part {
-  line-height: 1.62;
+.run-assistant-output .assistant-output-part {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.75;
 }
 
 .assistant-output-part + .assistant-output-part {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .run-assistant-output .ai-markdown p,
@@ -2740,14 +2742,42 @@ summary::-webkit-details-marker {
 .run-assistant-output .ai-markdown ol,
 .run-assistant-output .ai-markdown blockquote,
 .run-assistant-output .ai-markdown table {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
-.run-assistant-output .ai-markdown h1,
-.run-assistant-output .ai-markdown h2,
-.run-assistant-output .ai-markdown h3,
-.run-assistant-output .ai-markdown h4 {
-  margin: 16px 0 6px;
+.run-assistant-output .ai-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 22px 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.run-assistant-output .ai-markdown h1 {
+  font-size: 20px;
+}
+
+.run-assistant-output .ai-markdown h2 {
+  font-size: 18px;
+}
+
+.run-assistant-output .ai-markdown h3 {
+  font-size: 16px;
+}
+
+.run-assistant-output .ai-markdown :is(strong, b, th) {
+  font-weight: 600;
+}
+
+.run-assistant-output .ai-markdown ul:not(.contains-task-list) {
+  list-style-type: disc;
+}
+
+.run-assistant-output .ai-markdown ol:not(.contains-task-list) {
+  list-style-type: decimal;
+}
+
+.run-assistant-output .ai-markdown li + li {
+  margin-top: 6px;
 }
 
 .run-assistant-output .ai-markdown > :first-child {

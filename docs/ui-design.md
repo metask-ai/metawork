@@ -677,6 +677,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 ### 7.4 Agent 回复
 
 - 不使用头像和大气泡，使用正文排版；
+- 回复正文遵循本节的[回复正文排版](#回复正文排版)，保留可辨认的 Markdown 层级与强调；
 - 支持 Markdown、表格、代码、引用和链接；
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `commentary | provisional | final | partial` 共用安全 Markdown 排版；尚未收到 output-segment 定性的 provisional 不称为草稿，保持惰性交互并在 discard 后随下一 Snapshot 立即消失；流式生成不增加光标、骨架或第二个活动指示；
@@ -687,6 +688,25 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
+
+#### 回复正文排版
+
+回复沿用[现有字体栈](#164-字体间距与形态)，不引入额外字体资源。以下为 Assistant 回复的阅读尺度，独立于界面控件的默认正文尺度；代码块和行内代码继续使用现有等宽排版，表格保持紧凑字号。
+
+| 内容                   | 字号                   | 字重           | 行高             |
+| ---------------------- | ---------------------- | -------------- | ---------------- |
+| 普通正文               | 15 px                  | 400 / regular  | 1.75             |
+| 一级标题 `h1`          | 20 px                  | 600 / semibold | 1.6              |
+| 二级标题 `h2`          | 18 px                  | 600 / semibold | 1.6              |
+| 三级标题 `h3`          | 16 px                  | 600 / semibold | 1.6              |
+| 四至六级标题 `h4`–`h6` | 15 px                  | 600 / semibold | 1.6              |
+| 正文加粗与表头         | 沿用所属正文或表格字号 | 600 / semibold | 沿用所属内容行高 |
+
+- 标题上方留白 22 px，下方 12 px；每个 Markdown 输出块首元素取消顶部留白，末元素取消底部留白；
+- 段落、列表、引用与表格下方留白 12 px，相邻列表项间距 6 px，相邻独立输出块间距 16 px；有序列表保留编号，无序列表保留圆点，任务清单沿用复选框语义；
+- 保留 Markdown 的真实标题级别、加粗、列表、引用、链接、代码与表格结构。普通开场句保持正文，不能因内容位于回复开头而自动提升为标题；
+- 会话阅读面使用现有 `panel` 语义色，文字使用正文语义色。该排版只作用于 Assistant 回复正文，其他页面、文件预览、消息元信息、执行详情和输入区不继承这套局部尺度；
+- Renderer 验证须覆盖中英文混排、长文、标题阶梯、嵌套列表、表格和代码；常规桌面及约 390 px 窄窗均须检查可读性与横向溢出，不能用 CSS 源码检查代替实际渲染检查。
 
 ### 7.5 当前状态、请求与结果
 
@@ -1209,7 +1229,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 - `--metask-font-sans` 精确为 `Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif`；不依赖运行时网络字体，不使用通用 serif 制造空态“高级感”；
 - `--metask-font-mono` 精确为 `"SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace`；命令、路径、版本、稳定标识和数据才使用等宽字体，普通 Task、按钮、设置、状态和正文保持无衬线；
-- 字号 token 固定为 `--metask-text-micro: 11px`、`--metask-text-label: 12px`、`--metask-text-control: 13px`、`--metask-text-body: 14px`、`--metask-text-lead: 16px`、`--metask-text-title: 18px`、`--metask-text-title-lg: 20px`、`--metask-text-display: 24px` 与 `--metask-text-display-lg: 28px`；默认正文为 14 px，主要阅读内容不得低于 13 px；
+- 字号 token 固定为 `--metask-text-micro: 11px`、`--metask-text-label: 12px`、`--metask-text-control: 13px`、`--metask-text-body: 14px`、`--metask-text-lead: 16px`、`--metask-text-title: 18px`、`--metask-text-title-lg: 20px`、`--metask-text-display: 24px` 与 `--metask-text-display-lg: 28px`；默认正文为 14 px，主要阅读内容不得低于 13 px；Assistant 回复采用[回复正文排版](#回复正文排版)规定的局部阅读尺度，不修改全局字号 token；
 - 间距以 8 px 为基础节奏，紧凑桌面控件可以使用 4 px micro gap；优先复用 8 / 16 / 24 / 32 px，不为单个页面建立新的间距阶梯；
 - 小型控件使用约 6 px 圆角，导航、按钮与输入使用约 7 px，卡片和命令面使用约 12 px，Composer 与大面板使用约 16 px；
 - 按钮、输入和触控动作默认使用至少 44 px 命中高度；平台窗口按钮和明确的紧凑桌面控件只按各自已记录且经过键盘、DPI 与窄屏验收的规则例外；
