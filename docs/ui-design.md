@@ -298,7 +298,7 @@ Skills                                                              10
 
 兼容来源：
 
-标题下、搜索与 policy context 筛选之外直接呈现“兼容来源”及 Claude、Codex 两个 Checkbox；每项同时控制个人与全部已授权手动项目目录。不保留来源 Drawer 或逐目录操作，不新增 route、Logo、排序、自由目录或设置草稿。一句辅助文案解释全局范围及已有 Task 需要刷新技能；默认目录与正常检测结果不占用常驻列表。
+标题下、搜索与 policy context 筛选之外直接呈现“兼容来源”及 Claude、Codex 两个 Checkbox；每项同时控制个人与全部已授权手动项目目录。不保留来源 Drawer 或逐目录操作，不新增 route、Logo、排序、自由目录或设置草稿。一句辅助文案解释全局范围及后续新 Run 自动采用当前可用 Skill；默认目录与正常检测结果不占用常驻列表。
 
 Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；同品牌两个根都开/关才显示对应状态，已有值不一致显示可操作的 indeterminate 与“部分启用”，不自动写回。同一窗口来源写入/恢复互斥，pending 由 App 持有，页面切换不取消请求或解除互斥；其他导航仍可用。失败或超时 resync，不自动重放；stale CAS 提示确认新值。未知值显示禁用的 indeterminate 和“状态未知”，不能伪装 false 或与部分启用混淆。保存反馈、错误和恢复操作直接在设置下方呈现；重读/reset 严格消费 Host capability，超限与不支持格式不显示 reset。reset 明确只关闭 Claude/Codex 兼容来源，不删除 Skill、不修改单 Skill policy 或项目数据。
 

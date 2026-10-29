@@ -891,7 +891,6 @@ export const enUS = {
   "slash.command.compact": "Compact context",
   "slash.command.compact_help":
     "Compact this task's conversation without starting a new Run.",
-  "slash.catalog_refresh_started": "Refreshing the Skill catalog…",
   "slash.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
   "tool.input": "Input",
   "tool.progress": "Progress",
@@ -1160,7 +1159,6 @@ export const enUS = {
   "operation.task_restore": "Restoring the task",
   "operation.task_delete": "Deleting the task record",
   "operation.workspace_remove": "Removing the workspace",
-  "operation.skill_catalog_refresh": "Refreshing the Skill catalog",
   "search.open": "Search",
   "search.loading": "Searching…",
   "search.no_more": "No more matches.",
