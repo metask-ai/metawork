@@ -168,9 +168,10 @@ pub const Snapshot = struct {
             .source_scope = issue.source_scope,
             .source_instance_id = try owned.dupe(u8, issue.source_instance_id),
         };
+        const revision = try owned.dupe(u8, source.revision);
         return .{
             .arena = arena,
-            .revision = try owned.dupe(u8, source.revision),
+            .revision = revision,
             .health = source.health,
             .skills = skills,
             .issues = issues,
@@ -228,9 +229,10 @@ pub const Snapshot = struct {
             .source_scope = issue.source_scope,
             .source_instance_id = try owned.dupe(u8, issue.source_instance_id),
         };
+        const revision = try owned.dupe(u8, self.revision);
         return .{
             .arena = arena,
-            .revision = try owned.dupe(u8, self.revision),
+            .revision = revision,
             .health = self.health,
             .skills = skills,
             .issues = issues,
