@@ -1403,6 +1403,7 @@ export type SkillCatalogView = {
   selectionRevision: string | null;
   skills: {
     skillId: string;
+    skillPolicyKey: string;
     invocationName: string;
     displayName: string;
     description: string;

@@ -1572,6 +1572,78 @@ test("Slash menu translates command-specific disabled reasons without repeating 
   assert.equal(screen.getAllByText("Commands").length, 1);
 });
 
+test("opening the chooser queries once per opening rather than per edit or render", () => {
+  let refreshes = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "/" },
+    onRefreshSkillCatalog() {
+      refreshes += 1;
+    },
+  });
+  assert.equal(refreshes, 1);
+  act(() => composer.setDraft({ kind: "text", text: "/review" }));
+  assert.equal(refreshes, 1);
+  act(() => composer.setDraft({ kind: "text", text: "ordinary" }));
+  act(() => composer.setDraft({ kind: "text", text: "/" }));
+  assert.equal(refreshes, 2);
+});
+
+test("changed Skill parameters require review and retain surplus input visibly", async () => {
+  let latest;
+  renderComposer({
+    draft: {
+      kind: "skill",
+      skillId: "old",
+      skillPolicyKey: "review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "old",
+      selectionRevision: "1",
+      argumentNames: ["target"],
+      argumentValues: ["keep this"],
+      maxValues: 1,
+    },
+    skillCatalog: {
+      availability: "ready",
+      redacted: false,
+      revision: "new",
+      selectionRevision: "2",
+      skills: [
+        {
+          skillId: "new",
+          skillPolicyKey: "review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "",
+          argumentNames: [],
+          maxValues: 0,
+          enabled: true,
+        },
+      ],
+      issues: [],
+    },
+    onDraftChange(value) {
+      latest = value;
+    },
+    canSubmit: false,
+  });
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "Review new parameters" }),
+  );
+  assert.equal(latest.skillId, "new");
+  assert.deepEqual(latest.argumentValues, ["keep this"]);
+  assert.equal(
+    screen.getByRole("textbox", { name: "Argument 1" }).value,
+    "keep this",
+  );
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  await user.click(
+    screen.getByRole("button", { name: "Remove last argument" }),
+  );
+  assert.deepEqual(latest.argumentValues, []);
+});
+
 test("keyboard Skill selection moves focus into the structured draft", async () => {
   const composer = renderComposer({
     draft: { kind: "text", text: "/review" },
@@ -1583,6 +1655,7 @@ test("keyboard Skill selection moves focus into the structured draft", async () 
       skills: [
         {
           skillId: "builtin.review",
+          skillPolicyKey: "review",
           invocationName: "review",
           displayName: "Review",
           description: "Review a target",
@@ -1617,6 +1690,7 @@ test("a no-argument Skill moves keyboard focus to the real Send action", async (
       skills: [
         {
           skillId: "builtin.review",
+          skillPolicyKey: "review",
           invocationName: "review",
           displayName: "Review",
           description: "Review the current task",
@@ -1681,6 +1755,7 @@ test("a positional Skill tail remains visible even without a named label", () =>
       skills: [
         {
           skillId: "builtin.review",
+          skillPolicyKey: "review",
           invocationName: "review",
           displayName: "Review",
           description: "",
@@ -1720,6 +1795,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       skills: [
         {
           skillId: "builtin.review",
+          skillPolicyKey: "review",
           invocationName: "review",
           displayName: "Review",
           description: "",

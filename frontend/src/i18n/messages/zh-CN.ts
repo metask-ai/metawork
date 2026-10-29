@@ -485,7 +485,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.catalog_refresh_failed": "未能刷新 Skill 目录。",
   "skills.sources.title": "兼容来源",
   "skills.sources.hint":
-    "同时读取个人与所有已授权项目的 Skill；已有任务需刷新技能。",
+    "按需读取个人与已授权项目的 Skill；后续运行会自动采用最新可用版本。",
   "skills.sources.partial": "部分启用",
   "skills.sources.scope.user": "个人目录",
   "skills.sources.scope.workspace": "项目目录",
@@ -768,7 +768,12 @@ export const zhCN: Record<MessageId, string> = {
   "slash.add_argument": "添加参数",
   "slash.remove_argument": "移除最后一个参数",
   "slash.skill_input_too_large": "此 Skill 输入超过了支持的参数限制。",
-  "slash.skill_stale": "此 Skill 属于另一份目录快照。请刷新后重新选择。",
+  "slash.skill_arguments_changed":
+    "此 Skill 的参数定义已改变，现有输入已保留。请检查新参数后发送。",
+  "slash.skill_disabled": "此 Skill 已被禁用，现有输入已保留。",
+  "slash.review_arguments": "检查新参数",
+  "slash.skill_stale":
+    "此 Skill 已移除、存在冲突或旧选择无法确认。参数已保留，请重新选择。",
   "slash.disabled_unavailable": "此动作暂时不可用。",
   "slash.disabled_already_new_task": "已经打开了一个新任务草稿。",
   "slash.disabled_task_busy": "请等待当前任务操作完成。",

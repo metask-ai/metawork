@@ -26,7 +26,7 @@ fn testOwnerResolve(_: *const anyopaque, owner: management.Owner) ?management.Sc
 /// Text, variable arrays and fixed structure are charged independently.
 pub const SnapshotStructureBounds = struct {
     asset: usize = 640,
-    catalog_skill: usize = 192,
+    catalog_skill: usize = 216,
     argument: usize = 3, // Two JSON quotes and at most one comma.
     // Unmatched inventory entries are emitted twice and have no catalog text
     // allocation. Control must reserve these bytes even without any winner.
@@ -142,6 +142,8 @@ pub fn writeCatalogProjection(
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         writer.writeAll("{\"skillId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, skill.skill_id);
+        writer.writeAll(",\"skillPolicyKey\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, skill.skill_policy_key);
         writer.writeAll(",\"invocationName\":") catch
             return error.SnapshotTooLarge;
         try text.writeJson(writer, skill.invocation_name);
@@ -507,6 +509,7 @@ fn catalogContainsSensitive(
     for (projection.skills) |skill| {
         inline for (.{
             skill.skill_id,
+            skill.skill_policy_key,
             skill.invocation_name,
             skill.display_name,
             skill.description,
@@ -695,7 +698,7 @@ test "snapshot structure bounds cover maximum identities arguments issues and un
         var catalog_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
         defer catalog_json.deinit();
         const skill = &catalog_json.value.object.getPtr("skills").?.array.items[0];
-        Fixture.stripText(skill, &.{ "skillId", "invocationName", "displayName", "description" });
+        Fixture.stripText(skill, &.{ "skillId", "skillPolicyKey", "invocationName", "displayName", "description" });
         writer = std.Io.Writer.fixed(&buffer);
         try jsonValue(&writer, skill.*);
         try std.testing.expect(writer.buffered().len + 1 <= bounds.catalog_skill + arguments.len * bounds.argument);

@@ -2177,6 +2177,11 @@ fn wireAgentCore(
         "skill_recovery_required",
         @embedFile("frontend/src/bridge/__fixtures__/skill-recovery-required.fixture"),
     );
+    product_control_contract_fixture.addOption(
+        []const u8,
+        "skill_catalog_ready",
+        @embedFile("frontend/src/bridge/__fixtures__/skill-catalog-ready.fixture"),
+    );
     const shared_contract_fixture_module = product_control_contract_fixture.createModule();
     product_control_runtime.addImport("product_control_contract_fixture", shared_contract_fixture_module);
     const product_control = b.createModule(.{

@@ -14809,6 +14809,34 @@ test "Skill management health failure advances Product revision exactly once" {
     try std.testing.expectEqual(before_rejection, control.revision);
 }
 
+test "Skill logical policy key projection matches the Renderer wire fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const skills = [_]catalog_snapshot.SkillProjection{.{
+        .skill_id = "builtin.review",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "workspace",
+        .contribution_id = "review",
+        .content_revision = "v1",
+        .display_name = "Review",
+        .description = "Review a target",
+        .argument_names = &.{ "target", "focus" },
+        .max_values = 2,
+    }};
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try skill_runtime.Runtime.writeCatalogProjection(&writer, control.skillTextProjection(), .{
+        .availability = .ready,
+        .revision = "catalog-revision",
+        .selection_revision = 5,
+        .skills = &skills,
+    });
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.skill_catalog_ready, "\r\n "), writer.buffered());
+}
+
 test "Skill recovery phase changes publish without a health change and match the wire fixture" {
     var control = try testRuntime();
     defer control.deinit();

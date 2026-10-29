@@ -538,7 +538,7 @@ export const enUS = {
   "skills.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
   "skills.sources.title": "Compatible sources",
   "skills.sources.hint":
-    "Reads personal and all authorized project Skills. Existing tasks need a Skill refresh.",
+    "Reads personal and authorized project Skills on demand. Future runs automatically use the latest available version.",
   "skills.sources.partial": "Partially enabled",
   "skills.sources.scope.user": "Personal directory",
   "skills.sources.scope.workspace": "Project directory",
@@ -876,8 +876,12 @@ export const enUS = {
   "slash.remove_argument": "Remove last argument",
   "slash.skill_input_too_large":
     "This Skill input exceeds the supported argument limit.",
+  "slash.skill_arguments_changed":
+    "This Skill’s parameters changed. Your input is preserved; review the new parameters before sending.",
+  "slash.skill_disabled": "This Skill is disabled. Your input is preserved.",
+  "slash.review_arguments": "Review new parameters",
   "slash.skill_stale":
-    "This Skill belongs to a different catalog snapshot. Refresh and choose it again.",
+    "This Skill was removed, conflicts, or its previous selection cannot be confirmed. Arguments are preserved; choose it again.",
   "slash.disabled_unavailable": "This action is temporarily unavailable.",
   "slash.disabled_already_new_task": "A new task draft is already open.",
   "slash.disabled_task_busy": "Wait for the current task operation to finish.",
