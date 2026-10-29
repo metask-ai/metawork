@@ -8788,15 +8788,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   stroke-width: 2;
 }
 
-.composer-send-group,
-.composer-run-actions {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .composer-model-notice {
   display: flex;
   align-items: center;
