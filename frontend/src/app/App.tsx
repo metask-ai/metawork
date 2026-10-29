@@ -2,6 +2,7 @@ import {
   localReadingAnchor,
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
+import { editCustomModel } from "./edit-custom-model.ts";
 import { UserInputMessage } from "../features/tasks/UserInputMessage.tsx";
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
 import { BrandLogo } from "../components/ui/BrandLogo.tsx";
@@ -463,6 +464,7 @@ export default function App() {
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerModelTrigger = useRef<HTMLButtonElement>(null);
   const submissionSessions = useRef(new Map<string, TaskSubmissionSession>());
   const newTaskSubmissionInstance = useRef(0);
   const localSubmissionSequence = useRef(0);
@@ -1453,8 +1455,9 @@ export default function App() {
       case "refresh":
         void runExecutionCommand(() => client.refreshModelsCatalog());
         break;
-      case "providers":
-        if (customProvidersAvailable) openSettings("providers");
+      case "choose_model":
+        composerModelTrigger.current?.focus();
+        composerModelTrigger.current?.click();
         break;
       case "models":
         openSettings("models");
@@ -2218,43 +2221,6 @@ export default function App() {
     } finally {
       endTaskPendingOperation(scope);
     }
-  }
-  async function selectMetaskModel(modelId: string) {
-    const provider = metaskProvider;
-    if (!provider) return;
-    const configured = await runExecutionCommand(() =>
-      client.configureMetaskSelection({
-        sourceId: "metask",
-        modelId,
-        expectedMetaskSelectionRevision:
-          snapshot.models.metaskSelectionRevision,
-        expectedCatalogGeneration: provider.catalogGeneration,
-      }),
-    );
-    if (!configured) return;
-    // The connection installs the committed view before resolving its refresh.
-    // Use that view for the second CAS through the same serialized read owner.
-    const current = latestSnapshotRef.current;
-    if (!current) return;
-    const currentProvider = current.models.providers.find(
-      (candidate) => candidate.id === "metask",
-    );
-    const currentSelection = current.models.metaskSelection;
-    if (
-      !currentProvider ||
-      !currentSelection ||
-      currentSelection.modelId !== modelId
-    )
-      return;
-    await runExecutionCommand(() =>
-      client.selectModelsDefault({
-        sourceId: currentSelection.sourceId,
-        modelId,
-        expectedSelectionRevision: current.models.selectionRevision,
-        expectedSourceGeneration: currentProvider.sourceGeneration,
-        expectedCatalogGeneration: currentProvider.catalogGeneration,
-      }),
-    );
   }
   async function cancelAccountOperation() {
     if (
@@ -3612,6 +3578,7 @@ export default function App() {
         <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
       <ComposerFooter
+        modelTriggerRef={composerModelTrigger}
         textareaRef={composer}
         sendDisabledReason={inputDisabledReason}
         approvalModeControl={
@@ -4252,9 +4219,6 @@ export default function App() {
             executionDisabled={executionBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onBack={closeSettings}
-            onRefresh={() =>
-              void runExecutionCommand(() => client.refreshModelsCatalog())
-            }
             onResetModels={() =>
               runExecutionCommand(() =>
                 client.resetModelsStore(snapshot.revision),
@@ -4276,53 +4240,37 @@ export default function App() {
               )
             }
             onCancel={() => void cancelAccountOperation()}
-            onSelectModel={(id) => void selectMetaskModel(id)}
             onCreateCustomProvider={(input) =>
               runExecutionCommand(() => client.createCustomProvider(input))
             }
             onCreateBuiltinProvider={(input) =>
               runExecutionCommand(() => client.createBuiltinProvider(input))
             }
-            onUpdateBuiltinProviderBaseUrl={(input) =>
-              runExecutionCommand(() =>
-                client.updateBuiltinProviderBaseUrl(input),
-              )
-            }
-            onUpdateCustomProvider={(input) =>
-              runExecutionCommand(() =>
-                client.updateCustomProvider({
-                  providerId: input.providerId,
-                  expectedProviderRevision: input.expectedProviderRevision,
-                  displayName: input.displayName,
-                  protocol: input.protocol,
-                  normalizedBaseUrl: input.normalizedBaseUrl,
-                }),
-              )
-            }
-            onReplaceCustomProviderCredential={(providerId, revision, apiKey) =>
-              runExecutionCommand(() =>
-                client.replaceCustomProviderCredential(
-                  providerId,
-                  revision,
-                  apiKey,
-                ),
-              )
-            }
-            onAddCustomModel={(
-              providerId,
-              providerRevision,
-              catalogGeneration,
-              modelId,
-            ) =>
-              runExecutionCommand(() =>
-                client.addCustomModel({
-                  providerId,
-                  expectedProviderRevision: providerRevision,
-                  expectedCatalogGeneration: catalogGeneration,
-                  model: { id: modelId },
-                }),
-              )
-            }
+            onSaveCustomModel={async (input) => {
+              let outcome: Awaited<ReturnType<typeof editCustomModel>> = {
+                accepted: false,
+                applied: [],
+                source: null,
+                modelId: input.modelId,
+                reviewRequired: true,
+              };
+              await runExecutionCommand(async () => {
+                outcome = await editCustomModel(
+                  client,
+                  snapshot.models,
+                  async () => {
+                    await refreshSnapshot();
+                    return latestSnapshotRef.current!.models;
+                  },
+                  input,
+                );
+                return {
+                  accepted: outcome.accepted,
+                  errorCode: outcome.accepted ? "none" : "invalid_provider",
+                };
+              });
+              return outcome;
+            }}
             onRemoveCustomModel={(
               providerId,
               providerRevision,
@@ -4337,11 +4285,6 @@ export default function App() {
                 }),
               )
             }
-            onRemoveCustomProvider={(providerId, generation) =>
-              runExecutionCommand(() =>
-                client.removeCustomProvider(providerId, generation),
-              )
-            }
             onTestCustomModel={(
               providerId,
               revision,
@@ -4349,7 +4292,7 @@ export default function App() {
               sourceGeneration,
               catalogGeneration,
             ) =>
-              void runExecutionCommand(() =>
+              runExecutionCommand(() =>
                 client.testCustomModel(
                   providerId,
                   revision,
@@ -4357,23 +4300,6 @@ export default function App() {
                   sourceGeneration,
                   catalogGeneration,
                 ),
-              )
-            }
-            onSelectCustomModel={(providerId, generation, modelId) =>
-              void runExecutionCommand(() =>
-                client.selectModelsDefault({
-                  sourceId: providerId,
-                  modelId,
-                  expectedSelectionRevision: snapshot.models.selectionRevision,
-                  expectedSourceGeneration:
-                    snapshot.models.customProviders.find(
-                      (connection) => connection.id === providerId,
-                    )?.sourceGeneration ?? "0",
-                  expectedCatalogGeneration:
-                    snapshot.models.customProviders.find(
-                      (connection) => connection.id === providerId,
-                    )?.catalogGeneration ?? "0",
-                }),
               )
             }
             onBeginLogin={() =>
@@ -4722,7 +4648,7 @@ export default function App() {
         disabled={accountBusy || executionBusy}
         onClose={finishModelSetupIntroduction}
         onLogin={() => runModelSetupAction("login")}
-        onConfigure={() => openSettings("providers")}
+        onConfigure={() => openSettings("models")}
       />
 
       {archiveNotice && (

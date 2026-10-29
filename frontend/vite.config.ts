@@ -21,14 +21,17 @@ export default defineConfig(({ command }) => ({
     tailwindcss(),
     {
       name: "metawork-csp",
-      transformIndexHtml(html) {
-        if (!html.includes(cspPlaceholder)) {
-          throw new Error(`missing CSP placeholder: ${cspPlaceholder}`);
-        }
-        return html.replace(
-          cspPlaceholder,
-          command === "serve" ? developmentCsp : releaseCsp,
-        );
+      transformIndexHtml: {
+        order: "post",
+        handler(html) {
+          if (!html.includes(cspPlaceholder)) {
+            throw new Error(`missing CSP placeholder: ${cspPlaceholder}`);
+          }
+          return html.replace(
+            cspPlaceholder,
+            command === "serve" ? developmentCsp(html) : releaseCsp,
+          );
+        },
       },
     },
   ],

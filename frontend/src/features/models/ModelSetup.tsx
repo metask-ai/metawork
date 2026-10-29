@@ -14,8 +14,8 @@ const actionLabels: Record<ModelSetupAction, MessageId> = {
   start: "model_setup.start",
   login: "account.login",
   cancel: "model_setup.cancel_login",
-  models: "model_setup.choose_action",
-  providers: "model_setup.configure",
+  models: "settings.models",
+  choose_model: "account.choose_model",
   refresh: "model_setup.retry",
   schedules: "model_setup.view_schedules",
 };

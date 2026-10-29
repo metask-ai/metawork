@@ -26,8 +26,6 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.other_options": "其他方式",
   "model_setup.retry": "重试",
   "model_setup.unconfigured": "尚未配置模型",
-  "model_setup.provider_next":
-    "保存服务后，前往模型设置添加并测试模型，再选择默认模型。",
   "model_setup.required": "登录或配置模型后即可发送，已输入的内容会保留。",
   "model_setup.sign_in": "登录 Metask 后可使用此模型，已输入的内容会保留。",
   "model_setup.authorizing": "请在浏览器中完成登录，已输入的内容会保留。",
@@ -35,15 +33,14 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.loading": "正在加载模型…",
   "model_setup.preparing": "正在准备模型…",
   "model_setup.choose": "选择可用模型后即可发送。",
-  "model_setup.choose_action": "查看模型设置",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
   "model_setup.no_models":
     "当前 Metask 账号没有可用对话模型，请重试或查看模型设置。",
-  "model_setup.model_unavailable": "所选模型暂不可用，请查看模型设置。",
+  "model_setup.model_unavailable": "所选模型暂不可用，请重新选择或检查配置。",
   "model_setup.provider_unavailable":
     "自己的模型服务尚未就绪，请检查配置并测试模型。",
   "model_setup.execution_unavailable":
-    "当前默认执行配置暂不可用，请检查模型选择。",
+    "所选模型暂不可用，请选择可用模型或检查配置。",
   "model_setup.view_schedules": "查看定时任务",
   "model_setup.schedule_unavailable":
     "定时任务存储不可用，暂时无法更新执行配置。",
@@ -173,16 +170,15 @@ export const zhCN: Record<MessageId, string> = {
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.recharge_open_failed": "无法打开 Metask 充值页面，请稍后重试。",
-  "execution.command_rejected": "默认模型来源未更新，请刷新执行状态后重试。",
-  "execution.command_failed":
-    "MetaWork 无法完成默认模型来源操作，请使用执行区域显示的恢复操作。",
+  "execution.command_rejected": "模型配置未更新，请刷新后重试。",
+  "execution.command_failed": "MetaWork 无法更新模型配置，请检查配置后重试。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
   "account.updated": "Metask 账号已更新。",
-  "execution.updated": "默认模型来源已更新。",
+  "execution.updated": "模型配置已更新。",
   "operation.account": "更新 Metask 账号",
-  "operation.execution": "更新默认模型来源",
+  "operation.execution": "更新模型配置",
   "operation.account_cancel": "取消 Metask 账号操作",
   "command.timeout_reconciled":
     "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",
@@ -1032,12 +1028,10 @@ export const zhCN: Record<MessageId, string> = {
   "account.unknown_provider": "来源未知",
   "settings.title": "设置",
   "settings.back": "返回工作台",
-  "settings.intro": "管理 MetaWork 开始新任务时使用的默认配置。",
   "settings.sections": "设置分区",
   "settings.general": "通用",
   "settings.account": "账户",
   "settings.models": "模型",
-  "settings.providers": "Provider",
   "settings.general_basics": "常规",
   "settings.automatic_workspace.title": "自动工作区位置",
   "settings.automatic_workspace.help":
@@ -1098,33 +1092,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_history_less": "少",
   "settings.account_history_more": "多",
   "settings.account_security": "安全操作",
-  "settings.providers_saved": "模型服务",
-  "settings.back_to_providers": "返回 Provider",
-  "settings.builtin_provider": "官方模型服务",
-  "settings.builtin_provider_group": "模型厂商",
-  "settings.builtin_provider_group_help":
-    "选择厂商后，MetaWork 会预填官方协议和服务地址。",
-  "settings.builtin_provider_unconfigured": "尚未配置",
-  "settings.builtin_provider_needs_models": "待添加或测试模型",
-  "settings.builtin_provider_configure": "配置",
-  "settings.builtin_provider_manage": "管理",
-  "settings.custom_provider": "自定义 API",
-  "settings.custom_provider_group": "自定义 API",
-  "settings.custom_provider_group_help":
-    "用于自部署模型、其他厂商或 API 中转服务。",
-  "settings.custom_provider_add_action": "添加自定义 API",
-  "settings.builtin_provider_help":
-    "MetaWork 已配置该厂商的协议和官方地址；如有需要，也可以改用兼容地址。",
-  "settings.builtin_provider_address": "服务地址",
-  "settings.builtin_provider_change_address": "使用其他地址",
-  "settings.builtin_provider_reset_address": "恢复官方地址",
   "settings.builtin_provider_address_warning":
-    "后续模型请求会将此 Provider 的 API Key 发送到 {host}。",
+    "模型请求将向 {host} 发送 API Key。",
   "settings.get_api_key": "获取 API Key",
   "settings.open_provider_docs": "查看官方文档",
-  "settings.models_error": "模型配置需要处理",
-  "settings.models_error_help":
-    "请刷新 Metask 模型目录或检查已保存的模型配置。",
   "settings.models_reset_message": "模型配置无法读取",
   "settings.models_reset_detail":
     "恢复会先重新读取有效配置；只有配置缺失或确认损坏时才会清空。账户、Task、Workspace 和对话不会改变。",
@@ -1200,57 +1171,49 @@ export const zhCN: Record<MessageId, string> = {
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "直接执行会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
-  "settings.default_model_for_new_tasks": "新任务默认模型",
-  "settings.current_default": "当前默认",
-  "settings.provider": "Provider",
-  "settings.provider_help": "先选择提供模型的服务，再选择可用模型。",
-  "settings.choose_provider": "选择 Provider",
-  "settings.provider_menu_help":
-    "只有凭据可用且模型已测试的 Provider 才能成为默认来源。",
-  "settings.provider_managed_description": "通过 Metask 账号管理",
   "settings.api_key": "API Key",
-  "settings.open_models": "打开模型设置",
-  "settings.default_selection_missing": "未设置可执行的默认模型",
-  "settings.default_model_unavailable":
-    "原默认模型已不在当前可用目录中。请重新选择默认模型。",
-  "settings.providers_help":
-    "管理 MetaWork 可用的模型服务、服务地址和 API Key。默认模型请在模型页面选择。",
-  "settings.providers_empty": "还没有自定义 API。",
-  "settings.providers_unavailable": "当前版本无法管理 Provider。",
-  "settings.custom_provider_capture_unavailable":
-    "系统凭据存储当前不可用，因此暂时不能添加 Provider 或替换 API Key。",
-  "settings.custom_provider_add": "保存 Provider",
-  "settings.custom_provider_adding": "正在保存 Provider…",
-  "settings.custom_provider_title": "连接自定义 API",
-  "settings.custom_provider_help": "明确选择协议，然后填写服务地址和访问凭据。",
-  "settings.custom_provider_name": "显示名称",
-  "settings.custom_provider_name_placeholder": "我的 OpenAI 服务",
-  "settings.custom_provider_name_help": "仅用于在 MetaWork 内识别此 Provider。",
   "settings.custom_provider_protocol": "协议",
-  "settings.custom_provider_endpoint": "服务地址（Base URL）",
-  "settings.custom_provider_endpoint_help":
-    "填写服务根地址，MetaWork 会按所选协议补全请求路径。",
-  "settings.custom_provider_endpoint_preview": "实际请求地址：{endpoint}",
-  "settings.custom_provider_model_id_placeholder": "gpt-5",
-  "settings.provider_api_key_placeholder": "输入 API Key",
-  "settings.provider_models_configured_elsewhere":
-    "API Key 将保存到操作系统凭据存储；模型请在保存后前往模型页面配置。",
-  "settings.provider_save": "保存 Provider",
-  "settings.provider_save_api_key": "保存 API Key",
-  "settings.custom_provider_edit_help":
-    "修改协议或 Base URL 后需要重新测试该 Provider 的模型；已保存的 API Key 不会回填。",
-  "settings.custom_provider_replace_credential": "更新 API Key",
-  "settings.custom_provider_remove_confirm":
-    "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
-  "settings.custom_provider_removing": "正在删除…",
+  "settings.custom_provider_endpoint": "请求地址（Endpoint）",
+  "settings.custom_model_protocol_detected": "已识别接口：{protocol}",
+  "settings.custom_model_protocol_automatic":
+    "填写完整请求地址，自动识别接口类型。",
+  "settings.custom_model_base_url": "服务地址（Base URL）",
+  "settings.custom_model_gemini_address_help":
+    "填写服务根地址，Gemini 的模型路径由应用自动生成。",
+  "settings.custom_models": "自定义模型",
+  "settings.model_connection_provider": "模型厂商",
+  "settings.model_connection_choose_provider": "选择模型厂商",
+  "settings.model_connection_custom": "自定义 / 其他服务",
+  "settings.model_connection_help":
+    "添加第三方模型，测试通过后即可在任务中使用。",
+  "settings.custom_model_root_help":
+    "请填写完整请求端点；如果这是 Gemini 原生接口的服务根地址，请在下方确认。",
+  "settings.custom_model_gemini_confirm": "这是 Gemini 原生接口的服务根地址",
+  "settings.custom_model_address_error.address":
+    "请填写有效网址，不包含用户名、密码、查询参数或片段。",
+  "settings.custom_model_address_error.secure":
+    "请使用 HTTPS；仅本机地址支持 HTTP。",
+  "settings.custom_model_address_error.path":
+    "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
+  "settings.custom_model_test_start_failed": "无法开始测试 {model}，请重试。",
+  "settings.custom_model_remove_failed": "删除失败，请重试。",
+  "settings.model_edit_partial":
+    "部分修改已保存（{fields}）。请检查未完成的字段，必要时重新填写 API Key 后再保存。",
+  "settings.model_edit_review":
+    "配置已变化或保存结果尚未确认，请重新打开模型查看最新配置。",
+  "settings.model_connection_edit_help":
+    "修改模型信息后保存；不更换 API Key 时留空。",
+  "settings.model_connection_dialog_help":
+    "选择模型厂商或自定义服务，填写模型后保存。",
+  "settings.model_connection_empty": "还没有自定义模型。",
+  "settings.model_connection_edit": "编辑模型",
+  "settings.model_connection_shared":
+    "这些连接设置由 {count} 个模型共用，修改后需重新测试模型。",
   "settings.custom_model_testing": "正在测试…",
-  "settings.custom_provider_state.configuring": "尚未测试",
-  "settings.custom_provider_state.ready": "可用",
-  "settings.custom_provider_state.disabled": "已停用",
-  "settings.custom_model_test_status.untested": "尚未测试",
-  "settings.custom_model_test_status.testing": "正在测试",
-  "settings.custom_model_test_status.connected": "最近测试通过",
-  "settings.custom_model_test_status.failed": "最近测试失败",
+  "settings.custom_model_test_status.untested": "未测试",
+  "settings.custom_model_test_status.testing": "测试中",
+  "settings.custom_model_test_status.connected": "测试通过",
+  "settings.custom_model_test_status.failed": "测试失败",
   "settings.custom_provider_protocol.openai_responses": "OpenAI Responses",
   "settings.custom_provider_protocol.anthropic_messages": "Anthropic Messages",
   "settings.custom_provider_protocol.openai_chat_completions":
@@ -1258,54 +1221,26 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_protocol.gemini_native": "Gemini 原生协议",
   "settings.custom_provider_credential.ready": "凭据可用",
   "settings.custom_provider_credential.capture_unavailable":
-    "当前 Host 不支持安全凭据采集",
+    "当前无法安全保存 API Key",
   "settings.custom_provider_credential.missing": "需要凭据",
   "settings.custom_provider_credential.invalid": "凭据被拒绝",
   "settings.catalog_count": "模型 {models}",
-  "settings.loading_models": "正在加载可用模型",
   "settings.language_help": "更改会立即应用到这台设备。",
-  "settings.default_model": "默认模型",
-  "settings.default_model_help":
-    "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
-  "settings.new_task_model_help":
-    "选择这个新任务使用的模型；不会修改全局默认模型。",
+  "settings.new_task_model_help": "选择这个新任务使用的模型。",
   "settings.new_task_model_invalid":
     "之前选择的模型已不可用；请重新选择模型后再发送。",
-  "settings.only_model_help": "当前配置只提供这一个可用模型。",
-  "settings.model_menu_help": "从所选 Provider 的可用模型中选择。",
-  "settings.custom_model_add_help":
-    "输入这个 Provider 开放的模型 ID；测试通过后才能设为默认模型。",
   "settings.custom_model_add": "添加模型",
-  "settings.custom_model_adding": "正在添加…",
   "settings.custom_model_test": "测试模型",
   "settings.custom_model_id": "模型 ID",
-  "settings.custom_model_remove_confirm":
-    "从这个 Provider 中删除该模型？已有任务仍保留当前绑定。",
-  "settings.custom_model_removing": "正在删除…",
+  "settings.custom_model_remove_confirm": "删除模型？",
+  "settings.custom_model_remove_description":
+    "删除“{model}”后，新任务将无法再选择它。已有任务和历史记录会保留。",
   "settings.choose_selection": "选择",
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",
-  "settings.model_loading": "正在加载模型…",
-  "settings.switch.pending_label": "待应用更改",
-  "settings.switch.saving_label": "正在保存",
-  "settings.switch.preparing_model": "正在准备 {model}",
-  "settings.switch.saving": "正在保存新的默认配置",
-  "settings.switch.saving_detail": "保存完成后，新任务将使用 {api} · {model}。",
-  "settings.switch.current_preserved": "完成前，当前默认配置仍然有效。",
-  "settings.switch.current_model_preserved":
-    "完成前，当前默认模型 {model} 仍然有效。",
-  "settings.switch.refreshing": "同步账号选项期间，当前默认配置仍然有效。",
-  "settings.switch.working": "此操作完成前，相关账号设置会保持锁定。",
-  "settings.switch.cancelled": "已取消更改，{api} · {model} 仍为默认配置。",
-  "settings.switch.failure_preserved":
-    "默认配置未被修改，{api} · {model} 仍然有效。",
-  "settings.existing_tasks_unchanged":
-    "默认配置只影响新任务。已有任务的绑定和历史不会被改写。",
   "settings.signout_title": "退出登录",
   "settings.signout_help":
     "退出后，创建使用 Metask 模型的新任务需要重新登录。自定义模型、本地任务和工作区文件会保留。",
-  "settings.task_binding_model":
-    "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
   "settings.task_model_help": "选择此任务发送消息时使用的模型。",
   "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
   "settings.task_model_catalog_unavailable":
@@ -1589,7 +1524,7 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.occurrence.interrupted": "已中断",
   "scheduled.occurrence.delayed": "延迟触发，原计划时间：{time}",
   "scheduled.reason.previous_task_running": "上一次任务仍在运行。",
-  "scheduled.reason.execution_changed": "默认模型或连接已变更，请编辑并确认。",
+  "scheduled.reason.execution_changed": "模型或连接已变更，请编辑并确认。",
   "scheduled.reason.workspace_unavailable":
     "自动工作区不可用，请检查设置后编辑确认。",
   "scheduled.reason.capacity_reached": "运行容量不足，请释放容量后编辑确认。",

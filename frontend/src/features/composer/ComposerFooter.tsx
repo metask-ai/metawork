@@ -18,7 +18,7 @@ import { Input } from "../../components/ui/input.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
-import { ModelSelector } from "./ModelSelector.tsx";
+import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
   composerDraftWithinLimits,
@@ -117,6 +117,7 @@ export function ComposerFooter({
   selectedWorkspaceOptionId,
   workspaceEditable,
   modelLabel,
+  modelTriggerRef,
   modelOptions,
   selectedModelId,
   modelEditable,
@@ -178,11 +179,8 @@ export function ComposerFooter({
   selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
   modelLabel: string | null;
-  modelOptions: {
-    selectionId: string;
-    displayName: string;
-    triggerLabel?: string;
-  }[];
+  modelTriggerRef?: RefObject<HTMLButtonElement | null>;
+  modelOptions: ModelSelectorOption[];
   selectedModelId: string;
   modelEditable: boolean;
   modelSelectionDisabled: boolean;
@@ -882,6 +880,7 @@ export function ComposerFooter({
                 <span className="composer-model-context">
                   <span className="sr-only">{t("account.model")}</span>
                   <ModelSelector
+                    triggerRef={modelTriggerRef}
                     label={modelLabel}
                     options={modelOptions}
                     selectedId={selectedModelId}

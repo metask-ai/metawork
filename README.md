@@ -72,6 +72,8 @@ npm run package:windows
 
 平台打包入口只在对应平台运行。一次性准备、平台验收 harness 和 probe 直接使用 `node scripts/<name>.mjs`；验证范围和命令选择见[验证规范](docs/validation.md)。
 
+`npm run dev` 首次构建并启动 Host 后，React、TypeScript 和 CSS 界面修改会通过 Vite 热更新。修改 Zig、Bridge 合同或构建配置后需退出应用并重新运行；开发入口的验证与清理规则见[标准入口](docs/validation.md#标准入口)。
+
 ## AgentCore bundle
 
 `stage-agentcore-bundle.mjs` 是 candidate bundle 进入仓库 canonical target store 的唯一入口。正式 build、test 和 package 不读取 AgentCore 源码树，也不从环境变量寻找替代实现。

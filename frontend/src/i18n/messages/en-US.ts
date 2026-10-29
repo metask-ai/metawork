@@ -27,8 +27,6 @@ export const enUS = {
   "model_setup.other_options": "Other options",
   "model_setup.retry": "Retry",
   "model_setup.unconfigured": "No model configured",
-  "model_setup.provider_next":
-    "After saving a service, add and test its models in Models, then choose a default model.",
   "model_setup.required":
     "Sign in or configure a model before sending. Your draft will be kept.",
   "model_setup.sign_in":
@@ -39,17 +37,16 @@ export const enUS = {
   "model_setup.loading": "Loading models…",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
-  "model_setup.choose_action": "Open model settings",
   "model_setup.catalog_failed":
     "Models could not be loaded. Retry loading them.",
   "model_setup.no_models":
     "No conversation models are available for this Metask account. Retry or review Models settings.",
   "model_setup.model_unavailable":
-    "The selected model is unavailable. Review model settings before sending.",
+    "The selected model is unavailable. Choose another available model or review its configuration.",
   "model_setup.provider_unavailable":
     "Your model service is not ready. Review its configuration and test a model.",
   "model_setup.execution_unavailable":
-    "The current default execution configuration is unavailable. Review the model selection.",
+    "The selected model is unavailable. Choose an available model or review its configuration.",
   "model_setup.view_schedules": "View scheduled tasks",
   "model_setup.schedule_unavailable":
     "Schedule storage is unavailable, so the execution configuration could not be updated.",
@@ -201,17 +198,17 @@ export const enUS = {
   "account.recharge_open_failed":
     "MetaWork could not open the Metask recharge page. Try again shortly.",
   "execution.command_rejected":
-    "The default model source was not updated. Refresh execution state and try again.",
+    "The model settings were not updated. Refresh and try again.",
   "execution.command_failed":
-    "MetaWork could not complete the default model source action. Use the recovery action shown in Execution.",
+    "MetaWork could not update the model settings. Review the configuration and try again.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
     "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
-  "execution.updated": "Default model source updated.",
+  "execution.updated": "Model settings updated.",
   "operation.account": "Updating the Metask account",
-  "operation.execution": "Updating the default model source",
+  "operation.execution": "Updating model settings",
   "operation.account_cancel": "Cancelling the Metask account action",
   "command.timeout_reconciled":
     "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
@@ -1179,13 +1176,10 @@ export const enUS = {
   "account.unknown_provider": "Unknown provider",
   "settings.title": "Settings",
   "settings.back": "Back to workbench",
-  "settings.intro":
-    "Manage the defaults MetaWork uses when you start new work.",
   "settings.sections": "Settings sections",
   "settings.general": "General",
   "settings.account": "Account",
   "settings.models": "Models",
-  "settings.providers": "Providers",
   "settings.general_basics": "Basics",
   "settings.automatic_workspace.title": "Automatic Workspace location",
   "settings.automatic_workspace.help":
@@ -1248,33 +1242,10 @@ export const enUS = {
   "settings.account_history_less": "Less",
   "settings.account_history_more": "More",
   "settings.account_security": "Security",
-  "settings.providers_saved": "Model services",
-  "settings.back_to_providers": "Back to providers",
-  "settings.builtin_provider": "Official model service",
-  "settings.builtin_provider_group": "Model providers",
-  "settings.builtin_provider_group_help":
-    "Choose a provider and MetaWork fills in its official protocol and address.",
-  "settings.builtin_provider_unconfigured": "Not configured",
-  "settings.builtin_provider_needs_models": "Add or test a model",
-  "settings.builtin_provider_configure": "Configure",
-  "settings.builtin_provider_manage": "Manage",
-  "settings.custom_provider": "Custom API",
-  "settings.custom_provider_group": "Custom API",
-  "settings.custom_provider_group_help":
-    "For self-hosted models, other providers, or API gateways.",
-  "settings.custom_provider_add_action": "Add custom API",
-  "settings.builtin_provider_help":
-    "MetaWork supplies this provider's protocol and official address. You can use a compatible address when needed.",
-  "settings.builtin_provider_address": "Service address",
-  "settings.builtin_provider_change_address": "Use another address",
-  "settings.builtin_provider_reset_address": "Restore official address",
   "settings.builtin_provider_address_warning":
-    "Future model requests will send this Provider's API key to {host}.",
+    "Model requests will send the API key to {host}.",
   "settings.get_api_key": "Get an API key",
   "settings.open_provider_docs": "Open official documentation",
-  "settings.models_error": "Model configuration needs attention",
-  "settings.models_error_help":
-    "Refresh the Metask catalog or review the saved model configuration.",
   "settings.models_reset_message": "Model configuration cannot be read",
   "settings.models_reset_detail":
     "Recovery first reloads valid configuration and clears it only when it is missing or confirmed damaged. Your account, Tasks, Workspaces, and conversations are unchanged.",
@@ -1361,63 +1332,52 @@ export const enUS = {
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
     "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
-  "settings.default_model_for_new_tasks": "Default model for new tasks",
-  "settings.current_default": "Current",
-  "settings.provider": "Provider",
-  "settings.provider_help":
-    "Choose the service, then select one of its available models.",
-  "settings.choose_provider": "Choose a provider",
-  "settings.provider_menu_help":
-    "Only providers with a ready credential and tested model can become the default.",
-  "settings.provider_managed_description":
-    "Managed through your Metask account",
   "settings.api_key": "API key",
-  "settings.open_models": "Open Models",
-  "settings.default_selection_missing":
-    "No executable default model is selected",
-  "settings.default_model_unavailable":
-    "The previous default model is no longer in the available catalog. Choose another default model.",
-  "settings.providers_help":
-    "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
-  "settings.providers_empty": "No custom APIs yet.",
-  "settings.providers_unavailable":
-    "Provider management is unavailable in this build.",
-  "settings.custom_provider_capture_unavailable":
-    "Adding a provider or replacing an API key is unavailable while the system credential store is unavailable.",
-  "settings.custom_provider_add": "Save provider",
-  "settings.custom_provider_adding": "Saving provider…",
-  "settings.custom_provider_title": "Connect a custom API",
-  "settings.custom_provider_help":
-    "Choose the protocol explicitly, then enter the service address and credential.",
-  "settings.custom_provider_name": "Display name",
-  "settings.custom_provider_name_placeholder": "My OpenAI service",
-  "settings.custom_provider_name_help":
-    "Used only to identify this provider inside MetaWork.",
   "settings.custom_provider_protocol": "Protocol",
-  "settings.custom_provider_endpoint": "Base URL",
-  "settings.custom_provider_endpoint_help":
-    "Enter the service root. MetaWork adds the request path for the selected protocol.",
-  "settings.custom_provider_endpoint_preview": "Request endpoint: {endpoint}",
-  "settings.custom_provider_model_id_placeholder": "gpt-5",
-  "settings.provider_api_key_placeholder": "Enter API key",
-  "settings.provider_models_configured_elsewhere":
-    "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
-  "settings.provider_save": "Save provider",
-  "settings.provider_save_api_key": "Save API key",
-  "settings.custom_provider_edit_help":
-    "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
-  "settings.custom_provider_replace_credential": "Update API key",
-  "settings.custom_provider_remove_confirm":
-    "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
-  "settings.custom_provider_removing": "Removing…",
+  "settings.custom_provider_endpoint": "Request URL (Endpoint)",
+  "settings.custom_model_protocol_detected": "Detected API: {protocol}",
+  "settings.custom_model_protocol_automatic":
+    "Enter the complete request URL to detect the API format automatically.",
+  "settings.custom_model_base_url": "Base URL",
+  "settings.custom_model_gemini_address_help":
+    "Enter the service root URL. Gemini model paths are generated automatically.",
+  "settings.custom_models": "Custom models",
+  "settings.model_connection_provider": "Model vendor",
+  "settings.model_connection_choose_provider": "Choose a model vendor",
+  "settings.model_connection_custom": "Custom / other service",
+  "settings.model_connection_help":
+    "Add a third-party model, then test it before using it in a task.",
+  "settings.custom_model_root_help":
+    "Enter the complete endpoint. If this is a Gemini Native service root, confirm below.",
+  "settings.custom_model_gemini_confirm":
+    "This is a Gemini Native service root",
+  "settings.custom_model_address_error.address":
+    "Enter a valid URL without credentials, query parameters, or a fragment.",
+  "settings.custom_model_address_error.secure":
+    "Use HTTPS. HTTP is supported only for localhost.",
+  "settings.custom_model_address_error.path":
+    "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
+  "settings.custom_model_test_start_failed":
+    "Could not start the test for {model}. Try again.",
+  "settings.custom_model_remove_failed":
+    "Could not delete the model. Try again.",
+  "settings.model_edit_partial":
+    "Some changes were saved ({fields}). Review the remaining fields and re-enter the API key if needed before saving again.",
+  "settings.model_edit_review":
+    "The configuration changed or the save result could not be confirmed. Reopen the model to review its latest configuration.",
+  "settings.model_connection_edit_help":
+    "Save changes to the model. Leave the API key blank to keep it unchanged.",
+  "settings.model_connection_dialog_help":
+    "Choose a vendor or custom service, enter the model, and save.",
+  "settings.model_connection_empty": "No custom models yet.",
+  "settings.model_connection_edit": "Edit model",
+  "settings.model_connection_shared":
+    "These connection settings are shared by {count} models. Changes require testing the models again.",
   "settings.custom_model_testing": "Testing…",
-  "settings.custom_provider_state.configuring": "Not tested",
-  "settings.custom_provider_state.ready": "Ready",
-  "settings.custom_provider_state.disabled": "Disabled",
   "settings.custom_model_test_status.untested": "Not tested",
   "settings.custom_model_test_status.testing": "Testing",
-  "settings.custom_model_test_status.connected": "Last test passed",
-  "settings.custom_model_test_status.failed": "Last test failed",
+  "settings.custom_model_test_status.connected": "Test passed",
+  "settings.custom_model_test_status.failed": "Test failed",
   "settings.custom_provider_protocol.openai_responses": "OpenAI Responses",
   "settings.custom_provider_protocol.anthropic_messages": "Anthropic Messages",
   "settings.custom_provider_protocol.openai_chat_completions":
@@ -1425,61 +1385,26 @@ export const enUS = {
   "settings.custom_provider_protocol.gemini_native": "Gemini Native",
   "settings.custom_provider_credential.ready": "Credential available",
   "settings.custom_provider_credential.capture_unavailable":
-    "Secure credential capture is unavailable on this Host",
+    "Secure API key storage is unavailable",
   "settings.custom_provider_credential.missing": "Credential required",
   "settings.custom_provider_credential.invalid": "Credential rejected",
   "settings.catalog_count": "Models {models}",
-  "settings.loading_models": "Loading available models",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.default_model": "Default model",
-  "settings.default_model_help":
-    "Choose the model used by new tasks. Existing tasks keep their own model.",
-  "settings.new_task_model_help":
-    "Choose the model for this new task without changing the global default.",
+  "settings.new_task_model_help": "Choose the model for this new task.",
   "settings.new_task_model_invalid":
     "The previously selected model is no longer available. Choose another model before sending.",
-  "settings.only_model_help":
-    "This configuration currently provides only one available model.",
-  "settings.model_menu_help":
-    "Choose from models available to the selected provider.",
-  "settings.custom_model_add_help":
-    "Enter the model ID exposed by this provider. It will be tested before it can become the default.",
   "settings.custom_model_add": "Add model",
-  "settings.custom_model_adding": "Adding…",
   "settings.custom_model_test": "Test model",
   "settings.custom_model_id": "Model ID",
-  "settings.custom_model_remove_confirm":
-    "Remove this model from the provider? Existing tasks keep their current binding.",
-  "settings.custom_model_removing": "Removing…",
+  "settings.custom_model_remove_confirm": "Remove model?",
+  "settings.custom_model_remove_description":
+    "After removing “{model}”, it will no longer be selectable for new tasks. Existing tasks and their history will be kept.",
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",
-  "settings.model_loading": "Loading models…",
-  "settings.switch.pending_label": "Pending change",
-  "settings.switch.saving_label": "Saving",
-  "settings.switch.preparing_model": "Preparing {model}",
-  "settings.switch.saving": "Saving the new default",
-  "settings.switch.saving_detail":
-    "{api} · {model} will be used for new tasks when saving finishes.",
-  "settings.switch.current_preserved":
-    "Your current default stays active until this finishes.",
-  "settings.switch.current_model_preserved":
-    "Your current default model, {model}, stays active until this finishes.",
-  "settings.switch.refreshing":
-    "Your current default stays active while account options refresh.",
-  "settings.switch.working":
-    "Account changes remain locked until this action finishes.",
-  "settings.switch.cancelled":
-    "Change cancelled. {api} · {model} remains your default.",
-  "settings.switch.failure_preserved":
-    "No default was changed. {api} · {model} remains active.",
-  "settings.existing_tasks_unchanged":
-    "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out",
   "settings.signout_help":
     "Sign in again to create new tasks using Metask models. Your custom models, local tasks, and workspace files will remain.",
-  "settings.task_binding_model":
-    "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help":
     "Choose the model for messages sent in this task.",
   "settings.task_model_catalog_loading":
@@ -1810,7 +1735,7 @@ export const enUS = {
   "scheduled.reason.previous_task_running":
     "The previous task is still running.",
   "scheduled.reason.execution_changed":
-    "The default model or connection changed. Edit and confirm.",
+    "The model or connection changed. Edit and confirm.",
   "scheduled.reason.workspace_unavailable":
     "Automatic workspaces are unavailable. Check settings, then edit and confirm.",
   "scheduled.reason.capacity_reached":

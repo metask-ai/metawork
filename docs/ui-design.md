@@ -121,7 +121,7 @@ Workspace
 | MCP                  | MCP             | 可信服务、连接状态与已发现工具目录    |
 | Account              | 账号            | Metask 登录、身份、授权与退出         |
 | Providers            | Provider        | 用户管理的模型服务、协议、地址与凭据  |
-| Models               | 模型            | 所有 Provider 的模型与全局默认模型    |
+| Models               | 模型            | 用户自行添加的模型与服务配置管理      |
 | Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
 | Model                | 模型            | 新 Task 的执行模型，不称模式          |
 | Task Panel           | 任务面板        | 当前 Task 的统一右侧详情容器          |
@@ -509,7 +509,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task    |
 | View sync            | `ready / syncing / failed`                            | 当前连接已确认、最近一次合格读取成功且无故障 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only 同源模型选择；发送前必须同时满足相应 Workspace admission、默认执行配置与所选模型 authority。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
+`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only、source-qualified 模型选择；发送前必须同时满足相应 Workspace admission 与所选模型 authority，未明确选择模型时还须满足默认执行配置 admission。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
 
 正常通知滞后不构成 View sync 故障：一次合格快照被当前连接消费后，后续仍有更新需求不撤销 readiness；命令的最终接纳仍由 Host 校验。显式恢复在顶栏既有状态入口轻量显示“正在恢复同步”，普通读取失败自动升级一次重建时不闪中间故障；最终失败在同一入口提供“重试同步”和可折叠技术详情，不在对话正文叠加故障卡或重复横幅。恢复动作可直接使用键盘，窄窗保持可访问名称与安全换行；已收到内容和本地草稿保留。启动时尚无可信视图仍使用根连接失败页面。
 
@@ -727,8 +727,8 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 模型选择规则：
 
-- New task 默认显示当前 active 模型；Composer 模型按钮和菜单项只显示模型名称，内部仍以来源和模型共同区分候选。菜单仅列出当前已选 Provider 的 ready 模型；已有草稿保留其明确选择的来源，其余从 Host 当前默认配置确定，不能合并其他 Provider 的候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
-- 没有可用 global default 时，已有明确来源仍允许选择该来源当前可用的模型并发送；没有已选 Provider 或该 Provider 没有可用候选时提供进入 `Models` 设置的导航，不回退到其他 Provider。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
+- New task 默认显示当前 active 模型；Composer 模型按钮和菜单项只显示模型名称，不展示 Provider 名称。菜单汇总 Metask 与所有 Custom Provider 的 ready 模型，上方列出 Metask 官方模型，下方列出自定义模型；自定义区域仅在有候选时显示一次“自定义模型”分组标识，标识不参与选择。不因当前默认或草稿选择改变该顺序；内部以来源和模型共同区分候选。已有草稿保留其明确选择，初始意图从 Host 当前默认配置确定。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
+- 没有可用 global default 或当前来源不可用时，菜单仍允许明确选择其他可用 Provider 的模型并发送；没有可用候选时提供进入 `Models` 设置的导航，不自动选择其他来源。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
 - 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。菜单仅列出 Task modelIntent 所属 Provider 的 ready 模型，不受 global default 的来源变化或忙碌状态约束；当前来源不可用或历史来源未知时保留模型事实，不借用其他 Provider 的目录。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
@@ -996,15 +996,15 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
 
-新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Providers 设置复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
+新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Models 页的自定义模型管理复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
 
 自动展示须在可信 Snapshot 与正常连接建立后，仅在新任务工作面、Account 已确认 signed_out、没有可用模型或更具体的配置恢复问题时发生。检查、授权、目录加载、执行配置替换、存储恢复、账号错误、已有自定义配置待修复和显式草稿选择失效优先呈现自己的状态。历史、执行中的 Task、设置、搜索、其他模态界面和正在输入的草稿不被首次引导打断。
 
 本机轻量 UI 偏好记住引导已处理，不保存账号、模型或 credential：用户选择任一入口、跳过或关闭后记为已处理；首次确认已有可用模型也视为已处理。记录跨 reload/重启保留，不随退出登录或模型失效重置；存储失败不阻止使用，当前 Renderer 会话仍抑制重复自动展示。关闭按钮、Esc 和遮罩关闭等同跳过。输入区“开始使用”可主动重新打开弹层。
 
-点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Providers 设置，保存服务后通过清晰的 Models 入口添加、测试和选择模型；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
+点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Models 的自定义模型分组，通过“添加模型”同时准备连接与模型，添加和测试在 Models 完成，选择在任务输入区完成；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
 
-跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时提供模型设置；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Providers，服务已保存但模型尚未就绪时进入 Models 添加、测试或选择；模型存储异常进入 Models，定时任务存储阻止执行配置更新时说明具体原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，定时任务存储阻止执行配置更新时说明具体原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
 
 弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
@@ -1022,14 +1022,9 @@ Account
 └── Sign out
 
 Models
-├── Global default model（Metask + user-managed Providers）
-├── Metask API and model catalog
-└── Refresh catalog
-
-Providers（capability-gated）
-├── Model providers（DeepSeek / Kimi / MiniMax / GLM）
-├── Official provider setup and management（independent full page）
-└── Custom API（secondary group and independent add page）
+└── Custom models（capability-gated）
+    ├── Model list（test / edit / remove）
+    └── Add model dialog（vendor preset / custom service）
 
 Archived tasks
 ├── Search by task name
@@ -1049,7 +1044,7 @@ Archived tasks
 
 安装、更新、重新安装、检查与清理由 Host action facts 决定是否可用，不因 Task 正在运行而整体禁用。移除使用危险动作和确认弹层，默认焦点为取消；说明新 Task 回到基础 Skill，仍被使用的资源待清理，必要时重启完成。清理与移除须提示本机其他 MetaWork 构建可能需要重新安装环境。环境就绪时说明新 Task 使用新资源、既有 Task 在后续新 Run 前自动采用当前 Skill，不宣称正在运行的 Session 已切换。该分组遵循现有设置行、错误、焦点、深浅主题及窄窗规则，不建立插件商店或通用拓展管理页面。
 
-`Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
+`Models / 模型` 只管理用户自行添加的模型与对应服务配置，不再提供平级 `Providers` 导航。模型服务管理分组只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才显示；该组隐藏不影响配置恢复入口。不能显示不可完成的空壳或“能力不可用”配置表单。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
 Workspace 列表、打开、迁移、清理和重新授权不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
@@ -1069,59 +1064,56 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
 - 退出登录必须说明 Account设备凭据会清理、Metask模型将暂时不可用于新 Task、自定义模型不受影响且历史保留；不能把它描述成对 live Task的热撤权。
 
-`Models`规则：
+`Models / 模型`规则：
 
 - `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先尝试恢复合法配置，只有文件缺失或确认损坏时才清空，不得无条件承诺删除 Provider 或模型配置。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
-- 进入该设置 route只渲染 Host已提交的 Models projection，不触发隐藏同步；用户显式点击 `重新同步`时才刷新 Metask provider目录。已提交 intent在同步期间保持可读，`重新同步`只用于失败恢复或页面保持打开期间发生的 Metask外部变更，不能成为打开下拉框或切换默认值的前置步骤；
-- 页面以一组连续的 `Provider → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 限定 source authority，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
-- Models 与对话 Composer 只提供对话模型选择，不设置生图模型选择区域、生成按钮或连接测试。生图模型由 Host 自动解析，Renderer 不渲染图片目录或维护第二份配置。生成可能收费及失败后不自动重试的事实使用既有工具说明和审批详情呈现；结果沿既有工具详情提供真实文件引用或不可用原因，不伪造图片预览、图库或模型已看过图的事实；
-- Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的已保存 credential 只在独立 Providers 页面管理，Models 页面也不重复投影凭据步骤；
-- Metask protocol 固定为 Anthropic Messages，Renderer 不提供 protocol、base URL 或 credential 编辑入口；
-- 切换 Provider 只准备并收窄当前模型候选，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
-- 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
+- 进入该设置 route 只渲染 Host 已提交的用户模型与配置持久化事实，不触发同步或隐藏 mutation；Metask 官方模型的目录加载、重试和选择属于任务输入区，不在本页提供官方目录或同步入口；
+- 页面名称固定为“模型”，只列出用户自行添加的模型，包括通过内置厂商预设添加的模型；提供添加、编辑、测试与删除。不展示 Metask 官方模型目录、官方登录/同步/加载/空态或错误，也不提供默认模型设置。任务使用的模型在输入区选择；
+- 管理页与对话 Composer 只呈现对话模型，不设置生图模型选择区域、生成按钮或连接测试。生图模型由 Host 自动解析，Renderer 不渲染图片目录或维护第二份配置。生成可能收费及失败后不自动重试的事实使用既有工具说明和审批详情呈现；结果沿既有工具详情提供真实文件引用或不可用原因，不伪造图片预览、图库或模型已看过图的事实；
+- Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的 credential 通过 Models 内专用服务配置表单管理，不要求先选择默认模型，已保存 secret 永不显示或回填；
+
+- 添加模型时选择厂商或自定义服务只准备表单，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
+- 模型管理不提交模型选择 mutation。New task Composer 直接列出所有来源的 ready 模型；缺少选择但已有可用候选时，恢复动作直接打开输入区模型列表，不能再要求用户进入管理页设置默认值；
+- 模型图标表示模型厂商品牌，使用同一套本地打包的小尺寸标志；未知厂商与自定义来源的通用模型图标使用线框立方体。Metask 官方目录按模型 ID 的已知系列映射对应厂商，无法识别时使用通用模型图标；内置厂商预设按 Host 发布的预设身份显示对应厂商标志；自定义接口始终使用通用模型图标，不根据用户填写的模型 ID、显示名称、服务名称或地址推断厂商。该展示映射不参与模型 identity、protocol、credential 或执行资格判定。添加模型的厂商选择器、模型管理列表、Composer 菜单与当前模型触发器复用同一图标组件，沿用文字颜色适配深浅主题，不增加 Provider 名称文案、独立操作或可访问名称；来源仍由菜单分组表达。
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
 - `在 Metask 中管理`只有在 Host发布固定安全入口后才显示；当前没有该 capability时不放置链接或假入口；
-- Account为 `signed_out`时，Metask provider显示需要登录且不允许刷新/选择；无 secret的已选 intent可以保留，Custom Provider 与其模型仍可独立查看和管理。
-- 选择 Custom Provider 后，模型步骤始终显示该 Provider 的全部模型和新增入口，不以“尚无模型”作为唯一可编辑状态；每个模型提供独立测试与带确认的删除动作，ready 模型才可提交为 global default。新增第二个及后续模型不得要求删除或覆盖已有模型；
+- 用户模型管理不依赖 Metask 登录；Account 或 Metask 官方目录的加载和失败不得隐藏已保存的用户模型或阻塞其管理；
+- 自定义模型列表始终提供新增入口，每个模型提供独立测试、编辑与带确认的删除动作，只有 ready 模型可在任务输入区选择。新增后续模型不得要求删除或覆盖已有模型；
 
 设置页保留左侧分区导航与右侧内容的双栏布局。桌面双栏直接消费应用左侧导航轨的已保存宽度，使设置内容起点与 Workbench 分界线保持一致；设置页不建立第二份宽度状态或第二个拖动器。它是桌面控制面，不使用营销页式 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。顶部只保留与左侧导航对齐的返回入口，不重复展示全局设置标题和说明；标准窗口下当前分区标题和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
 
 设置视觉与控件遵循以下规则：
 
-- 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，Provider 和模型这种依赖型配置形成连续交互组；
+- 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，用户添加的模型使用同一管理列表；
 - 每个设置分区页面在内容列顶部使用一个醒目的页面标题；页面标题下用 13–15 px 的小分组标题组织设置项，具体控件再使用自己的字段标签。不得在页面标题、分组标题和字段标签之间重复写“设置”或同义标题；
 - 页面标题约 22–26 px，设置主文案 13–15 px，辅助文案不小于 12 px；disabled 状态只改变语义色和对比度，不缩小字号；
-- 语言、Provider 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
-- compact 选择器只显示一个短值；Provider 可以使用 detailed 选择器显示名称与来源说明，credential 与 protocol 不伪装成可编辑字段；
-- Provider 与默认模型控件在同一个工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `Provider → source-qualified ModelRef`；不能再附加 Metask 专属配置块、API Key 步骤或第二个同名的默认模型控件。credential 的创建、替换和删除只能进入独立 Providers 页面；
+- 语言和模型来源统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
+- compact 选择器只显示一个短值；添加模型时厂商选择器只列内置厂商预设与自定义服务，不提供已有 Provider 或连接的选择与复用；编辑模型时不再显示不可修改的来源选择器；自定义地址按下述端点规则识别接口；
+- 管理页没有默认模型步骤、配置链或模型选择控件；credential 只在添加或编辑模型时处理；
 - 模型目录加载、选择和持久化只冻结相关配置组，不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
-- 设置页把 Provider 候选准备与 global default mutation表现为一条分阶段的 Models-owned transaction；Provider 只限定 source，最后一步从该 source 的 ready 模型中提交唯一 global default。Metask provider-local 准备和最终 global default提交分别校验对应 catalog/source generation与 expected revision，再 durable提交 Models state；Custom Provider 使用其 provider revision 提交完整 `ModelRef`。Product后续 resolve/scrub/install失败时另行显示 desired/active mismatch与 recovery，不回滚 Models，也不把 Product failure显示成 Account mutation失败。Renderer可在 command acknowledgement前短暂回显用户请求，但收到 snapshot后必须以 Host projection为准；页面重建、失败和成功都不得依赖 Renderer临时状态恢复事务；
-- 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，但仍不让导航与内容共享滚动层；
+- 管理页的添加、编辑、测试和删除分别消费 Host typed command 与 canonical Snapshot；页面不通过本地选中态或默认模型 mutation 准备任务。任务模型选择的接纳和绑定以对应 Task 合同为准；
+- 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，标签保持单行，必要时仅导航自身横向滚动，仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
 Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
 
-Models 设置与 Composer 的候选只来自 Host 按[产品模型范围](requirements.md#52-账号provider模型与执行配置)发布的合格目录，不把失格的历史或 Renderer 请求项补回可选菜单。ready 目录允许保留已失格的 default intent；设置保留其身份并明确提示重新选择，合格候选仍可操作。合法空目录禁用模型选择并提示“没有可用的对话模型”，保留重新同步入口与 Account 登录状态。
+本页只展示 Host 发布的用户模型和相应配置状态；即使官方目录非空、为空或失败，也不在本页显示其模型、同步、登录或恢复提示。共享 Models 配置存储需要恢复时保留明确确认入口；任务模型选择和执行资格仍以 Host 事实为准。
 
-`Providers` 规则：
+`Models` 中的自定义模型管理规则：
 
-> 该入口按完整 Host capability gate 开放；支持的桌面平台只要三项运行能力同时可用即可导航。
-
-- Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。revision 1 保留 `customProviderSecretCapture` 字段名，但其 true 表示 create/replace API Key typed command 可用且 Models credential vault 可写，不再表示弹出原生输入窗。Host 只发布全 true 或全 false，并从实际 management、credential storage 与模型测试能力生成该组事实，不读取平台名决定产品可见性；不得提供“稍后补齐 credential”的半成品路径；
-- Provider 首页以“模型厂商”和“自定义 API”两个分组建立明确主次。DeepSeek、Kimi、MiniMax 与智谱 GLM 四个 Host 模板始终逐行显示，不因尚未配置而隐藏；行内只显示名称、`未配置 / 尚未测试 / 可用 / 凭据需处理` 状态和单一 `配置 / 管理` 动作。自定义 API 位于带分隔的第二分组，只有该分组提供弱化的“添加自定义 API”动作；不再提供通用 `Add Provider`、厂商下拉框或“官方 / 自定义”radio 模式切换；
-- 点击厂商行打开该厂商的独立全页，不使用列表内展开表单，也不成为 Models 的子页面。未配置状态默认直接使用 Host 模板发布的官方 Base URL，只要求 API Key；Base URL 输入默认隐藏，用户显式点击“使用其他地址”后才展开。展开区必须保留固定 protocol 的只读事实、实时展示最终 endpoint、提供恢复官方地址动作，并在地址偏离官方默认值时明确显示后续请求将把该 Provider API Key 发送到哪个 host；
-- 已配置厂商的管理页把地址与凭据作为两项独立设置：Base URL 修改使用专用 revision-bound mutation，API Key 更新始终打开新的空 password input 并使用独立 credential replacement，不把两者合并成一笔表单提交。厂商显示名和 protocol 始终不可编辑；地址或 credential authority 变化推进 source generation 并使该 Provider 全部模型回到待验证状态。秘密永不回填，保存成功、取消或离页后清除临时值；当前不显示厂商 logo；
-- 自定义 API 使用独立全页的单列连续表单，依次填写只用于 MetaWork 内识别的显示名称、protocol、API Base URL 与 API Key，不使用暗示连接步骤已经完成的装饰性流程图。填写 Base URL 后必须实时展示由 protocol 规则生成的实际请求地址，帮助用户在保存前确认最终 endpoint；API Key 使用可粘贴的 password input，不提供显示已保存值的能力，也不进入浏览器自动填充。自定义 API 精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native；选择协议只改变 Base URL 示例和后续 endpoint 生成规则，不得自动写入或覆盖输入框。Renderer 对前三者分别把用户填写的 Base URL确定性映射为 `{base_url}/responses`、`{base_url}/chat/completions` 与 `{base_url}/v1/messages`，Gemini Native 保持 Base URL并由既有消费者追加模型路径。Host 在提交时继续独立规范化 endpoint并校验 scheme/host/path/长度和控制字符；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
-- `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认模型后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
-- 第一版不提供自动模型发现；Provider 保存后由 Models 页明确填写 bounded model ID并执行测试，Provider 没有 ready 模型时不能成为默认来源；
-- global default 只在 Models 页作为一笔 Models-owned、source-qualified desired transaction提交；Providers 页不得因当前 Provider 是默认来源而禁用编辑或删除。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
-- Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask 模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
-- 自定义 API 列表保留编辑和删除两个一级操作，API Key 更新位于编辑界面的凭据区域，不在列表行中抢占一级操作。credential storage 不可用时整个 Provider 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该 Provider 全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 provider revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；两种 Provider 都通过 Models-owned custom model mutation添加或删除模型，不把模型伪装成 Provider 身份的一部分；
-- Models 按 exact Provider identity 与 expected provider revision 校验编辑/删除，不查询 live Session、Run、job 或 worker，也不以 consumer usage 拒绝 mutation。若 mutation 使当前 desired default 不可解析，Product Control 独立关闭 new admission 并进入 reconciliation；既有 Task/Run 保持自己的 owned binding，不静默改绑，历史仍保留；
-- Providers 页只管理 Provider 本身与 credential，不提供模型测试、默认模型、Workspace、权限策略、Task 历史或 AgentCore 内部状态。
+- Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest`；只有三者均为 true 才显示自定义模型分组。Host 从实际 management、credential storage 与模型测试能力发布全 true 或全 false，不按平台名决定产品可见性；不得提供缺少 credential 写入或测试能力的局部路径；
+- 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行只显示模型名和最新测试状态，状态以简短标签放在模型名称右侧，窄窗空间不足时允许换行，不显示 Provider 或服务名称，测试、编辑和删除使用三个图标按钮，保留本地化 accessible name、键盘焦点和 hover/focus tooltip；测试中显示加载状态并禁用重复测试，无法启动测试时显示包含模型名的可重试提示；删除仍需明确确认，弹层使用独立短标题和包含目标模型名称的影响说明，不重复标题与正文，也不把内部 Provider 身份当作模型删除对象；删除最后一个模型时连同其连接配置与 API Key 一起清理，不留下空服务入口；删除确认消费最新 revision，目标消失时关闭，完成后焦点返回仍存在的原按钮或新增入口；
+- 添加与编辑弹窗使用同一 Foundation Dialog、Select 与表单组件，各自提供对应操作的说明，不复用旧 Provider 配置步骤或默认模型说明。模型配置恢复只定位同一个 Models 设置分区，不保留独立 Provider 导航或焦点入口。先选择内置厂商预设或自定义服务；内置厂商使用 Host 发布的固定官方 Base URL、protocol 和模型 ID 列表；只展示 API Key 和模型选择，不展示连接设置、地址、协议或实际 endpoint。填写 API Key 并选择模型即可保存。自定义服务直接填写完整请求地址、API Key 和模型 ID；标准 endpoint 的 protocol 由确定性路径识别，无效地址在字段旁解释原因；Gemini Native 使用服务根地址并单独确认。每次添加都保存独立模型配置，不因同厂商或同地址而复用已有凭据或增加已有 Provider 的模型；不存在“连接”“填写新连接”或“使用已有服务”选择步骤。创建新来源与首个模型使用同一 typed command，成功后以 Snapshot 为准，不猜测新来源 identity；
+- 内置模型列表是填写建议，不授予授权、能力或 readiness，不做自动模型发现。保存后须明确测试；未通过测试的模型不能用于新任务选择。新增模型或进入编辑不隐式修改 global default；
+- 添加自定义模型的字段依次为模型厂商、请求地址、API Key、模型 ID；请求地址位于 API Key 上方，直接平铺展示，不放入“连接设置”等折叠区域；自定义服务开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native。前三种协议的地址字段标为“请求地址（Endpoint）”，直接显示并提交完整请求 URL，不补路径、不剥离已有路径，也不重复显示推算的地址预览。完整 URL 的 path 分别以 `/chat/completions`、`/responses`、`/v1/messages` 结束时自动识别对应 protocol 并显示只读接口提示，不提供协议选择；空地址不预选 protocol；仅有效的根地址提供 Gemini Native 确认，未确认时禁止提交。无效 URL、非本机 HTTP、携带凭据、query 或 fragment，以及不支持的路径在失焦后显示具体错误并禁止提交。改写地址重新识别并清除旧的 Gemini 确认。不根据 hostname、query、fragment、模型名或请求试错猜测 protocol。Gemini Native 明确标为服务根地址，并说明模型路径由应用生成；不把它伪装成完整 endpoint。自定义服务显示 API Key 的目标 host；Host 独立校验 scheme、host、协议路径、长度与控制字符；
+- 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；新模型的连接与凭据独立管理；既有共享配置只有在同源存在多个模型时才说明共同影响。弹窗使用一个“保存”动作，按地址、非空 API Key、模型 ID 的实际变化顺序提交现有 revision-bound mutation；每步须重新读取 canonical Models 并核对 revision、catalog 与目标模型后才继续，不假装为原子事务。明确失败时说明已保存的字段，保留其余非 secret 草稿并更新 revision；结果未知或配置发生冲突时停止，清除临时 secret，并提示重新打开确认，不自动重放。API Key 留空表示保留已有凭据。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；
+- endpoint、protocol 或 credential authority 变化推进 source generation 并使同源全部模型回到待验证状态；普通模型 add/replace/remove 只推进对应 revision/catalog generation。Provider 可在模型集合为空时持久处于 configuring，不把模型伪装成 Provider identity 的一部分；
+- `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；generation readiness 与最新测试状态分别显示。ready 模型失败重测不撤销已验证 generation、默认选择或既有 owned binding；
+- 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
+- 编辑和删除不因来源正被 Task/Session/Run 使用而禁用，也不查询 consumer usage。若 mutation 使 desired default 不可解析，Product Control 独立关闭新 admission 并进入 reconciliation；既有消费者保持 owned binding，历史不改写。该分组不扩展到 Workspace、权限策略或 AgentCore 内部状态。
 
 Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 Workbench 一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
@@ -1356,8 +1348,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 原生目录 picker 确认后直接完成 Manual Workspace 注册，不出现第二次 trust / `Use this folder` 请求，Renderer 不提交 `trusted` boolean；
 - New task Composer 始终显示当前模型和 Workspace，上下文缺失时提供明确下一步而非静默 disabled；
 - New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
-- 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
-- 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
+- 模型管理中的添加、编辑、测试与删除结果与 Composer 的可用模型候选一致；模型切换 pending/error 在任务输入区呈现；
+- 模型设置页只管理用户添加的模型，厂商预设只准备表单；没有默认 API、默认模型或独立 Provider 配置步骤，任务模型在输入区选择，不自动改绑已有 Task；
 - 已有 live Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；detached Task 的 Conversation restore 可按 §6.4 为兼容 credential target 建立 adoption epoch，任意 protocol/model 变化仍只有未来的显式 rebind 可以建立新 epoch；
 - Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 保持普通输入形态，用户发送时在同一意图内执行 restore→Run，required、restoring 与 failed/retry 不形成独立恢复控件或文案。不得因导航自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
 - API 只在设置中显示脱敏名称、protocol 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；

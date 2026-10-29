@@ -2,6 +2,7 @@ import {
   Activity,
   Archive,
   ArrowLeft,
+  Box,
   CalendarDays,
   Check,
   ChevronRight,
@@ -11,6 +12,7 @@ import {
   Folder,
   FolderUp,
   FileText,
+  Pencil,
   FileDiff,
   Layers3,
   LoaderCircle,
@@ -67,6 +69,7 @@ type IconName =
   | "warning"
   | "account"
   | "model"
+  | "box"
   | "provider"
   | "refresh"
   | "check"
@@ -83,6 +86,8 @@ type IconName =
   | "download"
   | "external-link"
   | "trash"
+  | "test"
+  | "edit"
   | "scheduled-tasks"
   | "mcp"
   | "calendar-days"
@@ -114,6 +119,7 @@ const icons: Record<IconName, LucideIcon> = {
   warning: TriangleAlert,
   account: UserRound,
   model: Layers3,
+  box: Box,
   provider: Plug,
   refresh: RefreshCw,
   check: Check,
@@ -130,6 +136,8 @@ const icons: Record<IconName, LucideIcon> = {
   download: Download,
   "external-link": ExternalLink,
   trash: Trash2,
+  test: Plug,
+  edit: Pencil,
   "scheduled-tasks": Clock3,
   mcp: Plug,
   "calendar-days": CalendarDays,

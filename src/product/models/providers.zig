@@ -196,13 +196,6 @@ pub const Registry = struct {
             provider_revision == 0 or source_generation == 0 or
             catalog_generation == 0)
             return error.InvalidProvider;
-        for (self.providers.items) |provider|
-            if ((std.mem.eql(u8, provider.normalized_base_url, input.spec.normalized_base_url) and
-                provider.protocol == input.spec.protocol) or
-                (input.spec.builtin_provider_id != null and
-                    provider.builtin_provider_id == input.spec.builtin_provider_id))
-                return error.InvalidProvider;
-
         if (input.provider_id.len == 0 or
             input.provider_id.len > contract.Limits.instance_id_bytes or
             !std.mem.eql(u8, input.provider_id, input.credential_slot.id) or
@@ -220,6 +213,16 @@ pub const Registry = struct {
             .catalog_generation = catalog_generation,
         };
         errdefer provider.deinit(self.allocator);
+        if (input.spec.initial_model) |model| {
+            try provider.models.ensureUnusedCapacity(self.allocator, 1);
+            const owned: OwnedModel = make: {
+                const id = try self.allocator.dupe(u8, model.id);
+                errdefer self.allocator.free(id);
+                const display_name = try self.allocator.dupe(u8, model.display_name);
+                break :make .{ .id = id, .display_name = display_name, .metadata = model.metadata, .metadata_provenance = .user_declared };
+            };
+            provider.models.appendAssumeCapacity(owned);
+        }
         try self.providers.append(self.allocator, provider);
     }
 
@@ -336,15 +339,6 @@ pub const Registry = struct {
         const provider = try self.selected(input.selection);
         const binding_changed = provider.protocol != input.spec.protocol or
             !std.mem.eql(u8, provider.normalized_base_url, input.spec.normalized_base_url);
-        for (self.providers.items) |candidate|
-            if (!std.mem.eql(u8, candidate.id, provider.id) and
-                candidate.protocol == input.spec.protocol and
-                std.mem.eql(
-                    u8,
-                    candidate.normalized_base_url,
-                    input.spec.normalized_base_url,
-                ))
-                return error.InvalidProvider;
         if (next_provider_revision == 0 or
             next_provider_revision == provider.provider_revision or
             (binding_changed and (next_source_generation == null or
@@ -545,6 +539,13 @@ pub const Registry = struct {
                 return error.InvalidProvider;
         } else if (next_selection_revision != null) {
             return error.InvalidProvider;
+        }
+        if (provider.models.items.len == 1) {
+            try self.remove(.{
+                .source_id = provider.id,
+                .expected_provider_revision = provider.provider_revision,
+            }, next_selection_revision);
+            return;
         }
         if (default_changed) {
             self.clearDefaultSelection();
@@ -1224,10 +1225,6 @@ pub fn decode(
             .normalized_base_url = provider_wire.normalized_base_url,
         }) catch return error.InvalidData;
         if (result.findIndex(provider_wire.id) != null) return error.InvalidData;
-        if (provider_wire.builtin_provider_id) |builtin_provider_id|
-            for (result.providers.items) |provider|
-                if (provider.builtin_provider_id == builtin_provider_id)
-                    return error.InvalidData;
         for (result.pending_credential_deletions.items) |provider_id|
             if (std.mem.eql(u8, provider_id, provider_wire.id))
                 return error.InvalidData;
@@ -1519,7 +1516,41 @@ test "registry creates and selects a native custom provider" {
     try contract.validateCustomProviderView(values[0]);
 }
 
-test "registry persists a provider before its first model is configured" {
+test "model configurations with the same endpoint and vendor remain independent across persistence" {
+    for ([_]?contract.BuiltinProviderId{ null, .deepseek }) |vendor| {
+        var registry = Registry.init(std.testing.allocator);
+        defer registry.deinit();
+        for ([_][]const u8{ "model-config-one", "model-config-two" }) |id| {
+            try testCreate(&registry, .{
+                .provider_id = id,
+                .spec = .{
+                    .builtin_provider_id = vendor,
+                    .display_name = "Model configuration",
+                    .protocol = .openai_chat_completions,
+                    .normalized_base_url = "https://api.deepseek.com/chat/completions",
+                },
+                .credential_slot = .{ .id = id },
+                .model = .{ .id = "deepseek-flash" },
+            });
+        }
+        const encoded = try encodeAlloc(std.testing.allocator, &registry);
+        defer std.testing.allocator.free(encoded);
+        var restored = try decode(std.testing.allocator, encoded);
+        defer restored.deinit();
+        try std.testing.expectEqual(@as(usize, 2), restored.views().len);
+        try restored.removeCustomModel(.{
+            .selection = .{ .source_id = "model-config-one", .model_id = "deepseek-flash" },
+            .expected_provider_revision = 1,
+            .expected_catalog_generation = 3,
+        }, 4, 5, null);
+        try std.testing.expectEqual(@as(usize, 1), restored.views().len);
+        try std.testing.expectEqualStrings("model-config-two", restored.views()[0].id);
+        try std.testing.expectEqualStrings("deepseek-flash", restored.views()[0].models[0].id);
+        try std.testing.expectEqualStrings("model-config-one", restored.credentialDeletions()[0]);
+    }
+}
+
+test "registry removes the connection and queues credential cleanup when its last model is deleted" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
     try registry.create(.{
@@ -1556,9 +1587,9 @@ test "registry persists a provider before its first model is configured" {
         .expected_provider_revision = 4,
         .expected_catalog_generation = 5,
     }, 6, 7, null);
-    const emptied = restored.views()[0];
-    try std.testing.expectEqual(@as(usize, 0), emptied.models.len);
-    try contract.validateCustomProviderView(emptied);
+    try std.testing.expectEqual(@as(usize, 0), restored.views().len);
+    try std.testing.expectEqual(@as(usize, 1), restored.credentialDeletions().len);
+    try std.testing.expectEqualStrings("slot-empty", restored.credentialDeletions()[0]);
 }
 
 test "schema 1 rejects removed provider selection and test fields" {

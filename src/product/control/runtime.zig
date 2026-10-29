@@ -3275,11 +3275,13 @@ pub const Runtime = struct {
         secret: []const u8,
         provider_id: models_contract.BuiltinProviderId,
         base_url: []const u8,
+        initial_model: ?models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         const result = self.custom_providers.createBuiltinWithCredential(
             secret,
             provider_id,
             base_url,
+            initial_model,
         );
         if (result.accepted) self.finishExecutionCommitNoFail();
         return result;
@@ -7662,6 +7664,12 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, preset.api_key_url);
             writer.writeAll(",\"documentationUrl\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, preset.documentation_url);
+            writer.writeAll(",\"modelIds\":[") catch return error.SnapshotTooLarge;
+            for (preset.model_ids, 0..) |model_id, model_index| {
+                if (model_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model_id);
+            }
+            writer.writeByte(']') catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
@@ -10975,8 +10983,8 @@ fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.Imag
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
 }
-fn controlCreateBuiltinProvider(context: *anyopaque, secret: []const u8, provider_id: models_contract.BuiltinProviderId, base_url: []const u8) models_contract.CommandResult {
-    return controlOwner(context).createBuiltinProviderWithCredential(secret, provider_id, base_url);
+fn controlCreateBuiltinProvider(context: *anyopaque, secret: []const u8, provider_id: models_contract.BuiltinProviderId, base_url: []const u8, initial_model: ?models_contract.CustomModelInput) models_contract.CommandResult {
+    return controlOwner(context).createBuiltinProviderWithCredential(secret, provider_id, base_url, initial_model);
 }
 fn controlUpdateBuiltinProviderBaseUrl(context: *anyopaque, selection: models_contract.CustomProviderSelectionCommand, base_url: []const u8) models_contract.CommandResult {
     return controlOwner(context).updateBuiltinProviderBaseUrl(selection, base_url);
@@ -13328,7 +13336,7 @@ test "Restore permission stats are projected as runtime health" {
         .restored_rules = 2,
         .invalidated_rules = 1,
     };
-    var storage: [8192]u8 = undefined;
+    var storage: [16 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,

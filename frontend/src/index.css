@@ -642,9 +642,8 @@ summary::-webkit-details-marker {
 }
 
 /* Long-lived Settings surface */
-.settings-page {
-  --settings-navigation-track: var(--left-column-width);
-  --settings-content-max-width: 960px;
+.settings-page,
+.settings-model-dialog {
   --settings-frost: var(--ui-surface-canvas);
   --settings-paper: var(--ui-surface-panel);
   --settings-ink: var(--ui-content-primary);
@@ -653,6 +652,11 @@ summary::-webkit-details-marker {
   --settings-brand-strong: var(--ui-action-primary-hover);
   --settings-brand-mist: var(--metask-primary-soft);
   --settings-line: var(--ui-border);
+}
+
+.settings-page {
+  --settings-navigation-track: var(--left-column-width);
+  --settings-content-max-width: 960px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
@@ -795,6 +799,7 @@ summary::-webkit-details-marker {
 
 .settings-section-heading h2 {
   margin: 0;
+  outline: none;
   font-size: var(--text-display);
   font-weight: 720;
   letter-spacing: -0.03em;
@@ -1386,6 +1391,119 @@ summary::-webkit-details-marker {
   background: var(--settings-paper);
 }
 
+.settings-model-services {
+  margin-top: 32px;
+}
+
+.settings-model-list-heading,
+.settings-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-model-list-heading p,
+.settings-model-connection-details p {
+  margin: 6px 0 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.settings-model-list {
+  margin-top: 16px;
+  border-top: 1px solid var(--settings-line);
+}
+
+.settings-model-row {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--settings-line);
+  flex-wrap: wrap;
+}
+
+.settings-model-identity {
+  display: flex;
+  flex: 1 1 160px;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-model-identity > strong {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  font-size: var(--text-body);
+  font-weight: 650;
+}
+
+.settings-model-identity > strong > span:last-child {
+  min-width: 0;
+}
+
+.model-vendor-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  font-size: 18px;
+}
+
+.model-vendor-icon:not([data-vendor="custom"]) {
+  background-color: currentColor;
+}
+
+.settings-model-list-empty {
+  padding: 20px 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-control);
+}
+
+.settings-model-dialog {
+  z-index: 110;
+}
+
+.settings-model-dialog-backdrop {
+  z-index: 100;
+}
+
+.settings-model-form,
+.settings-model-form-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-model-form {
+  gap: 20px;
+}
+.settings-model-form-field > span {
+  font-size: var(--text-control);
+  font-weight: 600;
+}
+.settings-model-form .settings-custom-provider-input {
+  width: 100%;
+}
+.settings-model-form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.settings-model-connection-details {
+  display: grid;
+  gap: 12px;
+  font-size: var(--text-control);
+}
+
 .settings-custom-providers .settings-execution-header p {
   margin: 5px 0 0;
   color: var(--settings-muted);
@@ -1892,7 +2010,7 @@ summary::-webkit-details-marker {
 .settings-field {
   position: relative;
   display: grid;
-  grid-template-columns: 36px minmax(170px, 0.72fr) minmax(280px, 1.28fr);
+  grid-template-columns: minmax(170px, 0.72fr) minmax(280px, 1.28fr);
   min-height: 104px;
   padding: 18px 20px 18px 16px;
   align-items: center;
@@ -1901,46 +2019,6 @@ summary::-webkit-details-marker {
 
 .settings-field + .settings-field {
   border-top: 1px solid var(--settings-line);
-}
-
-.settings-field-provider::after,
-.settings-field-provider + .settings-field-api::before,
-.settings-field-api::after,
-.settings-field-api + .settings-field::before {
-  position: absolute;
-  left: 31px;
-  width: 1px;
-  background: var(--metask-primary-soft);
-  content: "";
-}
-
-.settings-field-provider::after,
-.settings-field-api::after {
-  top: 50%;
-  bottom: 0;
-}
-
-.settings-field-provider + .settings-field-api::before,
-.settings-field-api + .settings-field::before {
-  top: 0;
-  height: 50%;
-}
-
-.settings-field-step {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 1px solid var(--ui-action-primary-border);
-  border-radius: 50%;
-  color: var(--settings-brand);
-  background: var(--metask-primary-soft);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  font-weight: 720;
-  letter-spacing: -0.02em;
 }
 
 .settings-field-copy {
@@ -2395,6 +2473,23 @@ summary::-webkit-details-marker {
 
 .selection-menu-item-copy > span {
   font-weight: 620;
+}
+
+.selection-menu-item-copy > .selection-menu-item-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-menu-item-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-menu-item-leading {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .selection-menu-item-copy small {
@@ -3033,12 +3128,20 @@ button.run-process-tool:hover {
 
   .settings-nav {
     display: flex;
+    min-width: 0;
+    overflow-x: auto;
     min-height: auto;
-    padding: 14px 20px 10px;
+    padding: 14px 12px 10px;
     gap: 4px;
     border-right: 0;
     border-bottom: 1px solid var(--settings-line);
     background: var(--settings-frost);
+  }
+
+  .settings-nav a {
+    flex-shrink: 0;
+    gap: 6px;
+    white-space: nowrap;
   }
 
   .settings-content {
@@ -3056,7 +3159,7 @@ button.run-process-tool:hover {
   }
 
   .settings-field {
-    grid-template-columns: 36px minmax(150px, 0.7fr) minmax(250px, 1.3fr);
+    grid-template-columns: minmax(150px, 0.7fr) minmax(250px, 1.3fr);
   }
 
   .settings-custom-provider-edit {
@@ -3069,6 +3172,22 @@ button.run-process-tool:hover {
 }
 
 @media (max-width: 620px) {
+  .settings-model-list-heading > button,
+  .settings-model-dialog .settings-model-form-actions > button,
+  .settings-model-dialog .delete-confirmation-actions > button {
+    min-height: 44px;
+  }
+
+  .settings-model-row {
+    gap: 4px;
+  }
+  .settings-model-identity {
+    flex-basis: 100%;
+  }
+  .settings-model-row .settings-custom-provider-actions {
+    margin-left: auto;
+  }
+
   .settings-header {
     grid-template-columns: 1fr;
     min-height: 0;
@@ -3095,7 +3214,7 @@ button.run-process-tool:hover {
   }
 
   .settings-field {
-    grid-template-columns: 30px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     min-height: 0;
     padding: 16px 14px;
     align-items: stretch;
@@ -3105,30 +3224,7 @@ button.run-process-tool:hover {
 
   .settings-field-copy,
   .settings-control-stack {
-    grid-column: 2;
-  }
-
-  .settings-field-step {
-    width: 28px;
-    height: 28px;
-    grid-row: 1 / span 2;
-  }
-
-  .settings-field-provider::after,
-  .settings-field-provider + .settings-field-api::before,
-  .settings-field-api::after,
-  .settings-field-api + .settings-field::before {
-    left: 28px;
-  }
-
-  .settings-field-provider::after,
-  .settings-field-api::after {
-    top: 30px;
-  }
-
-  .settings-field-provider + .settings-field-api::before,
-  .settings-field-api + .settings-field::before {
-    height: 30px;
+    grid-column: 1;
   }
 
   .settings-control-compact {
@@ -8508,7 +8604,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-model-trigger .selection-trigger-leading {
-  color: var(--ui-action-primary);
+  color: inherit;
   font-size: var(--text-body);
 }
 

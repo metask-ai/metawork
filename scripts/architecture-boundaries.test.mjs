@@ -374,7 +374,13 @@ test("Product Models owns custom providers independently of Account", () => {
   const app = read("src/app.zig");
   const bridgeDispatcher = read("src/bridge/dispatcher.zig");
   const bridgeClient = read("frontend/src/bridge/client.ts");
-  const settings = read("frontend/src/features/settings/SettingsPage.tsx");
+  const modelSettings = read(
+    "frontend/src/features/settings/CustomModelsSettings.tsx",
+  );
+  const settings =
+    read("frontend/src/features/settings/SettingsPage.tsx") +
+    "\n" +
+    modelSettings;
   const windowsBringup = read("scripts/run-windows-bringup.mjs");
   const identity = read("src/product_identity.zig");
 
@@ -509,7 +515,7 @@ test("Product Models owns custom providers independently of Account", () => {
     /control\.replaceCustomProviderCredential\(parsed\.value\.apiKey/,
   );
   assert.match(bridgeClient, /apiKey: string/);
-  assert.match(settings, /type="password"/);
+  assert.match(modelSettings, /type="password"/);
   assert.doesNotMatch(settings, /settings-secure-credential-handoff/);
   assert.match(
     app,

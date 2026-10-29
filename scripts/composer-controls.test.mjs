@@ -108,8 +108,10 @@ const { ComposerFooter } = await vite.ssrLoadModule(
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
 );
-const { SettingsPage, customProviderEndpointFromBaseUrl } =
-  await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
+);
+
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -244,6 +246,26 @@ test("Global search keeps focus in its combobox and restores the opener", async 
   await waitFor(() => assert.ok(document.activeElement === opener));
   view.unmount();
   opener.remove();
+});
+
+test("SelectionMenu labels the custom group without adding a selectable item or interrupting keyboard navigation", async () => {
+  const selected = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  renderMenu((value) => selected.push(value), "alpha", {
+    options: [
+      { value: "alpha", label: "Official model" },
+      { value: "custom-one", label: "Custom one", groupLabel: "Custom models" },
+      { value: "custom-two", label: "Custom two" },
+    ],
+  });
+  const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
+  trigger.focus();
+  await user.keyboard("{Enter}");
+  const customGroup = screen.getByRole("group", { name: "Custom models" });
+  assert.equal(customGroup.querySelectorAll('[role="option"]').length, 2);
+  assert.equal(screen.getAllByRole("option").length, 3);
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(selected, ["custom-one"]);
 });
 
 test("SelectionMenu closes on Escape and restores trigger focus", async () => {
@@ -442,30 +464,27 @@ function settingsElement(account, overrides = {}) {
         return Promise.resolve(false);
       },
       onCancel() {},
-      onSelectModel() {},
       onCreateCustomProvider() {
         return Promise.resolve(false);
       },
       onCreateBuiltinProvider() {
         return Promise.resolve(false);
       },
-      onUpdateBuiltinProviderBaseUrl() {
-        return Promise.resolve(false);
-      },
-      onUpdateCustomProvider() {
-        return Promise.resolve(false);
-      },
-      onAddCustomModel() {
-        return Promise.resolve(false);
+      onSaveCustomModel() {
+        return Promise.resolve({
+          accepted: false,
+          applied: [],
+          source: null,
+          modelId: "",
+          reviewRequired: true,
+        });
       },
       onRemoveCustomModel() {
         return Promise.resolve(false);
       },
-      onRemoveCustomProvider() {
+      onTestCustomModel() {
         return Promise.resolve(false);
       },
-      onTestCustomModel() {},
-      onSelectCustomModel() {},
       onBeginLogin() {},
       onOpenRecharge() {},
       onLogout() {},
@@ -720,441 +739,741 @@ function renderSettings(account, overrides = {}) {
   };
 }
 
-test("Settings exposes Providers only for the complete Host gate", () => {
+const completeModelCapabilities = {
+  management: true,
+  secretCapture: true,
+  modelTest: true,
+};
+const presetModels = JSON.parse(
+  readFileSync(
+    new URL(
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+).models.builtinProviderPresets;
+function renderModelSettings(overrides = {}) {
+  return renderSettings(readySettingsAccount, {
+    customProviderCapabilities: completeModelCapabilities,
+    models: { ...readySettingsModels, builtinProviderPresets: presetModels },
+    ...overrides,
+  });
+}
+async function chooseModelSource(user, label) {
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(dialog).getByRole("combobox", { name: "Model vendor" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: label, exact: true }),
+  );
+  return dialog;
+}
+
+test("Models exposes a model list and Add model action instead of a Provider directory", () => {
   const incomplete = renderSettings(readySettingsAccount);
-  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
+  assert.equal(screen.queryByRole("heading", { name: "Custom models" }), null);
   incomplete.unmount();
-
-  render(
-    settingsElement(readySettingsAccount, {
-      customProviderCapabilities: {
-        management: true,
-        secretCapture: true,
-        modelTest: true,
-      },
-    }),
-  );
-  fireEvent.click(screen.getByRole("link", { name: "Providers" }));
-  assert.ok(screen.getByRole("heading", { name: "Providers" }));
-  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
-  fireEvent.click(screen.getByRole("button", { name: "Add custom API" }));
-  assert.ok(screen.getByRole("heading", { name: "Connect a custom API" }));
-  assert.ok(screen.getByRole("button", { name: "Back to providers" }));
+  renderModelSettings();
+  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Configure" }), null);
+  assert.ok(screen.getByRole("heading", { name: "Custom models" }));
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
 });
 
-test("Provider setup keeps Base URL user-owned and submits the protocol endpoint", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
+test("Add model uses the Host recipe and saves the first model with its official connection", async () => {
+  const user = userEvent.setup({ document });
   const submitted = [];
-  render(
-    settingsElement(readySettingsAccount, {
-      customProviderCapabilities: {
-        management: true,
-        secretCapture: true,
-        modelTest: true,
-      },
-      onCreateCustomProvider(input) {
-        submitted.push(input);
-        return Promise.resolve(false);
-      },
-    }),
-  );
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Add custom API" }));
-  assert.equal(screen.queryByRole("radio"), null);
-
-  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
-  assert.equal(baseUrl.value, "");
-  assert.equal(baseUrl.placeholder, "https://api.openai.com/v1");
-  assert.equal(screen.queryByRole("textbox", { name: /model id/i }), null);
-  const apiKey = screen.getByLabelText("API key");
-  assert.equal(apiKey.type, "password");
-
-  await user.click(screen.getByRole("combobox", { name: "Protocol" }));
-  for (const name of [
-    "OpenAI Responses",
-    "OpenAI Chat Completions",
-    "Anthropic Messages",
-    "Gemini Native",
-  ]) {
-    assert.ok(await screen.findByRole("option", { name }));
-  }
-  await user.click(screen.getByRole("option", { name: "Anthropic Messages" }));
-  assert.equal(baseUrl.value, "");
-  assert.equal(baseUrl.placeholder, "https://api.anthropic.com");
-
-  const displayName = screen.getByRole("textbox", { name: "Display name" });
-  await user.type(displayName, "My Anthropic");
-  await user.type(baseUrl, "https://api.anthropic.com/");
-  assert.ok(
-    screen.getByText("Request endpoint: https://api.anthropic.com/v1/messages"),
-  );
-  await user.type(apiKey, "anthropic-secret");
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
-  assert.deepEqual(submitted, [
-    {
-      displayName: "My Anthropic",
-      protocol: "anthropic_messages",
-      normalizedBaseUrl: "https://api.anthropic.com/v1/messages",
-      apiKey: "anthropic-secret",
-    },
-  ]);
-});
-
-test("Official Provider setup starts from its official address", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const submitted = [];
-  renderSettings(readySettingsAccount, {
-    models: {
-      ...readySettingsModels,
-      builtinProviderPresets: [
-        {
-          id: "deepseek",
-          displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
-          defaultBaseUrl: "https://api.deepseek.com",
-          apiKeyUrl: "https://platform.deepseek.com/api_keys",
-          documentationUrl: "https://api-docs.deepseek.com/",
-        },
-      ],
-    },
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    onCreateBuiltinProvider(input) {
+  renderModelSettings({
+    onCreateBuiltinProvider: async (input) => {
       submitted.push(input);
-      return Promise.resolve(false);
+      return false;
     },
   });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(dialog).getByRole("combobox", { name: "Model vendor" }),
+  );
+  await screen.findByRole("option", { name: "DeepSeek", exact: true });
+  for (const [label, vendor] of [
+    ["DeepSeek", "deepseek"],
+    ["Kimi", "kimi"],
+    ["MiniMax", "minimax"],
+    ["智谱 GLM", "glm"],
+    ["Custom / other service", "custom"],
+  ]) {
+    const option = screen.getByRole("option", { name: label, exact: true });
+    assert.equal(
+      option.querySelector(".model-vendor-icon")?.dataset.vendor,
+      vendor,
+    );
+    assert.equal(
+      option.querySelector(".model-vendor-icon")?.getAttribute("aria-hidden"),
+      "true",
+    );
+  }
+  await user.click(
+    screen.getByRole("option", { name: "DeepSeek", exact: true }),
+  );
+  assert.equal(
+    within(dialog)
+      .getByRole("combobox", { name: "Model vendor" })
+      .querySelector(".model-vendor-icon")?.dataset.vendor,
+    "deepseek",
+  );
+  assert.equal(within(dialog).queryByText("Connection settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Request URL (Endpoint)" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  assert.ok(within(dialog).getByRole("link", { name: "Get an API key" }));
 
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  assert.ok(screen.getByText("Model providers"));
-  await user.click(screen.getByRole("button", { name: "Configure" }));
-  assert.ok(screen.getByRole("heading", { name: "DeepSeek" }));
-  assert.equal(screen.queryByRole("combobox", { name: "Protocol" }), null);
-  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
-  assert.equal(
-    screen.getByRole("button", { name: "Save provider" }).disabled,
-    true,
+  await user.type(within(dialog).getByLabelText("API key"), "official-secret");
+  await user.click(within(dialog).getByRole("combobox", { name: "Model ID" }));
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
   );
-
-  assert.ok(screen.getByText("https://api.deepseek.com"));
-  await user.click(screen.getByRole("button", { name: "Use another address" }));
-  assert.equal(
-    screen.getByRole("textbox", { name: "Base URL" }).value,
-    "https://api.deepseek.com",
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
-  const apiKey = screen.getByLabelText("API key");
-  await user.type(apiKey, "deepseek-secret");
-  assert.equal(
-    screen.getByRole("link", { name: "Get an API key" }).href,
-    "https://platform.deepseek.com/api_keys",
-  );
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
     {
       providerId: "deepseek",
       baseUrl: "https://api.deepseek.com",
-      apiKey: "deepseek-secret",
+      apiKey: "official-secret",
+      model: { id: "deepseek-flash" },
     },
   ]);
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  assert.ok(within(dialog).getByRole("alert"));
 });
 
-test("Official Provider address override is explicit and separate from its credential", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const updates = [];
-  renderSettings(readySettingsAccount, {
-    models: {
-      ...readySettingsModels,
-      builtinProviderPresets: [
-        {
-          id: "deepseek",
-          displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
-          defaultBaseUrl: "https://api.deepseek.com",
-          apiKeyUrl: "https://platform.deepseek.com/api_keys",
-          documentationUrl: "https://api-docs.deepseek.com/",
-        },
-      ],
-      customProviders: [
-        {
-          id: "provider-deepseek",
-          builtinProviderId: "deepseek",
-          displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
-          normalizedBaseUrl: "https://api.deepseek.com/chat/completions",
-          state: "configuring",
-          credentialStatus: "ready",
-          enabled: true,
-          models: [],
-          providerRevision: "7",
-          sourceGeneration: "3",
-          catalogGeneration: "5",
-        },
-      ],
-    },
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    onUpdateBuiltinProviderBaseUrl(input) {
-      updates.push(input);
-      return Promise.resolve(false);
+test("Custom model form detects its protocol from the complete endpoint without a protocol selector", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
     },
   });
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Manage" }));
-  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
-  await user.click(screen.getByRole("button", { name: "Use another address" }));
-  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
-  await user.clear(baseUrl);
-  await user.type(baseUrl, "https://gateway.example.com/deepseek/v1");
-  assert.ok(
-    screen.getByText(
-      "Future model requests will send this Provider's API key to gateway.example.com.",
-    ),
-  );
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
-  assert.deepEqual(updates, [
-    {
-      providerId: "provider-deepseek",
-      expectedProviderRevision: "7",
-      baseUrl: "https://gateway.example.com/deepseek/v1",
-    },
-  ]);
-});
-
-test("Provider API key update lives inside Edit and submits the exact user input", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const replacements = [];
-  renderSettings(readySettingsAccount, {
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    models: {
-      ...readySettingsModels,
-      customProviders: [
-        {
-          id: "provider-1",
-          builtinProviderId: null,
-          displayName: "Team OpenAI",
-          protocol: "openai_responses",
-          normalizedBaseUrl: "https://api.openai.com/v1/responses",
-          state: "configuring",
-          credentialStatus: "ready",
-          enabled: true,
-          models: [],
-          providerRevision: "7",
-          sourceGeneration: "3",
-          catalogGeneration: "5",
-        },
-      ],
-    },
-    onReplaceCustomProviderCredential(...input) {
-      replacements.push(input);
-      return Promise.resolve(false);
-    },
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  assert.equal(dialog.querySelector("details, summary"), null);
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
   });
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  assert.equal(screen.queryByRole("button", { name: "Update API key" }), null);
-  await user.click(screen.getByRole("button", { name: "Edit" }));
-  await user.click(screen.getByRole("button", { name: "Update API key" }));
-  const apiKey = screen.getByLabelText("API key");
-  assert.equal(apiKey.type, "password");
-  assert.equal(apiKey.value, "");
-  assert.equal(apiKey.autocomplete, "off");
-
-  await user.type(apiKey, "  exact replacement secret  ");
-  await user.click(screen.getByRole("button", { name: "Save API key" }));
-  assert.deepEqual(replacements, [
-    ["provider-1", "7", "  exact replacement secret  "],
-  ]);
-});
-
-test("Provider Base URLs map to all four existing protocol endpoints", () => {
+  await user.type(address, "https://custom.example.com/v1/messages");
   assert.equal(
-    customProviderEndpointFromBaseUrl(
-      "openai_responses",
-      "https://api.openai.com/v1/",
-    ),
-    "https://api.openai.com/v1/responses",
-  );
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
-      "openai_chat_completions",
-      "https://api.openai.com/v1",
-    ),
-    "https://api.openai.com/v1/chat/completions",
-  );
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
-      "anthropic_messages",
-      "https://api.anthropic.com",
-    ),
-    "https://api.anthropic.com/v1/messages",
-  );
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
-      "gemini_native",
-      "https://generativelanguage.googleapis.com",
-    ),
-    "https://generativelanguage.googleapis.com",
-  );
-});
-
-test("Settings moves directly from Provider to model selection", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount);
-
-  assert.equal(screen.queryByRole("combobox", { name: "Image model" }), null);
-  assert.equal(screen.queryByRole("combobox", { name: "API key" }), null);
-  assert.match(screen.getByText("Models 2").textContent, /Models 2/);
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-  assert.deepEqual(view.selections.model, ["model-2"]);
-
-  view.rerenderModels(
-    settingsModels(
-      {
-        catalogState: "loading",
-        models: [{ id: "model-2", displayName: "Model Two" }],
-      },
-      { operation: "refreshing_catalog" },
-    ),
-  );
-  assert.match(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("status").textContent,
-    /Preparing Model Two/,
-  );
-  assert.match(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("status").textContent,
-    /current default model, model-1/i,
-  );
-  const model = screen.getByRole("combobox", { name: "Default model" });
-  assert.equal(model.getAttribute("aria-busy"), "true");
-  assert.equal(model.hasAttribute("disabled"), true);
-
-  view.rerenderModels(
-    settingsModels(
-      { models: [{ id: "model-2", displayName: "Model Two" }] },
-      {
-        metaskSelection: { sourceId: "metask", modelId: "model-2" },
-        defaultSelection: { sourceId: "metask", modelId: "model-2" },
-      },
-    ),
-  );
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model Two/,
-  );
-  assert.equal(screen.queryByText("Pending change"), null);
-  assert.equal(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).queryByRole("status"),
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
     null,
   );
-});
-
-test("Settings keeps a model choice visibly pending without declaring it committed", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount);
-
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-
-  assert.deepEqual(view.selections.model, ["model-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model Two/,
+    within(dialog).getByRole("status").textContent,
+    /Detected API: Anthropic Messages/,
   );
-  assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
+  assert.equal(address.value, "https://custom.example.com/v1/messages");
+  assert.doesNotMatch(dialog.textContent, /Request endpoint:/);
+  assert.match(
+    dialog.textContent,
+    /Model requests will send the API key to custom.example.com/,
+  );
+  assert.doesNotMatch(dialog.textContent, /\bprovider\b|\bdefault\b/i);
+
+  await user.type(within(dialog).getByLabelText("API key"), "custom-secret");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "custom-model",
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      displayName: "custom.example.com",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://custom.example.com/v1/messages",
+      apiKey: "custom-secret",
+      model: { id: "custom-model" },
+    },
+  ]);
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Model ID" }).value,
+    "custom-model",
+  );
 });
 
-test("Settings keeps Metask available while a custom provider is the default", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const customSelections = [];
-  const view = renderSettings(readySettingsAccount, {
+test("closing or losing the model configuration gate clears an unfinished credential", async () => {
+  const user = userEvent.setup({ document });
+  const view = render(
+    settingsElement(readySettingsAccount, {
+      customProviderCapabilities: completeModelCapabilities,
+      models: { ...readySettingsModels, builtinProviderPresets: presetModels },
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  let dialog = await chooseModelSource(user, "Custom / other service");
+  await user.type(
+    within(dialog).getByLabelText("API key"),
+    "unfinished-secret",
+  );
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("dialog", { name: "Add model" }), null);
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  dialog = await chooseModelSource(user, "Custom / other service");
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  await user.type(within(dialog).getByLabelText("API key"), "another-secret");
+  view.rerender(
+    settingsElement(readySettingsAccount, {
+      customProviderCapabilities: {
+        ...completeModelCapabilities,
+        secretCapture: false,
+      },
+    }),
+  );
+  assert.equal(screen.queryByRole("dialog", { name: "Add model" }), null);
+  assert.ok(screen.getByRole("heading", { name: "Models" }));
+});
+
+test("model editing saves all changes once and clears credentials after a partial failure", async () => {
+  const user = userEvent.setup({ document });
+  const changes = [];
+  const source = {
+    id: "source-edit",
+    builtinProviderId: null,
+    displayName: "Team",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://example.com/v1/responses",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [
+      {
+        id: "model-a",
+        displayName: "Model A",
+        metadata: {},
+        metadataProvenance: "unknown",
+        testStatus: "connected",
+        ready: true,
+      },
+    ],
+  };
+  const view = renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onSaveCustomModel: async (input) => {
+      changes.push(input);
+      const updatedSource = {
+        ...source,
+        normalizedBaseUrl: input.endpoint,
+        protocol: input.protocol,
+        providerRevision: "8",
+      };
+      view.rerenderModels({
+        ...readySettingsModels,
+        customProviders: [updatedSource],
+      });
+      return {
+        accepted: false,
+        applied: ["address"],
+        source: updatedSource,
+        modelId: "model-a",
+        reviewRequired: false,
+      };
+    },
+  });
+  assert.ok(screen.getByText("Model A"));
+  assert.ok(screen.getByText("Test passed"));
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
+  assert.equal(
+    view.container.querySelector(".settings-model-identity .model-vendor-icon")
+      ?.dataset.vendor,
+    "custom",
+  );
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Model vendor" }),
+    null,
+  );
+  assert.match(dialog.textContent, /Save changes to the model/);
+  assert.doesNotMatch(
+    dialog.textContent,
+    /choose a preset|\bprovider\b|\bdefault\b/i,
+  );
+
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Request URL (Endpoint)" })
+      .value,
+    source.normalizedBaseUrl,
+  );
+  const model = within(dialog).getByRole("textbox", { name: "Model ID" });
+  await user.clear(model);
+  await user.type(model, "model-b");
+  const key = within(dialog).getByLabelText("API key");
+  assert.equal(key.type, "password");
+  assert.equal(key.value, "");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  assert.ok(
+    address.compareDocumentPosition(key) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    key.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  await user.clear(address);
+  await user.type(address, "https://other.example/v1/messages");
+  assert.doesNotMatch(dialog.textContent, /shared by/);
+  await user.type(key, "  replacement secret  ");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(changes, [
+    {
+      providerId: "source-edit",
+      expectedProviderRevision: "7",
+      expectedCatalogGeneration: "13",
+      modelId: "model-a",
+      nextModelId: "model-b",
+      protocol: "anthropic_messages",
+      endpoint: "https://other.example/v1/messages",
+      apiKey: "  replacement secret  ",
+    },
+  ]);
+  assert.equal(key.value, "");
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Some changes were saved/,
+  );
+  assert.equal(
+    within(dialog).queryByRole("button", { name: "Save API key" }),
+    null,
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Cancel", exact: true }),
+  );
+  view.rerenderModels({
+    ...readySettingsModels,
+    customProviders: [{ ...source, state: "configuring", models: [] }],
+  });
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
+  assert.ok(screen.getByText("No custom models yet."));
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
+  );
+  const addDialog = await chooseModelSource(user, "Custom / other service");
+  assert.equal(
+    within(addDialog).queryByRole("combobox", {
+      name: "Connection",
+      exact: true,
+    }),
+    null,
+  );
+  assert.equal(
+    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" })
+      .value,
+    "",
+  );
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
+  assert.ok(within(addDialog).getByRole("textbox", { name: "Model ID" }));
+});
+
+test("Editing an official model permits credential replacement without exposing connection settings", async () => {
+  const user = userEvent.setup({ document });
+  const credentials = [];
+  const creations = [];
+  const recipe = presetModels.find((preset) => preset.id === "deepseek");
+  renderModelSettings({
     models: {
       ...readySettingsModels,
-      defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
+      builtinProviderPresets: presetModels,
       customProviders: [
         {
-          id: "provider-1",
-          builtinProviderId: null,
-          displayName: "Team OpenAI",
-          protocol: "openai_chat_completions",
-          normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+          id: "official-source",
+          builtinProviderId: "deepseek",
+          displayName: "DeepSeek",
+          protocol: recipe.protocol,
+          normalizedBaseUrl: "https://api.deepseek.com/chat/completions",
           state: "ready",
           credentialStatus: "ready",
           enabled: true,
+          providerRevision: "7",
+          sourceGeneration: "11",
+          catalogGeneration: "13",
           models: [
             {
-              id: "gpt-5",
-              displayName: "GPT-5",
-              metadata: readySettingsModels.providers[0].models[0].metadata,
+              ...readySettingsModels.providers[0].models[0],
+              id: "deepseek-flash",
+              displayName: "deepseek-flash",
+              ready: true,
               metadataProvenance: "user_declared",
               testStatus: "connected",
-              ready: true,
-            },
-            {
-              id: "gpt-5-mini",
-              displayName: "GPT-5 mini",
-              metadata: readySettingsModels.providers[0].models[0].metadata,
-              metadataProvenance: "user_declared",
-              testStatus: "connected",
-              ready: true,
             },
           ],
-          providerRevision: "1",
-          sourceGeneration: "1",
-          catalogGeneration: "1",
         },
       ],
     },
-    onSelectCustomModel(...selection) {
-      customSelections.push(selection);
+    onCreateBuiltinProvider: async (input) => {
+      creations.push(input);
+      return false;
+    },
+    onSaveCustomModel: async (input) => {
+      credentials.push(input);
+      return {
+        accepted: false,
+        applied: [],
+        source: {
+          id: "official-source",
+          providerRevision: "7",
+          catalogGeneration: "13",
+        },
+        modelId: "deepseek-flash",
+        reviewRequired: false,
+      };
     },
   });
-
-  const provider = screen.getByRole("combobox", { name: "Provider" });
-  const defaultModel = screen.getByRole("combobox", {
-    name: "Default model",
-  });
-  assert.match(provider.textContent, /Team OpenAI/);
-  assert.match(defaultModel.textContent, /GPT-5/);
-  await user.click(defaultModel);
-  await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
-  assert.deepEqual(customSelections, [["provider-1", "1", "gpt-5-mini"]]);
-
-  await user.click(provider);
-  await user.click(await screen.findByRole("option", { name: /Metask/ }));
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Choose a model/,
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  assert.equal(within(dialog).queryByText("Connection settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Request URL (Endpoint)" }),
+    null,
   );
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  await user.click(await screen.findByRole("option", { name: /Model One/ }));
-  assert.deepEqual(view.selections.model, ["model-1"]);
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  const key = within(dialog).getByLabelText("API key");
+  assert.equal(key.value, "");
+  await user.type(key, "replacement-secret");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.equal(credentials.length, 1);
+  assert.equal(credentials[0].providerId, "official-source");
+  assert.equal(credentials[0].apiKey, "replacement-secret");
+  assert.equal(credentials[0].nextModelId, "deepseek-flash");
+  assert.equal(key.value, "");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Cancel", exact: true }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
+  );
+  const add = await chooseModelSource(user, "DeepSeek");
+  assert.equal(within(add).getByLabelText("API key").value, "");
+  await user.type(within(add).getByLabelText("API key"), "independent-key");
+  await user.click(within(add).getByRole("combobox", { name: "Model ID" }));
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  );
+  await user.click(
+    within(add).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(creations, [
+    {
+      providerId: "deepseek",
+      baseUrl: recipe.defaultBaseUrl,
+      apiKey: "independent-key",
+      model: { id: "deepseek-flash" },
+    },
+  ]);
 });
 
-test("Models keeps adding and removing models after the first provider model", async () => {
+test("custom model addresses are submitted directly for every protocol", async () => {
+  const user = userEvent.setup({ document });
+  for (const [protocol, label, endpoint] of [
+    [
+      "openai_responses",
+      "OpenAI Responses",
+      "https://example.com/api/responses",
+    ],
+    [
+      "openai_chat_completions",
+      "OpenAI Chat Completions",
+      "https://example.com/api/chat/completions",
+    ],
+    [
+      "anthropic_messages",
+      "Anthropic Messages",
+      "https://example.com/api/v1/messages",
+    ],
+    ["gemini_native", "Gemini Native", "https://example.com"],
+  ]) {
+    const submissions = [];
+    const view = renderModelSettings({
+      onCreateCustomProvider: async (input) => {
+        submissions.push(input);
+        return false;
+      },
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Add model", exact: true }),
+    );
+    const dialog = await chooseModelSource(user, "Custom / other service");
+    assert.equal(
+      within(dialog).queryByRole("combobox", { name: "Protocol" }),
+      null,
+    );
+    const address = within(dialog).getByRole("textbox", {
+      name: "Request URL (Endpoint)",
+    });
+    await user.type(address, endpoint);
+    if (protocol === "gemini_native") {
+      await user.click(
+        within(dialog).getByRole("checkbox", {
+          name: "This is a Gemini Native service root",
+        }),
+      );
+      assert.equal(
+        within(dialog)
+          .getByRole("checkbox", {
+            name: "This is a Gemini Native service root",
+            exact: true,
+          })
+          .getAttribute("aria-checked"),
+        "true",
+      );
+    } else {
+      assert.equal(
+        within(dialog).queryByRole("combobox", { name: "Protocol" }),
+        null,
+      );
+      assert.match(
+        within(dialog).getByRole("status").textContent,
+        new RegExp(label),
+      );
+    }
+    assert.equal(address.value, endpoint);
+    assert.doesNotMatch(dialog.textContent, /Request endpoint:/);
+    if (protocol === "gemini_native")
+      assert.match(
+        dialog.textContent,
+        /Gemini model paths are generated automatically/,
+      );
+    await user.type(within(dialog).getByLabelText("API key"), "example-key");
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Model ID" }),
+      "example-model",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save", exact: true }),
+    );
+    assert.deepEqual(submissions, [
+      {
+        displayName: "example.com",
+        protocol,
+        normalizedBaseUrl: endpoint,
+        apiKey: "example-key",
+        model: { id: "example-model" },
+      },
+    ]);
+    view.unmount();
+  }
+});
+
+test("a service root needs explicit Gemini confirmation and an endpoint replaces that choice", async () => {
+  const user = userEvent.setup({ document });
+  const submissions = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submissions.push(input);
+      return false;
+    },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
+  );
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  await user.type(within(dialog).getByLabelText("API key"), "example-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "example-model",
+  );
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://api.openai.com");
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    true,
+  );
+  await user.click(
+    within(dialog).getByRole("checkbox", {
+      name: "This is a Gemini Native service root",
+    }),
+  );
+  await user.clear(address);
+  await user.type(address, "https://example.com/v1/responses");
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  assert.match(
+    within(dialog).getByRole("status").textContent,
+    /OpenAI Responses/,
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.equal(submissions[0].protocol, "openai_responses");
+  assert.equal(
+    submissions[0].normalizedBaseUrl,
+    "https://example.com/v1/responses",
+  );
+});
+
+test("invalid endpoints explain the problem before submission and keep the other fields", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://example.com/v1");
+  await user.type(within(dialog).getByLabelText("API key"), "fake-test-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "my-model",
+  );
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    true,
+  );
+  assert.equal(within(dialog).getByLabelText("API key").value, "fake-test-key");
+  await user.clear(address);
+  await user.type(address, "https://example.com/v1/responses");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    false,
+  );
+  assert.equal(submitted.length, 0);
+});
+
+test("model test rejection and exceptions produce an actionable local message", async () => {
+  const user = userEvent.setup({ document });
+  let attempts = 0;
+  const source = {
+    id: "test-source",
+    displayName: "Hidden provider",
+    builtinProviderId: null,
+    enabled: true,
+    credentialStatus: "ready",
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [{ id: "model-a", displayName: "Model A", testStatus: "untested" }],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onTestCustomModel: async () => {
+      attempts++;
+      if (attempts === 1) return false;
+      throw Error("disconnected");
+    },
+  });
+  for (let i = 0; i < 2; i++) {
+    await user.click(
+      screen.getByRole("button", { name: "Test model", exact: true }),
+    );
+    assert.match(
+      screen.getByRole("alert").textContent,
+      /Could not start the test for Model A/,
+    );
+  }
+  assert.equal(attempts, 2);
+});
+
+test("delete confirmation uses current revisions and recovers focus when the row disappears", async () => {
+  const user = userEvent.setup({ document });
+  const calls = [];
+  const source = {
+    id: "delete-source",
+    displayName: "Hidden provider",
+    builtinProviderId: null,
+    enabled: true,
+    credentialStatus: "ready",
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [{ id: "model-a", displayName: "Model A", testStatus: "untested" }],
+  };
+  const view = renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onRemoveCustomModel: async (...input) => {
+      calls.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Remove", exact: true }));
+  const dialog = screen.getByRole("alertdialog");
+  view.rerenderModels({
+    ...readySettingsModels,
+    customProviders: [
+      { ...source, providerRevision: "8", catalogGeneration: "14" },
+    ],
+  });
+  await user.click(
+    within(dialog).getByRole("button", { name: "Remove", exact: true }),
+  );
+  assert.deepEqual(calls, [["delete-source", "8", "14", "model-a"]]);
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /Could not delete/,
+  );
+  view.rerenderModels({ ...readySettingsModels, customProviders: [] });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Add model" }),
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("Models manages user-added models without an official catalog or default selection", () => {
+  const view = renderModelSettings();
+  assert.ok(screen.getByRole("heading", { name: "Models", exact: true }));
+  assert.ok(screen.getByRole("heading", { name: "Custom models" }));
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
+  assert.equal(screen.queryByText("Model One"), null);
+  assert.equal(screen.queryByText("Model Two"), null);
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
+  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
+  assert.equal(screen.queryByText("Current default"), null);
+  assert.deepEqual(view.selections.model, []);
+});
+
+test("Models adds a model independently without listing or reusing legacy providers", async () => {
   const user = userEvent.setup({ document: dom.window.document });
+  const creations = [];
   const additions = [];
   const removals = [];
   renderSettings(readySettingsAccount, {
+    customProviderCapabilities: completeModelCapabilities,
     models: {
       ...readySettingsModels,
       customProviders: [
@@ -1183,6 +1502,10 @@ test("Models keeps adding and removing models after the first provider model", a
         },
       ],
     },
+    onCreateCustomProvider(input) {
+      creations.push(input);
+      return Promise.resolve(false);
+    },
     onAddCustomModel(...input) {
       additions.push(input);
       return Promise.resolve(false);
@@ -1193,19 +1516,74 @@ test("Models keeps adding and removing models after the first provider model", a
     },
   });
 
-  await user.click(screen.getByRole("combobox", { name: "Provider" }));
-  await user.click(
-    await screen.findByRole("option", { name: /Multi-model provider/ }),
-  );
-
-  const modelId = screen.getByRole("textbox", { name: "Model ID" });
-  await user.type(modelId, "gpt-5.6-sol");
   await user.click(screen.getByRole("button", { name: "Add model" }));
-  assert.deepEqual(additions, [["provider-multi", "3", "7", "gpt-5.6-sol"]]);
-
+  const addDialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(addDialog).getByRole("combobox", { name: "Model vendor" }),
+  );
+  await screen.findByRole("option", {
+    name: "Custom / other service",
+    exact: true,
+  });
+  assert.deepEqual(
+    screen.getAllByRole("option").map((option) => option.textContent),
+    ["Custom / other service"],
+  );
+  assert.equal(
+    screen.queryByText("Multi-model provider", { exact: true }),
+    null,
+  );
+  await user.click(
+    screen.getByRole("option", { name: "Custom / other service", exact: true }),
+  );
+  assert.equal(
+    within(addDialog).queryByRole("combobox", {
+      name: "Connection",
+      exact: true,
+    }),
+    null,
+  );
+  assert.equal(
+    within(addDialog).queryByRole("option", { name: /api.openai.com/ }),
+    null,
+  );
+  await user.type(within(addDialog).getByLabelText("API key"), "new-model-key");
+  await user.type(
+    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" }),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  await user.type(
+    within(addDialog).getByRole("textbox", { name: "Model ID" }),
+    "gpt-5.6-sol",
+  );
+  await user.click(
+    within(addDialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(additions, []);
+  assert.deepEqual(creations, [
+    {
+      displayName: "api.openai.com",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+      apiKey: "new-model-key",
+      model: { id: "gpt-5.6-sol" },
+    },
+  ]);
+  const dialog = addDialog;
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await user.click(screen.getByRole("button", { name: "Remove" }));
-  const removeButtons = screen.getAllByRole("button", { name: "Remove" });
-  await user.click(removeButtons[removeButtons.length - 1]);
+  const confirmation = screen.getByRole("alertdialog");
+  assert.ok(
+    within(confirmation).getByRole("heading", {
+      name: "Remove model?",
+      exact: true,
+    }),
+  );
+  assert.match(confirmation.textContent, /Model A/);
+  assert.doesNotMatch(confirmation.textContent, /provider/i);
+  await user.click(
+    within(confirmation).getByRole("button", { name: "Remove", exact: true }),
+  );
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
@@ -1225,12 +1603,7 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
     },
   );
 
-  assert.equal(
-    screen
-      .getByRole("combobox", { name: "Default model" })
-      .hasAttribute("disabled"),
-    true,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
 
   await user.click(screen.getByRole("link", { name: "General" }));
   assert.equal(
@@ -1247,21 +1620,15 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   assert.equal(cancellations, 1);
 });
 
-test("Settings reports Models failure without changing Account identity", async () => {
+test("Official catalog failures do not affect model management or Account identity", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount, {
     models: settingsModels({}, { errorCode: "catalog_unavailable" }),
     initialSection: "models",
   });
 
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model One/,
-  );
-  assert.match(
-    screen.getByRole("alert").textContent,
-    /Model configuration needs attention/,
-  );
+  assert.equal(screen.queryByText("Model One"), null);
+  assert.equal(screen.queryByRole("alert"), null);
 
   await user.click(screen.getByRole("link", { name: "Account" }));
   assert.match(screen.getByText("Metask User").textContent, /Metask User/);
@@ -1385,7 +1752,6 @@ function renderComposer(overrides = {}) {
       onRefreshSkillCatalog() {},
       onConfirmAccess() {},
       onSelectWorkspace() {},
-      onSelectModel() {},
       ...overrides,
       draft,
       onDraftChange(value) {
@@ -1464,10 +1830,10 @@ test("Composer model notice explains the blocker and opens its recovery action",
   renderComposer({
     canSubmit: false,
     modelNotice: createElement(ModelSetupNotice, {
-      notice: { reason: "choose", action: "models" },
+      notice: { reason: "choose", action: "choose_model" },
       disabled: false,
       onAction(action) {
-        assert.equal(action, "models");
+        assert.equal(action, "choose_model");
         opens += 1;
       },
     }),
@@ -1477,16 +1843,13 @@ test("Composer model notice explains the blocker and opens its recovery action",
     /Choose an available model/,
   );
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
-  await user.click(screen.getByRole("button", { name: "Open model settings" }));
+  await user.click(screen.getByRole("button", { name: "Choose a model" }));
   assert.equal(opens, 1);
 });
 
 test("Composer does not show model recovery for a ready selection", () => {
   renderComposer();
-  assert.equal(
-    screen.queryByRole("button", { name: "Open model settings" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Choose a model" }), null);
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {
@@ -2350,44 +2713,27 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
   assert.equal(selected, 0);
 });
 
-test("Models lets an unavailable default be replaced from the current Host catalog", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const view = renderSettings(readySettingsAccount, {
-    models: settingsModels({
-      models: [{ id: "model-2", displayName: "Model Two" }],
-    }),
-  });
-  assert.match(
-    screen.getByRole("alert").textContent,
-    /Choose another default model/,
-  );
-  assert.deepEqual(view.selections.model, []);
-  const selector = screen.getByRole("combobox", { name: "Default model" });
-  assert.equal(selector.disabled, false);
-  await user.click(selector);
-  assert.equal(screen.queryByRole("option", { name: /Model One/ }), null);
-  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
-  assert.deepEqual(view.selections.model, ["model-2"]);
-});
-
-test("Models reports an authoritative empty conversation catalog without signing out", () => {
-  const view = renderSettings(readySettingsAccount, {
+test("Models keeps user-added model management available when the official catalog is empty", () => {
+  const view = renderModelSettings({
     models: settingsModels(
       { models: [], errorCode: "no_models" },
       { errorCode: "no_models" },
     ),
   });
-  assert.match(screen.getByRole("alert").textContent, /No conversation models/);
-  assert.equal(
-    screen.getByRole("combobox", { name: "Default model" }).disabled,
-    true,
-  );
-  assert.ok(
-    within(
-      screen.getByRole("group", { name: "Default model for new tasks" }),
-    ).getByRole("button", { name: "Sync again" }),
-  );
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(screen.queryByRole("button", { name: "Sync again" }), null);
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
   assert.deepEqual(view.selections.model, []);
+});
+
+test("Models keeps canonical storage recovery available without official model settings", () => {
+  renderModelSettings({
+    models: settingsModels({}, { persistenceHealth: "recovery_required" }),
+  });
+  assert.ok(
+    screen.getByRole("button", { name: "Recover model configuration" }),
+  );
+  assert.equal(screen.queryByText("Model One"), null);
 });
 
 test("current Run keeps Stop reachable alongside Send and preserves IME", () => {

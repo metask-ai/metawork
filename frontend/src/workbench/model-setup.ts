@@ -23,7 +23,7 @@ export type ModelSetupAction =
   | "login"
   | "cancel"
   | "models"
-  | "providers"
+  | "choose_model"
   | "refresh"
   | "schedules";
 export type ModelSetupReason =
@@ -144,7 +144,10 @@ export function modelSetupNotice({
   // Logout can leave a retained Metask intent with no resolvable execution
   // candidate. Explain its authorization state before the generic failure.
   if (admission.reason === "invalid_candidate")
-    return { reason: "execution_unavailable", action: "models" };
+    return {
+      reason: "execution_unavailable",
+      action: hasReadyModels ? "choose_model" : "models",
+    };
   if (selected) {
     const customProvider = models.customProviders.find(
       (provider) => provider.id === selected.sourceId,
@@ -155,25 +158,24 @@ export function modelSetupNotice({
     )
       return {
         reason: "provider_unavailable",
-        action: customProvidersAvailable ? "providers" : "models",
+        action: customProvidersAvailable ? "models" : null,
       };
     if (admission.reason === "credential_unavailable")
       return { reason: "execution_unavailable", action: "models" };
-    return { reason: "model_unavailable", action: "models" };
+    return {
+      reason: "model_unavailable",
+      action: hasReadyModels ? "choose_model" : "models",
+    };
   }
   if (hasReadyModels || models.availability === "choosing")
-    return { reason: "choose", action: "models" };
+    return {
+      reason: "choose",
+      action: hasReadyModels ? "choose_model" : "models",
+    };
   if (models.customProviders.length > 0)
     return {
       reason: "provider_unavailable",
-      action:
-        customProvidersAvailable &&
-        !models.customProviders.some(
-          (provider) =>
-            provider.enabled && provider.credentialStatus === "ready",
-        )
-          ? "providers"
-          : "models",
+      action: customProvidersAvailable ? "models" : null,
     };
   if (account.state === "authenticated")
     return { reason: "no_models", action: "refresh" };

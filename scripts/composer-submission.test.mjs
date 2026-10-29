@@ -650,13 +650,19 @@ test("App first accepted send clears its original version after Task handoff wit
   assert.equal(fixture.textarea.value, "follow-up");
 });
 
-test("App Composer scopes model choices to its Provider and preserves the actual Run model", async (ctx) => {
+test("App new Task lists all Providers while existing Tasks preserve their source and actual Run model", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const provider = fixture.snapshot.models.providers[0];
   const model = provider.models[0];
   provider.models = [
     { ...model, id: "minimax-m3", displayName: "minimax-m3" },
     { ...model, id: "glm-5.3-flash", displayName: "glm-5.3-flash" },
+    {
+      ...model,
+      id: "DeepSeek-V4.1-Flash-1017",
+      displayName: "DeepSeek-V4.1-Flash-1017",
+    },
+    { ...model, id: "kimi-k3.1-pro", displayName: "kimi-k3.1-pro" },
   ];
   fixture.snapshot.models.customProviders = [
     {
@@ -686,13 +692,72 @@ test("App Composer scopes model choices to its Provider and preserves the actual
   fixture.snapshot.models.defaultSelection = defaultModel;
   fixture.snapshot.newTaskAdmission.activeModelRef = defaultModel;
   await fixture.publish();
-  const selector = screen.getByRole("combobox", { name: "Default model" });
+  const selector = screen.getByRole("combobox", { name: "Model" });
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "minimax",
+  );
   const user = userEvent.setup({ document });
   await user.click(selector);
-  assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
+  const customOption = await screen.findByRole("option", {
+    name: /gpt-5.6-sol/,
+  });
+  assert.equal(customOption.textContent, "gpt-5.6-sol");
+  assert.equal(
+    customOption.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "custom",
+  );
+  const customGroup = screen.getByRole("group", { name: "Custom models" });
+  assert.equal(customOption.closest('[role="group"]'), customGroup);
+  assert.equal(customGroup.querySelector("small"), null);
+  for (const [name, vendor] of [
+    ["minimax-m3", "minimax"],
+    ["glm-5.3-flash", "glm"],
+    ["DeepSeek-V4.1-Flash-1017", "deepseek"],
+    ["kimi-k3.1-pro", "kimi"],
+  ]) {
+    assert.equal(
+      screen
+        .getByRole("option", { name, exact: true })
+        .querySelector(".model-vendor-icon")?.dataset.vendor,
+      vendor,
+    );
+  }
+  assert.deepEqual(
+    screen
+      .getAllByRole("option")
+      .map(
+        (option) =>
+          option.querySelector(".selection-menu-item-copy").textContent,
+      ),
+    [
+      "minimax-m3",
+      "glm-5.3-flash",
+      "DeepSeek-V4.1-Flash-1017",
+      "kimi-k3.1-pro",
+      "gpt-5.6-sol",
+    ],
+  );
+  await user.click(customOption);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-model-trigger").textContent,
+      "gpt-5.6-sol",
+    ),
+  );
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "custom",
+  );
+  assert.deepEqual(fixture.snapshot.models.defaultSelection, defaultModel);
+  await user.click(selector);
   await user.click(
     await screen.findByRole("option", { name: /glm-5.3-flash/ }),
+  );
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "glm",
   );
   await user.type(fixture.textarea, "How can we forecast the weather?{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 1));
@@ -758,7 +823,7 @@ test("App Composer scopes model choices to its Provider and preserves the actual
   fixture.snapshot.newTaskAdmission.activeModelRef =
     fixture.snapshot.models.defaultSelection;
   await fixture.publish();
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
   assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
   await user.click(await screen.findByRole("option", { name: /minimax-m3/ }));
   await waitFor(() => {
@@ -787,12 +852,45 @@ test("App Composer scopes model choices to its Provider and preserves the actual
   await user.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
-  assert.ok(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
-  assert.equal(
-    screen.queryByRole("option", { name: /minimax-m3|glm-5.3-flash/ }),
-    null,
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  assert.ok(await screen.findByRole("option", { name: /minimax-m3/ }));
+  assert.ok(screen.getByRole("option", { name: /glm-5.3-flash/ }));
+  assert.deepEqual(
+    screen
+      .getAllByRole("option")
+      .map(
+        (option) =>
+          option.querySelector(".selection-menu-item-copy").textContent,
+      ),
+    [
+      "minimax-m3",
+      "glm-5.3-flash",
+      "DeepSeek-V4.1-Flash-1017",
+      "kimi-k3.1-pro",
+      "gpt-5.6-sol",
+    ],
   );
+  await user.click(screen.getByRole("option", { name: /gpt-5.6-sol/ }));
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-model-trigger").textContent,
+      "gpt-5.6-sol",
+    ),
+  );
+  await user.type(fixture.textarea, "Use my custom Provider{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  assert.deepEqual(
+    BridgeClient.prototype.createTask.mock.calls[1].arguments[3],
+    {
+      targetModelRef: { sourceId: "cc", modelId: "gpt-5.6-sol" },
+      expectedSourceGeneration: "23",
+      expectedCatalogGeneration: "29",
+    },
+  );
+  assert.deepEqual(fixture.snapshot.models.defaultSelection, {
+    sourceId: "cc",
+    modelId: "gpt-5.6-sol",
+  });
 });
 
 test("App late send result preserves another Task's draft and focus", async (ctx) => {

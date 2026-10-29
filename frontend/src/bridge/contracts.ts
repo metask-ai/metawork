@@ -82,6 +82,7 @@ export type BuiltinProviderPresetView = {
   defaultBaseUrl: string;
   apiKeyUrl: string;
   documentationUrl: string;
+  modelIds: string[];
 };
 export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];

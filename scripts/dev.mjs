@@ -346,13 +346,29 @@ export function signWithStableRequirement(targetPath, identity, options = {}) {
   });
 }
 
-export function developmentEnvironment(root, inherited = process.env) {
+export function developmentEnvironment(
+  root,
+  frontendUrl,
+  inherited = process.env,
+) {
   const environment = localArchiveEnvironment(root, inherited);
-  delete environment.NATIVE_SDK_FRONTEND_URL;
-  delete environment.NATIVE_SDK_HMR;
-  delete environment.NATIVE_SDK_MODE;
+  environment.NATIVE_SDK_FRONTEND_URL = frontendUrl;
+  environment.NATIVE_SDK_HMR = "1";
+  environment.NATIVE_SDK_MODE = "dev";
   environment.METAWORK_DEV_REQUIRE_PRIMARY = "1";
   return environment;
+}
+
+export async function withDevelopmentServer(root, useServer) {
+  const { createServer } = await import("vite");
+  const server = await createServer({ root: path.join(root, "frontend") });
+  try {
+    await server.listen();
+    server.printUrls();
+    return await useServer(server);
+  } finally {
+    await server.close();
+  }
 }
 
 export async function withDevelopmentDirectory(root, useDirectory) {
@@ -408,14 +424,22 @@ export async function runDevelopment() {
           `verified local development signature ${identity.fingerprint} (${signature.requirement})`,
         );
       }
-      console.log(`starting paired development artifact: ${executable}`);
-      await runChild(executable, [], {
-        cwd: repositoryRoot,
-        label:
-          "MetaWork development instance (close any existing instance before starting)",
-        env: developmentEnvironment(repositoryRoot),
-        signal,
-        timeoutMs: null,
+      await withDevelopmentServer(repositoryRoot, async (server) => {
+        const frontendUrl = server.resolvedUrls.local[0];
+        console.log(
+          `starting development Host with Renderer HMR: ${executable}`,
+        );
+        console.log(
+          "UI changes update live; restart npm run dev after Host or Bridge contract changes.",
+        );
+        await runChild(executable, [], {
+          cwd: repositoryRoot,
+          label:
+            "MetaWork development instance (close any existing instance before starting)",
+          env: developmentEnvironment(repositoryRoot, frontendUrl),
+          signal,
+          timeoutMs: null,
+        });
       });
     });
   } finally {

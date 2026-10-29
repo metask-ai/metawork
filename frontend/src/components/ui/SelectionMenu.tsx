@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 import { Icon } from "./Icon.tsx";
 import { Select } from "./select.tsx";
@@ -7,9 +7,11 @@ export type SelectionMenuOption = {
   value: string;
   label: string;
   triggerLabel?: string;
+  groupLabel?: string;
   description?: string;
   descriptionKind?: "text" | "code";
   disabled?: boolean;
+  leading?: ReactNode;
   trailing?: ReactNode;
 };
 
@@ -17,6 +19,7 @@ export function SelectionMenu({
   value,
   options,
   triggerId,
+  triggerRef,
   placeholder,
   ariaLabel,
   title,
@@ -33,6 +36,7 @@ export function SelectionMenu({
   value: string;
   options: SelectionMenuOption[];
   triggerId?: string;
+  triggerRef?: Ref<HTMLButtonElement>;
   placeholder: string;
   ariaLabel: string;
   title?: string;
@@ -47,6 +51,13 @@ export function SelectionMenu({
   onValueChange: (value: string) => void;
 }) {
   const selected = options.find((option) => option.value === value);
+  const groups: { label?: string; options: SelectionMenuOption[] }[] = [];
+  for (const option of options) {
+    if (groups.length === 0 || option.groupLabel) {
+      groups.push({ label: option.groupLabel, options: [] });
+    }
+    groups[groups.length - 1].options.push(option);
+  }
 
   return (
     <Select.Root
@@ -58,6 +69,7 @@ export function SelectionMenu({
     >
       <Select.Trigger
         id={triggerId}
+        ref={triggerRef}
         className={`selection-trigger focus-ring ${triggerClassName}`.trim()}
         aria-label={ariaLabel}
         aria-busy={busy || undefined}
@@ -119,42 +131,52 @@ export function SelectionMenu({
             className={`selection-menu-content ${contentClassName}`.trim()}
           >
             <Select.List className="selection-menu-viewport">
-              <Select.Group>
-                {helper && (
-                  <Select.GroupLabel className="selection-menu-label">
-                    {helper}
-                  </Select.GroupLabel>
-                )}
-                {options.map((option) => (
-                  <Select.Item
-                    key={option.value}
-                    className="selection-menu-item focus-ring"
-                    value={option.value}
-                    disabled={option.disabled}
-                    label={option.label}
-                  >
-                    <Select.ItemIndicator className="selection-menu-indicator">
-                      <Icon name="check" />
-                    </Select.ItemIndicator>
-                    <span className="selection-menu-item-copy">
-                      <Select.ItemText>{option.label}</Select.ItemText>
-                      {option.description && (
-                        <small
-                          data-kind={option.descriptionKind ?? "code"}
-                          title={option.description}
-                        >
-                          {option.description}
-                        </small>
-                      )}
-                    </span>
-                    {option.trailing && (
-                      <span className="selection-menu-item-trailing">
-                        {option.trailing}
+              {helper && <div className="selection-menu-label">{helper}</div>}
+              {groups.map((group, index) => (
+                <Select.Group key={index}>
+                  {group.label && (
+                    <Select.GroupLabel className="selection-menu-label">
+                      {group.label}
+                    </Select.GroupLabel>
+                  )}
+                  {group.options.map((option) => (
+                    <Select.Item
+                      key={option.value}
+                      className="selection-menu-item focus-ring"
+                      value={option.value}
+                      disabled={option.disabled}
+                      label={option.label}
+                    >
+                      <Select.ItemIndicator className="selection-menu-indicator">
+                        <Icon name="check" />
+                      </Select.ItemIndicator>
+                      <span className="selection-menu-item-copy">
+                        <span className="selection-menu-item-label">
+                          {option.leading && (
+                            <span className="selection-menu-item-leading">
+                              {option.leading}
+                            </span>
+                          )}
+                          <Select.ItemText>{option.label}</Select.ItemText>
+                        </span>
+                        {option.description && (
+                          <small
+                            data-kind={option.descriptionKind ?? "code"}
+                            title={option.description}
+                          >
+                            {option.description}
+                          </small>
+                        )}
                       </span>
-                    )}
-                  </Select.Item>
-                ))}
-              </Select.Group>
+                      {option.trailing && (
+                        <span className="selection-menu-item-trailing">
+                          {option.trailing}
+                        </span>
+                      )}
+                    </Select.Item>
+                  ))}
+                </Select.Group>
+              ))}
             </Select.List>
           </Select.Popup>
         </Select.Positioner>
