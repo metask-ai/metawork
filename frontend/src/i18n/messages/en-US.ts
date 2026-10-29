@@ -1330,10 +1330,25 @@ export const enUS = {
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
     "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
+  "settings.custom_model_protocol_detected": "Detected API: {protocol}",
+  "settings.custom_model_protocol_automatic":
+    "Enter the complete request URL to detect the API format automatically.",
+  "settings.custom_model_base_url": "Base URL",
+  "settings.custom_model_gemini_address_help":
+    "Enter the service root URL. Gemini model paths are generated automatically.",
+  "settings.custom_model_root_help":
+    "Enter the complete endpoint. If this is a Gemini Native service root, confirm below.",
+  "settings.custom_model_gemini_confirm":
+    "This is a Gemini Native service root",
+  "settings.custom_model_address_error.address":
+    "Enter a valid URL without credentials, query parameters, or a fragment.",
+  "settings.custom_model_address_error.secure":
+    "Use HTTPS. HTTP is supported only for localhost.",
+  "settings.custom_model_address_error.path":
+    "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
   "settings.api_key": "API key",
   "settings.custom_provider_protocol": "Protocol",
-  "settings.custom_provider_endpoint": "Base URL",
-  "settings.custom_provider_endpoint_preview": "Request endpoint: {endpoint}",
+  "settings.custom_provider_endpoint": "Request URL (Endpoint)",
   "settings.model_connection_save": "Save connection settings",
   "settings.provider_save_api_key": "Save API key",
   "settings.custom_models": "Custom models",
@@ -1348,7 +1363,6 @@ export const enUS = {
     "Choose a vendor or custom service, enter the model, and save.",
   "settings.model_connection_empty": "No custom models yet.",
   "settings.model_connection_edit": "Edit model",
-  "settings.model_connection_details": "Connection settings",
   "settings.model_connection_shared":
     "These connection settings are shared by {count} models. Changes require testing the models again.",
   "settings.custom_model_testing": "Testing…",

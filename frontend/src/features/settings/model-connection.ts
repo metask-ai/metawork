@@ -1,22 +1,66 @@
-import type { CustomProviderView, Protocol } from "../../bridge/contracts.ts";
+import type {
+  BuiltinProviderPresetView,
+  Protocol,
+} from "../../bridge/contracts.ts";
 
-export const providerRequestPaths: Record<Protocol, string> = {
+const requestPaths: Record<Protocol, string> = {
   openai_responses: "/responses",
   openai_chat_completions: "/chat/completions",
   anthropic_messages: "/v1/messages",
   gemini_native: "",
 };
-export function customProviderEndpointFromBaseUrl(
-  protocol: Protocol,
-  value: string,
-) {
-  const base = value.trim().replace(/\/+$/u, "");
-  const path = providerRequestPaths[protocol];
-  return !path || base.endsWith(path) ? base : `${base}${path}`;
+
+export function builtinProviderEndpoint(preset: BuiltinProviderPresetView) {
+  return `${preset.defaultBaseUrl.replace(/\/+$/u, "")}${requestPaths[preset.protocol]}`;
 }
-export function customProviderBaseUrl(provider: CustomProviderView) {
-  const path = providerRequestPaths[provider.protocol];
-  return path && provider.normalizedBaseUrl.endsWith(path)
-    ? provider.normalizedBaseUrl.slice(0, -path.length)
-    : provider.normalizedBaseUrl;
+
+export type EndpointIssue = "address" | "secure" | "path";
+export function inspectModelEndpoint(value: string): {
+  protocol: Protocol | null;
+  root: boolean;
+  issue: EndpointIssue | null;
+} {
+  const address = value.trim();
+  const invalid = (issue: EndpointIssue) => ({
+    protocol: null,
+    root: false,
+    issue,
+  });
+  if (!address) return { protocol: null, root: false, issue: null };
+  if (
+    /[\x00-\x20\x7f\\?#]/u.test(address) ||
+    /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/iu.test(address)
+  )
+    return invalid("address");
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return invalid("address");
+  }
+  if (url.username || url.password || url.search || url.hash)
+    return invalid("address");
+  if (
+    url.protocol !== "https:" &&
+    !(
+      url.protocol === "http:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    )
+  )
+    return invalid("secure");
+  const path = url.pathname;
+  for (const protocol of [
+    "openai_chat_completions",
+    "openai_responses",
+    "anthropic_messages",
+  ] as const) {
+    if (path.endsWith(requestPaths[protocol]))
+      return { protocol, root: false, issue: null };
+  }
+  if (path === "/" || path === "")
+    return { protocol: null, root: true, issue: null };
+  return invalid("path");
+}
+export function protocolFromEndpoint(value: string): Protocol | null {
+  return inspectModelEndpoint(value).protocol;
 }

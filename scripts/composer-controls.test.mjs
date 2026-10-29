@@ -111,9 +111,6 @@ const { ModelSetupNotice } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
-const { customProviderEndpointFromBaseUrl } = await vite.ssrLoadModule(
-  "/src/features/settings/model-connection.ts",
-);
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -795,7 +792,7 @@ test("Add model uses the Host recipe and saves the first model with its official
   const dialog = await chooseModelSource(user, "DeepSeek");
   assert.equal(within(dialog).queryByText("Connection settings"), null);
   assert.equal(
-    within(dialog).queryByRole("textbox", { name: "Base URL" }),
+    within(dialog).queryByRole("textbox", { name: "Request URL (Endpoint)" }),
     null,
   );
   assert.equal(
@@ -824,7 +821,7 @@ test("Add model uses the Host recipe and saves the first model with its official
   assert.ok(within(dialog).getByRole("alert"));
 });
 
-test("Custom model form saves endpoint, protocol, credential and model together without overwriting the address", async () => {
+test("Custom model form detects its protocol from the complete endpoint without a protocol selector", async () => {
   const user = userEvent.setup({ document });
   const submitted = [];
   renderModelSettings({
@@ -835,16 +832,21 @@ test("Custom model form saves endpoint, protocol, credential and model together 
   });
   await user.click(screen.getByRole("button", { name: "Add model" }));
   const dialog = await chooseModelSource(user, "Custom / other service");
-  const address = within(dialog).getByRole("textbox", { name: "Base URL" });
-  await user.type(address, "https://custom.example.com");
-  await user.click(within(dialog).getByRole("combobox", { name: "Protocol" }));
-  await user.click(
-    await screen.findByRole("option", {
-      name: "Anthropic Messages",
-      exact: true,
-    }),
+  assert.equal(dialog.querySelector("details, summary"), null);
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://custom.example.com/v1/messages");
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
   );
-  assert.equal(address.value, "https://custom.example.com");
+  assert.match(
+    within(dialog).getByRole("status").textContent,
+    /Detected API: Anthropic Messages/,
+  );
+  assert.equal(address.value, "https://custom.example.com/v1/messages");
+  assert.doesNotMatch(dialog.textContent, /Request endpoint:/);
   assert.match(
     dialog.textContent,
     /Model requests will send the API key to custom.example.com/,
@@ -967,11 +969,10 @@ test("model rows edit the exact model and expose shared credential replacement w
     within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
   assert.deepEqual(changes, [["source-edit", "7", "13", "model-a", "model-b"]]);
-  await user.click(within(dialog).getByText("Connection settings"));
   const key = within(dialog).getByLabelText("API key");
   assert.equal(key.type, "password");
   assert.equal(key.value, "");
-  assert.match(dialog.textContent, /shared by 1 models/);
+  assert.doesNotMatch(dialog.textContent, /shared by 1 models/);
   await user.type(key, "  replacement secret  ");
   await user.click(
     within(dialog).getByRole("button", { name: "Save API key" }),
@@ -994,7 +995,7 @@ test("model rows edit the exact model and expose shared credential replacement w
   );
   const addDialog = await chooseModelSource(user, "Custom / other service");
   assert.equal(
-    within(addDialog).getByRole("textbox", { name: "Base URL" }).value,
+    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" }).value,
     "",
   );
   assert.ok(within(addDialog).getByRole("textbox", { name: "Model ID" }));
@@ -1043,7 +1044,7 @@ test("Editing an official model permits credential replacement without exposing 
   const dialog = screen.getByRole("dialog", { name: "Edit model" });
   assert.equal(within(dialog).queryByText("Connection settings"), null);
   assert.equal(
-    within(dialog).queryByRole("textbox", { name: "Base URL" }),
+    within(dialog).queryByRole("textbox", { name: "Request URL (Endpoint)" }),
     null,
   );
   assert.equal(
@@ -1062,35 +1063,185 @@ test("Editing an official model permits credential replacement without exposing 
   assert.equal(key.value, "");
 });
 
-test("Provider Base URLs map to all four existing protocol endpoints", () => {
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
+test("custom model addresses are submitted directly for every protocol", async () => {
+  const user = userEvent.setup({ document });
+  for (const [protocol, label, endpoint] of [
+    [
       "openai_responses",
-      "https://api.openai.com/v1/",
-    ),
-    "https://api.openai.com/v1/responses",
-  );
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
+      "OpenAI Responses",
+      "https://example.com/api/responses",
+    ],
+    [
       "openai_chat_completions",
-      "https://api.openai.com/v1",
-    ),
-    "https://api.openai.com/v1/chat/completions",
-  );
-  assert.equal(
-    customProviderEndpointFromBaseUrl(
+      "OpenAI Chat Completions",
+      "https://example.com/api/chat/completions",
+    ],
+    [
       "anthropic_messages",
-      "https://api.anthropic.com",
-    ),
-    "https://api.anthropic.com/v1/messages",
+      "Anthropic Messages",
+      "https://example.com/api/v1/messages",
+    ],
+    ["gemini_native", "Gemini Native", "https://example.com"],
+  ]) {
+    const submissions = [];
+    const view = renderModelSettings({
+      onCreateCustomProvider: async (input) => {
+        submissions.push(input);
+        return false;
+      },
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Add model", exact: true }),
+    );
+    const dialog = await chooseModelSource(user, "Custom / other service");
+    assert.equal(
+      within(dialog).queryByRole("combobox", { name: "Protocol" }),
+      null,
+    );
+    const address = within(dialog).getByRole("textbox", {
+      name: "Request URL (Endpoint)",
+    });
+    await user.type(address, endpoint);
+    if (protocol === "gemini_native") {
+      await user.click(
+        within(dialog).getByRole("checkbox", {
+          name: "This is a Gemini Native service root",
+        }),
+      );
+      assert.equal(
+        within(dialog)
+          .getByRole("checkbox", {
+            name: "This is a Gemini Native service root",
+            exact: true,
+          })
+          .getAttribute("aria-checked"),
+        "true",
+      );
+    } else {
+      assert.equal(
+        within(dialog).queryByRole("combobox", { name: "Protocol" }),
+        null,
+      );
+      assert.match(
+        within(dialog).getByRole("status").textContent,
+        new RegExp(label),
+      );
+    }
+    assert.equal(address.value, endpoint);
+    assert.doesNotMatch(dialog.textContent, /Request endpoint:/);
+    if (protocol === "gemini_native")
+      assert.match(
+        dialog.textContent,
+        /Gemini model paths are generated automatically/,
+      );
+    await user.type(within(dialog).getByLabelText("API key"), "example-key");
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Model ID" }),
+      "example-model",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save", exact: true }),
+    );
+    assert.deepEqual(submissions, [
+      {
+        displayName: "example.com",
+        protocol,
+        normalizedBaseUrl: endpoint,
+        apiKey: "example-key",
+        model: { id: "example-model" },
+      },
+    ]);
+    view.unmount();
+  }
+});
+test("a service root needs explicit Gemini confirmation and an endpoint replaces that choice", async () => {
+  const user = userEvent.setup({ document });
+  const submissions = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submissions.push(input);
+      return false;
+    },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
   );
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  await user.type(within(dialog).getByLabelText("API key"), "example-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "example-model",
+  );
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://api.openai.com");
   assert.equal(
-    customProviderEndpointFromBaseUrl(
-      "gemini_native",
-      "https://generativelanguage.googleapis.com",
-    ),
-    "https://generativelanguage.googleapis.com",
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    true,
   );
+  await user.click(
+    within(dialog).getByRole("checkbox", {
+      name: "This is a Gemini Native service root",
+    }),
+  );
+  await user.clear(address);
+  await user.type(address, "https://example.com/v1/responses");
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  assert.match(
+    within(dialog).getByRole("status").textContent,
+    /OpenAI Responses/,
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.equal(submissions[0].protocol, "openai_responses");
+  assert.equal(
+    submissions[0].normalizedBaseUrl,
+    "https://example.com/v1/responses",
+  );
+});
+test("invalid endpoints explain the problem before submission and keep the other fields", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", {
+    name: "Request URL (Endpoint)",
+  });
+  await user.type(address, "https://example.com/v1");
+  await user.type(within(dialog).getByLabelText("API key"), "fake-test-key");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "my-model",
+  );
+  assert.match(
+    within(dialog).getByRole("alert").textContent,
+    /endpoint ending/,
+  );
+  assert.equal(address.getAttribute("aria-invalid"), "true");
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    true,
+  );
+  assert.equal(within(dialog).getByLabelText("API key").value, "fake-test-key");
+  await user.clear(address);
+  await user.type(address, "https://example.com/v1/responses");
+  assert.equal(within(dialog).queryByRole("alert"), null);
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Save", exact: true }).disabled,
+    false,
+  );
+  assert.equal(submitted.length, 0);
 });
 
 test("Models manages user-added models without an official catalog or default selection", () => {
@@ -1188,7 +1339,7 @@ test("Models adds a model independently without listing or reusing legacy provid
   );
   await user.type(within(addDialog).getByLabelText("API key"), "new-model-key");
   await user.type(
-    within(addDialog).getByRole("textbox", { name: "Base URL" }),
+    within(addDialog).getByRole("textbox", { name: "Request URL (Endpoint)" }),
     "https://api.openai.com/v1/chat/completions",
   );
   await user.type(

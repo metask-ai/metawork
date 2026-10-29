@@ -1479,17 +1479,6 @@ summary::-webkit-details-marker {
   gap: 12px;
   font-size: var(--text-control);
 }
-.settings-model-connection-details > :not(summary) {
-  margin-top: 12px;
-}
-.settings-model-connection-details summary {
-  cursor: pointer;
-  color: var(--ui-content-muted);
-}
-.settings-model-endpoint {
-  overflow-wrap: anywhere;
-}
-
 .settings-custom-providers .settings-execution-header p {
   margin: 5px 0 0;
   color: var(--settings-muted);

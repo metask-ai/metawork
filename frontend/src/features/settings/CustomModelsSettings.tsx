@@ -5,6 +5,7 @@ import type {
   ModelsView,
   Protocol,
 } from "../../bridge/contracts.ts";
+import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Badge } from "../../components/ui/badge.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
@@ -15,9 +16,9 @@ import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 import {
-  customProviderEndpointFromBaseUrl,
-  customProviderBaseUrl,
-  providerRequestPaths,
+  builtinProviderEndpoint,
+  inspectModelEndpoint,
+  protocolFromEndpoint,
 } from "./model-connection.ts";
 
 function ModelAction({
@@ -69,9 +70,9 @@ function ModelAction({
 }
 
 const examples: Record<Protocol, string> = {
-  openai_responses: "https://api.openai.com/v1",
-  openai_chat_completions: "https://api.openai.com/v1",
-  anthropic_messages: "https://api.anthropic.com",
+  openai_responses: "https://api.openai.com/v1/responses",
+  openai_chat_completions: "https://api.openai.com/v1/chat/completions",
+  anthropic_messages: "https://api.anthropic.com/v1/messages",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
 export type CustomModelActions = {
@@ -128,7 +129,7 @@ type Draft = {
   providerId: string | null;
   revision: string | null;
   catalogGeneration: string | null;
-  protocol: Protocol;
+  protocol: Protocol | null;
   baseUrl: string;
   apiKey: string;
 };
@@ -139,7 +140,7 @@ const emptyDraft = (): Draft => ({
   providerId: null,
   revision: null,
   catalogGeneration: null,
-  protocol: "openai_chat_completions",
+  protocol: null,
   baseUrl: "",
   apiKey: "",
 });
@@ -160,6 +161,7 @@ export function CustomModelsSettings({
     modelId: string;
   } | null>(null);
   const [failed, setFailed] = useState(false);
+  const [addressTouched, setAddressTouched] = useState(false);
   const dialogVersion = useRef(0);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -171,6 +173,9 @@ export function CustomModelsSettings({
       draft?.choice === `preset:${item.id}` ||
       provider?.builtinProviderId === item.id,
   );
+  const endpoint = inspectModelEndpoint(draft?.baseUrl ?? "");
+  const detectedProtocol = endpoint.protocol;
+  const addressInvalid = !preset && endpoint.issue !== null;
   const editing =
     draft?.originalModelId !== null && draft?.originalModelId !== undefined;
   const busy = disabled || pending;
@@ -189,6 +194,7 @@ export function CustomModelsSettings({
         : addButton.current;
     dialogVersion.current += 1;
     setFailed(false);
+    setAddressTouched(false);
     setDraft(
       source
         ? {
@@ -200,7 +206,7 @@ export function CustomModelsSettings({
             revision: source.providerRevision,
             catalogGeneration: source.catalogGeneration,
             protocol: source.protocol,
-            baseUrl: customProviderBaseUrl(source),
+            baseUrl: source.normalizedBaseUrl,
             modelId: modelId ?? "",
             originalModelId: modelId,
           }
@@ -229,10 +235,11 @@ export function CustomModelsSettings({
       (item) => value === `preset:${item.id}`,
     );
     setFailed(false);
+    setAddressTouched(false);
     setDraft({
       ...emptyDraft(),
       choice: value,
-      protocol: recipe?.protocol ?? "openai_chat_completions",
+      protocol: recipe?.protocol ?? null,
       baseUrl: recipe?.defaultBaseUrl ?? "",
     });
   }
@@ -260,7 +267,9 @@ export function CustomModelsSettings({
     }
   }
   async function submit() {
-    if (!draft || !draft.modelId.trim()) return;
+    if (!draft || !draft.modelId.trim() || !draft.protocol || addressInvalid)
+      return;
+    const protocol = draft.protocol;
     const modelId = draft.modelId.trim();
     if (editing && modelId === draft.originalModelId) return;
     if (provider && editing) {
@@ -294,11 +303,8 @@ export function CustomModelsSettings({
       await perform(() =>
         actions.onCreateCustomProvider({
           displayName: name,
-          protocol: draft.protocol,
-          normalizedBaseUrl: customProviderEndpointFromBaseUrl(
-            draft.protocol,
-            draft.baseUrl,
-          ),
+          protocol,
+          normalizedBaseUrl: draft.baseUrl.trim(),
           apiKey: draft.apiKey,
           model: { id: modelId },
         }),
@@ -475,6 +481,152 @@ export function CustomModelsSettings({
                 )}
                 {draft.choice && (
                   <>
+                    {!preset && (
+                      <>
+                        {provider && editing && provider.models.length > 1 && (
+                          <p className="text-xs text-(--ui-content-muted)">
+                            {t("settings.model_connection_shared", {
+                              count: provider.models.length,
+                            })}
+                          </p>
+                        )}
+                        <label className="settings-model-form-field">
+                          <span>
+                            {t(
+                              draft.protocol === "gemini_native"
+                                ? "settings.custom_model_base_url"
+                                : "settings.custom_provider_endpoint",
+                            )}
+                          </span>
+                          <input
+                            className="settings-custom-provider-input focus-ring"
+                            type="url"
+                            autoComplete="off"
+                            value={draft.baseUrl}
+                            aria-invalid={
+                              (addressTouched && addressInvalid) || undefined
+                            }
+                            onBlur={() => setAddressTouched(true)}
+                            aria-describedby="model-endpoint-help"
+                            maxLength={2048}
+                            placeholder={
+                              examples[
+                                draft.protocol ?? "openai_chat_completions"
+                              ]
+                            }
+                            disabled={busy || (provider != null && !editing)}
+                            onChange={(event) =>
+                              setDraft({
+                                ...draft,
+                                baseUrl: event.target.value,
+                                protocol: protocolFromEndpoint(
+                                  event.target.value,
+                                ),
+                              })
+                            }
+                          />
+                        </label>
+                        <div id="model-endpoint-help" className="grid gap-1">
+                          {detectedProtocol ? (
+                            <p
+                              role="status"
+                              className="text-xs text-(--ui-content-muted)"
+                            >
+                              {t("settings.custom_model_protocol_detected", {
+                                protocol: t(
+                                  `settings.custom_provider_protocol.${detectedProtocol}`,
+                                ),
+                              })}
+                            </p>
+                          ) : endpoint.root ? (
+                            <>
+                              {draft.protocol !== "gemini_native" && (
+                                <p className="text-xs text-(--ui-content-muted)">
+                                  {t("settings.custom_model_root_help")}
+                                </p>
+                              )}
+                              <label className="flex min-h-11 items-center gap-2 text-sm">
+                                <Checkbox.Root
+                                  checked={draft.protocol === "gemini_native"}
+                                  disabled={busy}
+                                  onCheckedChange={(checked) =>
+                                    setDraft({
+                                      ...draft,
+                                      protocol: checked
+                                        ? "gemini_native"
+                                        : null,
+                                    })
+                                  }
+                                >
+                                  <Checkbox.Indicator aria-hidden="true">
+                                    ✓
+                                  </Checkbox.Indicator>
+                                </Checkbox.Root>
+                                {t("settings.custom_model_gemini_confirm")}
+                              </label>
+                            </>
+                          ) : addressTouched && endpoint.issue ? (
+                            <p
+                              role="alert"
+                              className="text-sm text-(--ui-content-danger)"
+                            >
+                              {t(
+                                `settings.custom_model_address_error.${endpoint.issue}`,
+                              )}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-(--ui-content-muted)">
+                              {t("settings.custom_model_protocol_automatic")}
+                            </p>
+                          )}
+                          {draft.protocol === "gemini_native" && (
+                            <p className="text-xs text-(--ui-content-muted)">
+                              {t("settings.custom_model_gemini_address_help")}
+                            </p>
+                          )}
+                          {draft.baseUrl.trim() && !endpoint.issue && (
+                            <p className="text-xs text-(--ui-content-muted)">
+                              {t("settings.builtin_provider_address_warning", {
+                                host: (() => {
+                                  try {
+                                    return new URL(draft.baseUrl).host;
+                                  } catch {
+                                    return draft.baseUrl.trim();
+                                  }
+                                })(),
+                              })}
+                            </p>
+                          )}
+                        </div>
+                        {provider && editing && (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              busy ||
+                              !draft.baseUrl.trim() ||
+                              !draft.protocol ||
+                              addressInvalid
+                            }
+                            onClick={() =>
+                              void perform(() =>
+                                actions.onUpdateCustomProvider({
+                                  providerId: provider.id,
+                                  expectedProviderRevision:
+                                    provider.providerRevision,
+                                  displayName: provider.displayName,
+                                  protocol: draft.protocol!,
+                                  normalizedBaseUrl: draft.baseUrl.trim(),
+                                }),
+                              )
+                            }
+                          >
+                            {t("settings.model_connection_save")}
+                          </Button>
+                        )}
+                      </>
+                    )}
                     {!provider && (
                       <label className="settings-model-form-field">
                         <span>{t("settings.api_key")}</span>
@@ -491,145 +643,9 @@ export function CustomModelsSettings({
                         />
                       </label>
                     )}
-                    <label className="settings-model-form-field">
-                      <span>{t("settings.custom_model_id")}</span>
-                      {preset && !editing ? (
-                        <SelectionMenu
-                          triggerClassName="settings-control"
-                          value={draft.modelId}
-                          options={preset.modelIds.map((id) => ({
-                            value: id,
-                            label: id,
-                          }))}
-                          placeholder={t("account.choose_model")}
-                          ariaLabel={t("settings.custom_model_id")}
-                          disabled={busy}
-                          onValueChange={(modelId) =>
-                            setDraft({ ...draft, modelId })
-                          }
-                        />
-                      ) : (
-                        <input
-                          className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
-                          maxLength={256}
-                          autoComplete="off"
-                          value={draft.modelId}
-                          disabled={busy}
-                          onChange={(event) =>
-                            setDraft({ ...draft, modelId: event.target.value })
-                          }
-                        />
-                      )}
-                    </label>
-                    {!preset && (
-                      <details
-                        open={draft.choice === "custom"}
-                        className="settings-model-connection-details"
-                      >
-                        <summary>
-                          {t("settings.model_connection_details")}
-                        </summary>
-                        {provider && (
-                          <p>
-                            {t("settings.model_connection_shared", {
-                              count: provider.models.length,
-                            })}
-                          </p>
-                        )}
-                        <label className="settings-model-form-field">
-                          <span>{t("settings.custom_provider_protocol")}</span>
-                          <SelectionMenu
-                            triggerClassName="settings-control"
-                            value={draft.protocol}
-                            options={(
-                              Object.keys(providerRequestPaths) as Protocol[]
-                            ).map((protocol) => ({
-                              value: protocol,
-                              label: t(
-                                `settings.custom_provider_protocol.${protocol}`,
-                              ),
-                            }))}
-                            placeholder={t("settings.custom_provider_protocol")}
-                            ariaLabel={t("settings.custom_provider_protocol")}
-                            disabled={busy || (provider != null && !editing)}
-                            onValueChange={(protocol) =>
-                              setDraft({
-                                ...draft,
-                                protocol: protocol as Protocol,
-                              })
-                            }
-                          />
-                        </label>
-                        <label className="settings-model-form-field">
-                          <span>{t("settings.custom_provider_endpoint")}</span>
-                          <input
-                            className="settings-custom-provider-input focus-ring"
-                            type="url"
-                            autoComplete="off"
-                            value={draft.baseUrl}
-                            maxLength={2048}
-                            placeholder={examples[draft.protocol]}
-                            disabled={busy || (provider != null && !editing)}
-                            onChange={(event) =>
-                              setDraft({
-                                ...draft,
-                                baseUrl: event.target.value,
-                              })
-                            }
-                          />
-                        </label>
-                        <p className="settings-model-endpoint">
-                          {t("settings.custom_provider_endpoint_preview", {
-                            endpoint: customProviderEndpointFromBaseUrl(
-                              draft.protocol,
-                              draft.baseUrl,
-                            ),
-                          })}
-                        </p>
-                        {draft.baseUrl.trim() && (
-                          <p>
-                            {t("settings.builtin_provider_address_warning", {
-                              host: (() => {
-                                try {
-                                  return new URL(draft.baseUrl).host;
-                                } catch {
-                                  return draft.baseUrl.trim();
-                                }
-                              })(),
-                            })}
-                          </p>
-                        )}
-                        {provider && editing && (
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled={busy || !draft.baseUrl.trim()}
-                            onClick={() =>
-                              void perform(() =>
-                                actions.onUpdateCustomProvider({
-                                  providerId: provider.id,
-                                  expectedProviderRevision:
-                                    provider.providerRevision,
-                                  displayName: provider.displayName,
-                                  protocol: draft.protocol,
-                                  normalizedBaseUrl:
-                                    customProviderEndpointFromBaseUrl(
-                                      draft.protocol,
-                                      draft.baseUrl,
-                                    ),
-                                }),
-                              )
-                            }
-                          >
-                            {t("settings.model_connection_save")}
-                          </Button>
-                        )}
-                      </details>
-                    )}
                     {provider && editing && (
                       <div className="settings-model-connection-details">
-                        {preset && (
+                        {preset && provider.models.length > 1 && (
                           <p>
                             {t("settings.model_connection_shared", {
                               count: provider.models.length,
@@ -637,8 +653,8 @@ export function CustomModelsSettings({
                           </p>
                         )}
                         {preset &&
-                          customProviderBaseUrl(provider) !==
-                            preset.defaultBaseUrl && (
+                          provider.normalizedBaseUrl !==
+                            builtinProviderEndpoint(preset) && (
                             <p>
                               {t("settings.builtin_provider_address_warning", {
                                 host: new URL(provider.normalizedBaseUrl).host,
@@ -681,6 +697,36 @@ export function CustomModelsSettings({
                         </Button>
                       </div>
                     )}
+                    <label className="settings-model-form-field">
+                      <span>{t("settings.custom_model_id")}</span>
+                      {preset && !editing ? (
+                        <SelectionMenu
+                          triggerClassName="settings-control"
+                          value={draft.modelId}
+                          options={preset.modelIds.map((id) => ({
+                            value: id,
+                            label: id,
+                          }))}
+                          placeholder={t("account.choose_model")}
+                          ariaLabel={t("settings.custom_model_id")}
+                          disabled={busy}
+                          onValueChange={(modelId) =>
+                            setDraft({ ...draft, modelId })
+                          }
+                        />
+                      ) : (
+                        <input
+                          className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                          maxLength={256}
+                          autoComplete="off"
+                          value={draft.modelId}
+                          disabled={busy}
+                          onChange={(event) =>
+                            setDraft({ ...draft, modelId: event.target.value })
+                          }
+                        />
+                      )}
+                    </label>
                     {preset && (
                       <p className="text-xs text-(--ui-content-muted)">
                         <a
@@ -727,6 +773,8 @@ export function CustomModelsSettings({
                       busy ||
                       !draft.choice ||
                       !draft.modelId.trim() ||
+                      !draft.protocol ||
+                      addressInvalid ||
                       (editing &&
                         draft.modelId.trim() === draft.originalModelId) ||
                       (!provider && (!draft.apiKey || !draft.baseUrl.trim()))

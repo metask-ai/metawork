@@ -1168,10 +1168,24 @@ export const zhCN: Record<MessageId, string> = {
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "直接执行会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
+  "settings.custom_model_protocol_detected": "已识别接口：{protocol}",
+  "settings.custom_model_protocol_automatic":
+    "填写完整请求地址，自动识别接口类型。",
+  "settings.custom_model_base_url": "服务地址（Base URL）",
+  "settings.custom_model_gemini_address_help":
+    "填写服务根地址，Gemini 的模型路径由应用自动生成。",
+  "settings.custom_model_root_help":
+    "请填写完整请求端点；如果这是 Gemini 原生接口的服务根地址，请在下方确认。",
+  "settings.custom_model_gemini_confirm": "这是 Gemini 原生接口的服务根地址",
+  "settings.custom_model_address_error.address":
+    "请填写有效网址，不包含用户名、密码、查询参数或片段。",
+  "settings.custom_model_address_error.secure":
+    "请使用 HTTPS；仅本机地址支持 HTTP。",
+  "settings.custom_model_address_error.path":
+    "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
   "settings.api_key": "API Key",
   "settings.custom_provider_protocol": "协议",
-  "settings.custom_provider_endpoint": "服务地址（Base URL）",
-  "settings.custom_provider_endpoint_preview": "实际请求地址：{endpoint}",
+  "settings.custom_provider_endpoint": "请求地址（Endpoint）",
   "settings.model_connection_save": "保存连接设置",
   "settings.provider_save_api_key": "保存 API Key",
   "settings.custom_models": "自定义模型",
@@ -1185,7 +1199,6 @@ export const zhCN: Record<MessageId, string> = {
     "选择模型厂商或自定义服务，填写模型后保存。",
   "settings.model_connection_empty": "还没有自定义模型。",
   "settings.model_connection_edit": "编辑模型",
-  "settings.model_connection_details": "连接设置",
   "settings.model_connection_shared":
     "这些连接设置由 {count} 个模型共用，修改后需重新测试模型。",
   "settings.custom_model_testing": "正在测试…",
