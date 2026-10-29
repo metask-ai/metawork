@@ -34,6 +34,7 @@ import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runApprovalReadabilityVertical } from "./agentcore-approval-readability-vertical.mjs";
 import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
+import { runSkillAutoRefreshVertical } from "./skill-auto-refresh-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
@@ -429,12 +430,25 @@ let lastCheckpointObservation = null;
 let app;
 let exited;
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
+const skillAutoRefreshOnly =
+  process.env.METAWORK_SKILL_AUTO_REFRESH_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
 const approvalReadabilityOnly =
   process.env.METAWORK_APPROVAL_READABILITY_ONLY === "1";
 const approvalOnly =
   process.env.METAWORK_APPROVAL_ONLY === "1" || approvalReadabilityOnly;
+if (
+  skillAutoRefreshOnly &&
+  (activeInputOnly ||
+    outputOnly ||
+    builtinOfficeOnly ||
+    approvalOnly ||
+    taskArchiveOnly)
+)
+  throw new Error(
+    "Skill automatic refresh verification requires its own scope",
+  );
 if (approvalOnly && process.platform !== "win32")
   throw new Error("The approval-mode desktop audit currently requires Windows");
 if (
@@ -489,6 +503,7 @@ desktopVertical: try {
     break desktopVertical;
   }
   if (
+    !skillAutoRefreshOnly &&
     !activeInputOnly &&
     !outputOnly &&
     !builtinOfficeOnly &&
@@ -984,6 +999,21 @@ desktopVertical: try {
     throw new Error(
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
+  if (skillAutoRefreshOnly) {
+    await runSkillAutoRefreshVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      catalog: catalogSnapshot,
+      skillPath: join(skillDirectory, "SKILL.md"),
+    });
+    await stopApplication("Skill automatic refresh verification complete");
+    break desktopVertical;
+  }
   if (approvalReadabilityOnly) {
     await verifyApprovalReadability(workspaceId, expectedWorkspaceEpoch);
     await stopApplication("approval readability verification complete");
@@ -1182,38 +1212,8 @@ desktopVertical: try {
     );
     await probeWindowsChromeUi();
   }
-  // Disabling the source invalidates the Workspace current authority, but the
-  // already-created Task must still execute its pinned Skill below.
-  const sourceOff = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "claude",
-    enabled: false,
-    expectedRevision: sourceCommit.revision,
-  });
-  assert.equal(sourceOff.applied, true);
-  await poll(
-    async () => {
-      const current = await snapshot();
-      const workspaceCatalog = current.workspaces.find(
-        (item) => item.id === workspaceId,
-      )?.skillCatalog;
-      if (workspaceCatalog?.availability !== "ready") return null;
-      assert.equal(
-        workspaceCatalog.skills.some(
-          (item) => item.invocationName === "review",
-        ),
-        false,
-      );
-      assert.equal(
-        current.tasks.find((item) => item.id === taskId)?.skillCatalog.revision,
-        catalogSnapshot.catalog.revision,
-      );
-      return true;
-    },
-    commandTimeoutMs,
-    "disabled compatibility source with pinned Task",
-  );
   const runSubmittedAfterUnixMs = Date.now() - 1_000;
-  const runResult = await invokeBridge("metawork.tasks.run", {
+  const runResult = await invokePreparedRun({
     taskId,
     expectedBindingEpoch,
     input: {
@@ -1249,6 +1249,35 @@ desktopVertical: try {
     },
     commandTimeoutMs,
     "Run submission",
+  );
+  // A source change leaves the already-admitted Run on its captured authority.
+  const sourceOff = await invokeBridge("metawork.skills.setSourceEnabled", {
+    sourceId: "claude",
+    enabled: false,
+    expectedRevision: sourceCommit.revision,
+  });
+  assert.equal(sourceOff.applied, true);
+  await poll(
+    async () => {
+      const current = await snapshot();
+      const workspaceCatalog = current.workspaces.find(
+        (item) => item.id === workspaceId,
+      )?.skillCatalog;
+      if (workspaceCatalog?.availability !== "ready") return null;
+      assert.equal(
+        workspaceCatalog.skills.some(
+          (item) => item.invocationName === "review",
+        ),
+        false,
+      );
+      assert.equal(
+        current.tasks.find((item) => item.id === taskId)?.skillCatalog.revision,
+        catalogSnapshot.catalog.revision,
+      );
+      return true;
+    },
+    commandTimeoutMs,
+    "disabled compatibility source with pinned Task",
   );
   const runId = submittedRun.id;
   if (!isWireId(runId)) throw new Error("Run submission omitted its identity");
@@ -1687,7 +1716,7 @@ desktopVertical: try {
     (attachment) => attachment.token,
   );
   const beforeMultimodalRunIds = new Set(task.runs.map((item) => item.id));
-  const multimodalRunResult = await invokeBridge("metawork.tasks.run", {
+  const multimodalRunResult = await invokePreparedRun({
     taskId,
     expectedBindingEpoch,
     input: {
@@ -1787,7 +1816,7 @@ desktopVertical: try {
   );
   const priorRunIds = new Set(currentTask.runs.map((item) => item.id));
   const deliveryCountBeforeTextRun = productDeliveryEmitCount();
-  const textRunResult = await invokeBridge("metawork.tasks.run", {
+  const textRunResult = await invokePreparedRun({
     taskId,
     expectedBindingEpoch,
     input: {
@@ -2652,6 +2681,20 @@ async function expectMissing(filePath) {
     throw error;
   }
   throw new Error(`checkpoint blob survived Task deletion: ${filePath}`);
+}
+
+// Direct tasks.run remains synchronous and never fabricates a Run receipt
+// while its fresh query is pending. Normal Composer messages use sendInput.
+async function invokePreparedRun(payload) {
+  return poll(
+    async () => {
+      const result = await invokeBridge("metawork.tasks.run", payload);
+      if (result?.reason === "catalog_loading") return null;
+      return result;
+    },
+    commandTimeoutMs,
+    "fresh catalog before direct Run",
+  );
 }
 
 async function invokeBridge(command, payload) {

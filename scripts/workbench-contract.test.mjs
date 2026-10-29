@@ -1324,29 +1324,15 @@ test("automatic Workspace projection is one-to-one and capability-gated", () => 
 
 test("Skill catalogs and typed Skill history decode without exposing loader internals", () => {
   const withSkill = clone(fixture);
-  const catalog = {
-    availability: "degraded",
-    redacted: false,
-    revision: "catalog-revision",
-    selectionRevision: "5",
-    skills: [
-      {
-        skillId: "builtin.review",
-        invocationName: "review",
-        displayName: "Review",
-        description: "Review a target",
-        argumentNames: ["target", "focus"],
-        maxValues: 2,
-        enabled: true,
-      },
-    ],
-    issues: [
-      {
-        code: "invalid_resource",
-        invocationName: "broken-skill",
-      },
-    ],
-  };
+  const catalog = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/skill-catalog-ready.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   withSkill.workspaces[0].skillCatalog = catalog;
   withSkill.tasks[0].skillCatalog = clone(catalog);
   withSkill.tasks[0].runs[0].input = {

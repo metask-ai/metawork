@@ -643,6 +643,7 @@ test("Skill drafts persist identity, revision, and positional values together", 
   const draft = {
     kind: "skill",
     skillId: "builtin.review",
+    skillPolicyKey: "review",
     invocationName: "review",
     displayName: "Review",
     catalogRevision: "17",
@@ -658,7 +659,14 @@ test("Skill drafts persist identity, revision, and positional values together", 
     "metawork.task-draft.v1.7",
     JSON.stringify({ ...draft, argumentValues: ["one", "two"] }),
   );
-  assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
+  assert.deepEqual(readTaskDraft("7"), {
+    ...draft,
+    argumentValues: ["one", "two"],
+  });
+  assert.equal(composerDraftWithinLimits(readTaskDraft("7")), false);
+  const { skillPolicyKey, ...legacy } = draft;
+  values.set("metawork.task-draft.v1.7", JSON.stringify(legacy));
+  assert.deepEqual(readTaskDraft("7"), legacy);
   values.set(
     "metawork.task-draft.v1.7",
     JSON.stringify({ ...draft, unexpected: true }),

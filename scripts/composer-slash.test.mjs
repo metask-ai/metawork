@@ -8,7 +8,10 @@ import {
   parseSlashInput,
   resolveSlashCandidates,
   resolveSlashCommandStates,
-  skillCatalogRefreshTarget,
+  reconcileSkillDraft,
+  reviewSkillDraft,
+  skillDraftProblem,
+  skillDraftVisibleArgumentCount,
   slashCommandNames,
   skillDraftFromCandidate,
 } from "../frontend/src/features/composer/slash.ts";
@@ -21,6 +24,7 @@ const catalog = {
   skills: [
     {
       skillId: "workspace.new",
+      skillPolicyKey: "new",
       invocationName: "new",
       displayName: "Prepare new files",
       description: "Prepare files for a new change",
@@ -30,6 +34,7 @@ const catalog = {
     },
     {
       skillId: "builtin.review",
+      skillPolicyKey: "review",
       invocationName: "review",
       displayName: "Review",
       description: "Review a target",
@@ -67,6 +72,7 @@ test("Slash resolver keeps Commands authoritative over colliding Skill names", (
   assert.deepEqual(skillDraftFromCandidate(review), {
     kind: "skill",
     skillId: "builtin.review",
+    skillPolicyKey: "review",
     invocationName: "review",
     displayName: "Review",
     catalogRevision: "17",
@@ -282,32 +288,57 @@ test("stale Skill drafts retain values but cannot be treated as current", () => 
   assert.deepEqual(draft.argumentValues, ["src/main.zig"]);
 });
 
-test("Skill refresh repairs Workspace discovery before binding an existing Task", () => {
-  const emptyCatalog = (availability) => ({
-    availability,
-    redacted: false,
-    revision: null,
-    selectionRevision: null,
-    skills: [],
-    issues: [],
-  });
+test("logical Skill drafts automatically follow compatible winners and preserve arguments", () => {
+  const candidate = resolveSlashCandidates({
+    input: parseSlashInput("/review src"),
+    commands: [],
+    catalog,
+  })[0];
+  const draft = skillDraftFromCandidate(candidate);
+  const next = structuredClone(catalog);
+  next.revision = "updated";
+  next.selectionRevision = "9";
+  next.skills[1].skillId = "new-core-winner";
+  next.skills[1].displayName = "Review v2";
+  const resolved = reconcileSkillDraft(draft, next);
+  assert.equal(resolved.skillId, "new-core-winner");
+  assert.equal(resolved.catalogRevision, "updated");
+  assert.equal(resolved.selectionRevision, "9");
+  assert.deepEqual(resolved.argumentValues, ["src"]);
+  assert.equal(isSkillDraftCurrent(draft, next), true);
+  assert.equal(reconcileSkillDraft(resolved, next), resolved);
+  assert.equal(composerDraftToRunInput(resolved).skillId, "new-core-winner");
+  assert.equal("skillPolicyKey" in composerDraftToRunInput(resolved), false);
+
+  next.skills[1].argumentNames = [];
+  next.skills[1].maxValues = 0;
+  assert.equal(skillDraftProblem(draft, next), "arguments");
+  assert.equal(reconcileSkillDraft(draft, next), draft);
+  const reviewed = reviewSkillDraft(draft, next);
+  assert.deepEqual(reviewed.argumentValues, ["src"]);
+  assert.equal(skillDraftVisibleArgumentCount(reviewed), 1);
+  assert.equal(composerDraftWithinLimits(reviewed), false);
+  next.skills[1].enabled = false;
+  assert.equal(skillDraftProblem(draft, next), "disabled");
+  next.skills[1].enabled = true;
+  next.skills[1].skillPolicyKey = "another-skill";
+  assert.equal(skillDraftProblem(draft, next), "missing");
+});
+
+test("legacy drafts acquire a logical key only from their exact valid selection", () => {
+  const candidate = resolveSlashCandidates({
+    input: parseSlashInput("/review src"),
+    commands: [],
+    catalog,
+  })[0];
+  const { skillPolicyKey, ...legacy } = skillDraftFromCandidate(candidate);
   assert.equal(
-    skillCatalogRefreshTarget(false, emptyCatalog("ready")),
-    "workspace",
+    reconcileSkillDraft(legacy, catalog).skillPolicyKey,
+    skillPolicyKey,
   );
-  assert.equal(
-    skillCatalogRefreshTarget(true, emptyCatalog("unavailable")),
-    "workspace",
-  );
-  assert.equal(
-    skillCatalogRefreshTarget(true, emptyCatalog("loading")),
-    "workspace",
-  );
-  assert.equal(skillCatalogRefreshTarget(true, emptyCatalog("ready")), "task");
-  assert.equal(
-    skillCatalogRefreshTarget(true, emptyCatalog("degraded")),
-    "task",
-  );
+  const changed = { ...catalog, revision: "changed" };
+  assert.equal(reconcileSkillDraft(legacy, changed), legacy);
+  assert.equal(isSkillDraftCurrent(legacy, changed), false);
 });
 
 test("ordinary text uses a UTF-8 byte budget independent of Skill arguments", () => {

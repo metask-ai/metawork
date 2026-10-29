@@ -15,6 +15,23 @@ pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
 
+// tasks.run is synchronous: a fresh catalog wait returns no Run identity.
+// Only successful direct-admission fixtures wait and retry that public command;
+// sendInput tests below exercise one-shot reception and Host-owned preparation.
+pub fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput) !u64 {
+    for (0..5000) |_| {
+        return workbench.runTask(task_id, input) catch |err| switch (err) {
+            error.CatalogLoading => {
+                try workbench.drainAgentEvents();
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                continue;
+            },
+            else => return err,
+        };
+    }
+    return error.TestUnexpectedResult;
+}
+
 /// Framed storage is a test double here; production history uses typed SQLite.
 pub const TypedHistory = struct {
     fixture_restore: ?[]const u8 = null,

@@ -159,8 +159,8 @@ test("central conversation paths use only the shared AI UI vocabulary", async ()
   ]);
 
   assert.match(taskContent, /<Conversation/);
-  assert.match(taskContent, /<Message role="user"/);
-  assert.match(taskContent, /<Message role="assistant"/);
+  assert.match(taskContent, /<Message\s+role="user"/);
+  assert.match(taskContent, /<Message\s+role="assistant"/);
   assert.match(taskContent, /<Activity/);
   assert.match(approval, /<Intervention/);
   assert.match(composer, /<Composer/);

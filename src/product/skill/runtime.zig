@@ -80,6 +80,14 @@ pub const Error = std.mem.Allocator.Error || error{
     WorkspaceEpochMismatch,
 };
 
+/// Freshness of one request, independent of the retained last-good view.
+pub const CatalogPreparation = union(enum) {
+    pending,
+    stale,
+    ready: BorrowedCatalogAuthority,
+    unavailable,
+};
+
 pub const EnablementError = enablement.Error || enablement.FileStoreError || catalog.Error || error{
     CatalogUnavailable,
     PersistenceFailed,
@@ -658,6 +666,50 @@ pub const Runtime = struct {
         const generation = nextGeneration(workspace.control.request_generation) orelse
             return error.CatalogRequestGenerationExhausted;
         try self.startWorkspace(workspace, generation, null);
+    }
+
+    /// A new Run requests once. Concurrent consumers share the current query.
+    /// Queue pressure keeps one intent, driven by executor completion wakes.
+    pub fn prepareWorkspaceCatalog(self: *Runtime, id: u64, epoch: u64) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        if (!workspace.authorized or self.state.source_settings == null)
+            return error.CatalogUnavailable;
+        if (workspace.job != null or workspace.reschedule_pending)
+            return workspace.control.request_generation;
+        const generation = nextGeneration(workspace.control.request_generation) orelse
+            return error.CatalogRequestGenerationExhausted;
+        workspace.control.request_generation = generation;
+        workspace.reschedule_pending = true;
+        self.startWorkspace(workspace, generation, null) catch |err| {
+            if (err != error.QueueFull) {
+                workspace.reschedule_pending = false;
+                workspace.control.completed_generation = generation;
+                workspace.control.query_succeeded = false;
+                return err;
+            }
+        };
+        return generation;
+    }
+
+    pub fn workspacePreparation(self: *const Runtime, id: u64, epoch: u64, generation: u64) Error!CatalogPreparation {
+        const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        if (!workspace.authorized or self.state.source_settings == null or self.shutting_down)
+            return .unavailable;
+        if (workspace.job != null or workspace.reschedule_pending or
+            workspace.control.completed_generation < generation)
+            return .pending;
+        if (workspace.control.needs_query or workspace.control.completed_generation != workspace.control.request_generation)
+            return .stale;
+        if (!workspace.control.query_succeeded)
+            return .unavailable;
+        const authority = &workspace.control.slot;
+        return if (authority.snapshotConst()) |snapshot|
+            .{ .ready = .{ .snapshot = snapshot, .lease = authority.lease() orelse return .unavailable } }
+        else
+            .unavailable;
     }
 
     fn startWorkspace(self: *Runtime, workspace: *WorkspaceCatalog, generation: u64, verification: ?state.Reconciliation) Error!void {
@@ -1474,7 +1526,12 @@ pub const Runtime = struct {
         const current = job.request_generation == control.request_generation and
             !self.shutting_down and self.state.source_settings != null and
             job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace));
-        if (current) control.source_checks = job.root_checks;
+        if (current) {
+            control.source_checks = job.root_checks;
+            control.completed_generation = job.request_generation;
+            control.query_succeeded = false;
+            control.needs_query = false;
+        }
         switch (job.state.load(.acquire)) {
             .completed => switch (job.outcome) {
                 .success => |*acquisition| if (current) {
@@ -1504,6 +1561,19 @@ pub const Runtime = struct {
                     };
                     if (job.personal_only) policy.restrictToPersonalSources(&snapshot);
                     acquisition.projection.deinit();
+                    control.query_succeeded = true;
+                    control.needs_query = false;
+                    if (control.slot.snapshotConst()) |previous| {
+                        if (std.mem.eql(u8, previous.revision, snapshot.revision) and
+                            previous.selection_revision == snapshot.selection_revision)
+                        {
+                            snapshot.deinit();
+                            self.ports.catalog.release(acquisition.lease);
+                            self.reconcileCatalogResultNoFail(job, previous, now_unix_seconds);
+                            job.outcome = .failure;
+                            return;
+                        }
+                    }
                     var old_slot = control.slot;
                     control.slot = .{ .committed = .{
                         .lease = .init(acquisition.lease),
@@ -1641,6 +1711,15 @@ pub const Runtime = struct {
         self: *Runtime,
         scope: management.Scope,
     ) MutationError!void {
+        // Personal management verification cannot stand in for a Workspace
+        // query. Dependent scopes refresh lazily at selection/Run preparation.
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (scope == .project and scope.project.workspace_id != workspace.id) continue;
+            workspace.control.needs_query = true;
+            workspace.control.request_generation = nextGeneration(workspace.control.request_generation) orelse std.math.maxInt(u64);
+            if (workspace.job != null) workspace.reschedule_pending = true;
+        }
         var verification = self.state.reconciliation orelse return switch (scope) {
             .personal => self.refreshPersonal(),
             .project => |project| self.refreshWorkspace(project.workspace_id, project.workspace_epoch),
@@ -1793,6 +1872,8 @@ pub const Runtime = struct {
     }
 
     fn invalidateControl(self: *Runtime, control: *state.CatalogControl) void {
+        control.query_succeeded = false;
+        control.completed_generation = control.request_generation;
         control.slot.deinit(catalogReleaser(&self.ports.catalog));
     }
 
@@ -2047,6 +2128,60 @@ fn testRuntime(harness: *TestHarness) !Runtime {
             .max_policy_key_bytes = 64,
         },
     );
+}
+
+test "Run preparation shares a query and rejects last-good as fresh after failure" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace"),
+    }, harness.budget());
+    var previous = try catalog.Snapshot.init(std.testing.allocator, .{
+        .revision = "last-good",
+        .health = .healthy,
+        .skills = &.{},
+        .issues = &.{},
+        .storage = undefined,
+    }, 1, &.{}, test_snapshot_limits, 4096);
+    try runtime.testInstallWorkspaceSnapshot(9, 1, previous, harness.budget());
+    previous = undefined;
+    const generation = try runtime.prepareWorkspaceCatalog(9, 1);
+    try std.testing.expectEqual(generation, try runtime.prepareWorkspaceCatalog(9, 1));
+    try std.testing.expect(try runtime.workspacePreparation(9, 1, generation) == .pending);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expect(try runtime.workspacePreparation(9, 1, generation) == .unavailable);
+    try std.testing.expectEqualStrings("last-good", (try runtime.workspaceCatalogProjection(9, 1)).revision);
+    const next = try runtime.prepareWorkspaceCatalog(9, 1);
+    try std.testing.expect(next > generation);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+}
+
+test "Run preparation retains a single ticket through executor queue pressure" {
+    var harness: TestHarness = .{ .queue_blocked = true };
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace"),
+    }, harness.budget());
+    const generation = try runtime.prepareWorkspaceCatalog(9, 1);
+    try std.testing.expectEqual(generation, try runtime.prepareWorkspaceCatalog(9, 1));
+    try std.testing.expect(try runtime.workspacePreparation(9, 1, generation) == .pending);
+    harness.queue_blocked = false;
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expect(try runtime.workspacePreparation(9, 1, generation) == .unavailable);
+    try std.testing.expectError(error.WorkspaceEpochMismatch, runtime.workspacePreparation(9, 2, generation));
 }
 
 test "Skill restore ceiling retains pinned IDs under current source and Workspace grants" {

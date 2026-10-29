@@ -1,0 +1,1 @@
+{"availability":"ready","redacted":false,"revision":"catalog-revision","selectionRevision":"5","skills":[{"skillId":"builtin.review","skillPolicyKey":"review","invocationName":"review","displayName":"Review","description":"Review a target","argumentNames":["target","focus"],"maxValues":2,"enabled":true}],"issues":[]}

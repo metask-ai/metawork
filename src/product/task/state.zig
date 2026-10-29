@@ -457,13 +457,23 @@ pub const Submission = struct {
 };
 
 /// One owned execution buffer; never serialized or reconstructed from history.
+pub const SkillSelection = struct {
+    policy_key: []const u8,
+    argument_shape: [32]u8,
+};
+
 pub const OwnedRunInput = struct {
     input: RunInput,
     bytes: []u8,
     arguments: []([]const u8) = &.{},
     attachments: []MultimodalAttachment = &.{},
+    skill_selection: ?SkillSelection = null,
 
     pub fn clone(allocator: std.mem.Allocator, input: RunInput, budget: usize) error{ OutOfMemory, ProjectionCapacity }!OwnedRunInput {
+        return cloneSelected(allocator, input, budget, null);
+    }
+
+    pub fn cloneSelected(allocator: std.mem.Allocator, input: RunInput, budget: usize, selection: ?SkillSelection) error{ OutOfMemory, ProjectionCapacity }!OwnedRunInput {
         var length: usize = 0;
         switch (input) {
             .text => |text| length = text.len,
@@ -479,6 +489,7 @@ pub const OwnedRunInput = struct {
                 }
             },
         }
+        if (selection) |skill| length = std.math.add(usize, length, skill.policy_key.len) catch return error.ProjectionCapacity;
         if (length > budget) return error.ProjectionCapacity;
         const bytes = try allocator.alloc(u8, length);
         errdefer allocator.free(bytes);
@@ -505,7 +516,16 @@ pub const OwnedRunInput = struct {
                 break :blk .{ .multimodal = .{ .text = text, .attachments = attachments } };
             },
         };
-        return .{ .input = owned, .bytes = bytes, .arguments = arguments, .attachments = attachments };
+        return .{
+            .input = owned,
+            .bytes = bytes,
+            .arguments = arguments,
+            .attachments = attachments,
+            .skill_selection = if (selection) |skill| .{
+                .policy_key = copy(bytes, &offset, skill.policy_key),
+                .argument_shape = skill.argument_shape,
+            } else null,
+        };
     }
 
     fn copy(bytes: []u8, offset: *usize, value: []const u8) []const u8 {
@@ -1107,6 +1127,10 @@ pub const Task = struct {
     conversation_observation: ConversationObservation = .{},
     /// Runtime-only first catalog binding; never persisted or used for recovery eligibility.
     initial_catalog_preparation: enum { uninitialized, loading, unavailable } = .uninitialized,
+    /// One query ticket for the next Run, including a queued input or public
+    /// run retry. No payload or lease is owned by this preparation marker.
+    skill_preparation: ?struct { generation: u64, binding_epoch: u64 } = null,
+    skills_unavailable: bool = false,
     approval_change: ?ApprovalChange = null,
     approval_result: ?ApprovalResult = null,
     deletion: task_deletion.State = .idle,

@@ -967,7 +967,7 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, provider, catalog.revision, catalog.selection_revision, .{ .interactive = if (refresh_pressure) .manual else .auto_review });
     try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try control.taskMcpAuthority(task_id));
     if (refresh_pressure) {
-        const run_id = try control.runTask(task_id, .{ .text = "Call the selected echo tool." });
+        const run_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Call the selected echo tool." });
         defer control.cancel(task_id, run_id) catch {};
         const task = control.task_runtime.find(task_id).?;
         const request_id = pending: {
@@ -2540,7 +2540,7 @@ fn waitTaskSwitchCatalog(control: *product_control.Runtime, workspace: u64, skil
 }
 
 fn executeTaskSwitchRun(control: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput, choice: product_task.PermissionChoice) !usize {
-    const run_id = try control.runTask(task_id, input);
+    const run_id = try @import("lifecycle_fixture").runPreparedTask(control, task_id, input);
     const task = control.task_runtime.find(task_id).?;
     var previous: ?u64 = null;
     var answers: usize = 0;
@@ -2603,7 +2603,7 @@ test "real Core Product rejects a different MCP origin before closing the origin
     try expectProductTaskSwitch(.anthropic_messages, .openai_responses, .replace_connection, .manual);
 }
 
-test "real Core Product rebind preserves full access without adding Skill or MCP authority" {
+test "real Core Product rebind preserves full access and restore ceilings before next Run Skill preparation" {
     try expectProductTaskSwitch(.gemini_native, .openai_responses, .narrow, .full_access);
 }
 
@@ -2701,7 +2701,14 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     catalog = try control.workspaceCatalog(workspace);
     const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, initial, catalog.revision, catalog.selection_revision, .{ .interactive = approval_mode });
     const task = control.task_runtime.find(task_id).?;
-    const pinned = try control.taskCatalog(task_id);
+    var original_catalog = try task.runtime.pinnedCatalogConst().?.clone(std.testing.allocator, .{
+        .max_catalog_skills = control.limits.max_catalog_skills,
+        .max_catalog_issues = control.limits.max_catalog_issues,
+        .max_skill_arguments = control.limits.max_skill_arguments,
+        .max_catalog_projection_bytes = control.limits.max_catalog_projection_bytes,
+    }, control.limits.max_projection_bytes);
+    defer original_catalog.deinit();
+    const pinned = original_catalog.view();
     try std.testing.expectEqual(source_protocol, task.runtime.executionConst().?.protocol);
     const retained = for (pinned.skills) |skill| {
         if (std.mem.eql(u8, skill.invocation_name, "retained")) break skill;
@@ -2726,7 +2733,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     const logical_id = try std.testing.allocator.dupe(u8, before.session.logical_session_id);
     defer std.testing.allocator.free(logical_id);
     try tmp.dir.createDirPath(std.testing.io, ".agents/skills/extra");
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/extra/SKILL.md", .data = "---\nname: extra\ndescription: Newly available ungranted Skill\n---\nThis new global capability must not enter the original Task.\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/extra/SKILL.md", .data = "---\nname: extra\ndescription: Newly available ungranted Skill\n---\nThis new Skill is eligible for the next Run; restore alone cannot widen its grants.\n" });
     try control.refreshWorkspaceCatalog(workspace, try control.workspaceEpoch(workspace));
     const wider = try waitTaskSwitchCatalog(&control, workspace, 3);
     try std.testing.expectEqual(@as(usize, 3), wider.skills.len);
@@ -2771,13 +2778,24 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try checkpoints.verify(task.durable.checkpoint.?.blob);
     const after_switch_file = try tmp.dir.statFile(std.testing.io, "permission-boundary.txt", .{});
     try std.testing.expectEqual(original_file.mtime, after_switch_file.mtime);
+    // Restore itself preserves its captured ceiling. A new Run separately
+    // adopts currently authorized Skills; it never broadens restored MCP tools.
+    try std.testing.expectEqualStrings(pinned.revision, (try control.taskCatalog(task_id)).revision);
+    {
+        var restored_access = try task.runtime.acquireAccess();
+        defer restored_access.deinit();
+        var ceiling = try restored_access.captureRestoreInputs();
+        defer ceiling.deinit() catch unreachable;
+        try std.testing.expectEqual(@as(usize, 1), ceiling.skill.?.borrow().policy.granted_skill_ids.len);
+    }
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Continue on the new connection." }, .allow_session));
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Deny this echo tool." }, .allow_session));
     // A one-shot Write decision must not become a restored Session grant.
     try std.testing.expectEqual(@as(usize, if (manual) 1 else 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Write the permission boundary file." }, .allow_once));
     const restored_catalog = try control.taskCatalog(task_id);
-    try std.testing.expectEqualStrings(pinned.revision, restored_catalog.revision);
-    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = pinned.revision, .selection_revision = restored_catalog.selection_revision.?, .argument_values = &.{} } }, .allow_session));
+    try std.testing.expectEqualStrings((try control.workspaceCatalog(workspace)).revision, restored_catalog.revision);
+    try std.testing.expectEqual(@as(usize, 3), restored_catalog.skills.len);
+    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = restored_catalog.revision, .selection_revision = restored_catalog.selection_revision.?, .argument_values = &.{} } }, .allow_session));
     var access = try task.runtime.acquireAccess();
     var access_owned = true;
     defer if (access_owned) access.deinit();
@@ -2789,8 +2807,11 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try std.testing.expectEqual(agent.ShellPolicy.unrestricted, restored_inputs.shell_policy);
     try std.testing.expectEqual(agent.PermissionInteraction.interactive, restored_inputs.permission_interaction);
     const ids = restored_inputs.skill.?.borrow().policy.granted_skill_ids;
-    try std.testing.expectEqual(@as(usize, 1), ids.len);
-    try std.testing.expectEqualStrings(retained.skill_id, ids[0]);
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    try std.testing.expect(for (ids) |id| {
+        if (std.mem.eql(u8, id, retained.skill_id)) break true;
+    } else false);
+    for (ids) |id| try std.testing.expect(!std.mem.eql(u8, id, blocked.skill_id));
     var mcp_authority = try control.mcp.?.restoreAuthority(restored_inputs.mcp);
     defer mcp_authority.deinit();
     try std.testing.expectEqual(@as(usize, 1), mcp_authority.selection.?.selectedTools().len);
@@ -2848,8 +2869,9 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try std.testing.expectEqualStrings("gpt-4o", task.durable.execution_model);
     try std.testing.expectEqualStrings(logical_id, task.durable.checkpoint.?.session.logical_session_id);
     const narrowed = try control.taskCatalog(task_id);
-    for (narrowed.skills) |skill| try std.testing.expect(!skill.enabled);
-    try std.testing.expectError(error.SkillUnavailable, control.runTask(task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = narrowed.revision, .selection_revision = narrowed.selection_revision.?, .argument_values = &.{} } }));
+    for (narrowed.skills) |skill| try std.testing.expectEqual(std.mem.eql(u8, skill.skill_policy_key, "extra"), skill.enabled);
+    const current_policy = try control.workspaceCatalog(workspace);
+    try std.testing.expectError(error.SkillUnavailable, control.runTask(task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = current_policy.revision, .selection_revision = current_policy.selection_revision.?, .argument_values = &.{} } }));
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Call the revoked echo tool." }, .allow_session));
     // A checkpoint's cached image cannot substitute for retaining the user's
     // original file in the Product Task namespace.

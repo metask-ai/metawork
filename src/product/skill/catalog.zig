@@ -31,6 +31,21 @@ pub const CatalogIssueProjection = struct {
     source_instance_id: []const u8,
 };
 
+/// Equality token for the positional argument contract, not a Core identity
+/// or an authorization. Unrelated content/catalog changes do not affect it.
+pub fn argumentShape(skill: SkillProjection) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var number: [8]u8 = undefined;
+    std.mem.writeInt(u64, &number, skill.max_values, .little);
+    hash.update(&number);
+    for (skill.argument_names) |name| {
+        std.mem.writeInt(u64, &number, name.len, .little);
+        hash.update(&number);
+        hash.update(name);
+    }
+    return hash.finalResult();
+}
+
 pub const CatalogProjection = struct {
     availability: CatalogAvailability,
     redacted: bool = false,
@@ -168,9 +183,10 @@ pub const Snapshot = struct {
             .source_scope = issue.source_scope,
             .source_instance_id = try owned.dupe(u8, issue.source_instance_id),
         };
+        const revision = try owned.dupe(u8, source.revision);
         return .{
             .arena = arena,
-            .revision = try owned.dupe(u8, source.revision),
+            .revision = revision,
             .health = source.health,
             .skills = skills,
             .issues = issues,
@@ -228,9 +244,10 @@ pub const Snapshot = struct {
             .source_scope = issue.source_scope,
             .source_instance_id = try owned.dupe(u8, issue.source_instance_id),
         };
+        const revision = try owned.dupe(u8, self.revision);
         return .{
             .arena = arena,
-            .revision = try owned.dupe(u8, self.revision),
+            .revision = revision,
             .health = self.health,
             .skills = skills,
             .issues = issues,

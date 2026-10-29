@@ -110,6 +110,8 @@ function boundedNonEmptyString(value: unknown): value is string {
 
 function skillDraftPersistable(draft: ComposerSkillDraft) {
   if (
+    (draft.skillPolicyKey !== undefined &&
+      !boundedNonEmptyString(draft.skillPolicyKey)) ||
     !boundedNonEmptyString(draft.skillId) ||
     !boundedNonEmptyString(draft.invocationName) ||
     !boundedNonEmptyString(draft.displayName) ||
@@ -119,7 +121,7 @@ function skillDraftPersistable(draft: ComposerSkillDraft) {
     draft.maxValues < 0 ||
     draft.maxValues > maxSkillArguments ||
     draft.argumentNames.length > draft.maxValues ||
-    draft.argumentValues.length > draft.maxValues ||
+    draft.argumentValues.length > maxSkillArguments ||
     !draft.argumentNames.every(boundedNonEmptyString) ||
     !draft.argumentValues.every(
       (value) => value.length <= maxComposerCharacters,
@@ -129,6 +131,7 @@ function skillDraftPersistable(draft: ComposerSkillDraft) {
   let semanticBytes = 0;
   for (const value of [
     draft.skillId,
+    draft.skillPolicyKey ?? "",
     draft.invocationName,
     draft.displayName,
     draft.catalogRevision,
@@ -146,6 +149,7 @@ function decodeSkillDraft(
 ): ComposerDraft | null {
   if (
     !exactKeys(draft, [
+      ...(draft.skillPolicyKey === undefined ? [] : ["skillPolicyKey"]),
       "kind",
       "skillId",
       "invocationName",
@@ -157,6 +161,8 @@ function decodeSkillDraft(
       "maxValues",
     ]) ||
     draft.kind !== "skill" ||
+    (draft.skillPolicyKey !== undefined &&
+      !boundedNonEmptyString(draft.skillPolicyKey)) ||
     !boundedNonEmptyString(draft.skillId) ||
     !boundedNonEmptyString(draft.invocationName) ||
     !boundedNonEmptyString(draft.displayName) ||
@@ -172,7 +178,7 @@ function decodeSkillDraft(
   const maxValues = draft.maxValues as number;
   if (
     draft.argumentNames.length > maxValues ||
-    draft.argumentValues.length > maxValues ||
+    draft.argumentValues.length > maxSkillArguments ||
     !draft.argumentNames.every(boundedNonEmptyString) ||
     !draft.argumentValues.every(
       (value) =>
@@ -183,6 +189,9 @@ function decodeSkillDraft(
   const decoded: ComposerSkillDraft = {
     kind: "skill",
     skillId: draft.skillId,
+    ...(draft.skillPolicyKey === undefined
+      ? {}
+      : { skillPolicyKey: draft.skillPolicyKey as string }),
     invocationName: draft.invocationName,
     displayName: draft.displayName,
     catalogRevision: draft.catalogRevision,

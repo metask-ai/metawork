@@ -227,7 +227,11 @@ Personal 或 Workspace 的 committed Skill authority 必须不可分地拥有 im
 
 Enablement mutation 先构造受影响 authority 的完整 candidate，再提交无 secret policy store，最后 no-fail 替换 committed authority。明确 write failure 保持旧 authority；outcome unknown 必须冻结新的 Skill authority mutation 和 Skill admission，不能降级为全启用。尚无 committed authority 的 Workspace 不得锁死无关 scope 的 mutation，但以后取得 catalog 时必须按最新 committed policy 编译。
 
-Manual Task 创建时同步借用可用 Workspace authority 并取得独立 pinned snapshot/lease；缺席时保留 uninitialized，后续显式 idle refresh 绑定。Automatic 交互 Task 先提交真实 Task 和 Session，再以 owning Task 的 root/home/epoch 查询与 idle 绑定准备首个 Run；同一 Task 的 loading/ready/degraded/unavailable 通过既有 catalog projection 发布，loading 期间 Run 接纳拒绝，失败保留 Task 与草稿，不启用部分 authority。Conversation recovery 不以 Skill readiness 为资格，也不向 restore 注入旧 Skill authority；Automatic 可用 Session 安装后再次执行初始准备。准备不属于 Schedule required admission，不为 noninteractive occurrence 创建 catalog job。已有 pinned authority 不因目录、policy 或来源变化自动替换，仍只有显式 idle refresh 在 Agent 成功后提交新 pinned snapshot。
+交互 Task 的 Skill authority 在每个新 Run 的准备边界自动更新。Product Control 在消息接收、必要的 Conversation 恢复或模型切换完成后，以 owning Workspace 的 root/home/epoch 查询当前目录并应用 committed policy；只有 Session 空闲、原 Run 等共享 Session 的 operation 已收口时才原子绑定 catalog 和 grants，再创建 Run。已经接纳的 Run 与其插话保留原绑定；排队输入和自动接续形成新 Run 时重新准备。相同 catalog/selection 不重复绑定。Conversation recovery 不以 Skill readiness 为资格，恢复事务保持原有能力上限，新的运行准备在恢复安装完成后独立进行。Schedule 不因此取得 Skill 或启动 catalog job。
+
+Composer 的下一轮候选来自 owning Workspace current authority；Session 的 pinned snapshot 只表示当前安装的执行绑定，不要求用户手动推进。显式 Skill 消息先按用户看到的 revision pair 和 concrete identity 验证，再捕获 Core 提供的逻辑 policy key、参数定义与 owned 参数；运行准备从当前 resolved winners 编译该逻辑选择，不根据显示名称或文件路径猜测。内容更新或无关目录变化可自动跟随；参数定义改变须保留输入并要求检查，禁用、删除或冲突不得执行。历史 Run 保存实际执行的身份与 revision，不重写旧历史，也不恢复或重放未执行的原文。
+
+每条待执行输入只登记一次有界准备，按 Task/binding、Workspace epoch、来源与 policy 代次接纳查询完成；过期结果只释放。查询失败不能把 last-good 绑定当成更新成功：显式 Skill 输入失败并保留安全展示，普通 Text/multimodal 只有在可靠撤去 Skill grants 后才可继续；Session mutation 的合同失败按其真实生命周期收口。空 grants 是授权收缩，不伪造查询成功的空 catalog。停止、删除与 shutdown 撤销准备意图并收口 jobs/leases，不分配虚假 Run identity。
 
 本地资产 import、reimport、uninstall 与 retry 使用同一 staged transaction：preview capability 绑定 source、内容摘要、目标 scope 与有效期；commit 重新校验 capability、目标 Workspace authority、冲突 generation 和相关 Task quiescence；publish 后必须完成 Agent catalog reconciliation。明确且可归因于候选的失败回滚 candidate/backup；catalog 暂时不可验证时保留可恢复 transaction 并发布 `pending_verification`，不能声称 ready。恢复只能完成或回滚已登记 transaction，不扫描、接管或删除 canonical root 外的目录。
 
@@ -243,7 +247,7 @@ Manual Task 创建时同步借用可用 Workspace authority 并取得独立 pinn
 
 Automatic 的 Skill query authority 来自 owning interactive Task 的可用 Session，不来自 Manual 选择器的 visible 标记。它只消费已启用的个人兼容根与内置根，按 User policy 编译 resolved winners；workspace-local winner 或未知 provenance 必须禁用，不能选取被它遮蔽的个人候选。工作文件、ZIP 解压目录和其中的 SKILL.md 都不构成 Skill 授权；Automatic 不开放项目 policy override 或安装/卸载管理权限。初始准备、显式 refresh 和 job completion 都重新核验 owner、epoch、来源配置、policy 与投影容量。删除撤销查询 authority，并等待 catalog job、Session 与 Task worker 静止后才提交 Workspace record 退休和 Task 专用原件/artifact 目录删除；Automatic 的实际工作目录继续遵守既有保留合同；shutdown 先停止 admission、join jobs，再释放全部 catalog lease。
 
-每个查询 scope 至多保留一个 job 与一个 latest reschedule intent。来源提交时即推进 request generation；旧 generation、选择或 Workspace epoch 的结果只释放，不得因 A→B→A 恢复同值而发布。shared Executor 的 QueueFull 保留 intent，沿既有 completion/wake 与 Control sync 有界轮转重试；其他错误结束该 intent 并等待显式刷新，不增加 timer、watcher 或无限自动重试。来源查询不隐式刷新 Task。
+每个查询 scope 至多保留一个 job 与一个 latest reschedule intent。来源提交时即推进 request generation；旧 generation、选择或 Workspace epoch 的结果只释放，不得因 A→B→A 恢复同值而发布。shared Executor 的 QueueFull 保留 intent，沿既有 completion/wake 与 Control sync 有界轮转重试；其他错误结束该次准备，后续显式输入或重查可以重新请求，不增加 timer、watcher 或无限自动重试。管理发布只验证精确资产 scope，并标记依赖它的 current authority 需要重新查询；个人变更不能遗漏已授权项目，也不主动重扫全部项目。选择器打开和新 Run 准备通过同一 query 路径发现外部文件变化；普通查询不得完成管理 transaction。
 
 管理资产关联必须同时证明 query purpose、provider、固定 source identity/scope 与 invocation，不能仅凭同名 winner 借用外部来源的健康、policy 或文件权限。管理记录与同名 external winner 可同时存在。验证 job 绑定 install identity、operation、scope/epoch 和 request generation；普通刷新不得完成 pending transaction，取消只清理匹配的 active verification，不丢弃 durable pending。发布验证还必须核对授权目标的实际 package 与 candidate 摘要；卸载验证证明该精确管理目标不存在，不要求其他来源的同名 Skill 一并消失。
 

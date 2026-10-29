@@ -25,6 +25,8 @@ import {
   composerDraftHasContent,
   emptyComposerDraft,
   isSkillDraftCurrent,
+  reviewSkillDraft,
+  skillDraftProblem,
   parseSlashInput,
   resolveSlashCandidates,
   skillDraftFromCandidate,
@@ -246,6 +248,14 @@ export function ComposerFooter({
     !attachmentActionsDisabled &&
     !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
+  const refreshCatalogRef = useRef(onRefreshSkillCatalog);
+  refreshCatalogRef.current = onRefreshSkillCatalog;
+  useEffect(() => {
+    if (menuOpen) refreshCatalogRef.current();
+  }, [menuOpen, draftScope]);
+  const draftProblem =
+    draft.kind === "skill" ? skillDraftProblem(draft, skillCatalog) : null;
+
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
@@ -776,15 +786,33 @@ export function ComposerFooter({
               )}
               {!skillDraftCurrent && (
                 <div className="skill-draft-warning" role="status">
-                  <span>{t("slash.skill_stale")}</span>
+                  <span>
+                    {t(
+                      draftProblem === "arguments"
+                        ? "slash.skill_arguments_changed"
+                        : draftProblem === "disabled"
+                          ? "slash.skill_disabled"
+                          : draftProblem === "catalog"
+                            ? "slash.skills_unavailable"
+                            : "slash.skill_stale",
+                    )}
+                  </span>
                   <Button
                     type="button"
                     variant="secondary"
                     size="sm"
                     className="slash-refresh"
-                    onClick={onRefreshSkillCatalog}
+                    onClick={() =>
+                      draftProblem === "arguments"
+                        ? onDraftChange(reviewSkillDraft(draft, skillCatalog))
+                        : onRefreshSkillCatalog()
+                    }
                   >
-                    {t("slash.refresh")}
+                    {t(
+                      draftProblem === "arguments"
+                        ? "slash.review_arguments"
+                        : "slash.refresh",
+                    )}
                   </Button>
                 </div>
               )}

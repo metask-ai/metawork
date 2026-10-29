@@ -671,6 +671,7 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     (value, itemPath) => {
       const skill = object(value, itemPath, [
         "skillId",
+        "skillPolicyKey",
         "invocationName",
         "displayName",
         "description",
@@ -691,6 +692,10 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
         fail(itemPath, "argument names exceed max values");
       return {
         skillId: nonEmptyString(skill.skillId, `${itemPath}.skillId`),
+        skillPolicyKey: nonEmptyString(
+          skill.skillPolicyKey,
+          `${itemPath}.skillPolicyKey`,
+        ),
         invocationName: nonEmptyString(
           skill.invocationName,
           `${itemPath}.invocationName`,
@@ -736,8 +741,13 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
   )
     fail(path, "catalog health and issues must agree");
   const skillIds = new Set(skills.map((skill) => skill.skillId));
+  const policyKeys = new Set(skills.map((skill) => skill.skillPolicyKey));
   const invocationNames = new Set(skills.map((skill) => skill.invocationName));
-  if (skillIds.size !== skills.length || invocationNames.size !== skills.length)
+  if (
+    skillIds.size !== skills.length ||
+    policyKeys.size !== skills.length ||
+    invocationNames.size !== skills.length
+  )
     fail(path, "catalog skill identities must be unique");
   return {
     availability,

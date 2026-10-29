@@ -136,7 +136,7 @@ import {
   isSkillDraftCurrent,
   maxSkillArguments,
   resolveSlashCommandStates,
-  skillCatalogRefreshTarget,
+  reconcileSkillDraft,
   type ComposerDraft,
   type SlashCommandName,
   type SlashCommandState,
@@ -387,7 +387,7 @@ export default function App() {
     useState<ApprovalMode | null>(null);
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
-  const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
+  const composerCatalogRefreshPending = useRef(new Set<string>());
   const skillRefreshPending = useRef(new Set<string>());
   const [skillRefreshRequests, setSkillRefreshRequests] =
     useState<SkillRefreshRequests>({});
@@ -1241,27 +1241,25 @@ export default function App() {
   const newTaskWorkspaceReady = workbench.draftWorkspaceId
     ? composerWorkspace?.authorization === "available"
     : snapshot.capabilities.automaticWorkspaces;
-  const skillCatalog = newTaskDraftActive
-    ? (composerWorkspace?.skillCatalog ?? {
-        availability: "unavailable" as const,
-        redacted: false,
-        revision: null,
-        selectionRevision: null,
-        skills: [],
-        issues: [],
-      })
-    : (activeTask?.skillCatalog ?? {
-        availability: "unavailable" as const,
-        redacted: false,
-        revision: null,
-        selectionRevision: null,
-        skills: [],
-        issues: [],
-      });
+  const skillCatalog = composerWorkspace?.skillCatalog ?? {
+    availability: "unavailable" as const,
+    redacted: false,
+    revision: null,
+    selectionRevision: null,
+    skills: [],
+    issues: [],
+  };
+  const currentComposerDraft = reconcileSkillDraft(composerDraft, skillCatalog);
+  useEffect(() => {
+    if (currentComposerDraft !== composerDraft) {
+      composerDraftRef.current = currentComposerDraft;
+      updateComposerDraft(currentComposerDraft);
+    }
+  }, [composerDraft, currentComposerDraft, updateComposerDraft]);
   const skillDraftCurrent =
     composerDraft.kind !== "skill" ||
     isSkillDraftCurrent(composerDraft, skillCatalog);
-  const composerRunInput = composerDraftToRunInput(composerDraft);
+  const composerRunInput = composerDraftToRunInput(currentComposerDraft);
   const newTaskModelState = newTaskModelSelectionState(
     snapshot.models,
     snapshot.newTaskAdmission,
@@ -1271,8 +1269,7 @@ export default function App() {
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
-    skillDraftCurrent &&
-    (composerDraft.kind !== "skill" || !skillCatalogBusy);
+    skillDraftCurrent;
   // Unknown results still own their local record, including in other Tasks.
   const localSubmissionCount = localSubmissions.filter(
     (entry) =>
@@ -2431,7 +2428,10 @@ export default function App() {
       attachmentRemoval.current.busy
     )
       return;
-    const submitted = composerDraftRef.current;
+    const submitted = reconcileSkillDraft(
+      composerDraftRef.current,
+      skillCatalog,
+    );
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
     const scope = composerDraftScope;
@@ -2836,80 +2836,53 @@ export default function App() {
     const descriptor = skillCatalog.skills.find(
       (skill) => skill.skillId === input.skillId,
     );
-    if (
-      !descriptor ||
-      !descriptor.enabled ||
-      skillCatalog.revision !== input.catalogRevision ||
-      skillCatalog.selectionRevision === null
-    )
-      return null;
+    const confirmed =
+      descriptor && skillCatalog.revision === input.catalogRevision;
     return {
       kind: "skill",
       skillId: input.skillId,
+      ...(confirmed ? { skillPolicyKey: descriptor.skillPolicyKey } : {}),
       invocationName: input.invocationName,
       displayName: input.displayName,
       catalogRevision: input.catalogRevision,
-      selectionRevision: skillCatalog.selectionRevision,
-      argumentNames: descriptor.argumentNames,
+      selectionRevision: skillCatalog.selectionRevision ?? "0",
+      argumentNames: confirmed ? descriptor.argumentNames : [],
       argumentValues: input.argumentValues,
-      maxValues: Math.min(descriptor.maxValues, maxSkillArguments),
+      maxValues: confirmed
+        ? Math.min(descriptor.maxValues, maxSkillArguments)
+        : maxSkillArguments,
     };
   }
   async function refreshComposerSkillCatalog() {
-    if (
-      skillCatalogBusy ||
-      bridgeUnavailable ||
-      !composerWorkspace ||
-      !composerWorkspaceId
-    )
-      return;
-    setSkillCatalogBusy(true);
+    if (bridgeUnavailable || !composerWorkspace || !composerWorkspaceId) return;
+    const key = `${composerWorkspaceId}:${composerWorkspace.epoch}`;
+    if (composerCatalogRefreshPending.current.has(key)) return;
+    composerCatalogRefreshPending.current.add(key);
+    const audience: StatusAudience = {
+      scope: "workspace",
+      workspaceId: composerWorkspaceId,
+    };
     try {
-      const refreshTarget = skillCatalogRefreshTarget(
-        Boolean(activeTask) && !newTaskDraftActive,
-        composerWorkspace.skillCatalog,
+      const result = await client.refreshWorkspaceSkillCatalog(
+        composerWorkspaceId,
+        composerWorkspace.epoch,
       );
-      const audience: StatusAudience =
-        refreshTarget === "workspace"
-          ? { scope: "workspace", workspaceId: composerWorkspaceId }
-          : { scope: "task", taskId: activeTask!.id };
-      const result =
-        refreshTarget === "workspace"
-          ? await client.refreshWorkspaceSkillCatalog(
-              composerWorkspaceId,
-              composerWorkspace.epoch,
-            )
-          : await client.refreshTaskSkillCatalog(
-              activeTask!.id,
-              activeTask!.binding.epoch,
-            );
-      if (!result.accepted) {
+      if (!result.accepted && result.reason !== "catalog_loading") {
         setStatus(
           attentionStatus(mutationReasonMessageId(result.reason!), audience),
         );
         return;
       }
-      await refreshAfterCommit(
-        "slash.catalog_refresh_started",
-        "operation.skill_catalog_refresh",
-        audience,
-      );
+      await refreshSnapshot();
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
       setStatus(
-        attentionStatus(
-          "slash.catalog_refresh_failed",
-          skillCatalogRefreshTarget(
-            Boolean(activeTask) && !newTaskDraftActive,
-            composerWorkspace.skillCatalog,
-          ) === "task"
-            ? { scope: "task", taskId: activeTask!.id }
-            : { scope: "workspace", workspaceId: composerWorkspaceId },
-          { diagnostic: errorText(error) },
-        ),
+        attentionStatus("slash.catalog_refresh_failed", audience, {
+          diagnostic: errorText(error),
+        }),
       );
     } finally {
-      setSkillCatalogBusy(false);
+      composerCatalogRefreshPending.current.delete(key);
     }
   }
   async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
@@ -3671,7 +3644,7 @@ export default function App() {
           !activeTask.continuationAvailable,
         )}
         unavailableReason={activeTask?.continuationUnavailableReason ?? null}
-        draft={composerDraft}
+        draft={currentComposerDraft}
         draftScope={`${bridgeGeneration}:${composerDraftScope}`}
         attachmentsEnabled={snapshot.capabilities.attachments.enabled}
         attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}

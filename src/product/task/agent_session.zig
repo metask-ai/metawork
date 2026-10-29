@@ -214,6 +214,14 @@ pub const Access = struct {
         return self.get().setModel(model);
     }
 
+    pub fn clearSkillPolicy(self: *Access) !void {
+        return self.get().clearSkillPolicy();
+    }
+
+    pub fn skillPolicyMatches(self: *Access, lease: *agent.CatalogLease, policy: agent.SkillPolicyInput) bool {
+        return self.get().skillPolicyMatches(lease, policy);
+    }
+
     pub fn captureRestoreInputs(self: *Access) !agent.SessionRestoreInputs {
         return self.get().captureRestoreInputs();
     }

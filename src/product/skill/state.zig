@@ -255,6 +255,9 @@ pub const CatalogControl = struct {
     slot: CatalogSlot = .uninitialized,
     request_generation: u64 = 0,
     source_checks: ?sources.RootChecks = null,
+    completed_generation: u64 = 0,
+    query_succeeded: bool = false,
+    needs_query: bool = false,
 };
 
 pub const InitError = management.Error || enablement.Error;

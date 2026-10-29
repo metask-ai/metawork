@@ -20,6 +20,8 @@ export type ComposerMultimodalDraft = {
 
 export type ComposerSkillDraft = {
   kind: "skill";
+  // Older session drafts acquire this only from an exact valid selection.
+  skillPolicyKey?: string;
   skillId: string;
   invocationName: string;
   displayName: string;
@@ -109,39 +111,103 @@ export function composerDraftToRunInput(
   };
 }
 
+function selectedSkill(draft: ComposerSkillDraft, catalog: SkillCatalogView) {
+  if (catalog.availability !== "ready" && catalog.availability !== "degraded")
+    return undefined;
+  return draft.skillPolicyKey
+    ? catalog.skills.find(
+        (skill) => skill.skillPolicyKey === draft.skillPolicyKey,
+      )
+    : catalog.revision === draft.catalogRevision &&
+        catalog.selectionRevision === draft.selectionRevision
+      ? catalog.skills.find((skill) => skill.skillId === draft.skillId)
+      : undefined;
+}
+
+function sameArguments(
+  draft: ComposerSkillDraft,
+  skill: SkillCatalogView["skills"][number],
+) {
+  return (
+    draft.maxValues === Math.min(skill.maxValues, maxSkillArguments) &&
+    draft.argumentNames.length === skill.argumentNames.length &&
+    draft.argumentNames.every(
+      (name, index) => name === skill.argumentNames[index],
+    )
+  );
+}
+
+function bindSkillDraft(
+  draft: ComposerSkillDraft,
+  skill: SkillCatalogView["skills"][number],
+  catalog: SkillCatalogView,
+): ComposerSkillDraft {
+  if (
+    draft.skillId === skill.skillId &&
+    draft.skillPolicyKey === skill.skillPolicyKey &&
+    draft.catalogRevision === catalog.revision &&
+    draft.selectionRevision === catalog.selectionRevision &&
+    draft.displayName === skill.displayName &&
+    draft.invocationName === skill.invocationName &&
+    sameArguments(draft, skill)
+  )
+    return draft;
+  return {
+    ...draft,
+    skillId: skill.skillId,
+    skillPolicyKey: skill.skillPolicyKey,
+    invocationName: skill.invocationName,
+    displayName: skill.displayName,
+    catalogRevision: catalog.revision!,
+    selectionRevision: catalog.selectionRevision!,
+    argumentNames: [...skill.argumentNames],
+    maxValues: Math.min(skill.maxValues, maxSkillArguments),
+  };
+}
+
+export function reconcileSkillDraft(
+  draft: ComposerDraft,
+  catalog: SkillCatalogView,
+): ComposerDraft {
+  if (draft.kind !== "skill") return draft;
+  const skill = selectedSkill(draft, catalog);
+  return skill?.enabled && sameArguments(draft, skill)
+    ? bindSkillDraft(draft, skill, catalog)
+    : draft;
+}
+
+export function skillDraftProblem(
+  draft: ComposerSkillDraft,
+  catalog: SkillCatalogView,
+) {
+  if (catalog.availability !== "ready" && catalog.availability !== "degraded")
+    return "catalog" as const;
+  const skill = selectedSkill(draft, catalog);
+  if (!skill) return "missing" as const;
+  if (!skill.enabled) return "disabled" as const;
+  return sameArguments(draft, skill) ? null : ("arguments" as const);
+}
+
+// Explicitly open the new parameter definition for review, retaining all text.
+// Surplus values stay visible and must be removed before sending.
+export function reviewSkillDraft(
+  draft: ComposerSkillDraft,
+  catalog: SkillCatalogView,
+): ComposerSkillDraft {
+  const skill = selectedSkill(draft, catalog);
+  return skill?.enabled ? bindSkillDraft(draft, skill, catalog) : draft;
+}
+
 export function isSkillDraftCurrent(
   draft: ComposerDraft,
   catalog: SkillCatalogView,
 ) {
-  const descriptor =
-    draft.kind === "skill"
-      ? catalog.skills.find((skill) => skill.skillId === draft.skillId)
-      : null;
-  return (
-    draft.kind === "skill" &&
-    (catalog.availability === "ready" || catalog.availability === "degraded") &&
-    catalog.revision === draft.catalogRevision &&
-    catalog.selectionRevision === draft.selectionRevision &&
-    descriptor != null &&
-    descriptor.enabled &&
-    Math.min(descriptor.maxValues, maxSkillArguments) === draft.maxValues
-  );
-}
-
-export function skillCatalogRefreshTarget(
-  hasTask: boolean,
-  workspaceCatalog: SkillCatalogView,
-) {
-  return hasTask &&
-    (workspaceCatalog.availability === "ready" ||
-      workspaceCatalog.availability === "degraded")
-    ? ("task" as const)
-    : ("workspace" as const);
+  return draft.kind === "skill" && skillDraftProblem(draft, catalog) === null;
 }
 
 export function skillDraftVisibleArgumentCount(draft: ComposerSkillDraft) {
   return Math.min(
-    draft.maxValues,
+    maxSkillArguments,
     Math.max(
       draft.argumentNames.length,
       draft.argumentValues.length,
@@ -235,6 +301,7 @@ export type SlashCandidate =
       kind: "skill";
       key: string;
       skillId: string;
+      skillPolicyKey: string;
       invocationName: string;
       displayName: string;
       description: string;
@@ -326,6 +393,7 @@ export function resolveSlashCandidates({
       kind: "skill",
       key: `skill:${skill.skillId}`,
       skillId: skill.skillId,
+      skillPolicyKey: skill.skillPolicyKey,
       invocationName: skill.invocationName,
       displayName: skill.displayName,
       description: skill.description,
@@ -353,6 +421,7 @@ export function skillDraftFromCandidate(
   return {
     kind: "skill",
     skillId: candidate.skillId,
+    skillPolicyKey: candidate.skillPolicyKey,
     invocationName: candidate.invocationName,
     displayName: candidate.displayName,
     catalogRevision: candidate.catalogRevision,
