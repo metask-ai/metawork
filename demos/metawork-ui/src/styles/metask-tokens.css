@@ -1,0 +1,203 @@
+/* Metask brand foundation. Product layout and density tokens belong to the
+ * owning product, not to this company-wide visual layer. */
+:root {
+  color-scheme: light;
+
+  --metask-primary: #8a4ed1;
+  --metask-primary-deep: #4b2db5;
+  --metask-primary-soft: #e9e6ff;
+  --metask-accent: #b35be8;
+  --metask-state-warning: #9c5b10;
+  --metask-state-warning-ink: #7d4308;
+
+  --metask-state-running: #b35be8;
+  --metask-state-complete: #4c9a72;
+  --metask-state-error: #c85a5a;
+
+  --metask-light-canvas: #f7f8fa;
+  --metask-light-panel: #ffffff;
+  --metask-light-panel-2: #f1f2f5;
+  --metask-light-text: #191b21;
+  --metask-light-text-muted: #626775;
+  --metask-light-border: #dfe2e8;
+
+  --metask-dark-canvas: #0f1115;
+  --metask-dark-panel: #12141b;
+  --metask-dark-panel-2: #181a23;
+  --metask-dark-text: #f4f5f7;
+  --metask-dark-text-muted: #a7abb7;
+  --metask-dark-border: #2b2f3a;
+
+  --metask-font-sans:
+    Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  --metask-font-mono:
+    "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  --metask-text-micro: 11px;
+  --metask-text-label: 12px;
+  --metask-text-control: 13px;
+  --metask-text-body: 14px;
+  --metask-text-lead: 16px;
+  --metask-text-title: 18px;
+  --metask-text-title-lg: 20px;
+  --metask-text-display: 24px;
+  --metask-text-display-lg: 28px;
+
+  --ui-surface-canvas: var(--metask-light-canvas);
+  --ui-surface-panel: var(--metask-light-panel);
+  --ui-surface-panel-2: var(--metask-light-panel-2);
+  --ui-content-primary: var(--metask-light-text);
+  --ui-content-muted: var(--metask-light-text-muted);
+  --ui-border: var(--metask-light-border);
+  --ui-action-primary: var(--metask-primary);
+  --ui-action-primary-hover: var(--metask-primary-deep);
+  --ui-action-primary-border: color-mix(
+    in srgb,
+    var(--ui-action-primary) 42%,
+    var(--ui-border)
+  );
+  --ui-content-warning: var(--metask-state-warning-ink);
+  --ui-content-error: color-mix(
+    in srgb,
+    var(--metask-light-text) 28%,
+    var(--metask-state-error) 72%
+  );
+  --ui-content-success: color-mix(
+    in srgb,
+    var(--metask-light-text) 22%,
+    var(--metask-state-complete) 78%
+  );
+  --ui-content-on-primary: var(--metask-light-panel);
+  --ui-syntax-comment: #626775;
+  --ui-syntax-keyword: #6639ba;
+  --ui-syntax-string: #26734d;
+  --ui-syntax-constant: #8a5515;
+  --ui-syntax-function: #2457a6;
+  --ui-syntax-punctuation: #4e5360;
+  --ui-action-hover-surface: var(--ui-surface-panel-2);
+  --ui-action-hover-content: var(--ui-content-primary);
+  --ui-action-selected-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 32%,
+    var(--metask-primary-soft) 68%
+  );
+  --ui-action-selected-content: var(--metask-primary-deep);
+  --ui-action-danger-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 92%,
+    var(--metask-state-error) 8%
+  );
+  --ui-action-danger-hover-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 86%,
+    var(--metask-state-error) 14%
+  );
+  --ui-action-danger-border: color-mix(
+    in srgb,
+    var(--ui-border) 58%,
+    var(--metask-state-error) 42%
+  );
+  --ui-overlay-scrim: rgb(15 17 21 / 45%);
+  --ui-control-thumb: var(--metask-light-panel);
+  --ui-focus-ring: var(--metask-primary);
+  --ui-shadow-overlay: 0 18px 48px rgb(25 27 33 / 16%);
+}
+
+[data-theme="dark"],
+.dark {
+  color-scheme: dark;
+
+  --ui-surface-canvas: var(--metask-dark-canvas);
+  --ui-surface-panel: var(--metask-dark-panel);
+  --ui-surface-panel-2: var(--metask-dark-panel-2);
+  --ui-content-primary: var(--metask-dark-text);
+  --ui-content-muted: var(--metask-dark-text-muted);
+  --ui-border: var(--metask-dark-border);
+  --ui-action-selected-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 70%,
+    var(--metask-primary) 30%
+  );
+  --ui-action-selected-content: var(--metask-primary-soft);
+  --ui-content-warning: color-mix(
+    in srgb,
+    var(--metask-dark-text) 26%,
+    var(--metask-state-warning) 74%
+  );
+  --ui-content-error: color-mix(
+    in srgb,
+    var(--metask-dark-text) 28%,
+    var(--metask-state-error) 72%
+  );
+  --ui-content-success: color-mix(
+    in srgb,
+    var(--metask-dark-text) 22%,
+    var(--metask-state-complete) 78%
+  );
+  --ui-syntax-comment: #a7abb7;
+  --ui-syntax-keyword: #c6a0f6;
+  --ui-syntax-string: #8bd5a5;
+  --ui-syntax-constant: #f5b97a;
+  --ui-syntax-function: #8aadf4;
+  --ui-syntax-punctuation: #cbd0da;
+  --ui-action-danger-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 85%,
+    var(--metask-state-error) 15%
+  );
+  --ui-action-danger-hover-surface: color-mix(
+    in srgb,
+    var(--ui-surface-panel) 76%,
+    var(--metask-state-error) 24%
+  );
+  --ui-action-danger-border: color-mix(
+    in srgb,
+    var(--ui-border) 45%,
+    var(--metask-state-error) 55%
+  );
+  --ui-overlay-scrim: rgb(0 0 0 / 56%);
+  --ui-shadow-overlay: 0 20px 56px rgb(0 0 0 / 42%);
+}
+
+@theme inline {
+  --color-metask-primary: var(--metask-primary);
+  --color-metask-primary-deep: var(--metask-primary-deep);
+  --color-metask-primary-soft: var(--metask-primary-soft);
+  --color-metask-accent: var(--metask-accent);
+  --color-metask-warning: var(--metask-state-warning);
+  --color-metask-warning-ink: var(--metask-state-warning-ink);
+  --color-metask-running: var(--metask-state-running);
+  --color-metask-complete: var(--metask-state-complete);
+  --color-metask-error: var(--metask-state-error);
+  --color-ui-canvas: var(--ui-surface-canvas);
+  --color-ui-panel: var(--ui-surface-panel);
+  --color-ui-panel-2: var(--ui-surface-panel-2);
+  --color-ui-content: var(--ui-content-primary);
+  --color-ui-muted: var(--ui-content-muted);
+  --color-ui-border: var(--ui-border);
+  --color-ui-primary-border: var(--ui-action-primary-border);
+  --color-ui-warning: var(--ui-content-warning);
+  --color-ui-error: var(--ui-content-error);
+  --color-ui-on-primary: var(--ui-content-on-primary);
+  --color-ui-hover-surface: var(--ui-action-hover-surface);
+  --color-ui-hover-content: var(--ui-action-hover-content);
+  --color-ui-selected-surface: var(--ui-action-selected-surface);
+  --color-ui-selected-content: var(--ui-action-selected-content);
+  --color-ui-danger-surface: var(--ui-action-danger-surface);
+  --color-ui-danger-hover-surface: var(--ui-action-danger-hover-surface);
+  --color-ui-danger-border: var(--ui-action-danger-border);
+  --color-ui-overlay-scrim: var(--ui-overlay-scrim);
+  --color-ui-control-thumb: var(--ui-control-thumb);
+  --font-sans: var(--metask-font-sans);
+  --font-mono: var(--metask-font-mono);
+  --font-display: var(--metask-font-sans);
+  --text-micro: var(--metask-text-micro);
+  --text-label: var(--metask-text-label);
+  --text-control: var(--metask-text-control);
+  --text-body: var(--metask-text-body);
+  --text-lead: var(--metask-text-lead);
+  --text-title: var(--metask-text-title);
+  --text-title-lg: var(--metask-text-title-lg);
+  --text-display: var(--metask-text-display);
+  --text-display-lg: var(--metask-text-display-lg);
+}

@@ -1,0 +1,1 @@
+{"operationId":"18446744073709551615","afterRunId":"7","conversationCoverage":"excluded","phase":"interrupted","cause":null,"beforeContextTokens":"100","afterContextTokens":"40","usage":{"input":"5","output":"2","cacheRead":"0","cacheCreation":"0"}}

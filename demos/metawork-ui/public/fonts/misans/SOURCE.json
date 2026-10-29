@@ -1,0 +1,30 @@
+{
+  "family": "MiSans",
+  "source": "https://hyperos.mi.com/font/zh/download/",
+  "archive": "https://hyperos.mi.com/font-download/MiSans.zip",
+  "license": "MiSans-LICENSE.pdf",
+  "files": [
+    {
+      "file": "MiSans-Regular.woff2",
+      "cssWeight": 400,
+      "bytes": 4858624,
+      "sha256": "d704c1a932c0bd7e8a071d276cd81c0ed0c9fecfa26ac234f4bed0559fe1cb2d",
+      "officialArchiveEntry": "MiSans/woff2/MiSans-Regular.woff2"
+    },
+    {
+      "file": "MiSans-Medium.woff2",
+      "cssWeight": 500,
+      "bytes": 4942368,
+      "sha256": "44e28ca6c2f0ca79829f192831ef87b5eec7c464f5cfb7a83467f57bb6e58114",
+      "officialArchiveEntry": "MiSans/woff2/MiSans-Medium.woff2"
+    },
+    {
+      "file": "MiSans-Semibold.woff2",
+      "cssWeight": 600,
+      "bytes": 5034212,
+      "sha256": "78227c6ec59566785c65ac0b5312328bfa2f879918f3d7403725785615a9a8f6",
+      "officialArchiveEntry": "MiSans/woff2/MiSans-Semibold.woff2"
+    }
+  ],
+  "note": "Unmodified official WOFF2 files. Face names are mapped to the existing UI weights: Regular 400, Medium 500, Semibold 600."
+}
