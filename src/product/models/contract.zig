@@ -72,6 +72,7 @@ pub const BuiltinProviderPresetView = struct {
     default_base_url: []const u8,
     api_key_url: []const u8,
     documentation_url: []const u8,
+    model_ids: []const []const u8,
 };
 
 pub const CatalogState = enum {
@@ -329,6 +330,7 @@ pub const CustomProviderSpec = struct {
     display_name: []const u8,
     protocol: Protocol,
     normalized_base_url: []const u8,
+    initial_model: ?CustomModelInput = null,
 };
 
 pub const CustomProviderCredentialSlot = struct {
@@ -908,6 +910,7 @@ pub fn validateCustomModelInput(model: CustomModelInput) ValidationError!void {
 }
 
 pub fn validateCustomProviderSpec(spec: CustomProviderSpec) ValidationError!void {
+    if (spec.initial_model) |model| try validateCustomModelInput(model);
     try validateRequired(spec.display_name, Limits.display_name_bytes);
     try validateRequired(spec.normalized_base_url, Limits.base_url_bytes);
     if (!customProviderProtocolAvailable(spec.protocol))

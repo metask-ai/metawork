@@ -189,11 +189,13 @@ pub const CustomProviderCreate = struct {
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
     apiKey: []const u8,
+    model: ?CustomModel = null,
 };
 pub const BuiltinProviderCreate = struct {
     providerId: []const u8,
     baseUrl: []const u8,
     apiKey: []const u8,
+    model: ?CustomModel = null,
 };
 pub const BuiltinProviderBaseUrlUpdate = struct {
     providerId: []const u8,
@@ -928,13 +930,23 @@ test "Task creation requires explicit nullable model and skill selections" {
     );
 }
 
-test "Custom Provider create accepts Provider metadata with an API key and rejects the retired model field" {
+test "Custom Provider create accepts an optional typed first model and rejects malformed input" {
     var provider = try parsePayload(CustomProviderCreate,
         \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret"}
     );
     defer provider.deinit();
     try std.testing.expectEqualStrings("Provider", provider.value.displayName);
     try std.testing.expectEqualStrings("secret", provider.value.apiKey);
+    var initial_model = try parsePayload(CustomProviderCreate,
+        \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret","model":{"id":"gpt-5"}}
+    );
+    defer initial_model.deinit();
+    try std.testing.expectEqualStrings("gpt-5", initial_model.value.model.?.id);
+    var builtin_model = try parsePayload(BuiltinProviderCreate,
+        \\{"providerId":"deepseek","baseUrl":"https://api.deepseek.com","apiKey":"secret","model":{"id":"deepseek-flash"}}
+    );
+    defer builtin_model.deinit();
+    try std.testing.expectEqualStrings("deepseek-flash", builtin_model.value.model.?.id);
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(CustomProviderCreate,
@@ -944,7 +956,7 @@ test "Custom Provider create accepts Provider metadata with an API key and rejec
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(CustomProviderCreate,
-            \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret","model":{"id":"gpt-5"}}
+            \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret","model":"gpt-5"}
         ),
     );
 }

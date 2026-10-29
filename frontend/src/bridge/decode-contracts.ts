@@ -1799,6 +1799,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
         "defaultBaseUrl",
         "apiKeyUrl",
         "documentationUrl",
+        "modelIds",
       ]);
       return {
         id: enumValue(
@@ -1820,6 +1821,16 @@ function decodeModels(value: unknown, path: string): ModelsView {
         documentationUrl: stringValue(
           preset.documentationUrl,
           `${itemPath}.documentationUrl`,
+        ),
+        modelIds: arrayValue(
+          preset.modelIds,
+          `${itemPath}.modelIds`,
+          (value, modelPath) => {
+            const id = stringValue(value, modelPath);
+            if (!id || new TextEncoder().encode(id).length > 256)
+              fail(modelPath, "expected a bounded model id");
+            return id;
+          },
         ),
       };
     },

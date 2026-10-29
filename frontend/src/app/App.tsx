@@ -4310,11 +4310,6 @@ export default function App() {
             onCreateBuiltinProvider={(input) =>
               runExecutionCommand(() => client.createBuiltinProvider(input))
             }
-            onUpdateBuiltinProviderBaseUrl={(input) =>
-              runExecutionCommand(() =>
-                client.updateBuiltinProviderBaseUrl(input),
-              )
-            }
             onUpdateCustomProvider={(input) =>
               runExecutionCommand(() =>
                 client.updateCustomProvider({
@@ -4361,6 +4356,22 @@ export default function App() {
                   selection: { sourceId: providerId, modelId },
                   expectedProviderRevision: providerRevision,
                   expectedCatalogGeneration: catalogGeneration,
+                }),
+              )
+            }
+            onReplaceCustomModel={(
+              providerId,
+              providerRevision,
+              catalogGeneration,
+              modelId,
+              replacementId,
+            ) =>
+              runExecutionCommand(() =>
+                client.replaceCustomModel({
+                  selection: { sourceId: providerId, modelId },
+                  expectedProviderRevision: providerRevision,
+                  expectedCatalogGeneration: catalogGeneration,
+                  replacement: { id: replacementId },
                 }),
               )
             }

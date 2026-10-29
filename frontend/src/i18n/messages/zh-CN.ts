@@ -26,8 +26,6 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.other_options": "其他方式",
   "model_setup.retry": "重试",
   "model_setup.unconfigured": "尚未配置模型",
-  "model_setup.provider_next":
-    "保存服务后，前往模型设置添加并测试模型，再选择默认模型。",
   "model_setup.required": "登录或配置模型后即可发送，已输入的内容会保留。",
   "model_setup.sign_in": "登录 Metask 后可使用此模型，已输入的内容会保留。",
   "model_setup.authorizing": "请在浏览器中完成登录，已输入的内容会保留。",
@@ -1096,7 +1094,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_history_more": "多",
   "settings.account_security": "安全操作",
   "settings.providers_saved": "模型服务",
-  "settings.back_to_providers": "返回 Provider",
+  "settings.back_to_models": "返回模型",
   "settings.builtin_provider": "官方模型服务",
   "settings.builtin_provider_group": "模型厂商",
   "settings.builtin_provider_group_help":
@@ -1206,12 +1204,11 @@ export const zhCN: Record<MessageId, string> = {
     "只有凭据可用且模型已测试的 Provider 才能成为默认来源。",
   "settings.provider_managed_description": "通过 Metask 账号管理",
   "settings.api_key": "API Key",
-  "settings.open_models": "打开模型设置",
+  "settings.manage_models": "管理模型",
   "settings.default_selection_missing": "未设置可执行的默认模型",
   "settings.default_model_unavailable":
     "原默认模型已不在当前可用目录中。请重新选择默认模型。",
-  "settings.providers_help":
-    "管理 MetaWork 可用的模型服务、服务地址和 API Key。默认模型请在模型页面选择。",
+  "settings.providers_help": "连接模型服务，或管理服务地址、API Key 和模型。",
   "settings.providers_empty": "还没有自定义 API。",
   "settings.providers_unavailable": "当前版本无法管理 Provider。",
   "settings.custom_provider_capture_unavailable":
@@ -1230,9 +1227,9 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_endpoint_preview": "实际请求地址：{endpoint}",
   "settings.custom_provider_model_id_placeholder": "gpt-5",
   "settings.provider_api_key_placeholder": "输入 API Key",
-  "settings.provider_models_configured_elsewhere":
-    "API Key 将保存到操作系统凭据存储；模型请在保存后前往模型页面配置。",
-  "settings.provider_save": "保存 Provider",
+  "settings.provider_models_next":
+    "API Key 将保存到操作系统凭据存储；保存后点击“管理模型”即可添加和测试模型。",
+  "settings.model_connection_save": "保存连接设置",
   "settings.provider_save_api_key": "保存 API Key",
   "settings.custom_provider_edit_help":
     "修改协议或 Base URL 后需要重新测试该 Provider 的模型；已保存的 API Key 不会回填。",
@@ -1241,6 +1238,19 @@ export const zhCN: Record<MessageId, string> = {
     "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
   "settings.custom_provider_removing": "正在删除…",
   "settings.custom_models": "自定义模型",
+  "settings.model_connection_provider": "模型厂商",
+  "settings.model_connection_choose_provider": "选择厂商或已有服务",
+  "settings.model_connection_custom": "自定义 / 其他服务",
+  "settings.model_connection_help":
+    "添加第三方模型，测试通过后即可在任务中使用。",
+  "settings.model_connection_dialog_help":
+    "选择厂商预设或已有服务，填写模型后保存；不会修改默认模型。",
+  "settings.model_connection_incomplete": "尚未添加模型",
+  "settings.model_connection_empty": "还没有自定义模型。",
+  "settings.model_connection_edit": "编辑模型",
+  "settings.model_connection_details": "连接设置",
+  "settings.model_connection_shared":
+    "这些连接设置由 {count} 个模型共用，修改后需重新测试模型。",
   "settings.custom_model_testing": "正在测试…",
   "settings.custom_provider_state.configuring": "尚未测试",
   "settings.custom_provider_state.ready": "可用",

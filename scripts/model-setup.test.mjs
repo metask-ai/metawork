@@ -598,7 +598,7 @@ test("login leaves setup, permits cancellation and never sends the preserved dra
   assert.equal(app.calls.input, 0);
 });
 
-test("configure opens Providers, exposes the next Models step and preserves the draft", async (ctx) => {
+test("configure opens model services and default selection in Models and preserves the draft", async (ctx) => {
   const app = await renderApp(ctx);
   const user = userEvent.setup({ document: dom.window.document });
   let dialog = await screen.findByRole("dialog");
@@ -614,7 +614,7 @@ test("configure opens Providers, exposes the next Models step and preserves the 
   await user.click(
     within(dialog).getByRole("button", { name: "Configure your own models" }),
   );
-  await screen.findByRole("heading", { name: "Providers" });
+  await screen.findByRole("heading", { name: "Custom models" });
   await waitFor(() =>
     assert.ok(
       screen.queryByRole("dialog", { name: "Get started with MetaWork" }) ===
@@ -622,8 +622,8 @@ test("configure opens Providers, exposes the next Models step and preserves the 
       "setup dialog should be closed",
     ),
   );
-  assert.ok(screen.getByRole("button", { name: "Open Models" }));
-  await user.click(screen.getByRole("button", { name: "Open Models" }));
+  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
+  assert.ok(screen.getByRole("combobox", { name: "Default model" }));
   await screen.findByRole("heading", { name: "Models" });
   await user.click(screen.getByRole("button", { name: "Back to workbench" }));
   await waitFor(() =>
@@ -851,7 +851,7 @@ test("a retained Metask choice can reopen alternative setup without changing its
   await user.click(
     within(dialog).getByRole("button", { name: "Configure your own models" }),
   );
-  await screen.findByRole("heading", { name: "Providers" });
+  await screen.findByRole("heading", { name: "Custom models" });
   assert.deepEqual(state.models.defaultSelection, original);
   assert.equal(app.calls.select, 0);
   assert.equal(app.calls.login, 0);
@@ -887,7 +887,7 @@ test("a ready alternative does not immediately close manually opened setup", asy
   await user.click(
     within(dialog).getByRole("button", { name: "Configure your own models" }),
   );
-  await screen.findByRole("heading", { name: "Providers" });
+  await screen.findByRole("heading", { name: "Custom models" });
   assert.equal(app.calls.login, 0);
   assert.equal(app.calls.select, 0);
 });

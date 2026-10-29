@@ -336,6 +336,34 @@ test("Task model selection carries source-qualified authority", async () => {
   ]);
 });
 
+test("Provider creation can carry its first model without a second command", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+  await client.createCustomProvider({
+    displayName: "Custom",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://example.com/responses",
+    apiKey: "fixture-secret",
+    model: { id: "custom-model" },
+  });
+  await client.createBuiltinProvider({
+    providerId: "deepseek",
+    baseUrl: "https://api.deepseek.com",
+    apiKey: "fixture-secret",
+    model: { id: "deepseek-flash" },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].payload.model, { id: "custom-model" });
+  assert.deepEqual(calls[1].payload.model, { id: "deepseek-flash" });
+  assert.equal(calls[0].command, "metawork.models.customProviders.create");
+  assert.equal(calls[1].command, "metawork.models.builtinProviders.create");
+});
+
 test("Custom Provider and model commands carry split source-qualified revisions", async () => {
   const calls = [];
   const client = new BridgeClient({

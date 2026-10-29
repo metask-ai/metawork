@@ -220,6 +220,16 @@ pub const Registry = struct {
             .catalog_generation = catalog_generation,
         };
         errdefer provider.deinit(self.allocator);
+        if (input.spec.initial_model) |model| {
+            try provider.models.ensureUnusedCapacity(self.allocator, 1);
+            const owned: OwnedModel = make: {
+                const id = try self.allocator.dupe(u8, model.id);
+                errdefer self.allocator.free(id);
+                const display_name = try self.allocator.dupe(u8, model.display_name);
+                break :make .{ .id = id, .display_name = display_name, .metadata = model.metadata, .metadata_provenance = .user_declared };
+            };
+            provider.models.appendAssumeCapacity(owned);
+        }
         try self.providers.append(self.allocator, provider);
     }
 

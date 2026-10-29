@@ -13,6 +13,7 @@ pub const Definition = struct {
     default_base_url: []const u8,
     api_key_url: []const u8,
     documentation_url: []const u8,
+    model_ids: []const []const u8,
 
     pub fn spec(self: Definition, normalized_endpoint: []const u8) contract.CustomProviderSpec {
         return .{
@@ -31,6 +32,7 @@ pub const Definition = struct {
             .default_base_url = self.default_base_url,
             .api_key_url = self.api_key_url,
             .documentation_url = self.documentation_url,
+            .model_ids = self.model_ids,
         };
     }
 };
@@ -43,6 +45,7 @@ pub const definitions = [_]Definition{
         .default_base_url = "https://api.deepseek.com",
         .api_key_url = "https://platform.deepseek.com/api_keys",
         .documentation_url = "https://api-docs.deepseek.com/",
+        .model_ids = &.{ "deepseek-flash", "deepseek-v4-pro" },
     },
     .{
         .id = .kimi,
@@ -51,6 +54,7 @@ pub const definitions = [_]Definition{
         .default_base_url = "https://api.moonshot.cn/v1",
         .api_key_url = "https://platform.moonshot.cn/console/api-keys",
         .documentation_url = "https://platform.kimi.com/docs/api/overview",
+        .model_ids = &.{ "kimi-k3.1-pro", "kimi-k3", "kimi-k2.7-code", "kimi-k2.6" },
     },
     .{
         .id = .minimax,
@@ -59,6 +63,7 @@ pub const definitions = [_]Definition{
         .default_base_url = "https://api.minimaxi.com/anthropic",
         .api_key_url = "https://platform.minimaxi.com/user-center/basic-information/interface-key",
         .documentation_url = "https://platform.minimaxi.com/docs/api-reference/api-overview",
+        .model_ids = &.{ "MiniMax-M3.1-Flash", "MiniMax-M3" },
     },
     .{
         .id = .glm,
@@ -67,6 +72,7 @@ pub const definitions = [_]Definition{
         .default_base_url = "https://open.bigmodel.cn/api/paas/v4",
         .api_key_url = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
         .documentation_url = "https://docs.bigmodel.cn/cn/api/introduction",
+        .model_ids = &.{ "glm-5.3", "glm-5.2", "glm-5.1" },
     },
 };
 

@@ -995,6 +995,7 @@ pub const Runtime = struct {
         secret: []const u8,
         provider_id: contract.BuiltinProviderId,
         base_url: []const u8,
+        initial_model: ?contract.CustomModelInput,
     ) contract.CommandResult {
         for (self.registry.views()) |provider|
             if (provider.builtin_provider_id == provider_id)
@@ -1006,10 +1007,9 @@ pub const Runtime = struct {
             base_url,
         ) catch return .rejected(.invalid_provider);
         defer self.allocator.free(endpoint);
-        return self.createWithResolvedCredential(
-            secret,
-            definition.spec(endpoint),
-        );
+        var spec = definition.spec(endpoint);
+        spec.initial_model = initial_model;
+        return self.createWithResolvedCredential(secret, spec);
     }
 
     pub fn updateBuiltinBaseUrl(
@@ -1692,6 +1692,62 @@ fn createTestProviderWithModel(
     } }).accepted);
 }
 
+test "Models Runtime creates a connection and its first model in the same durable candidate" {
+    for ([_]bool{ false, true }) |builtin_recipe| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+        const directory = directory_storage[0..directory_len];
+        var vault: TestVault = .{};
+        {
+            var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+            try runtime.start(directory, vault.port());
+            defer {
+                runtime.stop();
+                runtime.deinit();
+            }
+            const invalid = runtime.createWithCredential("secret", .{
+                .display_name = "Custom",
+                .protocol = .openai_responses,
+                .normalized_base_url = "https://example.com/responses",
+                .initial_model = .{ .id = "" },
+            });
+            try std.testing.expect(!invalid.accepted);
+            try std.testing.expect(!vault.present);
+            try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+            const result = if (builtin_recipe)
+                runtime.createBuiltinWithCredential("secret", .deepseek, "https://api.deepseek.com", .{ .id = "deepseek-flash" })
+            else
+                runtime.createWithCredential("secret", .{
+                    .display_name = "Custom",
+                    .protocol = .openai_responses,
+                    .normalized_base_url = "https://example.com/responses",
+                    .initial_model = .{ .id = "deepseek-flash" },
+                });
+            try std.testing.expect(result.accepted);
+            const source = runtime.views()[0];
+            try std.testing.expectEqual(@as(usize, 1), source.models.len);
+            try std.testing.expectEqualStrings("deepseek-flash", source.models[0].id);
+            try std.testing.expect(!source.models[0].ready);
+            try std.testing.expectEqual(contract.CustomModelTestStatus.untested, source.models[0].test_status);
+            try std.testing.expect(runtime.view().default_selection == null);
+            const persisted = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(persisted);
+            try std.testing.expect(std.mem.indexOf(u8, persisted, "secret") == null);
+        }
+        var restored = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try restored.start(directory, vault.port());
+        defer {
+            restored.stop();
+            restored.deinit();
+        }
+        try std.testing.expectEqual(@as(usize, 1), restored.views()[0].models.len);
+        try std.testing.expectEqualStrings("deepseek-flash", restored.views()[0].models[0].id);
+        try std.testing.expect(!restored.views()[0].models[0].ready);
+    }
+}
+
 test "Models Runtime durably creates a Provider before its first model" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1751,6 +1807,7 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
         "official-secret",
         .deepseek,
         builtin_providers.find(.deepseek).default_base_url,
+        null,
     ).accepted);
     try std.testing.expectEqual(
         contract.BuiltinProviderId.deepseek,
@@ -1760,6 +1817,7 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
         "second-secret",
         .deepseek,
         builtin_providers.find(.deepseek).default_base_url,
+        null,
     ).accepted);
 
     const provider = runtime.views()[0];

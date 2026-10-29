@@ -2687,6 +2687,7 @@ pub const Dispatcher = struct {
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
+            .initial_model = if (parsed.value.model) |model| try parseCustomModel(model) else null,
         };
         models_contract.validateCustomProviderSpec(spec) catch
             return error.InvalidBridgePayload;
@@ -2726,6 +2727,7 @@ pub const Dispatcher = struct {
                 parsed.value.apiKey,
                 provider_id,
                 parsed.value.baseUrl,
+                if (parsed.value.model) |model| try parseCustomModel(model) else null,
             ),
         );
     }

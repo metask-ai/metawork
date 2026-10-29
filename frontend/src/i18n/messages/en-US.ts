@@ -27,8 +27,6 @@ export const enUS = {
   "model_setup.other_options": "Other options",
   "model_setup.retry": "Retry",
   "model_setup.unconfigured": "No model configured",
-  "model_setup.provider_next":
-    "After saving a service, add and test its models in Models, then choose a default model.",
   "model_setup.required":
     "Sign in or configure a model before sending. Your draft will be kept.",
   "model_setup.sign_in":
@@ -1247,7 +1245,7 @@ export const enUS = {
   "settings.account_history_more": "More",
   "settings.account_security": "Security",
   "settings.providers_saved": "Model services",
-  "settings.back_to_providers": "Back to providers",
+  "settings.back_to_models": "Back to models",
   "settings.builtin_provider": "Official model service",
   "settings.builtin_provider_group": "Model providers",
   "settings.builtin_provider_group_help":
@@ -1370,13 +1368,13 @@ export const enUS = {
   "settings.provider_managed_description":
     "Managed through your Metask account",
   "settings.api_key": "API key",
-  "settings.open_models": "Open Models",
+  "settings.manage_models": "Manage models",
   "settings.default_selection_missing":
     "No executable default model is selected",
   "settings.default_model_unavailable":
     "The previous default model is no longer in the available catalog. Choose another default model.",
   "settings.providers_help":
-    "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
+    "Connect a model service or manage its address, API key, and models.",
   "settings.providers_empty": "No custom APIs yet.",
   "settings.providers_unavailable":
     "Provider management is unavailable in this build.",
@@ -1398,9 +1396,9 @@ export const enUS = {
   "settings.custom_provider_endpoint_preview": "Request endpoint: {endpoint}",
   "settings.custom_provider_model_id_placeholder": "gpt-5",
   "settings.provider_api_key_placeholder": "Enter API key",
-  "settings.provider_models_configured_elsewhere":
-    "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
-  "settings.provider_save": "Save provider",
+  "settings.provider_models_next":
+    "The API key is saved in the operating system credential store. After saving, choose Manage models to add and test models.",
+  "settings.model_connection_save": "Save connection settings",
   "settings.provider_save_api_key": "Save API key",
   "settings.custom_provider_edit_help":
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
@@ -1409,6 +1407,20 @@ export const enUS = {
     "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
   "settings.custom_provider_removing": "Removing…",
   "settings.custom_models": "Custom models",
+  "settings.model_connection_provider": "Model provider",
+  "settings.model_connection_choose_provider":
+    "Choose a provider or saved service",
+  "settings.model_connection_custom": "Custom / other service",
+  "settings.model_connection_help":
+    "Add a third-party model, then test it before using it in a task.",
+  "settings.model_connection_dialog_help":
+    "Choose a preset or an existing service, enter the model, and save. This does not change your default model.",
+  "settings.model_connection_incomplete": "No model added yet",
+  "settings.model_connection_empty": "No custom models yet.",
+  "settings.model_connection_edit": "Edit model",
+  "settings.model_connection_details": "Connection settings",
+  "settings.model_connection_shared":
+    "These connection settings are shared by {count} models. Changes require testing the models again.",
   "settings.custom_model_testing": "Testing…",
   "settings.custom_provider_state.configuring": "Not tested",
   "settings.custom_provider_state.ready": "Ready",

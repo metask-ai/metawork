@@ -108,8 +108,12 @@ const { ComposerFooter } = await vite.ssrLoadModule(
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
 );
-const { SettingsPage, customProviderEndpointFromBaseUrl } =
-  await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
+);
+const { customProviderEndpointFromBaseUrl } = await vite.ssrLoadModule(
+  "/src/features/settings/model-connection.ts",
+);
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -469,13 +473,13 @@ function settingsElement(account, overrides = {}) {
       onCreateBuiltinProvider() {
         return Promise.resolve(false);
       },
-      onUpdateBuiltinProviderBaseUrl() {
-        return Promise.resolve(false);
-      },
       onUpdateCustomProvider() {
         return Promise.resolve(false);
       },
       onAddCustomModel() {
+        return Promise.resolve(false);
+      },
+      onReplaceCustomModel() {
         return Promise.resolve(false);
       },
       onRemoveCustomModel() {
@@ -740,263 +744,290 @@ function renderSettings(account, overrides = {}) {
   };
 }
 
-test("Settings exposes Providers only for the complete Host gate", () => {
+const completeModelCapabilities = {
+  management: true,
+  secretCapture: true,
+  modelTest: true,
+};
+const presetModels = JSON.parse(
+  readFileSync(
+    new URL(
+      "../frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+).models.builtinProviderPresets;
+function renderModelSettings(overrides = {}) {
+  return renderSettings(readySettingsAccount, {
+    customProviderCapabilities: completeModelCapabilities,
+    models: { ...readySettingsModels, builtinProviderPresets: presetModels },
+    ...overrides,
+  });
+}
+async function chooseModelSource(user, label) {
+  const dialog = screen.getByRole("dialog", { name: "Add model" });
+  await user.click(
+    within(dialog).getByRole("combobox", { name: "Model provider" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: label, exact: true }),
+  );
+  return dialog;
+}
+
+test("Models exposes a model list and Add model action instead of a Provider directory", () => {
   const incomplete = renderSettings(readySettingsAccount);
-  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
+  assert.equal(screen.queryByRole("heading", { name: "Custom models" }), null);
   incomplete.unmount();
-
-  render(
-    settingsElement(readySettingsAccount, {
-      customProviderCapabilities: {
-        management: true,
-        secretCapture: true,
-        modelTest: true,
-      },
-    }),
-  );
-  fireEvent.click(screen.getByRole("link", { name: "Providers" }));
-  assert.ok(screen.getByRole("heading", { name: "Providers" }));
-  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
-  fireEvent.click(screen.getByRole("button", { name: "Add custom API" }));
-  assert.ok(screen.getByRole("heading", { name: "Connect a custom API" }));
-  assert.ok(screen.getByRole("button", { name: "Back to providers" }));
+  renderModelSettings();
+  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Configure" }), null);
+  assert.ok(screen.getByRole("heading", { name: "Custom models" }));
+  assert.ok(screen.getByRole("button", { name: "Add model" }));
 });
 
-test("Provider setup keeps Base URL user-owned and submits the protocol endpoint", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
+test("Add model uses the Host recipe and saves the first model with its official connection", async () => {
+  const user = userEvent.setup({ document });
   const submitted = [];
-  render(
-    settingsElement(readySettingsAccount, {
-      customProviderCapabilities: {
-        management: true,
-        secretCapture: true,
-        modelTest: true,
-      },
-      onCreateCustomProvider(input) {
-        submitted.push(input);
-        return Promise.resolve(false);
-      },
-    }),
-  );
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Add custom API" }));
-  assert.equal(screen.queryByRole("radio"), null);
-
-  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
-  assert.equal(baseUrl.value, "");
-  assert.equal(baseUrl.placeholder, "https://api.openai.com/v1");
-  assert.equal(screen.queryByRole("textbox", { name: /model id/i }), null);
-  const apiKey = screen.getByLabelText("API key");
-  assert.equal(apiKey.type, "password");
-
-  await user.click(screen.getByRole("combobox", { name: "Protocol" }));
-  for (const name of [
-    "OpenAI Responses",
-    "OpenAI Chat Completions",
-    "Anthropic Messages",
-    "Gemini Native",
-  ]) {
-    assert.ok(await screen.findByRole("option", { name }));
-  }
-  await user.click(screen.getByRole("option", { name: "Anthropic Messages" }));
-  assert.equal(baseUrl.value, "");
-  assert.equal(baseUrl.placeholder, "https://api.anthropic.com");
-
-  const displayName = screen.getByRole("textbox", { name: "Display name" });
-  await user.type(displayName, "My Anthropic");
-  await user.type(baseUrl, "https://api.anthropic.com/");
-  assert.ok(
-    screen.getByText("Request endpoint: https://api.anthropic.com/v1/messages"),
-  );
-  await user.type(apiKey, "anthropic-secret");
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
-  assert.deepEqual(submitted, [
-    {
-      displayName: "My Anthropic",
-      protocol: "anthropic_messages",
-      normalizedBaseUrl: "https://api.anthropic.com/v1/messages",
-      apiKey: "anthropic-secret",
-    },
-  ]);
-});
-
-test("Official Provider setup starts from its official address", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const submitted = [];
-  renderSettings(readySettingsAccount, {
-    models: {
-      ...readySettingsModels,
-      builtinProviderPresets: [
-        {
-          id: "deepseek",
-          displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
-          defaultBaseUrl: "https://api.deepseek.com",
-          apiKeyUrl: "https://platform.deepseek.com/api_keys",
-          documentationUrl: "https://api-docs.deepseek.com/",
-        },
-      ],
-    },
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    onCreateBuiltinProvider(input) {
+  renderModelSettings({
+    onCreateBuiltinProvider: async (input) => {
       submitted.push(input);
-      return Promise.resolve(false);
+      return false;
     },
   });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "DeepSeek");
+  assert.equal(within(dialog).queryByText("Connection settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Base URL" }),
+    null,
+  );
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  assert.ok(within(dialog).getByRole("link", { name: "Get an API key" }));
 
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  assert.ok(screen.getByText("Model providers"));
-  await user.click(screen.getByRole("button", { name: "Configure" }));
-  assert.ok(screen.getByRole("heading", { name: "DeepSeek" }));
-  assert.equal(screen.queryByRole("combobox", { name: "Protocol" }), null);
-  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
-  assert.equal(
-    screen.getByRole("button", { name: "Save provider" }).disabled,
-    true,
+  await user.type(within(dialog).getByLabelText("API key"), "official-secret");
+  await user.click(within(dialog).getByRole("combobox", { name: "Model ID" }));
+  await user.click(
+    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
   );
-
-  assert.ok(screen.getByText("https://api.deepseek.com"));
-  await user.click(screen.getByRole("button", { name: "Use another address" }));
-  assert.equal(
-    screen.getByRole("textbox", { name: "Base URL" }).value,
-    "https://api.deepseek.com",
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
-  await user.click(screen.getByRole("button", { name: "Cancel" }));
-  const apiKey = screen.getByLabelText("API key");
-  await user.type(apiKey, "deepseek-secret");
-  assert.equal(
-    screen.getByRole("link", { name: "Get an API key" }).href,
-    "https://platform.deepseek.com/api_keys",
-  );
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
     {
       providerId: "deepseek",
       baseUrl: "https://api.deepseek.com",
-      apiKey: "deepseek-secret",
+      apiKey: "official-secret",
+      model: { id: "deepseek-flash" },
     },
   ]);
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  assert.ok(within(dialog).getByRole("alert"));
 });
 
-test("Official Provider address override is explicit and separate from its credential", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const updates = [];
-  renderSettings(readySettingsAccount, {
+test("Custom model form saves endpoint, protocol, credential and model together without overwriting the address", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateCustomProvider: async (input) => {
+      submitted.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Custom / other service");
+  const address = within(dialog).getByRole("textbox", { name: "Base URL" });
+  await user.type(address, "https://custom.example.com");
+  await user.click(within(dialog).getByRole("combobox", { name: "Protocol" }));
+  await user.click(
+    await screen.findByRole("option", {
+      name: "Anthropic Messages",
+      exact: true,
+    }),
+  );
+  assert.equal(address.value, "https://custom.example.com");
+  await user.type(within(dialog).getByLabelText("API key"), "custom-secret");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "custom-model",
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      displayName: "custom.example.com",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://custom.example.com/v1/messages",
+      apiKey: "custom-secret",
+      model: { id: "custom-model" },
+    },
+  ]);
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Model ID" }).value,
+    "custom-model",
+  );
+});
+
+test("closing or losing the model configuration gate clears an unfinished credential", async () => {
+  const user = userEvent.setup({ document });
+  const view = render(
+    settingsElement(readySettingsAccount, {
+      customProviderCapabilities: completeModelCapabilities,
+      models: { ...readySettingsModels, builtinProviderPresets: presetModels },
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  let dialog = await chooseModelSource(user, "Custom / other service");
+  await user.type(
+    within(dialog).getByLabelText("API key"),
+    "unfinished-secret",
+  );
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("dialog", { name: "Add model" }), null);
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  dialog = await chooseModelSource(user, "Custom / other service");
+  assert.equal(within(dialog).getByLabelText("API key").value, "");
+  await user.type(within(dialog).getByLabelText("API key"), "another-secret");
+  view.rerender(
+    settingsElement(readySettingsAccount, {
+      customProviderCapabilities: {
+        ...completeModelCapabilities,
+        secretCapture: false,
+      },
+    }),
+  );
+  assert.equal(screen.queryByRole("dialog", { name: "Add model" }), null);
+  assert.ok(screen.getByRole("heading", { name: "Models" }));
+});
+
+test("model rows edit the exact model and expose shared credential replacement without recovering a saved key", async () => {
+  const user = userEvent.setup({ document });
+  const changes = [],
+    credentials = [];
+  const source = {
+    id: "source-edit",
+    builtinProviderId: null,
+    displayName: "Team",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://example.com/v1/responses",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [
+      {
+        id: "model-a",
+        displayName: "Model A",
+        metadata: {},
+        metadataProvenance: "unknown",
+        testStatus: "connected",
+        ready: true,
+      },
+    ],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onReplaceCustomModel: async (...input) => {
+      changes.push(input);
+      return false;
+    },
+    onReplaceCustomProviderCredential: async (...input) => {
+      credentials.push(input);
+      return false;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  const model = within(dialog).getByRole("textbox", { name: "Model ID" });
+  await user.clear(model);
+  await user.type(model, "model-b");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(changes, [["source-edit", "7", "13", "model-a", "model-b"]]);
+  await user.click(within(dialog).getByText("Connection settings"));
+  const key = within(dialog).getByLabelText("API key");
+  assert.equal(key.type, "password");
+  assert.equal(key.value, "");
+  assert.match(dialog.textContent, /shared by 1 models/);
+  await user.type(key, "  replacement secret  ");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save API key" }),
+  );
+  assert.deepEqual(credentials, [
+    ["source-edit", "7", "  replacement secret  "],
+  ]);
+  assert.equal(key.value, "");
+});
+
+test("Editing an official model permits credential replacement without exposing connection settings", async () => {
+  const user = userEvent.setup({ document });
+  const credentials = [];
+  const recipe = presetModels.find((preset) => preset.id === "deepseek");
+  renderModelSettings({
     models: {
       ...readySettingsModels,
-      builtinProviderPresets: [
-        {
-          id: "deepseek",
-          displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
-          defaultBaseUrl: "https://api.deepseek.com",
-          apiKeyUrl: "https://platform.deepseek.com/api_keys",
-          documentationUrl: "https://api-docs.deepseek.com/",
-        },
-      ],
+      builtinProviderPresets: presetModels,
       customProviders: [
         {
-          id: "provider-deepseek",
+          id: "official-source",
           builtinProviderId: "deepseek",
           displayName: "DeepSeek",
-          protocol: "openai_chat_completions",
+          protocol: recipe.protocol,
           normalizedBaseUrl: "https://api.deepseek.com/chat/completions",
-          state: "configuring",
+          state: "ready",
           credentialStatus: "ready",
           enabled: true,
-          models: [],
           providerRevision: "7",
-          sourceGeneration: "3",
-          catalogGeneration: "5",
+          sourceGeneration: "11",
+          catalogGeneration: "13",
+          models: [
+            {
+              ...readySettingsModels.providers[0].models[0],
+              id: "deepseek-flash",
+              displayName: "deepseek-flash",
+              ready: true,
+              metadataProvenance: "user_declared",
+              testStatus: "connected",
+            },
+          ],
         },
       ],
     },
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    onUpdateBuiltinProviderBaseUrl(input) {
-      updates.push(input);
-      return Promise.resolve(false);
+    onReplaceCustomProviderCredential: async (...input) => {
+      credentials.push(input);
+      return false;
     },
   });
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Manage" }));
-  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
-  await user.click(screen.getByRole("button", { name: "Use another address" }));
-  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
-  await user.clear(baseUrl);
-  await user.type(baseUrl, "https://gateway.example.com/deepseek/v1");
-  assert.ok(
-    screen.getByText(
-      "Future model requests will send this Provider's API key to gateway.example.com.",
-    ),
+  await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  assert.equal(within(dialog).queryByText("Connection settings"), null);
+  assert.equal(
+    within(dialog).queryByRole("textbox", { name: "Base URL" }),
+    null,
   );
-  await user.click(screen.getByRole("button", { name: "Save provider" }));
-  assert.deepEqual(updates, [
-    {
-      providerId: "provider-deepseek",
-      expectedProviderRevision: "7",
-      baseUrl: "https://gateway.example.com/deepseek/v1",
-    },
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Protocol" }),
+    null,
+  );
+  const key = within(dialog).getByLabelText("API key");
+  assert.equal(key.value, "");
+  await user.type(key, "replacement-secret");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save API key" }),
+  );
+  assert.deepEqual(credentials, [
+    ["official-source", "7", "replacement-secret"],
   ]);
-});
-
-test("Provider API key update lives inside Edit and submits the exact user input", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const replacements = [];
-  renderSettings(readySettingsAccount, {
-    customProviderCapabilities: {
-      management: true,
-      secretCapture: true,
-      modelTest: true,
-    },
-    models: {
-      ...readySettingsModels,
-      customProviders: [
-        {
-          id: "provider-1",
-          builtinProviderId: null,
-          displayName: "Team OpenAI",
-          protocol: "openai_responses",
-          normalizedBaseUrl: "https://api.openai.com/v1/responses",
-          state: "configuring",
-          credentialStatus: "ready",
-          enabled: true,
-          models: [],
-          providerRevision: "7",
-          sourceGeneration: "3",
-          catalogGeneration: "5",
-        },
-      ],
-    },
-    onReplaceCustomProviderCredential(...input) {
-      replacements.push(input);
-      return Promise.resolve(false);
-    },
-  });
-
-  await user.click(screen.getByRole("link", { name: "Providers" }));
-  assert.equal(screen.queryByRole("button", { name: "Update API key" }), null);
-  await user.click(screen.getByRole("button", { name: "Edit" }));
-  await user.click(screen.getByRole("button", { name: "Update API key" }));
-  const apiKey = screen.getByLabelText("API key");
-  assert.equal(apiKey.type, "password");
-  assert.equal(apiKey.value, "");
-  assert.equal(apiKey.autocomplete, "off");
-
-  await user.type(apiKey, "  exact replacement secret  ");
-  await user.click(screen.getByRole("button", { name: "Save API key" }));
-  assert.deepEqual(replacements, [
-    ["provider-1", "7", "  exact replacement secret  "],
-  ]);
+  assert.equal(key.value, "");
 });
 
 test("Provider Base URLs map to all four existing protocol endpoints", () => {
@@ -1030,10 +1061,11 @@ test("Provider Base URLs map to all four existing protocol endpoints", () => {
   );
 });
 
-test("Settings moves directly from Provider to model selection", async () => {
+test("Settings selects a default model without a Provider step", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
+  assert.equal(screen.queryByRole("combobox", { name: "Provider" }), null);
   assert.equal(screen.queryByRole("combobox", { name: "Image model" }), null);
   assert.equal(screen.queryByRole("combobox", { name: "API key" }), null);
   assert.match(screen.getByText("Models 2").textContent, /Models 2/);
@@ -1149,25 +1181,59 @@ test("Settings keeps Metask available while a custom provider is the default", a
     },
   });
 
-  const provider = screen.getByRole("combobox", { name: "Provider" });
   const defaultModel = screen.getByRole("combobox", {
     name: "Default model",
   });
-  assert.match(provider.textContent, /Team OpenAI/);
   assert.match(defaultModel.textContent, /GPT-5/);
   await user.click(defaultModel);
   await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
   assert.deepEqual(customSelections, [["provider-1", "1", "gpt-5-mini"]]);
 
-  await user.click(provider);
-  await user.click(await screen.findByRole("option", { name: /Metask/ }));
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Choose a model/,
-  );
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
   await user.click(await screen.findByRole("option", { name: /Model One/ }));
   assert.deepEqual(view.selections.model, ["model-1"]);
+});
+
+test("Settings keeps custom models selectable during Metask refresh and retains full identity for duplicate model IDs", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const selected = [];
+  renderSettings(readySettingsAccount, {
+    accountDisabled: true,
+    models: {
+      ...readySettingsModels,
+      operation: "refreshing_catalog",
+      customProviders: [
+        {
+          id: "custom-source",
+          builtinProviderId: null,
+          displayName: "Custom API",
+          protocol: "openai_responses",
+          normalizedBaseUrl: "https://example.com/responses",
+          enabled: true,
+          state: "ready",
+          credentialStatus: "ready",
+          providerRevision: "4",
+          sourceGeneration: "2",
+          catalogGeneration: "3",
+          models: [
+            {
+              ...readySettingsModels.providers[0].models[0],
+              ready: true,
+              metadataProvenance: "user_declared",
+              testStatus: "connected",
+            },
+          ],
+        },
+      ],
+    },
+    onSelectCustomModel: (...selection) => selected.push(selection),
+  });
+  const picker = screen.getByRole("combobox", { name: "Default model" });
+  assert.equal(picker.disabled, false);
+  await user.click(picker);
+  const group = screen.getByRole("group", { name: "Custom models" });
+  await user.click(within(group).getByRole("option", { name: /Model One/ }));
+  assert.deepEqual(selected, [["custom-source", "4", "model-1"]]);
 });
 
 test("Models keeps adding and removing models after the first provider model", async () => {
@@ -1175,6 +1241,7 @@ test("Models keeps adding and removing models after the first provider model", a
   const additions = [];
   const removals = [];
   renderSettings(readySettingsAccount, {
+    customProviderCapabilities: completeModelCapabilities,
     models: {
       ...readySettingsModels,
       customProviders: [
@@ -1213,16 +1280,18 @@ test("Models keeps adding and removing models after the first provider model", a
     },
   });
 
-  await user.click(screen.getByRole("combobox", { name: "Provider" }));
-  await user.click(
-    await screen.findByRole("option", { name: /Multi-model provider/ }),
-  );
-
-  const modelId = screen.getByRole("textbox", { name: "Model ID" });
-  await user.type(modelId, "gpt-5.6-sol");
   await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "Multi-model provider");
+  await user.type(
+    within(dialog).getByRole("textbox", { name: "Model ID" }),
+    "gpt-5.6-sol",
+  );
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
   assert.deepEqual(additions, [["provider-multi", "3", "7", "gpt-5.6-sol"]]);
 
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await user.click(screen.getByRole("button", { name: "Remove" }));
   const removeButtons = screen.getAllByRole("button", { name: "Remove" });
   await user.click(removeButtons[removeButtons.length - 1]);
