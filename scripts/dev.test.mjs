@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { createServer as createHttpServer } from "node:http";
 import { readFileSync } from "node:fs";
 import {
   access,
@@ -14,6 +17,7 @@ import test from "node:test";
 
 import {
   developmentEnvironment,
+  withDevelopmentServer,
   withDevelopmentDirectory,
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
@@ -37,29 +41,181 @@ const certificateSuffix = "6L6UHLW8L7";
 const teamId = "Z4T2BLNJ8X";
 const identityName = `Apple Development: developer@example.com (${certificateSuffix})`;
 
-test("paired development removes server overrides without changing inherited environment", async () => {
+test("development uses its owned Vite server without changing inherited environment", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-env-"));
   const resources = path.join(root, "src", "product", "control", "resources");
   await mkdir(resources, { recursive: true });
   await writeFile(path.join(resources, "archive.py"), "");
   const inherited = {
     NATIVE_SDK_FRONTEND_URL: "http://old-server/",
-    NATIVE_SDK_HMR: "1",
-    NATIVE_SDK_MODE: "dev",
+    NATIVE_SDK_HMR: "0",
+    NATIVE_SDK_MODE: "release",
     KEEP: "preserved",
   };
   try {
-    const environment = developmentEnvironment(root, inherited);
-    assert.equal(environment.NATIVE_SDK_FRONTEND_URL, undefined);
-    assert.equal(environment.NATIVE_SDK_HMR, undefined);
-    assert.equal(environment.NATIVE_SDK_MODE, undefined);
+    const environment = developmentEnvironment(
+      root,
+      "http://127.0.0.1:5173/",
+      inherited,
+    );
+    assert.equal(environment.NATIVE_SDK_FRONTEND_URL, "http://127.0.0.1:5173/");
+    assert.equal(environment.NATIVE_SDK_HMR, "1");
+    assert.equal(environment.NATIVE_SDK_MODE, "dev");
     assert.equal(environment.KEEP, "preserved");
     assert.equal(environment.METAWORK_DEV_REQUIRE_PRIMARY, "1");
-    assert.equal(inherited.NATIVE_SDK_HMR, "1");
+    assert.equal(inherited.NATIVE_SDK_HMR, "0");
+    assert.equal(inherited.NATIVE_SDK_FRONTEND_URL, "http://old-server/");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test(
+  "development serves live modules, emits HMR updates and closes its server on Host exit or failure",
+  { timeout: 30_000 },
+  async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-hmr-"));
+    const frontend = path.join(root, "frontend");
+    await mkdir(frontend);
+    const modulePath = path.join(frontend, "main.js");
+    await writeFile(
+      path.join(frontend, "index.html"),
+      '<script type="module" src="/main.js"></script>',
+    );
+    await writeFile(
+      modulePath,
+      'export const label = "before"; import.meta.hot.accept();',
+    );
+    await writeFile(
+      path.join(frontend, "vite.config.mjs"),
+      'export default { logLevel: "silent", optimizeDeps: { noDiscovery: true }, server: { host: "127.0.0.1", port: 0, strictPort: true } };',
+    );
+    let ownedServer;
+    try {
+      await withDevelopmentServer(root, async (server) => {
+        ownedServer = server;
+        const url = server.resolvedUrls.local[0];
+        const html = await (await fetch(url)).text();
+        assert.match(html, /\/@vite\/client/);
+        assert.match(
+          await (await fetch(new URL("main.js", url))).text(),
+          /before/,
+        );
+        const socket = new WebSocket(url.replace("http:", "ws:"), "vite-hmr");
+        try {
+          const [connected] = await once(socket, "message", {
+            signal: AbortSignal.timeout(10_000),
+          });
+          assert.equal(JSON.parse(connected.data).type, "connected");
+          const update = once(socket, "message", {
+            signal: AbortSignal.timeout(10_000),
+          });
+          await writeFile(
+            modulePath,
+            'export const label = "after"; import.meta.hot.accept();',
+          );
+          const [message] = await update;
+          const payload = JSON.parse(message.data);
+          assert.equal(payload.type, "update");
+          assert.ok(payload.updates.some((entry) => entry.path === "/main.js"));
+          assert.match(
+            await (await fetch(new URL("main.js", url))).text(),
+            /after/,
+          );
+        } finally {
+          socket.close();
+        }
+      });
+      assert.equal(ownedServer.httpServer.listening, false);
+      await assert.rejects(
+        withDevelopmentServer(root, async (server) => {
+          ownedServer = server;
+          throw new Error("Host startup failed");
+        }),
+        /Host startup failed/,
+      );
+      assert.equal(ownedServer.httpServer.listening, false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "development refuses an occupied Vite port instead of using another instance",
+  { timeout: 30_000 },
+  async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-port-"));
+    const frontend = path.join(root, "frontend");
+    await mkdir(frontend);
+    const occupied = createHttpServer();
+    occupied.listen(0, "127.0.0.1");
+    await once(occupied, "listening");
+    try {
+      await writeFile(
+        path.join(frontend, "vite.config.mjs"),
+        `export default { logLevel: "silent", optimizeDeps: { noDiscovery: true }, server: { host: "127.0.0.1", port: ${occupied.address().port}, strictPort: true } };`,
+      );
+      let hostStarted = false;
+      await assert.rejects(
+        withDevelopmentServer(root, () => {
+          hostStarted = true;
+        }),
+        /already in use/,
+      );
+      assert.equal(hostStarted, false);
+      assert.equal(occupied.listening, true);
+    } finally {
+      await new Promise((resolve, reject) =>
+        occupied.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "the real development HTML permits the exact React refresh preamble without allowing arbitrary inline scripts",
+  { timeout: 30_000 },
+  async () => {
+    const { createServer } = await import("vite");
+    const server = await createServer({
+      root: path.resolve(import.meta.dirname, "../frontend"),
+      server: { port: 0 },
+      logLevel: "silent",
+    });
+    try {
+      await server.listen();
+      const html = await (
+        await fetch(server.resolvedUrls.local[0], {
+          signal: AbortSignal.timeout(10_000),
+        })
+      ).text();
+      assert.match(html, /\/@vite\/client/);
+      assert.match(html, /\/@react-refresh/);
+      const csp = html.match(
+        /http-equiv="Content-Security-Policy" content="([^"]+)"/u,
+      )?.[1];
+      assert.ok(csp);
+      const scriptPolicy = csp
+        .split(";")
+        .find((part) => part.trim().startsWith("script-src"));
+      assert.doesNotMatch(scriptPolicy, /unsafe-inline|unsafe-eval/);
+      for (const [, script] of html.matchAll(
+        /<script\b[^>]*>([\s\S]*?)<\/script>/gu,
+      )) {
+        if (script.trim())
+          assert.ok(
+            scriptPolicy.includes(
+              `'sha256-${createHash("sha256").update(script).digest("base64")}'`,
+            ),
+          );
+      }
+    } finally {
+      await server.close();
+    }
+  },
+);
 
 test("development directories isolate overlapping sessions and clean only their own output", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-test-"));

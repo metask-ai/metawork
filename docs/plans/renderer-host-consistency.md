@@ -27,15 +27,9 @@ Renderer 发产品命令，Host 返回结果并发布状态，Renderer 据此更
 
 启动主提示使用“无法加载 MetaWork”等用户可以理解的描述；字段差异收入技术详情。保持既有快照拒绝、显式重连与整页阻断政策，不猜默认值、不吞未知字段、不重放命令。
 
-### 成套构建与固定资源
+### 开发入口与资源隔离
 
-默认 `npm run dev` 验证 canonical bundle 与当前平台前置条件，构建静态 Renderer、构建 Debug Host 并部署资源，验证最终位置的 macOS 稳定签名，再启动新 primary。默认入口不启动独立 Vite 热更新；开发循环改为退出后重新构建。
-
-Renderer 输出、Native install prefix 和部署资源从一开始就使用本次独立目录，不先写共享输出再复制。沿用 executable 相对资源布局与官方 SDK，不新增打包器、artifact registry、全仓指纹、常驻 watcher 或原子源码快照机制。运行目录在进程存活期间保持不变，后续构建使用另一目录。
-
-启动环境排除前端 URL/HMR 覆盖，Office、archive、Skill 开发配置与 credential namespace 沿用原规则。构建、部署、依赖或签名缺失时明确失败，不能启动旧产物。
-
-沿用 Application 单实例 owner，开发启动必须取得新 primary；已有同身份实例时明确失败，不把激活旧窗口算作新构建成功。普通产品重复打开行为保持不变，不删除锁或停止其他实例。脚本只管理自己的子进程，正常退出后清理自有目录；异常退出无法证明全部后代停止时保留资源，不新增清理服务。
+用户后续要求恢复前端热更新。开发入口、HMR 的合同边界、独立产物与进程清理规则统一由[验证规范的标准入口](../validation.md#标准入口)定义；本计划不再维护静态 Renderer 开发循环的旧约束。Office、archive、Skill 开发配置与 credential namespace 沿用各自原规则。
 
 ### 两处缺陷的最小修复
 
