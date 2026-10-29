@@ -31,6 +31,21 @@ pub const CatalogIssueProjection = struct {
     source_instance_id: []const u8,
 };
 
+/// Equality token for the positional argument contract, not a Core identity
+/// or an authorization. Unrelated content/catalog changes do not affect it.
+pub fn argumentShape(skill: SkillProjection) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var number: [8]u8 = undefined;
+    std.mem.writeInt(u64, &number, skill.max_values, .little);
+    hash.update(&number);
+    for (skill.argument_names) |name| {
+        std.mem.writeInt(u64, &number, name.len, .little);
+        hash.update(&number);
+        hash.update(name);
+    }
+    return hash.finalResult();
+}
+
 pub const CatalogProjection = struct {
     availability: CatalogAvailability,
     redacted: bool = false,

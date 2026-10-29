@@ -374,6 +374,10 @@ pub const RunClock = struct {
 };
 
 pub const OperationEffects = struct {
+    /// Main-thread borrowed view used only while accepting a Skill selection.
+    input_catalog: ?product_skill.catalog.CatalogProjection = null,
+    /// Catalog-recompiled queued input, borrowed only by prepareRun.
+    prepared_input: ?RunInput = null,
     /// Caller owns until a Run record is installed; preparation consumes it.
     /// The pointer is callback-scoped and cleared from retained effects.
     image_execution: ?*?task_state.OwnedImageExecution = null,
@@ -1899,8 +1903,9 @@ pub const Runtime = struct {
             if (value.len > effects.limits.max_user_message_bytes) return error.ProjectionCapacity;
         }
         var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
-        _ = try validateRunInput(task, input, effects.limits, &parts);
-        var payload = try task_state.OwnedRunInput.clone(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes);
+        _ = try validateRunInput(task, input, effects.limits, &parts, effects.input_catalog);
+        const selection = if (input == .skill) try selectSkillInput(input, effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |pinned| pinned.view() else return error.CatalogUnavailable)) else null;
+        var payload = try task_state.OwnedRunInput.cloneSelected(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes, selection);
         errdefer payload.deinit(self.allocator);
         const credential = if (task.runtime.executionConst()) |execution| execution.secret else &.{};
         var credentials: [2][]const u8 = .{ credential, &.{} };
@@ -2387,7 +2392,7 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const record = self.pendingInput(task_id, index) orelse return error.InvalidInput;
         if (record.state != .waiting or record.payload == null) return error.InvalidInput;
-        return self.prepareRun(task_id, task.durable.binding_epoch, record.payload.?.input, workspace, effects, .{ .queued = index });
+        return self.prepareRun(task_id, task.durable.binding_epoch, effects.prepared_input orelse record.payload.?.input, workspace, effects, .{ .queued = index });
     }
 
     pub fn startInputContinuation(self: *Runtime, task_id: u64, binding_epoch: u64, source_id: u64, input: RunInput, workspace: WorkspaceOrderEffect, effects: OperationEffects) RunError!PreparedRun {
@@ -2424,7 +2429,7 @@ pub const Runtime = struct {
         try applyModelIntent(self, task, &access, effects);
         const execution = try taskExecutionInput(task);
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
-        const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
+        const agent_input = try validateRunInput(task, input, effects.limits, &input_parts, null);
         const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
         const delivery = if (effects.file_delivery) |owned| if (owned.*) |value| value.input else null else null;
         const run_id = try access.prepareRunWithTools(agent_input, image, delivery);
@@ -3316,12 +3321,22 @@ pub const Runtime = struct {
         if (task.durable.binding_epoch != expected_binding_epoch)
             return error.BindingEpochMismatch;
         if (task_policy.taskLifecycle(task) != .open or
-            task_policy.hasActiveOperation(task))
+            task_policy.hasActiveOperation(task) or task.runtime.worker_leases.hasLive())
             return error.TaskBusy;
         return .{
             .workspace_id = task.durable.workspace_id,
             .workspace_epoch = task.durable.workspace_epoch,
         };
+    }
+
+    pub fn catalogBindingMatches(self: *Runtime, task_id: u64, current: product_skill.catalog.CatalogProjection, lease: *agent.CatalogLease, grants: []const []const u8) bool {
+        const task = self.find(task_id) orelse return false;
+        if (task.skills_unavailable) return false;
+        const pinned = task.runtime.pinnedCatalogConst() orelse return false;
+        if (!std.mem.eql(u8, pinned.revision, current.revision) or pinned.selection_revision != current.selection_revision) return false;
+        var access = task.runtime.acquireAccess() catch return false;
+        defer access.deinit();
+        return access.skillPolicyMatches(lease, .{ .granted_skill_ids = grants });
     }
 
     /// On success takes `replacement`; on failure the caller retains it.
@@ -3347,8 +3362,22 @@ pub const Runtime = struct {
         const old_bytes = if (task.runtime.pinnedCatalog()) |old| old.projected_bytes else 0;
         if (task.runtime.pinnedCatalog()) |old| old.deinit();
         task.runtime.attached().?.pinned_catalog = replacement.*;
+        task.skills_unavailable = false;
         replacement.* = undefined;
         return old_bytes;
+    }
+
+    pub fn suspendSkills(self: *Runtime, task_id: u64) (CatalogRefreshError || agent.Error || std.mem.Allocator.Error)!void {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        _ = try self.catalogRefreshFacts(task_id, task.durable.binding_epoch);
+        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
+        defer access.deinit();
+        try access.clearSkillPolicy();
+        if (task.runtime.pinnedCatalog()) |snapshot|
+            for (snapshot.skills) |*skill| {
+                skill.enabled = false;
+            };
+        task.skills_unavailable = true;
     }
 
     pub fn renameTask(
@@ -7601,11 +7630,43 @@ fn agentSessionPermission(
     };
 }
 
+pub fn selectSkillInput(input: RunInput, current: product_skill.catalog.CatalogProjection) RunError!?task_state.SkillSelection {
+    if (input != .skill) return null;
+    if (current.availability != .ready and current.availability != .degraded) return error.CatalogUnavailable;
+    const selected = input.skill;
+    if (!std.mem.eql(u8, current.revision, selected.catalog_revision) or current.selection_revision != selected.selection_revision)
+        return error.StaleCatalog;
+    const skill = for (current.skills) |candidate| {
+        if (std.mem.eql(u8, candidate.skill_id, selected.skill_id)) break candidate;
+    } else return error.SkillNotFound;
+    if (!skill.enabled) return error.SkillUnavailable;
+    return .{ .policy_key = skill.skill_policy_key, .argument_shape = product_skill.catalog.argumentShape(skill) };
+}
+
+pub fn compileSkillInput(input: RunInput, selection: ?task_state.SkillSelection, current: product_skill.catalog.CatalogProjection) RunError!RunInput {
+    if (input != .skill) return input;
+    const intent = selection orelse return error.StaleCatalog;
+    if (current.availability != .ready and current.availability != .degraded) return error.CatalogUnavailable;
+    const skill = for (current.skills) |candidate| {
+        if (std.mem.eql(u8, candidate.skill_policy_key, intent.policy_key)) break candidate;
+    } else return error.SkillNotFound;
+    if (!skill.enabled) return error.SkillUnavailable;
+    if (!std.mem.eql(u8, &intent.argument_shape, &product_skill.catalog.argumentShape(skill)))
+        return error.InvalidSkillArguments;
+    return .{ .skill = .{
+        .skill_id = skill.skill_id,
+        .catalog_revision = current.revision,
+        .selection_revision = current.selection_revision orelse return error.CatalogUnavailable,
+        .argument_values = input.skill.argument_values,
+    } };
+}
+
 fn validateRunInput(
     task: *const task_state.Task,
     input: RunInput,
     limits: OperationLimits,
     parts: *[agent.multimodal_input_limits.max_parts]agent.InputPart,
+    input_catalog: ?product_skill.catalog.CatalogProjection,
 ) RunError!agent.RunInput {
     return switch (input) {
         .text => |value| .{ .text = value },
@@ -7652,13 +7713,13 @@ fn validateRunInput(
             break :blk .{ .multimodal = parts[0..part_count] };
         },
         .skill => |skill_input| blk: {
-            const pinned = task.runtime.pinnedCatalogConst() orelse
-                return error.CatalogUnavailable;
+            const pinned = input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);
             if (!std.mem.eql(u8, skill_input.catalog_revision, pinned.revision) or
                 skill_input.selection_revision != pinned.selection_revision)
                 return error.StaleCatalog;
-            const skill = pinned.findSkill(skill_input.skill_id) orelse
-                return error.SkillNotFound;
+            const skill = for (pinned.skills) |candidate| {
+                if (std.mem.eql(u8, candidate.skill_id, skill_input.skill_id)) break candidate;
+            } else return error.SkillNotFound;
             if (!skill.enabled) return error.SkillUnavailable;
             if (skill_input.argument_values.len > @min(
                 @as(usize, @intCast(skill.max_values)),
@@ -7759,13 +7820,13 @@ fn copyRunInput(
             } };
         },
         .skill => |skill_input| blk: {
-            const pinned = task.runtime.pinnedCatalogConst() orelse
-                return error.CatalogUnavailable;
+            const pinned = effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);
             if (!std.mem.eql(u8, skill_input.catalog_revision, pinned.revision) or
                 skill_input.selection_revision != pinned.selection_revision)
                 return error.StaleCatalog;
-            const skill = pinned.findSkill(skill_input.skill_id) orelse
-                return error.SkillNotFound;
+            const skill = for (pinned.skills) |candidate| {
+                if (std.mem.eql(u8, candidate.skill_id, skill_input.skill_id)) break candidate;
+            } else return error.SkillNotFound;
             if (!skill.enabled) return error.SkillUnavailable;
             const skill_id = (try effects.text.project(
                 skill.skill_id,
@@ -7976,6 +8037,8 @@ fn applyProvisionalTitle(
 fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     var clean = effects;
     clean.model_target = null;
+    clean.input_catalog = null;
+    clean.prepared_input = null;
     clean.image_execution = null;
     clean.file_delivery = null;
     return clean;
@@ -9659,18 +9722,60 @@ test "Task message acceptance allocation failures leave no payload or projection
     }.run, .{});
 }
 
+test "queued Skill intent follows the Core winner while preserving argument compatibility" {
+    var winner: product_skill.catalog.SkillProjection = .{
+        .skill_id = "old-content",
+        .skill_policy_key = "core-policy",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "workspace",
+        .contribution_id = "review",
+        .content_revision = "v1",
+        .display_name = "Review",
+        .description = "",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    };
+    var current: product_skill.catalog.CatalogProjection = .{ .availability = .ready, .revision = "one", .selection_revision = 1, .skills = (&winner)[0..1] };
+    const input: RunInput = .{ .skill = .{ .skill_id = "old-content", .catalog_revision = "one", .selection_revision = 1, .argument_values = &.{"diff"} } };
+    const selection = try selectSkillInput(input, current);
+    winner.skill_id = "new-content";
+    winner.content_revision = "v2";
+    current.revision = "two";
+    current.selection_revision = 3;
+    const compiled = try compileSkillInput(input, selection, current);
+    try std.testing.expectEqualStrings("new-content", compiled.skill.skill_id);
+    try std.testing.expectEqualStrings("diff", compiled.skill.argument_values[0]);
+    try std.testing.expectError(error.StaleCatalog, selectSkillInput(input, current));
+    winner.argument_names = &.{"changed"};
+    try std.testing.expectError(error.InvalidSkillArguments, compileSkillInput(input, selection, current));
+    winner.argument_names = &.{"target"};
+    winner.enabled = false;
+    try std.testing.expectError(error.SkillUnavailable, compileSkillInput(input, selection, current));
+    winner.enabled = true;
+    winner.skill_policy_key = "another-policy";
+    try std.testing.expectError(error.SkillNotFound, compileSkillInput(input, selection, current));
+    current.availability = .unavailable;
+    try std.testing.expectError(error.CatalogUnavailable, compileSkillInput(input, selection, current));
+    try std.testing.expectEqualStrings("ordinary text", (try compileSkillInput(.{ .text = "ordinary text" }, null, current)).text);
+}
+
 test "Task owned input preserves Skill and media slices across caller release and allocation failure" {
     const Checks = struct {
         fn run(allocator: std.mem.Allocator) !void {
             var argument = "argument".*;
+            var policy_key = "policy".*;
             var bytes = "image bytes".*;
-            var skill = try task_state.OwnedRunInput.clone(allocator, .{ .skill = .{ .skill_id = "skill", .catalog_revision = "revision", .selection_revision = 3, .argument_values = &.{&argument} } }, 1024);
+            var skill = try task_state.OwnedRunInput.cloneSelected(allocator, .{ .skill = .{ .skill_id = "skill", .catalog_revision = "revision", .selection_revision = 3, .argument_values = &.{&argument} } }, 1024, .{ .policy_key = &policy_key, .argument_shape = @splat(7) });
             defer skill.deinit(allocator);
             var image = try task_state.OwnedRunInput.clone(allocator, .{ .multimodal = .{ .text = "describe", .attachments = &.{.{ .kind = .image, .format = .png, .display_name = "image.png", .bytes = &bytes, .reference = "Task-owned reference" }} } }, 1024);
             defer image.deinit(allocator);
             @memset(&argument, 'x');
+            @memset(&policy_key, 'x');
             @memset(&bytes, 'x');
             try std.testing.expectEqualStrings("argument", skill.input.skill.argument_values[0]);
+            try std.testing.expectEqualStrings("policy", skill.skill_selection.?.policy_key);
             try std.testing.expectEqualStrings("image bytes", image.input.multimodal.attachments[0].bytes);
             try std.testing.expectEqualStrings("Task-owned reference", image.input.multimodal.attachments[0].reference);
         }

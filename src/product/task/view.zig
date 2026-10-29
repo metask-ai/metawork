@@ -1613,6 +1613,7 @@ fn writeUiHistory(
 }
 
 pub fn catalogProjection(task: *const task_state.Task) product_skill.catalog.CatalogProjection {
+    if (task.skills_unavailable) return .{ .availability = .unavailable };
     return if (task.runtime.pinnedCatalogConst()) |snapshot|
         snapshot.view()
     else

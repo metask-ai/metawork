@@ -3926,19 +3926,20 @@ pub const Runtime = struct {
         };
         const current = authority.snapshot;
         const lease = authority.lease;
+        var granted_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer granted_skill_ids.deinit(self.allocator);
+        for (current.skills) |skill|
+            if (skill.enabled) try granted_skill_ids.append(
+                self.allocator,
+                skill.skill_id,
+            );
+        if (self.task_runtime.catalogBindingMatches(task_id, current.view(), lease, granted_skill_ids.items)) return;
         var replacement = try current.clone(
             self.allocator,
             catalogSnapshotLimits(self.limits),
             self.historyByteLimit() - self.projection_bytes,
         );
         errdefer replacement.deinit();
-        var granted_skill_ids: std.ArrayList([]const u8) = .empty;
-        defer granted_skill_ids.deinit(self.allocator);
-        for (replacement.skills) |skill|
-            if (skill.enabled) try granted_skill_ids.append(
-                self.allocator,
-                skill.skill_id,
-            );
         const replacement_bytes = replacement.projected_bytes;
         const old_bytes = try self.task_runtime.installCatalogRefresh(
             task_id,
@@ -3950,6 +3951,34 @@ pub const Runtime = struct {
         self.projection_bytes -= old_bytes;
         self.projection_bytes += replacement_bytes;
         self.bumpRevision();
+    }
+
+    /// One fresh query per new Run, shared by waiting consumers of a scope.
+    /// A failed query withdraws grants before ordinary text can proceed.
+    fn prepareTaskSkills(self: *Runtime, task_id: u64, binding_epoch: u64) Error!void {
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        if (task.durable.permission_interaction != .interactive) return;
+        const facts = try self.task_runtime.catalogRefreshFacts(task_id, binding_epoch);
+        if (task.skill_preparation == null or task.skill_preparation.?.binding_epoch != binding_epoch) {
+            const generation = self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch) catch |err| switch (err) {
+                error.CatalogUnavailable => {
+                    try self.task_runtime.suspendSkills(task_id);
+                    return;
+                },
+                else => return err,
+            };
+            task.skill_preparation = .{ .generation = generation, .binding_epoch = binding_epoch };
+            self.bumpRevision();
+        }
+        switch (try self.skill.workspacePreparation(facts.workspace_id, facts.workspace_epoch, task.skill_preparation.?.generation)) {
+            .pending => return error.CatalogLoading,
+            .stale => {
+                task.skill_preparation.?.generation = try self.skill.prepareWorkspaceCatalog(facts.workspace_id, facts.workspace_epoch);
+                return error.CatalogLoading;
+            },
+            .ready => try self.installTaskCatalog(task_id, binding_epoch),
+            .unavailable => try self.task_runtime.suspendSkills(task_id),
+        }
     }
 
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
@@ -5084,7 +5113,9 @@ pub const Runtime = struct {
         var staged: StagedTaskInput = .{};
         defer if (staged.borrow) |*borrow| borrow.rollback();
         const task_input = try self.borrowTaskInput(task_id, input, &staged);
-        _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, self.taskRuntimeOperationEffects());
+        var effects = self.taskRuntimeOperationEffects();
+        effects.input_catalog = try self.workspaceCatalog(task.durable.workspace_id);
+        _ = try self.task_runtime.receiveInput(task_id, operation_id, task_input, effects);
         if (staged.borrow) |*borrow| {
             borrow.retainForTask();
             staged.external.accept();
@@ -5096,6 +5127,7 @@ pub const Runtime = struct {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null or task.durable.archived or task.deletion != .idle) return error.TaskClosing;
         _ = self.task_runtime.stopInputs(task_id);
+        task.skill_preparation = null;
         try self.stopTaskOperation(task_id);
         self.reapTaskInputResources();
         self.commitTaskStateNoFail();
@@ -5390,12 +5422,21 @@ pub const Runtime = struct {
             workspace_id,
             task_workspace_epoch,
         );
-        if ((self.task_runtime.catalogProjection(task_id) orelse return error.UnknownTask).availability == .loading)
-            return error.CatalogLoading;
+        const command_selection = switch (input) {
+            .command => |command| if (command == .skill) try task_runtime.selectSkillInput(.{ .skill = .{
+                .skill_id = command.skill.skill_id,
+                .catalog_revision = command.skill.catalog_revision,
+                .selection_revision = command.skill.selection_revision,
+                .argument_values = command.skill.argument_values,
+            } }, try self.workspaceCatalog(workspace_id)) else null,
+            .queued => null,
+        };
+        try self.prepareTaskSkills(task_id, binding_epoch);
+        defer self.task_runtime.find(task_id).?.skill_preparation = null;
         var staged: StagedTaskInput = .{};
         var acceptance_context: AttachmentRunAcceptanceContext = undefined;
         defer if (staged.borrow) |*borrow| borrow.rollback();
-        const task_input = switch (input) {
+        const original_input = switch (input) {
             .command => |command| blk: {
                 const value = try self.borrowTaskInput(task_id, command, &staged);
                 if (value == .multimodal) for (staged.items[0..value.multimodal.attachments.len]) |*item| {
@@ -5405,6 +5446,11 @@ pub const Runtime = struct {
             },
             .queued => |index| (self.task_runtime.pendingInput(task_id, index) orelse return error.InvalidInput).payload.?.input,
         };
+        const selection = switch (input) {
+            .queued => |index| self.task_runtime.pendingInput(task_id, index).?.payload.?.skill_selection,
+            .command => command_selection,
+        };
+        const task_input = try task_runtime.compileSkillInput(original_input, selection, try self.taskCatalog(task_id));
         var order_preparation = if (workspace.kind == .manual)
             try self.workspace.prepareOrder(workspace.id)
         else
@@ -5416,6 +5462,7 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
+        operation_effects.prepared_input = task_input;
         var image = self.prepareRunImage(workspace);
         defer if (image) |*value| value.deinit();
         var delivery = if (self.file_delivery_preparation) |preparation| preparation.prepare(workspace) else null;
@@ -6264,6 +6311,17 @@ pub const Runtime = struct {
                         return true;
                     };
                     return false;
+                };
+                // Keep the continuation's owned payload until fresh Skill
+                // preparation finishes; catalog waits are not failed Runs.
+                self.prepareTaskSkills(task_id, batch.binding_epoch) catch |err| switch (err) {
+                    error.CatalogLoading, error.TaskBusy => return false,
+                    else => {
+                        self.task_runtime.find(task_id).?.skill_preparation = null;
+                        _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
+                        self.bumpRevision();
+                        return true;
+                    },
                 };
             },
         }

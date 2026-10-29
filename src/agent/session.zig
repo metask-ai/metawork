@@ -1160,6 +1160,36 @@ pub const Session = struct {
         };
     }
 
+    /// Withdraws Skill grants after a failed fresh query. The original catalog
+    /// remains an owned snapshot; it is never presented as a fresh empty one.
+    pub fn clearSkillPolicy(self: *Session) (Error || std.mem.Allocator.Error)!void {
+        self.lock();
+        const captured = if (self.skill_restore_inputs) |inputs| inputs.clone() catch |err| {
+            self.unlock();
+            return err;
+        } else null;
+        self.unlock();
+        const inputs = captured orelse return;
+        const result = self.refreshSkillCatalog(inputs.borrow().catalog, .{ .granted_skill_ids = &.{} });
+        inputs.deinit() catch {
+            self.lock();
+            defer self.unlock();
+            return self.failSkillUpdateContract();
+        };
+        return result;
+    }
+
+    pub fn skillPolicyMatches(self: *Session, lease: *CatalogLease, policy: SkillPolicyInput) bool {
+        self.lock();
+        defer self.unlock();
+        const inputs = self.skill_restore_inputs orelse return false;
+        const installed = inputs.borrow();
+        if (installed.catalog != lease or installed.policy.granted_skill_ids.len != policy.granted_skill_ids.len) return false;
+        for (installed.policy.granted_skill_ids, policy.granted_skill_ids) |old, current|
+            if (!std.mem.eql(u8, old, current)) return false;
+        return true;
+    }
+
     /// Rebinds the model of this Session while it is idle. AgentCore rejects
     /// the same operation while a Run is active; the caller uses that busy
     /// result to keep model changes out of the in-flight Run path.

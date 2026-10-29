@@ -61,7 +61,7 @@ test "history capacity executes more than sixteen Runs through worker retirement
     for (0..20) |_| {
         fake_core.rearmControlled();
         fake_core.setNextPlan(.controlled);
-        _ = try scenario.control.runTask(scenario.task_id, .{ .text = "continue the same history" });
+        _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "continue the same history" });
         try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
@@ -193,7 +193,7 @@ const ReviewScenario = struct {
         // before this fixture starts the Run whose approval it exercises.
         try waitInitialTaskCatalog(&self.control, self.task_id);
         try settleWorkspaceSkillQueries(&self.control, try self.control.taskWorkspaceId(self.task_id));
-        _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
+        _ = try runPreparedTask(&self.control, self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, if (plan == .ui_wait) "\"currentRunPhase\":\"waiting_ui\"" else "\"inputReady\":true");
         return self;
     }
@@ -385,7 +385,7 @@ test "Control permission reviewer keeps repeated manual and full-access requests
         var input = productControlTaskInput();
         input.approval_mode = mode;
         const task_id = try control.createTask(input);
-        const run_id = try control.runTask(task_id, .{ .text = "Inspect two local operations" });
+        const run_id = try runPreparedTask(&control, task_id, .{ .text = "Inspect two local operations" });
         try waitControlSnapshot(&control, "\"pendingUi\":{\"requestId\":\"1\"");
         try control.respondUi(task_id, run_id, 1, .{ .permission = .allow_once });
         try waitControlSnapshot(&control, "\"pendingUi\":{\"requestId\":\"2\"");
@@ -425,7 +425,7 @@ test "Control permission reviewer cannot preempt a valid manual command with a q
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input);
-        const run_id = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+        const run_id = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         const request_id = control.task_runtime.find(task_id).?.runtime.pending_ui_request_id;
         transport.released.store(true, .release);
@@ -470,7 +470,7 @@ test "Control permission reviewer survives stale identities and unavailable manu
     var input = productControlTaskInput();
     input.approval_mode = .auto_review;
     const task_id = try control.createTask(input);
-    const run_id = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+    const run_id = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
     try transport.awaitEntered(&control);
     const task = control.task_runtime.find(task_id).?;
     const identity = task.runtime.permission_review.identity.?;
@@ -540,7 +540,7 @@ test "Control permission reviewer commits once-only decisions and projects audit
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input);
-        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try transport.awaitEntered(&control);
         try waitControlSnapshot(&control, "\"permissionReviewState\":\"reviewing\"");
         const reviewing_signals = control.task_runtime.workspaceSignals(control.task_runtime.find(task_id).?.durable.workspace_id);
@@ -599,7 +599,7 @@ test "Control permission reviewer scrubs decoded arguments and leaves MCP and Ho
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input);
-        _ = try control.runTask(task_id, .{ .text = "Inspect the local operation" });
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Inspect the local operation" });
         if (case == 0) {
             try transport.awaitEntered(&control);
             try std.testing.expect(!transport.invalid.load(.acquire));
@@ -634,7 +634,7 @@ test "Control permission reviewer cancellation survives manual response delete a
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input);
-        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         switch (case) {
             0 => {
@@ -683,7 +683,7 @@ test "Control permission reviewer requires confirmed persistence and never retri
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         const task_id = try control.createTask(input);
-        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         persistence.result = failure;
         transport.released.store(true, .release);
@@ -717,7 +717,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
         id.* = try control.createTask(input);
-        _ = try control.runTask(id.*, .{ .text = "Perform the bounded operation" });
+        _ = try runPreparedTask(&control, id.*, .{ .text = "Perform the bounded operation" });
         for (0..1000) |_| {
             control.syncLifecycle();
             const task = control.task_runtime.find(id.*).?;
@@ -730,7 +730,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
     try waitSetTaskArchived(&control, ids[0]);
     try control.setTaskArchived(ids[0], false);
     fake_core.setNextPlan(.ui_wait);
-    _ = try control.runTask(ids[0], .{ .text = "A new bounded operation" });
+    _ = try runPreparedTask(&control, ids[0], .{ .text = "A new bounded operation" });
     for (0..1000) |_| {
         control.syncLifecycle();
         if (first.runtime.permission_review.phase == .needs_user) break;
@@ -844,7 +844,7 @@ test "Task permission review carries earlier user authorization into a continuat
     fake_core.releaseControlled();
     try waitControlSnapshot(&scenario.control, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setNextPlan(.ui_wait);
-    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "Start installing" });
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "Start installing" });
     try waitControlSnapshot(&scenario.control, "\"currentRunPhase\":\"waiting_ui\"");
     var prepared = try scenario.prepare();
     defer prepared.deinit();
@@ -1718,7 +1718,7 @@ test "Skill source authorization returns after close failures and checkpoint int
             // Close admission succeeds, but Session close must not start until
             // the exporting checkpoint has settled and released its lease.
             fake_core.controlNextCheckpointExport();
-            _ = try workbench.runTask(task_id, .{ .text = "hold checkpoint during removal" });
+            _ = try runPreparedTask(&workbench, task_id, .{ .text = "hold checkpoint during removal" });
             fake_core.waitCheckpointExportEntered();
             try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
             fake_core.failNextSessionDestroy();
@@ -1734,12 +1734,12 @@ test "Skill source authorization returns after close failures and checkpoint int
             workbench.task_runtime.tasks[0].?.durable.runs[0].?.coverage,
         );
         try settleWorkspaceSkillQueries(&workbench, workspace_id);
-        try probe.expectQueries(2);
+        try probe.expectQueries(if (immediate_failure) 3 else 2);
         try expectWorkspaceSkillProjection(&workbench, workspace_id, true);
         // The restored grant remains usable, rather than only displaying ready.
         try workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id));
         try settleWorkspaceSkillQueries(&workbench, workspace_id);
-        try probe.expectQueries(3);
+        try probe.expectQueries(if (immediate_failure) 4 else 3);
     }
 }
 
@@ -1894,7 +1894,7 @@ test "new Task model selection binds only the created Task and rejects stale aut
         "fixture-model",
         workbench.newTaskAdmissionView().active_model_ref.?.model_id,
     );
-    const run_id = try workbench.runTask(task_id, .{ .text = "Use the model selected before the first send" });
+    const run_id = try runPreparedTask(&workbench, task_id, .{ .text = "Use the model selected before the first send" });
     try waitControlSnapshot(&workbench, "\"phase\":\"completed\"");
     const task = workbench.task_runtime.findConst(task_id).?;
     try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
@@ -2157,7 +2157,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         const old_execution_generation = task.durable.execution_generation;
         const old_revision = task.durable.model_intent.?.revision;
         const old_epoch = task.durable.binding_epoch;
-        const first_run = try workbench.runTask(task_id, .{ .text = "stay on the already installed source" });
+        const first_run = try runPreparedTask(&workbench, task_id, .{ .text = "stay on the already installed source" });
         try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
         const current = workbench.modelsView().custom_providers[0];
         if (replace_credential) {
@@ -2226,7 +2226,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
         try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
         try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
-        try std.testing.expectEqual(@as(u64, 2), try workbench.runTask(task_id, .{ .text = "apply the explicitly selected new authority" }));
+        try std.testing.expectEqual(@as(u64, 2), try runPreparedTask(&workbench, task_id, .{ .text = "apply the explicitly selected new authority" }));
         try std.testing.expectEqual(execution.protocol, task.durable.runs[1].?.execution_protocol);
     }
 }
@@ -2313,7 +2313,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         const task = workbench.task_runtime.find(id).?;
         const old_epoch = task.durable.binding_epoch;
         const old_generation = task.durable.execution_generation;
-        _ = try workbench.runTask(id, .{ .text = "keep this original context" });
+        _ = try runPreparedTask(&workbench, id, .{ .text = "keep this original context" });
         var revision: u64 = undefined;
 
         try waitCheckpointRecord(&workbench, &persistence);
@@ -2604,7 +2604,7 @@ test "Task model rebind confirms a full target connection and restores the origi
             try std.testing.expect(task.runtime.last_restore_failure == null);
             try std.testing.expectEqualStrings("custom_provider:" ++ TaskModelsVault.slot, execution.provider_id);
             {
-                const next_run = try workbench.runTask(id, .{ .text = "continue on the selected connection" });
+                const next_run = try runPreparedTask(&workbench, id, .{ .text = "continue on the selected connection" });
                 try std.testing.expectEqual(@as(u64, 2), next_run);
             }
             for (0..2000) |_| {
@@ -2702,7 +2702,7 @@ test "Task model rebind candidate close releases an earlier shared writer waiter
     } else return error.WaiterDidNotDetach;
     const id = try workbench.createTask(input);
     const task = workbench.task_runtime.find(id).?;
-    _ = try workbench.runTask(id, .{ .text = "Preserve this context while changing connection." });
+    _ = try runPreparedTask(&workbench, id, .{ .text = "Preserve this context while changing connection." });
     try waitCheckpointRecord(&workbench, &barrier.persistence);
     for (0..5000) |_| {
         try wake_loop.drain(&workbench);
@@ -2873,7 +2873,7 @@ test "Task model rebind shutdown settles completed and running close workers wit
         const id = try workbench.createTask(input);
         const task = workbench.task_runtime.find(id).?;
         const epoch = task.durable.binding_epoch;
-        _ = try workbench.runTask(id, .{ .text = "Keep this original context." });
+        _ = try runPreparedTask(&workbench, id, .{ .text = "Keep this original context." });
         try waitCheckpointRecord(&workbench, &persistence);
         for (0..5000) |_| {
             try wake_loop.drain(&workbench);
@@ -2976,7 +2976,7 @@ test "detached Task restores its committed target across restart without a globa
         input.approval_mode = .manual;
         const id = try first.createTask(input);
         if (has_history) {
-            _ = try first.runTask(id, .{ .text = "original context survives a different protocol" });
+            _ = try runPreparedTask(&first, id, .{ .text = "original context survives a different protocol" });
             try waitCheckpointRecord(&first, &persistence);
         }
         const task = first.task_runtime.findConst(id).?;
@@ -3046,7 +3046,7 @@ test "detached Task restores its committed target across restart without a globa
         try std.testing.expectEqualStrings("https://other.example.com/v1/responses", execution.base_url);
         try std.testing.expectEqual(models_contract.Protocol.openai_responses, execution.protocol);
         if (has_history) try std.testing.expectEqual(models_contract.Protocol.anthropic_messages, recovered.durable.runs[0].?.execution_protocol);
-        const run_id = try restored.runTask(id, .{ .text = "continue using my selected target" });
+        const run_id = try runPreparedTask(&restored, id, .{ .text = "continue using my selected target" });
         try std.testing.expectEqual(@as(u64, if (has_history) 2 else 1), run_id);
         try std.testing.expect(restored.modelsView().default_selection == null);
     };
@@ -3095,7 +3095,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     const id = try first.createTask(input);
     const task = first.task_runtime.find(id).?;
     const workspace_id = task.durable.workspace_id;
-    _ = try first.runTask(id, .{ .text = "original context survives the crash" });
+    _ = try runPreparedTask(&first, id, .{ .text = "original context survives the crash" });
     try waitCheckpointRecord(&first, &persistence);
     for (0..2000) |_| {
         first.syncLifecycle();
@@ -3141,7 +3141,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     });
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
-    try std.testing.expectEqual(@as(u64, 2), try first.runTask(id, .{ .text = "interrupted by a crash" }));
+    try std.testing.expectEqual(@as(u64, 2), try runPreparedTask(&first, id, .{ .text = "interrupted by a crash" }));
     try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
     try std.testing.expectEqualStrings("next-model", task.durable.execution_model);
     try std.testing.expect(task.durable.checkpoint.?.anchor.terminal == .approval);
@@ -3193,7 +3193,24 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     try std.testing.expectEqualStrings("next-model", recovered.durable.execution_model);
     try std.testing.expectEqualStrings("next-model", recovered.durable.checkpoint.?.session.model);
     try std.testing.expectEqualStrings("next-model", recovered.runtime.executionConst().?.model);
-    try std.testing.expectEqual(@as(u64, 3), try restored.runTask(id, .{ .text = "continue after the crash" }));
+    try std.testing.expectEqual(@as(u64, 3), try runPreparedTask(&restored, id, .{ .text = "continue after the crash" }));
+}
+
+// tasks.run is synchronous: a fresh catalog wait returns no Run identity.
+// Only successful direct-admission fixtures wait and retry that public command;
+// sendInput tests below exercise one-shot reception and Host-owned preparation.
+fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput) !u64 {
+    for (0..5000) |_| {
+        return workbench.runTask(task_id, input) catch |err| switch (err) {
+            error.CatalogLoading => {
+                try workbench.drainAgentEvents();
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                continue;
+            },
+            else => return err,
+        };
+    }
+    return error.TestUnexpectedResult;
 }
 
 fn waitCatalogReady(
@@ -3487,7 +3504,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     defer if (workbench_initialized) workbench.deinit();
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "persist checkpoint" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "persist checkpoint" });
     try waitCheckpointRecord(&workbench, &persistence);
 
     var digest: [32]u8 = undefined;
@@ -3527,7 +3544,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
 
     fake_core.setCheckpointGeneration(2);
-    _ = try workbench.runTask(task_id, .{ .text = "checkpoint after compact" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "checkpoint after compact" });
     try waitHistoryNeedle(
         &workbench,
         &persistence,
@@ -3741,7 +3758,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     fake_core.unlock();
     try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), fresh_permission_mode);
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), fresh_shell_policy);
-    _ = try first.runTask(task_id, .{ .text = "remember restart nonce" });
+    _ = try runPreparedTask(&first, task_id, .{ .text = "remember restart nonce" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
         u8,
@@ -3941,7 +3958,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     try std.testing.expectEqual(@as(usize, 12), fake_core.last_restored_allowed_tool_count);
 
-    _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
+    _ = try runPreparedTask(&restored, task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
@@ -4219,7 +4236,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
         .{ .interactive = null },
     );
     try waitInitialTaskCatalog(&first, task_id);
-    _ = try first.runTask(task_id, .{ .text = "automatic first run" });
+    _ = try runPreparedTask(&first, task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
         u8,
@@ -4362,7 +4379,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
         product_control.CatalogAvailability.unavailable,
         (try continued.taskCatalog(task_id)).availability,
     );
-    _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
+    _ = try runPreparedTask(&continued, task_id, .{ .text = "automatic second run" });
     try waitTaskSnapshot(
         &continued,
         "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
@@ -4429,7 +4446,7 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     defer workbench.deinit();
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "cancel checkpoint export" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "cancel checkpoint export" });
     fake_core.waitCheckpointExportEntered();
     // Product terminal publication must not wait for the same executor job's
     // controlled checkpoint export to be released.
@@ -4484,7 +4501,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     defer if (initialized) workbench.deinit();
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "descriptor commit fails" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "descriptor commit fails" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
     var snapshot: [128 * 1024]u8 = undefined;
@@ -4595,7 +4612,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     defer if (initialized) workbench.deinit();
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "descriptor outcome is unknown" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "descriptor outcome is unknown" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
     var snapshot: [128 * 1024]u8 = undefined;
@@ -4637,7 +4654,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     persistence.result = .committed;
     try workbench.renameTask(task_id, "Saved after retry");
     fake_core.setCheckpointGeneration(1);
-    const continuation_id = try workbench.runTask(task_id, .{
+    const continuation_id = try runPreparedTask(&workbench, task_id, .{
         .text = "continue after unknown descriptor",
     });
     try std.testing.expectEqual(@as(u64, 2), continuation_id);
@@ -4735,7 +4752,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
     const task_id = try first.createTask(productControlTaskInput());
-    _ = try first.runTask(task_id, .{ .text = "prepare recovery queue failure" });
+    _ = try runPreparedTask(&first, task_id, .{ .text = "prepare recovery queue failure" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
         u8,
@@ -4790,13 +4807,13 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     fake_core.rearmControlled();
     var blockers_released = false;
     defer if (!blockers_released) fake_core.releaseControlled();
-    _ = try restored.runTask(blocker_one, .{ .text = "occupy recovery worker" });
+    _ = try runPreparedTask(&restored, blocker_one, .{ .text = "occupy recovery worker" });
     try waitTaskSnapshot(
         &restored,
         "\"title\":\"restore blocker one\"",
         "\"currentRunPhase\":\"running\"",
     );
-    _ = try restored.runTask(blocker_two, .{ .text = "fill recovery queue" });
+    _ = try runPreparedTask(&restored, blocker_two, .{ .text = "fill recovery queue" });
 
     const revision_before_rejection = restored.currentRevision();
     try std.testing.expectError(
@@ -4883,7 +4900,7 @@ test "terminal drain candidate restarts without a stale active operation" {
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
     const task_id = try first.createTask(productControlTaskInput());
-    _ = try first.runTask(task_id, .{ .text = "persist terminal boundary" });
+    _ = try runPreparedTask(&first, task_id, .{ .text = "persist terminal boundary" });
     const run = &first.task_runtime.tasks[0].?.durable.runs[0].?;
     for (0..10_000) |_| {
         if (product_task.testing.state_module.terminalPayload(run) != null) break;
@@ -5001,7 +5018,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     try checkpoint_store.verify(identity);
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "Continue without saved history" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "Continue without saved history" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
@@ -5045,7 +5062,7 @@ test "unavailable checkpoint store does not close Task admission" {
     );
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "checkpoint store unavailable" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "checkpoint store unavailable" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
     try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
@@ -5526,7 +5543,7 @@ test "scheduled durable admission failure does not block an interactive Product 
         null,
         .{ .interactive = null },
     );
-    _ = try workbench.runTask(task_id, .{ .text = "Continue interactively" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "Continue interactively" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
@@ -5748,7 +5765,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
         null,
         .{ .interactive = null },
     );
-    _ = try workbench.runTask(task_id, .{ .text = "Remain accepted" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "Remain accepted" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.lock();
@@ -5829,7 +5846,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         null,
         .{ .interactive = null },
     );
-    _ = try workbench.runTask(task_id, .{ .multimodal = .{
+    _ = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = "Compare these",
         .attachment_ids = &ids,
         .acceptance = .{ .context = &acceptance, .accept_fn = Acceptance.accept },
@@ -5859,7 +5876,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         &pure_descriptor_storage,
     );
     const pure_ids = [_]u64{pure_descriptors[0].id};
-    const pure_run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+    const pure_run_id = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = "",
         .attachment_ids = &pure_ids,
     } });
@@ -5897,7 +5914,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         &text_descriptor_storage,
     );
     const retry_ids = [_]u64{retry_descriptors[0].id};
-    const text_run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+    const text_run_id = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = "Summarize this file",
         .attachment_ids = &retry_ids,
     } });
@@ -5957,7 +5974,7 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try closeSession(rejected, .session_close);
 }
 
-test "Product Control pins an async catalog and admits typed Skill through the existing executor" {
+test "Skill input is accepted once while fresh preparation waits and failed freshness withdraws grants" {
     fake_core.reset();
     fake_core.setCatalogPlan(.degraded);
     const runtime = try createTestComposition(.{
@@ -5989,7 +6006,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
             .queue_capacity = 2,
             .max_workspaces = 1,
             .max_tasks = 1,
-            .max_runs_per_task = 1,
+            .max_runs_per_task = 3,
             .max_tools_per_run = 1,
         },
         .{
@@ -6025,16 +6042,23 @@ test "Product Control pins an async catalog and admits typed Skill through the e
     );
     const task_catalog = try workbench.taskCatalog(task_id);
     try std.testing.expectEqualStrings(catalog.revision, task_catalog.revision);
-    _ = try workbench.runTask(task_id, .{ .skill = .{
+    var probe: WorkspaceSkillQueryProbe = .{};
+    probe.attach(&workbench);
+    probe.hold_queries.store(true, .release);
+    defer probe.hold_queries.store(false, .release);
+    const accepted = try workbench.sendInput("fresh-skill", task_id, .{ .skill = .{
         .skill_id = fixture.fixture_skill_id,
         .catalog_revision = catalog.revision,
         .selection_revision = catalog.selection_revision.?,
         .argument_values = &.{ "src/main.zig", "correctness" },
     } });
-    try waitControlSnapshot(
-        &workbench,
-        "\"terminal\":{\"outcome\":\"completed\"",
-    );
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    const task = workbench.task_runtime.find(task_id).?;
+    try std.testing.expectEqual(@as(usize, 1), task.input_submissions.items.len);
+    try std.testing.expectEqual(.waiting, task.input_submissions.items[0].state);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.run_calls);
+    probe.hold_queries.store(false, .release);
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try waitControlSnapshot(
         &workbench,
         "\"skillCatalog\":{\"availability\":\"degraded\"",
@@ -6055,6 +6079,36 @@ test "Product Control pins an async catalog and admits typed Skill through the e
     fake_core.unlock();
     try std.testing.expect(skill_seen);
     try std.testing.expect(input_matches);
+    // The query failure retains a useful chooser view, but grants no execution.
+    try settleWorkspaceSkillQueries(&workbench, workspace_id);
+    fake_core.setCatalogPlan(.query_failure);
+    const visible = try workbench.workspaceCatalog(workspace_id);
+    const failed = try workbench.sendInput("unavailable-skill", task_id, .{ .skill = .{
+        .skill_id = fixture.fixture_skill_id,
+        .catalog_revision = visible.revision,
+        .selection_revision = visible.selection_revision.?,
+        .argument_values = &.{},
+    } });
+    try std.testing.expectEqual(.accepted, failed.outcome);
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (task.input_submissions.items.len != 0 and task.input_submissions.items[0].state == .failed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.catalog_unavailable, task.input_submissions.items[0].reason.?);
+    var access = try task.runtime.acquireAccess();
+    var restore_inputs = try access.captureRestoreInputs();
+    access.deinit();
+    defer restore_inputs.deinit() catch unreachable;
+    try std.testing.expectEqual(@as(usize, 0), restore_inputs.skill.?.borrow().policy.granted_skill_ids.len);
+    const ordinary = try workbench.sendInput("text-without-skills", task_id, .{ .text = "Continue without Skill grants" });
+    try std.testing.expectEqual(.accepted, ordinary.outcome);
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (task.durable.runs[1] != null and product_task.testing.state_module.productTerminalFacts(&task.durable.runs[1].?) != null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
 }
 
 test "Workspace incomplete catalog refresh preserves the committed last-good authority" {
@@ -6217,7 +6271,7 @@ test "Task model selection during a Run persists intent for the next explicit ad
     fake_core.setSessionPlan(.controlled);
     var released = false;
     defer if (!released) fake_core.releaseControlled();
-    const first = try workbench.runTask(id, .{ .text = "first frozen model" });
+    const first = try runPreparedTask(&workbench, id, .{ .text = "first frozen model" });
     try std.testing.expect(first != 0);
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     try std.testing.expectEqual(@as(u64, 2), try workbench.selectTaskModel(id, taskModelSelectionInput(&workbench, 1, "fixture-model-2")));
@@ -6503,7 +6557,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
 
     try workbench.renameTask(second_task, "Preset title");
-    _ = try workbench.runTask(second_task, .{ .text = "must not replace preset" });
+    _ = try runPreparedTask(&workbench, second_task, .{ .text = "must not replace preset" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     var preset_title_snapshot: [128 * 1024]u8 = undefined;
     const preset_title_snapshot_bytes = try workbench.writeAggregateFixture(&preset_title_snapshot);
@@ -6516,7 +6570,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     var completion_released = false;
     defer if (!completion_released) fake_core.releaseCompletion();
     fake_core.setSessionPlan(.controlled);
-    _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
+    _ = try runPreparedTask(&workbench, first_task, .{ .text = "automatic text run" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     var provisional_title_snapshot: [128 * 1024]u8 = undefined;
     const provisional_title_snapshot_bytes = try workbench.writeAggregateFixture(
@@ -6977,12 +7031,12 @@ test "schedule rejection retains the automatic Task created before a full Run qu
         null,
         .{ .interactive = null },
     );
-    _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
+    _ = try runPreparedTask(&workbench, running_task, .{ .text = "hold worker" });
     try waitControlSnapshot(
         &workbench,
         "\"currentRunPhase\":\"running\"",
     );
-    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+    _ = try runPreparedTask(&workbench, queued_task, .{ .text = "fill queue" });
 
     try std.testing.expectError(
         error.QueueFull,
@@ -7160,7 +7214,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 0), runs_before);
 
-    _ = try workbench.runTask(task_id, .{ .skill = .{
+    _ = try runPreparedTask(&workbench, task_id, .{ .skill = .{
         .skill_id = fixture.fixture_skill_id,
         .catalog_revision = catalog.revision,
         .selection_revision = catalog.selection_revision.?,
@@ -7176,7 +7230,8 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     fake_core.lock();
     const catalog_releases = fake_core.catalog_releases;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), catalog_releases);
+    try std.testing.expectEqual(@as(usize, 3), catalog_releases);
+    try std.testing.expectEqual(fake_core.catalog_queries, catalog_releases);
 }
 
 test "Product Control refreshes an idle Task from committed policy after an enablement write failure" {
@@ -7236,7 +7291,7 @@ test "Product Control refreshes an idle Task from committed policy after an enab
         null,
         .{ .interactive = null },
     );
-    _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "hold refresh" });
     try waitControlSnapshot(
         &workbench,
         "\"currentRunPhase\":\"running\"",
@@ -7428,7 +7483,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
+    const run_id = try runPreparedTask(&workbench, task_id, .{ .text = "finish before deletion" });
     fake_core.waitRunEntered();
     _ = run_id;
     try workbench.deleteTask(task_id);
@@ -7462,7 +7517,8 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
 
     const task_id = try workbench.createTask(productControlTaskInput());
     const workspace_id = try workbench.taskWorkspaceId(task_id);
-    _ = try workbench.runTask(
+    _ = try runPreparedTask(
+        &workbench,
         task_id,
         .{ .text = "stop when the workspace is removed" },
     );
@@ -7535,7 +7591,8 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    const run_id = try workbench.runTask(
+    const run_id = try runPreparedTask(
+        &workbench,
         task_id,
         .{ .text = "finish before cancel arrives" },
     );
@@ -7588,7 +7645,7 @@ test "Product Control manual compact uses the active operation lane and appends 
         error.NoSuchRun,
         workbench.compactTaskAtBinding(task_id, 1),
     );
-    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     _ = try workbench.compactTaskAtBinding(task_id, 1);
@@ -7659,15 +7716,15 @@ test "compact queue rejection persists a legal terminal record and returns its o
     const compact_task = try workbench.createTask(productControlTaskInput());
     const blocking_task = try workbench.createTask(productControlTaskInput());
     const queued_task = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(compact_task, .{ .text = "establish conversation" });
+    _ = try runPreparedTask(&workbench, compact_task, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     defer fake_core.releaseControlled();
-    _ = try workbench.runTask(blocking_task, .{ .text = "hold worker" });
+    _ = try runPreparedTask(&workbench, blocking_task, .{ .text = "hold worker" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
-    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+    _ = try runPreparedTask(&workbench, queued_task, .{ .text = "fill queue" });
 
     const operation_id = try workbench.compactTaskAtBinding(compact_task, 1);
     try std.testing.expectEqual(@as(u64, 1), operation_id);
@@ -7725,7 +7782,7 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
@@ -7773,7 +7830,7 @@ test "Product Control terminal compact result wins a too-late cancellation race"
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
@@ -7816,9 +7873,9 @@ test "Product Control coverage saves queued Run cancellation before and after th
     const target_id = try workbench.createTask(productControlTaskInput());
     try workbench.renameTask(target_id, "queued cancellation target");
     fake_core.setSessionPlan(.controlled);
-    _ = try workbench.runTask(blocker_id, .{ .text = "occupy the worker" });
+    _ = try runPreparedTask(&workbench, blocker_id, .{ .text = "occupy the worker" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
-    const run_id = try workbench.runTask(target_id, .{ .text = "cancel while queued" });
+    const run_id = try runPreparedTask(&workbench, target_id, .{ .text = "cancel while queued" });
     const task = workbench.task_runtime.find(target_id).?;
     const run = task_state.findRun(task.durable.runs, run_id).?;
     persistence.watch(&workbench, target_id, run_id, false);
@@ -7876,13 +7933,13 @@ test "Product Control coverage saves queued compact cancellation without enterin
     const compact_task_id = try workbench.createTask(productControlTaskInput());
     try workbench.renameTask(blocking_task_id, "blocking target");
     try workbench.renameTask(compact_task_id, "compact target");
-    _ = try workbench.runTask(blocking_task_id, .{ .text = "first conversation" });
+    _ = try runPreparedTask(&workbench, blocking_task_id, .{ .text = "first conversation" });
     try waitTaskSnapshot(
         &workbench,
         "\"title\":\"blocking target\"",
         "\"terminal\":{\"outcome\":\"completed\"",
     );
-    _ = try workbench.runTask(compact_task_id, .{ .text = "second conversation" });
+    _ = try runPreparedTask(&workbench, compact_task_id, .{ .text = "second conversation" });
     try waitTaskSnapshot(
         &workbench,
         "\"title\":\"compact target\"",
@@ -7891,7 +7948,8 @@ test "Product Control coverage saves queued compact cancellation without enterin
 
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
-    const blocking_run_id = try workbench.runTask(
+    const blocking_run_id = try runPreparedTask(
+        &workbench,
         blocking_task_id,
         .{ .text = "occupy the only worker" },
     );
@@ -7945,17 +8003,17 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
     const target_id = try workbench.createTask(productControlTaskInput());
     try workbench.renameTask(target_id, "worker failure target");
     if (compact_operation) {
-        _ = try workbench.runTask(target_id, .{ .text = "establish Conversation" });
+        _ = try runPreparedTask(&workbench, target_id, .{ .text = "establish Conversation" });
         try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     }
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
-    _ = try workbench.runTask(blocker_id, .{ .text = "occupy the worker" });
+    _ = try runPreparedTask(&workbench, blocker_id, .{ .text = "occupy the worker" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     const operation_id = if (compact_operation)
         try workbench.compactTaskAtBinding(target_id, 1)
     else
-        try workbench.runTask(target_id, .{ .text = "fail the worker handoff" });
+        try runPreparedTask(&workbench, target_id, .{ .text = "fail the worker handoff" });
     const task = workbench.task_runtime.find(target_id).?;
     // Invalidate the Agent reservation before Executor claims the job. This
     // exercises the actual beginRunOutcome failure / executePreparedCompact
@@ -8059,7 +8117,7 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "wait for shutdown" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "wait for shutdown" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"interrupted\"");
@@ -8127,7 +8185,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     const task_id = try first.createTask(productControlTaskInput());
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(task_id, .{ .text = "checkpoint before shutdown" }),
+        try runPreparedTask(&first, task_id, .{ .text = "checkpoint before shutdown" }),
     );
     try waitCheckpointRecord(&first, &persistence);
 
@@ -8136,7 +8194,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 2),
-        try first.runTask(task_id, .{ .text = "interrupt this Run during shutdown" }),
+        try runPreparedTask(&first, task_id, .{ .text = "interrupt this Run during shutdown" }),
     );
     try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
     first.shutdownExecutor();
@@ -8205,7 +8263,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     fake_core.setCheckpointGeneration(3);
     try std.testing.expectEqual(
         @as(u64, 3),
-        try restored.runTask(task_id, .{ .text = "continue after restart" }),
+        try runPreparedTask(&restored, task_id, .{ .text = "continue after restart" }),
     );
     try waitTaskSnapshot(
         &restored,
@@ -8277,7 +8335,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(task_id, .{ .text = "resolve permission before checkpoint" }),
+        try runPreparedTask(&first, task_id, .{ .text = "resolve permission before checkpoint" }),
     );
     try waitTaskSnapshot(
         &first,
@@ -8297,7 +8355,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 2),
-        try first.runTask(task_id, .{ .text = "killed before terminal" }),
+        try runPreparedTask(&first, task_id, .{ .text = "killed before terminal" }),
     );
     try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
     const killed_history = try std.testing.allocator.dupe(
@@ -8374,7 +8432,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     fake_core.setCheckpointGeneration(2);
     try std.testing.expectEqual(
         @as(u64, 3),
-        try restored.runTask(task_id, .{ .text = "request permission after checkpoint restore" }),
+        try runPreparedTask(&restored, task_id, .{ .text = "request permission after checkpoint restore" }),
     );
     try waitTaskSnapshot(
         &restored,
@@ -8439,7 +8497,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(task_id, .{ .text = "resolve permission before first checkpoint" }),
+        try runPreparedTask(&first, task_id, .{ .text = "resolve permission before first checkpoint" }),
     );
     try waitTaskSnapshot(
         &first,
@@ -8549,7 +8607,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 2),
-        try restored.runTask(task_id, .{ .text = "request permission after fresh attach" }),
+        try runPreparedTask(&restored, task_id, .{ .text = "request permission after fresh attach" }),
     );
     try waitTaskSnapshot(
         &restored,
@@ -8611,7 +8669,7 @@ test "poisoned Session closes and the same Task continues with a fresh Conversat
     const task_id = try workbench.createTask(productControlTaskInput());
     try std.testing.expectEqual(
         @as(u64, 1),
-        try workbench.runTask(task_id, .{ .text = "poison this Session" }),
+        try runPreparedTask(&workbench, task_id, .{ .text = "poison this Session" }),
     );
     try waitTaskSnapshot(
         &workbench,
@@ -8639,7 +8697,7 @@ test "poisoned Session closes and the same Task continues with a fresh Conversat
     );
     try std.testing.expectEqual(
         @as(u64, 2),
-        try workbench.runTask(task_id, .{ .text = "continue the same Task" }),
+        try runPreparedTask(&workbench, task_id, .{ .text = "continue the same Task" }),
     );
     try waitTaskSnapshot(
         &workbench,
@@ -8710,7 +8768,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     try first.renameTask(continuation_task, "continuation target");
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(continuation_task, .{ .text = "durable checkpoint" }),
+        try runPreparedTask(&first, continuation_task, .{ .text = "durable checkpoint" }),
     );
     try waitCheckpointRecord(&first, &persistence);
 
@@ -8718,7 +8776,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     try first.renameTask(blocker_task, "executor blocker");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
-    _ = try first.runTask(blocker_task, .{ .text = "occupy executor" });
+    _ = try runPreparedTask(&first, blocker_task, .{ .text = "occupy executor" });
     try waitTaskSnapshot(
         &first,
         "\"title\":\"executor blocker\"",
@@ -8726,7 +8784,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     );
     try std.testing.expectEqual(
         @as(u64, 2),
-        try first.runTask(continuation_task, .{ .text = "never entered AgentCore" }),
+        try runPreparedTask(&first, continuation_task, .{ .text = "never entered AgentCore" }),
     );
     try waitTaskSnapshot(
         &first,
@@ -8798,7 +8856,8 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     fake_core.setCheckpointGeneration(2);
     try std.testing.expectEqual(
         @as(u64, 3),
-        try restored.runTask(
+        try runPreparedTask(
+            &restored,
             continuation_task,
             .{ .text = "continue after queued tail" },
         ),
@@ -8857,7 +8916,8 @@ test "late event from a finalized Run is dropped and newer active work continues
     try installControlExecution(&workbench);
 
     const task_id = try workbench.createTask(productControlTaskInput());
-    const first_run_id = try workbench.runTask(
+    const first_run_id = try runPreparedTask(
+        &workbench,
         task_id,
         .{ .text = "finish first" },
     );
@@ -8866,7 +8926,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.rearmControlled();
-    _ = try workbench.runTask(task_id, .{ .text = "new active work" });
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "new active work" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     const encoded = "{\"text_chunk\":\"late\"}";
@@ -8968,7 +9028,7 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
     // The Core receives bounded references, never the 800 MB of file bodies.
     fake_core.expected_multimodal_parts = null;
     fake_core.expected_multimodal_text = text[0 .. text.len - 1];
-    const run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+    const run_id = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = text[0 .. text.len - 1],
         .attachment_ids = &ids,
     } });
@@ -9079,7 +9139,7 @@ test "approval mutation workers retain the same Session and historical Run permi
         }
         // A permission request after two Core mutations carries generation three.
         // Its audit keeps the creating Run profile when the Task later changes.
-        const manual_run = try control.runTask(task_id, .{ .text = "ask at the current policy generation" });
+        const manual_run = try runPreparedTask(&control, task_id, .{ .text = "ask at the current policy generation" });
         try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
         const request_id = task.runtime.pending_ui_request_id;
         {
@@ -9139,7 +9199,7 @@ test "approval mutation workers retain the same Session and historical Run permi
             if (session.in_use and !session.destroyed) session.plan = .immediate;
             session.unlock();
         }
-        const full_run = try control.runTask(task_id, .{ .text = "execute under the committed full access mode" });
+        const full_run = try runPreparedTask(&control, task_id, .{ .text = "execute under the committed full access mode" });
         // currentRunPhase projects active Runs only; completion is a durable
         // terminal fact on the creating Run, not an active snapshot phase.
         for (0..2000) |_| {
@@ -9427,7 +9487,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     input.approval_mode = .manual;
     const task_id = try control.createTask(input);
     try waitInitialTaskCatalog(&control, task_id);
-    _ = try control.runTask(task_id, .{ .text = "fail without covering Conversation history" });
+    _ = try runPreparedTask(&control, task_id, .{ .text = "fail without covering Conversation history" });
     try waitTaskSnapshot(&control, "\"id\":\"1\"", "\"continuationRecoveryAvailable\":true");
     const task = control.task_runtime.find(task_id).?;
     try std.testing.expect(task.durable.checkpoint == null);
@@ -10037,7 +10097,7 @@ test "approval delegation can change while the only Run worker waits for permiss
         const task_id = try control.createTask(input);
         const task = control.task_runtime.find(task_id).?;
         const route = task.runtime.routeId();
-        const run_id = try control.runTask(task_id, .{ .text = "review this pending operation explicitly" });
+        const run_id = try runPreparedTask(&control, task_id, .{ .text = "review this pending operation explicitly" });
         try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
         const request_id = task.runtime.pending_ui_request_id;
         try std.testing.expect(request_id != 0);
@@ -10972,7 +11032,7 @@ test "Product view scopes exclude history from navigation and bound selected Run
     defer scenario.deinit();
     fake_core.releaseControlled();
     try waitControlSnapshot(&scenario.control, "\"terminal\":{\"outcome\":\"completed\"");
-    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "second-page-only-input" });
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "second-page-only-input" });
     try waitTaskSnapshot(&scenario.control, "\"id\":\"2\",\"conversationCoverage\"", "\"phase\":\"completed\"");
     var storage: [512 * 1024]u8 = undefined;
     const index_bytes = try scenario.control.writeViewFixture(&storage, .{});
@@ -11244,7 +11304,7 @@ test "image permission review carries Host cost facts without trusting a same-na
         var input = productControlTaskInput();
         input.approval_mode = .manual;
         const task_id = try control.createTask(input);
-        _ = try control.runTask(task_id, .{ .text = "Draw without exposing run-image-secret-a or fixture-secret" });
+        _ = try runPreparedTask(&control, task_id, .{ .text = "Draw without exposing run-image-secret-a or fixture-secret" });
         try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
         _ = try control.task_runtime.testSetPermissionReviewDelegation(task_id, true);
         var prepared = (try control.task_runtime.preparePermissionReview(task_id, product_control.TestSupport.taskPermissionReviewText(&control))).?;
@@ -11269,7 +11329,7 @@ test "image Run admission freezes per-Run input and retains scrub ownership thro
     scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
     defer scenario.control.setImageRunPreparation(null);
     fake_core.rearmControlled();
-    const id = try scenario.control.runTask(scenario.task_id, .{ .text = "use run-image-secret-a safely" });
+    const id = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "use run-image-secret-a safely" });
     try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     const run = &task.durable.runs[1].?;
@@ -11310,7 +11370,7 @@ test "image Run admission freezes per-Run input and retains scrub ownership thro
     const encoded = try scenario.control.writeAggregateFixture(&snapshot);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "run-image-secret-a") == null);
     fake_core.rearmControlled();
-    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "text remains available" });
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "text remains available" });
     try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
     try std.testing.expectEqual(@as(usize, 2), image.calls);
     try std.testing.expect(task.durable.runs[2].?.image_execution == null);
@@ -11334,7 +11394,7 @@ test "image Run follow-up resolves the next configuration and admission rollback
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     try std.testing.expect(task.durable.runs[1] == null);
     fake_core.rearmControlled();
-    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "source for follow-up" });
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "source for follow-up" });
     try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
     const sent = try scenario.control.sendInput("image-follow-up", scenario.task_id, .{ .text = "new instruction run-image-secret-a" });
     try std.testing.expectEqual(.accepted, sent.outcome);
@@ -11371,7 +11431,7 @@ test "image Run duplicate bearer ownership does not revoke the Renderer on admis
         const epoch = scenario.control.projectionSecurityEpoch();
         for (0..2) |index| {
             fake_core.rearmControlled();
-            _ = try scenario.control.runTask(scenario.task_id, .{ .text = "ordinary message with image capability" });
+            _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "ordinary message with image capability" });
             try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
             try std.testing.expectEqual(epoch, scenario.control.projectionSecurityEpoch());
             fake_core.releaseControlled();
@@ -11495,7 +11555,7 @@ test "file delivery Run authority survives preparation changes until worker and 
     scenario.control.setFileDeliveryPreparation(.{ .context = &probe, .prepare_fn = DeliveryAdmissionProbe.prepare });
     defer scenario.control.setFileDeliveryPreparation(null);
     fake_core.rearmControlled();
-    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "explicit file delivery" });
+    _ = try runPreparedTask(&scenario.control, scenario.task_id, .{ .text = "explicit file delivery" });
     try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     const run = &task.durable.runs[1].?;
@@ -11603,7 +11663,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
     fake_core.setNextPlan(.controlled);
     const id = try control.createTask(input);
     try waitInitialTaskCatalog(&control, id);
-    const run_id = try control.runTask(id, .{ .text = "Keep this accepted work running." });
+    const run_id = try runPreparedTask(&control, id, .{ .text = "Keep this accepted work running." });
     try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
     const task = control.task_runtime.find(id).?;
     try std.testing.expectError(error.SessionCapacity, control.createTask(input));
@@ -11651,7 +11711,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
     fake_core.setNextPlan(.controlled);
     const second = try control.createTask(input);
     try waitInitialTaskCatalog(&control, second);
-    _ = try control.runTask(second, .{ .text = "Occupy the only live Session." });
+    _ = try runPreparedTask(&control, second, .{ .text = "Occupy the only live Session." });
     try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
     try std.testing.expectEqual(.accepted, (try control.sendInput("busy-capacity", id, .{ .text = "Keep the unavailable draft." })).outcome);
     try std.testing.expectEqual(.session_capacity, task.input_submissions.items[0].reason.?);
