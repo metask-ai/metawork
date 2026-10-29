@@ -2,6 +2,7 @@ import {
   Activity,
   Archive,
   ArrowLeft,
+  Box,
   CalendarDays,
   Check,
   ChevronRight,
@@ -68,6 +69,7 @@ type IconName =
   | "warning"
   | "account"
   | "model"
+  | "box"
   | "provider"
   | "refresh"
   | "check"
@@ -117,6 +119,7 @@ const icons: Record<IconName, LucideIcon> = {
   warning: TriangleAlert,
   account: UserRound,
   model: Layers3,
+  box: Box,
   provider: Plug,
   refresh: RefreshCw,
   check: Check,

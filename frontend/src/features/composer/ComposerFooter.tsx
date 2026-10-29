@@ -18,7 +18,7 @@ import { Input } from "../../components/ui/input.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
-import { ModelSelector } from "./ModelSelector.tsx";
+import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
   composerDraftWithinLimits,
@@ -178,12 +178,7 @@ export function ComposerFooter({
   workspaceEditable: boolean;
   modelLabel: string | null;
   modelTriggerRef?: RefObject<HTMLButtonElement | null>;
-  modelOptions: {
-    selectionId: string;
-    displayName: string;
-    triggerLabel?: string;
-    group?: "custom";
-  }[];
+  modelOptions: ModelSelectorOption[];
   selectedModelId: string;
   modelEditable: boolean;
   modelSelectionDisabled: boolean;

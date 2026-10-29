@@ -797,8 +797,31 @@ test("Add model uses the Host recipe and saves the first model with its official
     within(dialog).getByRole("combobox", { name: "Model vendor" }),
   );
   await screen.findByRole("option", { name: "DeepSeek", exact: true });
+  for (const [label, vendor] of [
+    ["DeepSeek", "deepseek"],
+    ["Kimi", "kimi"],
+    ["MiniMax", "minimax"],
+    ["智谱 GLM", "glm"],
+    ["Custom / other service", "custom"],
+  ]) {
+    const option = screen.getByRole("option", { name: label, exact: true });
+    assert.equal(
+      option.querySelector(".model-vendor-icon")?.dataset.vendor,
+      vendor,
+    );
+    assert.equal(
+      option.querySelector(".model-vendor-icon")?.getAttribute("aria-hidden"),
+      "true",
+    );
+  }
   await user.click(
     screen.getByRole("option", { name: "DeepSeek", exact: true }),
+  );
+  assert.equal(
+    within(dialog)
+      .getByRole("combobox", { name: "Model vendor" })
+      .querySelector(".model-vendor-icon")?.dataset.vendor,
+    "deepseek",
   );
   assert.equal(within(dialog).queryByText("Connection settings"), null);
   assert.equal(
@@ -971,6 +994,11 @@ test("model editing saves all changes once and clears credentials after a partia
   assert.ok(screen.getByText("Model A"));
   assert.ok(screen.getByText("Test passed"));
   assert.equal(screen.queryByText("Team", { exact: true }), null);
+  assert.equal(
+    view.container.querySelector(".settings-model-identity .model-vendor-icon")
+      ?.dataset.vendor,
+    "custom",
+  );
   await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
   const dialog = screen.getByRole("dialog", { name: "Edit model" });
   assert.equal(

@@ -5,6 +5,10 @@ import type {
   NewTaskAdmissionView,
   NewTaskModelSelectionIntent,
 } from "../bridge/contracts.ts";
+import {
+  catalogModelVendor,
+  type ModelVendor,
+} from "../features/models/model-vendor.ts";
 
 export type NewTaskModelOption = {
   selectionId: string;
@@ -12,6 +16,7 @@ export type NewTaskModelOption = {
   sourceGeneration: string;
   catalogGeneration: string;
   displayName: string;
+  vendor: ModelVendor;
   group?: "custom";
   metadata: ModelMetadata | null;
 };
@@ -131,6 +136,7 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
         selectionId: model.id,
         displayName: model.displayName || model.id,
         metadata: model.metadata,
+        vendor: catalogModelVendor(model.id),
       })),
     };
   }
@@ -157,6 +163,7 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
         selectionId: model.id,
         displayName: model.displayName || model.id,
         metadata: model.metadata,
+        vendor: provider.builtinProviderId ?? ("custom" as const),
       })),
   };
 }

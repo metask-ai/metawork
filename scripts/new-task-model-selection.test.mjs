@@ -97,10 +97,73 @@ test("a new Task starts from the active default without emitting an override", (
   );
   assert.equal(state.selectedModelLabel, "Model one");
   assert.equal(state.intent, null);
+  assert.ok(state.options.every((option) => option.vendor === "custom"));
   assert.deepEqual(
     state.options.map((option) => option.selectionId),
     ["model-1", "model-2"].map((modelId) =>
       modelOptionId({ sourceId: "metask", modelId }),
+    ),
+  );
+});
+
+test("official catalog icons identify model families without changing model authority", () => {
+  const models = metaskModels();
+  const ids = [
+    "DeepSeek-V4.1-Flash-1017",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "kimi-k3.1-pro",
+    "MiniMax-M3",
+    "unrecognized-model",
+    "my-deepseek-model",
+  ];
+  models.providers[0].models = ids.map((id) => ({
+    id,
+    displayName: "DeepSeek display alias",
+    metadata,
+  }));
+  const options = readyModelOptions(models, "metask");
+  assert.deepEqual(
+    options.map((option) => option.vendor),
+    ["deepseek", "glm", "glm", "kimi", "minimax", "custom", "custom"],
+  );
+  assert.deepEqual(
+    options.map((option) => option.modelRef),
+    ids.map((modelId) => ({ sourceId: "metask", modelId })),
+  );
+  assert.ok(options.every((option) => option.metadata === metadata));
+});
+
+test("custom endpoints never infer brands from model ids and builtin presets keep their vendor", () => {
+  const models = metaskModels();
+  const source = {
+    id: "custom-source",
+    builtinProviderId: null,
+    displayName: "DeepSeek",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    sourceGeneration: "7",
+    catalogGeneration: "11",
+    models: [
+      "deepseek-chat",
+      "glm-5.3-flash",
+      "kimi-k3.1-pro",
+      "minimax-m3",
+    ].map((id) => ({ id, displayName: id, metadata, ready: true })),
+  };
+  models.customProviders = [
+    source,
+    { ...source, id: "preset-source", builtinProviderId: "kimi" },
+  ];
+  assert.ok(
+    readyModelOptions(models, source.id).every(
+      (option) => option.vendor === "custom",
+    ),
+  );
+  assert.ok(
+    readyModelOptions(models, "preset-source").every(
+      (option) => option.vendor === "kimi",
     ),
   );
 });
@@ -432,8 +495,21 @@ test("all-source discovery keeps Provider authority and per-model readiness chec
   }
   models.customProviders = [
     provider,
-    { ...provider, id: "other", displayName: "Other" },
+    {
+      ...provider,
+      id: "other",
+      displayName: "Other",
+      builtinProviderId: "kimi",
+    },
   ];
+  assert.deepEqual(
+    newTaskModelSelectionState(
+      models,
+      admission(models.defaultSelection),
+      null,
+    ).options.map((option) => option.vendor),
+    ["custom", "custom", "custom", "kimi"],
+  );
   assert.deepEqual(
     newTaskModelSelectionState(
       models,

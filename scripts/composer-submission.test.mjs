@@ -657,6 +657,12 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   provider.models = [
     { ...model, id: "minimax-m3", displayName: "minimax-m3" },
     { ...model, id: "glm-5.3-flash", displayName: "glm-5.3-flash" },
+    {
+      ...model,
+      id: "DeepSeek-V4.1-Flash-1017",
+      displayName: "DeepSeek-V4.1-Flash-1017",
+    },
+    { ...model, id: "kimi-k3.1-pro", displayName: "kimi-k3.1-pro" },
   ];
   fixture.snapshot.models.customProviders = [
     {
@@ -688,15 +694,36 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   await fixture.publish();
   const selector = screen.getByRole("combobox", { name: "Model" });
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "minimax",
+  );
   const user = userEvent.setup({ document });
   await user.click(selector);
   const customOption = await screen.findByRole("option", {
     name: /gpt-5.6-sol/,
   });
   assert.equal(customOption.textContent, "gpt-5.6-sol");
+  assert.equal(
+    customOption.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "custom",
+  );
   const customGroup = screen.getByRole("group", { name: "Custom models" });
   assert.equal(customOption.closest('[role="group"]'), customGroup);
   assert.equal(customGroup.querySelector("small"), null);
+  for (const [name, vendor] of [
+    ["minimax-m3", "minimax"],
+    ["glm-5.3-flash", "glm"],
+    ["DeepSeek-V4.1-Flash-1017", "deepseek"],
+    ["kimi-k3.1-pro", "kimi"],
+  ]) {
+    assert.equal(
+      screen
+        .getByRole("option", { name, exact: true })
+        .querySelector(".model-vendor-icon")?.dataset.vendor,
+      vendor,
+    );
+  }
   assert.deepEqual(
     screen
       .getAllByRole("option")
@@ -704,7 +731,13 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
         (option) =>
           option.querySelector(".selection-menu-item-copy").textContent,
       ),
-    ["minimax-m3", "glm-5.3-flash", "gpt-5.6-sol"],
+    [
+      "minimax-m3",
+      "glm-5.3-flash",
+      "DeepSeek-V4.1-Flash-1017",
+      "kimi-k3.1-pro",
+      "gpt-5.6-sol",
+    ],
   );
   await user.click(customOption);
   await waitFor(() =>
@@ -713,10 +746,18 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
       "gpt-5.6-sol",
     ),
   );
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "custom",
+  );
   assert.deepEqual(fixture.snapshot.models.defaultSelection, defaultModel);
   await user.click(selector);
   await user.click(
     await screen.findByRole("option", { name: /glm-5.3-flash/ }),
+  );
+  assert.equal(
+    selector.querySelector(".model-vendor-icon")?.dataset.vendor,
+    "glm",
   );
   await user.type(fixture.textarea, "How can we forecast the weather?{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 1));
@@ -821,7 +862,13 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
         (option) =>
           option.querySelector(".selection-menu-item-copy").textContent,
       ),
-    ["minimax-m3", "glm-5.3-flash", "gpt-5.6-sol"],
+    [
+      "minimax-m3",
+      "glm-5.3-flash",
+      "DeepSeek-V4.1-Flash-1017",
+      "kimi-k3.1-pro",
+      "gpt-5.6-sol",
+    ],
   );
   await user.click(screen.getByRole("option", { name: /gpt-5.6-sol/ }));
   await waitFor(() =>

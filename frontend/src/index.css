@@ -1432,10 +1432,34 @@ summary::-webkit-details-marker {
 }
 
 .settings-model-identity > strong {
+  display: inline-flex;
   min-width: 0;
+  align-items: center;
+  gap: 8px;
   overflow-wrap: anywhere;
   font-size: var(--text-body);
   font-weight: 650;
+}
+
+.settings-model-identity > strong > span:last-child {
+  min-width: 0;
+}
+
+.model-vendor-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  font-size: 18px;
+}
+
+.model-vendor-icon:not([data-vendor="custom"]) {
+  background-color: currentColor;
 }
 
 .settings-model-list-empty {
@@ -1479,6 +1503,7 @@ summary::-webkit-details-marker {
   gap: 12px;
   font-size: var(--text-control);
 }
+
 .settings-custom-providers .settings-execution-header p {
   margin: 5px 0 0;
   color: var(--settings-muted);
@@ -2448,6 +2473,23 @@ summary::-webkit-details-marker {
 
 .selection-menu-item-copy > span {
   font-weight: 620;
+}
+
+.selection-menu-item-copy > .selection-menu-item-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-menu-item-label > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-menu-item-leading {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .selection-menu-item-copy small {
@@ -8562,7 +8604,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-model-trigger .selection-trigger-leading {
-  color: var(--ui-action-primary);
+  color: inherit;
   font-size: var(--text-body);
 }
 

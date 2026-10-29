@@ -11,6 +11,7 @@ export type SelectionMenuOption = {
   description?: string;
   descriptionKind?: "text" | "code";
   disabled?: boolean;
+  leading?: ReactNode;
   trailing?: ReactNode;
 };
 
@@ -150,7 +151,14 @@ export function SelectionMenu({
                         <Icon name="check" />
                       </Select.ItemIndicator>
                       <span className="selection-menu-item-copy">
-                        <Select.ItemText>{option.label}</Select.ItemText>
+                        <span className="selection-menu-item-label">
+                          {option.leading && (
+                            <span className="selection-menu-item-leading">
+                              {option.leading}
+                            </span>
+                          )}
+                          <Select.ItemText>{option.label}</Select.ItemText>
+                        </span>
                         {option.description && (
                           <small
                             data-kind={option.descriptionKind ?? "code"}
