@@ -55,7 +55,6 @@ export function SettingsPage({
   onAddCustomModel,
   onRemoveCustomModel,
   onReplaceCustomModel,
-  onRemoveCustomProvider,
   onTestCustomModel,
   onBeginLogin,
   onRetryRefresh,
@@ -700,7 +699,6 @@ export function SettingsPage({
                   onAddCustomModel={onAddCustomModel}
                   onReplaceCustomModel={onReplaceCustomModel}
                   onRemoveCustomModel={onRemoveCustomModel}
-                  onRemoveCustomProvider={onRemoveCustomProvider}
                   onTestCustomModel={onTestCustomModel}
                 />
               )}

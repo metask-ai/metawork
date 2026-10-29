@@ -1104,7 +1104,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 `Models` 中的自定义模型管理规则：
 
 - Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest`；只有三者均为 true 才显示自定义模型分组。Host 从实际 management、credential storage 与模型测试能力发布全 true 或全 false，不按平台名决定产品可见性；不得提供缺少 credential 写入或测试能力的局部路径；
-- 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行显示模型名、所属服务和最新测试状态，并提供测试、编辑和带确认的删除；已有空来源显示待添加模型状态及继续添加、删除动作，不静默丢弃配置；
+- 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行只显示模型名和最新测试状态，状态以简短标签放在模型名称右侧，窄窗空间不足时允许换行，不显示 Provider 或服务名称，测试、编辑和删除使用三个图标按钮，保留本地化 accessible name、键盘焦点和 hover/focus tooltip；测试中显示加载状态并禁用重复测试，删除仍需明确确认，弹层使用独立短标题和包含目标模型名称的影响说明，不重复标题与正文，也不把内部 Provider 身份当作模型删除对象；没有模型的旧服务配置不作为模型列表项显示，但在添加模型时仍可显式复用，不因隐藏而删除持久配置；
 - 添加弹窗使用同一 Foundation Dialog、Select 与表单组件。先选择内置厂商预设、已有服务或自定义服务；内置厂商使用 Host 发布的固定官方 Base URL、protocol 和模型 ID 列表；只展示 API Key 和模型选择，不展示连接设置、地址、协议或实际 endpoint。填写 API Key 并选择模型即可保存。已有服务复用连接添加模型，自定义服务填写 protocol、Base URL、API Key 和模型 ID。创建新来源与首个模型使用同一 typed command，成功后以 Snapshot 为准，不猜测新来源 identity；
 - 内置模型列表是填写建议，不授予授权、能力或 readiness，不做自动模型发现。保存后须明确测试；未通过测试的模型不能用于新任务选择。新增模型或进入编辑不隐式修改 global default；
 - 连接设置只向自定义服务提供，使用可展开区域；自定义服务精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native。切换 protocol 不覆盖用户已填 Base URL。Renderer 对前三者确定性生成 `/responses`、`/chat/completions`、`/v1/messages` endpoint，Gemini Native 保持 Base URL，由既有消费者追加模型路径。表单显示最终 endpoint；自定义服务显示 API Key 的目标 host。Host 继续独立校验 scheme、host、path、长度与控制字符；

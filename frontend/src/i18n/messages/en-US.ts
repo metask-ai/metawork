@@ -1396,8 +1396,6 @@ export const enUS = {
   "settings.custom_provider_edit_help":
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
   "settings.custom_provider_replace_credential": "Update API key",
-  "settings.custom_provider_remove_confirm":
-    "Remove this service and its stored credential? Its models will no longer be available for new tasks. Existing tasks keep their current binding.",
   "settings.custom_provider_removing": "Removing…",
   "settings.custom_models": "Custom models",
   "settings.model_connection_provider": "Model provider",
@@ -1420,8 +1418,8 @@ export const enUS = {
   "settings.custom_provider_state.disabled": "Disabled",
   "settings.custom_model_test_status.untested": "Not tested",
   "settings.custom_model_test_status.testing": "Testing",
-  "settings.custom_model_test_status.connected": "Last test passed",
-  "settings.custom_model_test_status.failed": "Last test failed",
+  "settings.custom_model_test_status.connected": "Test passed",
+  "settings.custom_model_test_status.failed": "Test failed",
   "settings.custom_provider_protocol.openai_responses": "OpenAI Responses",
   "settings.custom_provider_protocol.anthropic_messages": "Anthropic Messages",
   "settings.custom_provider_protocol.openai_chat_completions":
@@ -1444,8 +1442,9 @@ export const enUS = {
   "settings.custom_model_adding": "Adding…",
   "settings.custom_model_test": "Test model",
   "settings.custom_model_id": "Model ID",
-  "settings.custom_model_remove_confirm":
-    "Remove this model from the provider? Existing tasks keep their current binding.",
+  "settings.custom_model_remove_confirm": "Remove model?",
+  "settings.custom_model_remove_description":
+    "After removing “{model}”, it will no longer be selectable for new tasks. Existing tasks and their history will be kept.",
   "settings.custom_model_removing": "Removing…",
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",

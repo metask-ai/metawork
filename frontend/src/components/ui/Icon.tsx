@@ -11,6 +11,7 @@ import {
   Folder,
   FolderUp,
   FileText,
+  Pencil,
   FileDiff,
   Layers3,
   LoaderCircle,
@@ -83,6 +84,8 @@ type IconName =
   | "download"
   | "external-link"
   | "trash"
+  | "test"
+  | "edit"
   | "scheduled-tasks"
   | "mcp"
   | "calendar-days"
@@ -130,6 +133,8 @@ const icons: Record<IconName, LucideIcon> = {
   download: Download,
   "external-link": ExternalLink,
   trash: Trash2,
+  test: Plug,
+  edit: Pencil,
   "scheduled-tasks": Clock3,
   mcp: Plug,
   "calendar-days": CalendarDays,

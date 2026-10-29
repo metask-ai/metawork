@@ -1422,10 +1422,20 @@ summary::-webkit-details-marker {
   flex-wrap: wrap;
 }
 
-.settings-model-row > .settings-custom-provider-copy {
-  flex: 1 1 180px;
+.settings-model-identity {
+  display: flex;
+  flex: 1 1 160px;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-model-identity > strong {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-size: var(--text-body);
+  font-weight: 650;
 }
 
 .settings-model-list-empty {

@@ -484,9 +484,6 @@ function settingsElement(account, overrides = {}) {
       onRemoveCustomModel() {
         return Promise.resolve(false);
       },
-      onRemoveCustomProvider() {
-        return Promise.resolve(false);
-      },
       onTestCustomModel() {},
       onBeginLogin() {},
       onOpenRecharge() {},
@@ -931,7 +928,7 @@ test("model rows edit the exact model and expose shared credential replacement w
       },
     ],
   };
-  renderModelSettings({
+  const view = renderModelSettings({
     models: { ...readySettingsModels, customProviders: [source] },
     onReplaceCustomModel: async (...input) => {
       changes.push(input);
@@ -942,6 +939,9 @@ test("model rows edit the exact model and expose shared credential replacement w
       return false;
     },
   });
+  assert.ok(screen.getByText("Model A"));
+  assert.ok(screen.getByText("Test passed"));
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
   await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
   const dialog = screen.getByRole("dialog", { name: "Edit model" });
   const model = within(dialog).getByRole("textbox", { name: "Model ID" });
@@ -964,6 +964,20 @@ test("model rows edit the exact model and expose shared credential replacement w
     ["source-edit", "7", "  replacement secret  "],
   ]);
   assert.equal(key.value, "");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Cancel", exact: true }),
+  );
+  view.rerenderModels({
+    ...readySettingsModels,
+    customProviders: [{ ...source, state: "configuring", models: [] }],
+  });
+  assert.equal(screen.queryByText("Team", { exact: true }), null);
+  assert.ok(screen.getByText("No custom models yet."));
+  await user.click(
+    screen.getByRole("button", { name: "Add model", exact: true }),
+  );
+  const addDialog = await chooseModelSource(user, "Team");
+  assert.ok(within(addDialog).getByRole("textbox", { name: "Model ID" }));
 });
 
 test("Editing an official model permits credential replacement without exposing connection settings", async () => {
@@ -1129,8 +1143,18 @@ test("Models keeps adding and removing models after the first provider model", a
 
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
   await user.click(screen.getByRole("button", { name: "Remove" }));
-  const removeButtons = screen.getAllByRole("button", { name: "Remove" });
-  await user.click(removeButtons[removeButtons.length - 1]);
+  const confirmation = screen.getByRole("alertdialog");
+  assert.ok(
+    within(confirmation).getByRole("heading", {
+      name: "Remove model?",
+      exact: true,
+    }),
+  );
+  assert.match(confirmation.textContent, /Model A/);
+  assert.doesNotMatch(confirmation.textContent, /provider/i);
+  await user.click(
+    within(confirmation).getByRole("button", { name: "Remove", exact: true }),
+  );
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 

@@ -1227,8 +1227,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_edit_help":
     "修改协议或 Base URL 后需要重新测试该 Provider 的模型；已保存的 API Key 不会回填。",
   "settings.custom_provider_replace_credential": "更新 API Key",
-  "settings.custom_provider_remove_confirm":
-    "删除这个服务及其保存的凭据？它的模型将无法再用于新任务，已有任务仍保留当前绑定。",
   "settings.custom_provider_removing": "正在删除…",
   "settings.custom_models": "自定义模型",
   "settings.model_connection_provider": "模型厂商",
@@ -1248,10 +1246,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_state.configuring": "尚未测试",
   "settings.custom_provider_state.ready": "可用",
   "settings.custom_provider_state.disabled": "已停用",
-  "settings.custom_model_test_status.untested": "尚未测试",
-  "settings.custom_model_test_status.testing": "正在测试",
-  "settings.custom_model_test_status.connected": "最近测试通过",
-  "settings.custom_model_test_status.failed": "最近测试失败",
+  "settings.custom_model_test_status.untested": "未测试",
+  "settings.custom_model_test_status.testing": "测试中",
+  "settings.custom_model_test_status.connected": "测试通过",
+  "settings.custom_model_test_status.failed": "测试失败",
   "settings.custom_provider_protocol.openai_responses": "OpenAI Responses",
   "settings.custom_provider_protocol.anthropic_messages": "Anthropic Messages",
   "settings.custom_provider_protocol.openai_chat_completions":
@@ -1274,8 +1272,9 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_model_adding": "正在添加…",
   "settings.custom_model_test": "测试模型",
   "settings.custom_model_id": "模型 ID",
-  "settings.custom_model_remove_confirm":
-    "从这个 Provider 中删除该模型？已有任务仍保留当前绑定。",
+  "settings.custom_model_remove_confirm": "删除模型？",
+  "settings.custom_model_remove_description":
+    "删除“{model}”后，新任务将无法再选择它。已有任务和历史记录会保留。",
   "settings.custom_model_removing": "正在删除…",
   "settings.choose_selection": "选择",
   "settings.change_selection": "更改",

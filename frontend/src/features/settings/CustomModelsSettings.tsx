@@ -6,9 +6,11 @@ import type {
   Protocol,
 } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
+import { Badge } from "../../components/ui/badge.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
+import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -17,6 +19,54 @@ import {
   customProviderBaseUrl,
   providerRequestPaths,
 } from "./model-connection.ts";
+
+function ModelAction({
+  label,
+  icon,
+  disabled,
+  loading = false,
+  onClick,
+}: {
+  label: string;
+  icon: "test" | "edit" | "trash";
+  disabled: boolean;
+  loading?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-11 text-base"
+            aria-label={label}
+            aria-busy={loading || undefined}
+            disabled={disabled}
+            onClick={onClick}
+          />
+        }
+      >
+        <span
+          className={
+            loading
+              ? "inline-flex animate-spin motion-reduce:animate-none"
+              : "inline-flex"
+          }
+        >
+          <Icon name={loading ? "loading" : icon} />
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Positioner side="top" className="z-[60]">
+          <Tooltip.Popup>{label}</Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
 
 const examples: Record<Protocol, string> = {
   openai_responses: "https://api.openai.com/v1",
@@ -69,10 +119,6 @@ export type CustomModelActions = {
     catalogGeneration: string,
     modelId: string,
   ) => Promise<boolean>;
-  onRemoveCustomProvider: (
-    providerId: string,
-    revision: string,
-  ) => Promise<boolean>;
   onTestCustomModel: (
     providerId: string,
     revision: string,
@@ -119,7 +165,7 @@ export function CustomModelsSettings({
   const [pending, setPending] = useState(false);
   const [removal, setRemoval] = useState<{
     source: CustomProviderView;
-    modelId: string | null;
+    modelId: string;
   } | null>(null);
   const [failed, setFailed] = useState(false);
   const dialogVersion = useRef(0);
@@ -138,9 +184,6 @@ export function CustomModelsSettings({
   const busy = disabled || pending;
   const rows = models.customProviders.flatMap((source) =>
     source.models.map((model) => ({ source, model })),
-  );
-  const emptyProviders = models.customProviders.filter(
-    (source) => source.models.length === 0,
   );
   function close() {
     dialogVersion.current += 1;
@@ -305,33 +348,18 @@ export function CustomModelsSettings({
       })),
     { value: "custom", label: t("settings.model_connection_custom") },
   ];
-  const removable = (source: CustomProviderView, modelId: string | null) => (
-    <Button
-      variant="ghost"
-      size="sm"
-      disabled={busy}
-      onClick={() => {
-        setFailed(false);
-        setRemoval({ source, modelId });
-      }}
-    >
-      {t("common.remove")}
-    </Button>
-  );
   async function remove() {
     if (!removal || busy) return;
     const { source, modelId } = removal;
     setPending(true);
     setFailed(false);
     try {
-      const success = await (modelId
-        ? actions.onRemoveCustomModel(
-            source.id,
-            source.providerRevision,
-            source.catalogGeneration,
-            modelId,
-          )
-        : actions.onRemoveCustomProvider(source.id, source.providerRevision));
+      const success = await actions.onRemoveCustomModel(
+        source.id,
+        source.providerRevision,
+        source.catalogGeneration,
+        modelId,
+      );
       if (success) setRemoval(null);
       else setFailed(true);
     } catch {
@@ -374,17 +402,21 @@ export function CustomModelsSettings({
             className="settings-model-row"
             key={JSON.stringify([source.id, model.id])}
           >
-            <div className="settings-custom-provider-copy">
+            <div className="settings-model-identity">
               <strong>{model.displayName || model.id}</strong>
-              <span>
-                {source.displayName} ·{" "}
+              <Badge className="shrink-0 whitespace-nowrap">
                 {t(`settings.custom_model_test_status.${model.testStatus}`)}
-              </span>
+              </Badge>
             </div>
             <div className="settings-custom-provider-actions">
-              <Button
-                variant="ghost"
-                size="sm"
+              <ModelAction
+                icon="test"
+                label={t(
+                  model.testStatus === "testing"
+                    ? "settings.custom_model_testing"
+                    : "settings.custom_model_test",
+                )}
+                loading={model.testStatus === "testing"}
                 disabled={
                   busy ||
                   !source.enabled ||
@@ -400,45 +432,26 @@ export function CustomModelsSettings({
                     source.catalogGeneration,
                   )
                 }
-              >
-                {t(
-                  model.testStatus === "testing"
-                    ? "settings.custom_model_testing"
-                    : "settings.custom_model_test",
-                )}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
+              />
+              <ModelAction
+                icon="edit"
+                label={t("common.edit")}
                 disabled={busy}
                 onClick={() => open(source, model.id)}
-              >
-                {t("common.edit")}
-              </Button>
-              {removable(source, model.id)}
-            </div>
-          </div>
-        ))}
-        {emptyProviders.map((source) => (
-          <div className="settings-model-row" key={source.id}>
-            <div className="settings-custom-provider-copy">
-              <strong>{source.displayName}</strong>
-              <span>{t("settings.model_connection_incomplete")}</span>
-            </div>
-            <div className="settings-custom-provider-actions">
-              <Button
-                variant="ghost"
-                size="sm"
+              />
+              <ModelAction
+                label={t("common.remove")}
+                icon="trash"
                 disabled={busy}
-                onClick={() => open(source)}
-              >
-                {t("settings.custom_model_add")}
-              </Button>
-              {removable(source, null)}
+                onClick={() => {
+                  setFailed(false);
+                  setRemoval({ source, modelId: model.id });
+                }}
+              />
             </div>
           </div>
         ))}
-        {rows.length === 0 && emptyProviders.length === 0 && (
+        {rows.length === 0 && (
           <p className="settings-model-list-empty">
             {t("settings.model_connection_empty")}
           </p>
@@ -771,18 +784,17 @@ export function CustomModelsSettings({
           <AlertDialog.Backdrop className="settings-model-dialog-backdrop" />
           <AlertDialog.Popup className="settings-model-dialog">
             <AlertDialog.Title>
-              {t(
-                removal?.modelId
-                  ? "settings.custom_model_remove_confirm"
-                  : "settings.custom_provider_remove_confirm",
-              )}
+              {t("settings.custom_model_remove_confirm")}
             </AlertDialog.Title>
             <AlertDialog.Description>
-              {t(
-                removal?.modelId
-                  ? "settings.custom_model_remove_confirm"
-                  : "settings.custom_provider_remove_confirm",
-              )}
+              {t("settings.custom_model_remove_description", {
+                model:
+                  removal?.source.models.find(
+                    (model) => model.id === removal.modelId,
+                  )?.displayName ||
+                  removal?.modelId ||
+                  "",
+              })}
             </AlertDialog.Description>
             {failed && <p role="alert">{t("execution.command_failed")}</p>}
             <div className="delete-confirmation-actions">

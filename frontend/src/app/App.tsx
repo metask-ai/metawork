@@ -4340,11 +4340,6 @@ export default function App() {
                 }),
               )
             }
-            onRemoveCustomProvider={(providerId, generation) =>
-              runExecutionCommand(() =>
-                client.removeCustomProvider(providerId, generation),
-              )
-            }
             onTestCustomModel={(
               providerId,
               revision,
