@@ -1087,8 +1087,8 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，用户添加的模型使用同一管理列表；
 - 每个设置分区页面在内容列顶部使用一个醒目的页面标题；页面标题下用 13–15 px 的小分组标题组织设置项，具体控件再使用自己的字段标签。不得在页面标题、分组标题和字段标签之间重复写“设置”或同义标题；
 - 页面标题约 22–26 px，设置主文案 13–15 px，辅助文案不小于 12 px；disabled 状态只改变语义色和对比度，不缩小字号；
-- 语言、Provider 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
-- compact 选择器只显示一个短值；Provider 可以使用 detailed 选择器显示名称与来源说明，credential 与 protocol 不伪装成可编辑字段；
+- 语言、模型来源和协议统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
+- compact 选择器只显示一个短值；添加模型时选择厂商预设或已有连接，编辑模型时不再显示不可修改的来源选择器，协议仅在自定义连接设置中按支持范围编辑；
 - 管理页没有默认模型步骤、配置链或模型选择控件；credential 只在添加或编辑模型时处理；
 - 模型目录加载、选择和持久化只冻结相关配置组，不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
 - 管理页的添加、编辑、测试和删除分别消费 Host typed command 与 canonical Snapshot；页面不通过本地选中态或默认模型 mutation 准备任务。任务模型选择的接纳和绑定以对应 Task 合同为准；
@@ -1105,7 +1105,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 
 - Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest`；只有三者均为 true 才显示自定义模型分组。Host 从实际 management、credential storage 与模型测试能力发布全 true 或全 false，不按平台名决定产品可见性；不得提供缺少 credential 写入或测试能力的局部路径；
 - 页面只列出已添加的模型，以“添加模型”为主入口，不展示未配置厂商目录，不要求先添加 Provider。每行只显示模型名和最新测试状态，状态以简短标签放在模型名称右侧，窄窗空间不足时允许换行，不显示 Provider 或服务名称，测试、编辑和删除使用三个图标按钮，保留本地化 accessible name、键盘焦点和 hover/focus tooltip；测试中显示加载状态并禁用重复测试，删除仍需明确确认，弹层使用独立短标题和包含目标模型名称的影响说明，不重复标题与正文，也不把内部 Provider 身份当作模型删除对象；没有模型的旧服务配置不作为模型列表项显示，但在添加模型时仍可显式复用，不因隐藏而删除持久配置；
-- 添加弹窗使用同一 Foundation Dialog、Select 与表单组件。先选择内置厂商预设、已有服务或自定义服务；内置厂商使用 Host 发布的固定官方 Base URL、protocol 和模型 ID 列表；只展示 API Key 和模型选择，不展示连接设置、地址、协议或实际 endpoint。填写 API Key 并选择模型即可保存。已有服务复用连接添加模型，自定义服务填写 protocol、Base URL、API Key 和模型 ID。创建新来源与首个模型使用同一 typed command，成功后以 Snapshot 为准，不猜测新来源 identity；
+- 添加与编辑弹窗使用同一 Foundation Dialog、Select 与表单组件，各自提供对应操作的说明，不复用旧 Provider 配置步骤或默认模型说明。模型配置恢复只定位同一个 Models 设置分区，不保留独立 Provider 导航或焦点入口。先选择内置厂商预设、已有服务或自定义服务；内置厂商使用 Host 发布的固定官方 Base URL、protocol 和模型 ID 列表；只展示 API Key 和模型选择，不展示连接设置、地址、协议或实际 endpoint。填写 API Key 并选择模型即可保存。已有服务复用连接添加模型，自定义服务填写 protocol、Base URL、API Key 和模型 ID。创建新来源与首个模型使用同一 typed command，成功后以 Snapshot 为准，不猜测新来源 identity；
 - 内置模型列表是填写建议，不授予授权、能力或 readiness，不做自动模型发现。保存后须明确测试；未通过测试的模型不能用于新任务选择。新增模型或进入编辑不隐式修改 global default；
 - 连接设置只向自定义服务提供，使用可展开区域；自定义服务精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native。切换 protocol 不覆盖用户已填 Base URL。Renderer 对前三者确定性生成 `/responses`、`/chat/completions`、`/v1/messages` endpoint，Gemini Native 保持 Base URL，由既有消费者追加模型路径。表单显示最终 endpoint；自定义服务显示 API Key 的目标 host。Host 继续独立校验 scheme、host、path、长度与控制字符；
 - 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；连接或凭据修改说明对同源模型的共同影响。地址保存与 API Key 替换分别为显式、独立的 revision-bound mutation，不能假装成一笔原子表单。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；

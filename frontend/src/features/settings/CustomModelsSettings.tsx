@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   BuiltinProviderId,
   CustomProviderView,
@@ -153,12 +153,10 @@ const emptyDraft = (): Draft => ({
 export function CustomModelsSettings({
   models,
   disabled,
-  headingRef,
   ...actions
 }: CustomModelActions & {
   models: ModelsView;
   disabled: boolean;
-  headingRef?: Ref<HTMLHeadingElement>;
 }) {
   const { t } = useI18n();
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -379,8 +377,6 @@ export function CustomModelsSettings({
           <h3
             className="settings-group-label"
             id="settings-custom-models-title"
-            tabIndex={-1}
-            ref={headingRef}
           >
             {t("settings.custom_models")}
           </h3>
@@ -482,7 +478,11 @@ export function CustomModelsSettings({
                 )}
               </Dialog.Title>
               <Dialog.Description>
-                {t("settings.model_connection_dialog_help")}
+                {t(
+                  editing
+                    ? "settings.model_connection_edit_help"
+                    : "settings.model_connection_dialog_help",
+                )}
               </Dialog.Description>
               <form
                 className="settings-model-form"
@@ -491,18 +491,22 @@ export function CustomModelsSettings({
                   void submit();
                 }}
               >
-                <label className="settings-model-form-field">
-                  <span>{t("settings.model_connection_provider")}</span>
-                  <SelectionMenu
-                    triggerClassName="settings-control"
-                    value={draft.choice}
-                    options={choiceOptions}
-                    placeholder={t("settings.model_connection_choose_provider")}
-                    ariaLabel={t("settings.model_connection_provider")}
-                    disabled={busy || editing}
-                    onValueChange={choose}
-                  />
-                </label>
+                {!editing && (
+                  <label className="settings-model-form-field">
+                    <span>{t("settings.model_connection_provider")}</span>
+                    <SelectionMenu
+                      triggerClassName="settings-control"
+                      value={draft.choice}
+                      options={choiceOptions}
+                      placeholder={t(
+                        "settings.model_connection_choose_provider",
+                      )}
+                      ariaLabel={t("settings.model_connection_provider")}
+                      disabled={busy || editing}
+                      onValueChange={choose}
+                    />
+                  </label>
+                )}
                 {draft.choice && (
                   <>
                     {!provider && (

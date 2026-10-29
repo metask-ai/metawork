@@ -763,7 +763,7 @@ function renderModelSettings(overrides = {}) {
 async function chooseModelSource(user, label) {
   const dialog = screen.getByRole("dialog", { name: "Add model" });
   await user.click(
-    within(dialog).getByRole("combobox", { name: "Model provider" }),
+    within(dialog).getByRole("combobox", { name: "Model vendor" }),
   );
   await user.click(
     await screen.findByRole("option", { name: label, exact: true }),
@@ -845,6 +845,12 @@ test("Custom model form saves endpoint, protocol, credential and model together 
     }),
   );
   assert.equal(address.value, "https://custom.example.com");
+  assert.match(
+    dialog.textContent,
+    /Model requests will send the API key to custom.example.com/,
+  );
+  assert.doesNotMatch(dialog.textContent, /\bprovider\b|\bdefault\b/i);
+
   await user.type(within(dialog).getByLabelText("API key"), "custom-secret");
   await user.type(
     within(dialog).getByRole("textbox", { name: "Model ID" }),
@@ -944,6 +950,16 @@ test("model rows edit the exact model and expose shared credential replacement w
   assert.equal(screen.queryByText("Team", { exact: true }), null);
   await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
   const dialog = screen.getByRole("dialog", { name: "Edit model" });
+  assert.equal(
+    within(dialog).queryByRole("combobox", { name: "Model vendor" }),
+    null,
+  );
+  assert.match(dialog.textContent, /Edit the model ID or update the API key/);
+  assert.doesNotMatch(
+    dialog.textContent,
+    /choose a preset|\bprovider\b|\bdefault\b/i,
+  );
+
   const model = within(dialog).getByRole("textbox", { name: "Model ID" });
   await user.clear(model);
   await user.type(model, "model-b");

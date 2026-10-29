@@ -24,9 +24,8 @@ import {
   type CustomModelActions,
 } from "./CustomModelsSettings.tsx";
 import { supportsCustomProviders } from "../../workbench/model-setup.ts";
-export type SettingsFocusTarget =
-  // "providers" focuses the custom-model group within Models.
-  "title" | "account" | "models" | "providers" | "archived";
+export type SettingsFocusTarget = "title" | "account" | "models" | "archived";
+
 type SettingsSection = "general" | "account" | "models" | "archived";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
@@ -113,7 +112,6 @@ export function SettingsPage({
   const generalHeading = useRef<HTMLHeadingElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
-  const providersHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
@@ -148,14 +146,12 @@ export function SettingsPage({
   useEffect(() => {
     if (focusTarget === "archived") {
       setActiveSection("archived");
-    } else if (focusTarget === "providers" && customProviderSettingsAvailable) {
-      setActiveSection("models");
     } else if (focusTarget === "models") {
       setActiveSection("models");
     } else if (focusTarget === "account") {
       setActiveSection("account");
     }
-  }, [focusTarget, customProviderSettingsAvailable]);
+  }, [focusTarget]);
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       if (activeSection === "general" && focusTarget === "title") {
@@ -163,15 +159,11 @@ export function SettingsPage({
       } else if (activeSection === "account") {
         accountHeading.current?.focus();
       } else if (activeSection === "models") {
-        if (customProviderSettingsAvailable && focusTarget === "providers") {
-          providersHeading.current?.focus();
-        } else {
-          modelsHeading.current?.focus();
-        }
+        modelsHeading.current?.focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSection, focusTarget, customProviderSettingsAvailable]);
+  }, [activeSection, focusTarget]);
   useEffect(() => {
     if (activeSection === "archived" && content.current)
       content.current.scrollTop = archiveManagement?.scrollTop ?? 0;
@@ -689,7 +681,6 @@ export function SettingsPage({
                 <CustomModelsSettings
                   models={models}
                   disabled={disabled || executionDisabled}
-                  headingRef={providersHeading}
                   onCreateCustomProvider={onCreateCustomProvider}
                   onCreateBuiltinProvider={onCreateBuiltinProvider}
                   onUpdateCustomProvider={onUpdateCustomProvider}

@@ -758,7 +758,7 @@ test("an available model is selected in the task input rather than model managem
   assert.equal(app.calls.create, 0);
 });
 
-test("a service missing its credential goes to Providers regardless of Account state", () => {
+test("model credential recovery opens Models and has no retired Provider entry", () => {
   const state = customModels();
   state.models.defaultSelection = null;
   state.models.customProviders[0].models = [];
@@ -769,12 +769,12 @@ test("a service missing its credential goes to Providers regardless of Account s
     state.account.state = accountState;
     assert.deepEqual(classify(state), {
       reason: "provider_unavailable",
-      action: "providers",
+      action: "models",
     });
   }
   assert.deepEqual(classify(state, { customProvidersAvailable: false }), {
     reason: "provider_unavailable",
-    action: "models",
+    action: null,
   });
 });
 

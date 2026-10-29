@@ -24,7 +24,6 @@ export type ModelSetupAction =
   | "cancel"
   | "models"
   | "choose_model"
-  | "providers"
   | "refresh"
   | "schedules";
 export type ModelSetupReason =
@@ -159,7 +158,7 @@ export function modelSetupNotice({
     )
       return {
         reason: "provider_unavailable",
-        action: customProvidersAvailable ? "providers" : "models",
+        action: customProvidersAvailable ? "models" : null,
       };
     if (admission.reason === "credential_unavailable")
       return { reason: "execution_unavailable", action: "models" };
@@ -176,14 +175,7 @@ export function modelSetupNotice({
   if (models.customProviders.length > 0)
     return {
       reason: "provider_unavailable",
-      action:
-        customProvidersAvailable &&
-        !models.customProviders.some(
-          (provider) =>
-            provider.enabled && provider.credentialStatus === "ready",
-        )
-          ? "providers"
-          : "models",
+      action: customProvidersAvailable ? "models" : null,
     };
   if (account.state === "authenticated")
     return { reason: "no_models", action: "refresh" };

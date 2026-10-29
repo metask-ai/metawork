@@ -1457,9 +1457,6 @@ export default function App() {
       case "refresh":
         void runExecutionCommand(() => client.refreshModelsCatalog());
         break;
-      case "providers":
-        if (customProvidersAvailable) openSettings("providers");
-        break;
       case "choose_model":
         composerModelTrigger.current?.focus();
         composerModelTrigger.current?.click();
@@ -4703,7 +4700,7 @@ export default function App() {
         disabled={accountBusy || executionBusy}
         onClose={finishModelSetupIntroduction}
         onLogin={() => runModelSetupAction("login")}
-        onConfigure={() => openSettings("providers")}
+        onConfigure={() => openSettings("models")}
       />
 
       {archiveNotice && (
