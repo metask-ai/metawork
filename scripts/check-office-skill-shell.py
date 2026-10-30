@@ -101,6 +101,12 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         language = "python"
         script = work / "create.py"
         script.write_text('from openpyxl import Workbook\nimport sys\nw=Workbook();w.active["A1"]="Office 中文";w.active["B1"]="=1+2";w.save(sys.argv[1])\n', encoding="utf-8")
+        checks = [{"id": "text", "op": "values", "target": {"sheet": "Sheet", "range": "A1"},
+                   "expected": [[{"type": "string", "value": "Office 中文 edited"}]]},
+                  {"id": "formula", "op": "values", "target": {"sheet": "Sheet", "range": "B1"},
+                   "expected": [[{"type": "formula", "value": "=1+2"}]]}]
+        (work / "checks.json").write_text(json.dumps({"version": 1, "checks": checks, "requirements": [
+            {"id": "content", "source": "Fixed fixture edit and unchanged formula", "checks": ["text", "formula"]}]}), encoding="utf-8")
     else:
         language = "node"
         script = work / "scripts" / "create.cjs"
@@ -141,13 +147,19 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                         ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(output)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'create failed' }; & " + quote(entry) + " python " + quote(edit_script) + " " + quote(output) + " " + quote(edited)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'edit failed' }; & " + quote(entry) + " python " + quote(entry.parent / "read.py") + " " + quote(edited) + " " + quote(work / "read.json")
-                        ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }; Write-Output '" + marker + "'"
+                        ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }"
+                        if kind == "xlsx":
+                            ps += "; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/verify.py") + " " + quote(edited) + " " + quote(work / "verification.json") + " --checks " + quote(work / "checks.json")
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'verification failed' }"
+                        ps += "; Write-Output '" + marker + "'"
                         encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
                         response = sse({"command": "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded, "timeout": 120000})
                     else:
                         calls = [["/bin/sh", entry, language, script.relative_to(work), output],
                                  ["/bin/sh", entry, "python", edit_script, output, edited],
                                  ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]]
+                        if kind == "xlsx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/verify.py", edited, work / "verification.json", "--checks", work / "checks.json"])
                         command = " && ".join(" ".join(shlex.quote(str(a)) for a in call) for call in calls)
                         command += " && /usr/bin/printf %s " + shlex.quote(marker)
                         response = sse({"command": command, "timeout": 120000})
@@ -191,6 +203,7 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
             assert "Office permission callbacks: " + str(expected) in result.stderr.decode("utf-8", errors="replace")
             if case == "deny":
                 assert not output.exists() and not edited.exists() and not (work / "read.json").exists(), "Denied Shell executed a document operation"
+                assert not (work / "verification.json").exists(), "Denied Shell produced a verification report"
                 assert inventory() == before_environment, "Denied Shell changed the private environment"
                 print(json.dumps({"permission": case, "callbacks": expected, "no_execution": True, "environment_unchanged": True}), flush=True)
                 continue
@@ -205,6 +218,9 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         if kind == "xlsx":
             cell = next(c for sheet in parsed["sheets"] for c in sheet["cells"] if c["cell"] == "B1")
             assert cell["formula"] is True and cell["value"] == "=1+2" and cell["cached"] is None
+            verification = json.loads((work / "verification.json").read_text(encoding="utf-8"))
+            assert verification["status"] == "passed" and verification["conforms"] is True, verification
+            assert verification["candidate"] == {"bytes": edited.stat().st_size, "sha256": hashlib.sha256(edited.read_bytes()).hexdigest()}
         assert inventory() == before_environment, "Core document processing changed the private environment"
         print(json.dumps({"skill": kind, "permission": case if args.permission_probe else "full", "materialized_entry": state["entry"], "actual_core_bash": True, "create_edit_read": True,
                           "original_sha256": hashlib.sha256(output.read_bytes()).hexdigest()}, ensure_ascii=True), flush=True)

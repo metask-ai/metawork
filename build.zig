@@ -76,6 +76,14 @@ pub fn build(b: *std.Build) void {
         .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
     });
     artifacts.tests.step.dependOn(&b.addRunArtifact(office_publish_tests).step);
+    const office_app_tests = b.addTest(.{
+        .name = "metawork-office-resources",
+        .root_module = test_modules.app,
+        .filters = &.{"full Office resources"},
+    });
+    const office_resources_step = b.step("test-office-resources", "Verify Office resource publication and complete Skill entries");
+    office_resources_step.dependOn(&b.addRunArtifact(office_publish_tests).step);
+    office_resources_step.dependOn(&b.addRunArtifact(office_app_tests).step);
     if (test_modules.app.resolved_target.?.result.os.tag == .macos) {
         if (b.sysroot) |sysroot| test_modules.app.addFrameworkPath(.{
             .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),

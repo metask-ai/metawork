@@ -122,6 +122,20 @@ test "full Office resources publish without preparing interpreters and reject ch
     defer temporary.cleanup();
     try publish(std.testing.allocator, std.testing.io, temporary.dir);
     try publish(std.testing.allocator, std.testing.io, temporary.dir);
+    for ([_][]const u8{ "docx", "xlsx", "pptx" }) |skill| {
+        for ([_][]const u8{ "SKILL.md", "environment/run.py", "scripts/office/validate.py" }) |entry| {
+            const path = try std.fs.path.join(std.testing.allocator, &.{ &version, skill, entry });
+            defer std.testing.allocator.free(path);
+            const data = try temporary.dir.readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(1024 * 1024));
+            defer std.testing.allocator.free(data);
+            try std.testing.expect(data.len > 0);
+        }
+    }
+    const verify_path = try std.fs.path.join(std.testing.allocator, &.{ &version, "xlsx/scripts/verify.py" });
+    defer std.testing.allocator.free(verify_path);
+    const verify = try temporary.dir.readFileAlloc(std.testing.io, verify_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(verify);
+    try std.testing.expect(std.mem.indexOf(u8, verify, "from office_archive import") != null);
     const definition = try std.fs.path.join(std.testing.allocator, &.{ &version, "docx/SKILL.md" });
     defer std.testing.allocator.free(definition);
     try temporary.dir.writeFile(std.testing.io, .{ .sub_path = definition, .data = "changed" });

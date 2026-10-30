@@ -49,13 +49,30 @@ function reportedVersions(versions) {
 test("shipped full Office archive matches canonical Skills, helpers and locked environments", () => {
   execFileSync(
     process.execPath,
-    ["scripts/sync-office-archive.mjs", "--check"],
-    { stdio: "pipe" },
-  );
-  execFileSync(
-    process.execPath,
     ["scripts/build-office-skills.mjs", "--check"],
     { stdio: "pipe" },
+  );
+});
+
+test("Office archive helpers derive directly from the canonical source", (t) => {
+  const root = resourceFixture(t);
+  const canonical = path.join(root, "src/product/control/resources/archive.py");
+  writeFileSync(
+    canonical,
+    Buffer.concat([
+      readFileSync(canonical),
+      Buffer.from("\n# changed canonical helper\n"),
+    ]),
+  );
+  assert.throws(
+    () =>
+      execFileSync(
+        process.execPath,
+        ["scripts/build-office-skills.mjs", "--check"],
+        { cwd: root, stdio: "pipe" },
+      ),
+    (error) =>
+      error.stderr.toString().includes("Office Skill archive is stale"),
   );
 });
 
