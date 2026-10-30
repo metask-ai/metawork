@@ -2,7 +2,9 @@
 
 Use the current XLSX Skill's private run entry for `scripts/verify.py`. The
 checker reads the final candidate; it never edits it or installs libraries.
-Use new paths for the candidate, check specification and every report.
+Use new paths for generated/edited candidates, check specifications and every
+report. A verification-only task may inspect its authorized existing workbook
+as a read-only candidate; no new workbook or change to the original is needed.
 
 ```sh
 # Windows: use the run.cmd entry in place of /bin/sh .../run.sh.
@@ -17,6 +19,27 @@ multiline JSON so the normal text reader can inspect them directly. Read
 mapping. Exit zero alone does not establish that the task was checked. A call
 without `--checks` only establishes the reported basic checks (`basic_passed`),
 with `conforms: null`. It does not verify the user's contents or formatting.
+
+This also applies when a necessary operation cannot be performed. Keep it in
+the specification, run the checker against the inspected workbook, and use the
+structured incomplete report to support the explanation. For example:
+
+```json
+{
+  "version": 1,
+  "requirements": [
+    {"id": "engine", "source": "User requires actual calculation-engine execution", "checks": ["engine"]}
+  ],
+  "checks": [
+    {"id": "engine", "op": "unsupported", "reason": "No supported calculation engine is available"}
+  ]
+}
+```
+
+That necessary check remains incomplete (`required_checks_completed: false`,
+`conforms: null`); it cannot become passed by explaining the limitation in
+prose. If the candidate itself cannot be read or checking cannot execute,
+report that execution failure without inventing a completed report.
 
 Before generating the document, map every necessary user requirement to a check
 or an explicit unsupported item. Keep this mapping when correcting the document

@@ -9,7 +9,9 @@ description: Create, read, edit, clean, and format spreadsheets with formulas an
 
 ## Creation, editing, verification and delivery
 
-Read [the XLSX verification workflow](verification.md) before creating or editing a deliverable. Use the current XLSX Skill's `scripts/verify.py` through its private run entry. This XLSX workflow requires checks of the final saved candidate; structured text from `read.py` does not check formatting.
+Read [the XLSX verification workflow](verification.md) before creating, editing or checking a workbook. Use the current XLSX Skill's `scripts/verify.py` through its private run entry. This XLSX workflow requires checks of the final saved candidate; structured text from `read.py` does not check formatting.
+
+For a verification-only request, use the authorized existing workbook as the read-only candidate and preserve it. Record necessary unavailable checks with `unsupported` and run the checker to produce the structured incomplete result. A prose explanation can accompany that result; it does not replace the necessary-check mapping. Do not edit a workbook just to report that a required operation is unavailable.
 
 1. Map the user's necessary contents, formatting and preservation requirements to explicit checks or unsupported items before generating. Derive numeric expectations independently from the raw input. Preserve originals and work on a new candidate.
 2. Create or edit within the requested scope. Re-find totals by unique labels within their own tables, check expected coordinates, and cover every required data and total font/percentage range. A successful A1 check does not cover the rest of a workbook. For a matching CSV task, `examples/summary.py` is a runnable starting point.
