@@ -668,12 +668,123 @@
       "serial": true,
       "attempt": 13,
       "run_id_hex": "0000000000000002",
-      "status": "queued",
+      "status": "completed",
       "submitted_at_unix_ms": 1793342305681,
       "operator_prompt": "请继续完成原任务。",
       "interventions": [
-        "Neutral continuation only; no expected values, internal paths, candidate fixes or verification hints supplied. Prior stopped Run retained; continuation is not an additional independent repetition."
-      ]
+        "Neutral continuation only; no expected values, internal paths, candidate fixes or verification hints supplied. Prior stopped Run retained; continuation is not an additional independent repetition.",
+        "Under prior synthetic acceptance authorization, allowed once for the requested verify command after automatic-review timeout. Prior Run activation, run.sh and verify.py were all absent, so this command could not execute the entry; did not restore, replace, redirect or hint a path. Missing-resource outcome retained.",
+        "Under prior synthetic acceptance authorization, allowed once for local DeliverFile created.xlsx after rechecking 6874 bytes and SHAead88a14…64457 against the own report and independent oracle. CSV baseline unchanged; no standing permission or external publication."
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 7,
+      "resource_entry_observation": "Initial reacquisition rule was not followed: reused old activation, command failed EXIT127 while shell echo returned0; model correctly read the failure, invoked Skill at ordinal2 and used fresh entry at ordinal3. Recovery succeeded without an implementation hint or environment preparation.",
+      "own_check_specification": {
+        "checks": 19,
+        "requirements": 9,
+        "scope_review": "Covers exact sheet set, raw values/blanks, data/region values and shares, full requested font rectangles, percentages, total fills, reference note/outside/formula. Expectations are literal independently stated task/CSV values, not reused generator variables."
+      },
+      "own_check_result": {
+        "status": "passed",
+        "execution_completed": true,
+        "required_checks_completed": true,
+        "conforms": true,
+        "candidate": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "not_performed": [
+          "formula_recalculation",
+          "visual_rendering",
+          "viewer_compatibility",
+          "full_xsd_validation"
+        ],
+        "report": "verification-1.json",
+        "checks": 19,
+        "requirements": 9,
+        "specification_sha256": "4aec47698e7235046917b41f67dd9975b297363dedf7dc9b74f97e8c6798facf",
+        "report_sha256": "ed64f34c729862911f01b9fd24e7dde6a37c897d16a60b4ab59d0f3aa9f0fec8"
+      },
+      "receipt_observation": [
+        {
+          "id": "6c80617108d04afe064b7950217f4266",
+          "locator": "created.xlsx",
+          "size_bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457",
+          "redacted": false
+        }
+      ],
+      "finished_at_unix_ms": 1793342769282,
+      "actual_deliveries": [
+        {
+          "id": "6c80617108d04afe064b7950217f4266",
+          "locator": "created.xlsx",
+          "size_bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457",
+          "redacted": false
+        }
+      ],
+      "final_response": "交付完成。created.xlsx 已通过 DeliverFile 提交，回执 6874 字节、SHA-256 `ead88a14…64457`，与校验报告的候选文件身份一致。\n\n**核验覆盖（verify.py 对最终保存字节执行，19/19 项通过，9 项需求全部 conforms）**\n\n| 要求 | 核验方式 |\n|---|---|\n| 恰有 Input/Data/Regions/Reference 四表 | sheets 精确比对 |\n| Input 原始表头 + 7 行原样、金额为数字、空字段空白 | A1:C8 逐格值/类型断言 + 外沿计数 22 非空格 |\n| Data 4 条有效订单原顺序、去重与排除正确 | A1:D6 全值断言（o-1/o-2/o-3/o-4，100/200/150/200），期望值独立从 CSV 推导 |\n| Data/Regions 末尾 Total 行、占比、地区排序 | 唯一标签定位 Total 于 A6/A4，区域值 North 300、South 350、总额 650 |\n| 整个已用矩形 Arial 11（含表头、空白格、合计行） | Data A1:D6、Regions A1:C4、Input A1:C8 字体断言（含空白格） |\n| 占比及合计行一位小数百分比 | D2:D6、C2:C4 均为 `0.0%` |\n| 两合计行 A 格纯色淡蓝 | A6、A4 solid FFDEEAF6 |\n| Reference A1/H20 文本、B2 公式 | 逐格断言，B2 存为公式文本 `=1+2` |\n| 不修改 orders.csv | 前后 SHA-256 一致（`11ca9b99…5756`） |\n\n**未执行项（如实说明）**：公式重算（按你要求不重算，B2 无缓存值，本环境不评估公式）、可视化渲染、查看器兼容性、完整 XSD 校验；文件中存储的 Arial 字体名不保证查看端已安装该字体。工作区另存在早前的 bad-styles.xlsx，与本任务无关，未触碰。",
+      "candidate_produced": true,
+      "create_stage_qualification": {
+        "status": "passed_with_recorded_neutral_continuation_and_manual_approvals",
+        "independent_checks_passed": 21,
+        "own_checks_passed": 19,
+        "necessary_requirements_passed": 9,
+        "receipt_matches": true,
+        "final_wording_truthful": true,
+        "not_an_unassisted_run": true,
+        "edit_stage": "not yet submitted"
+      },
+      "edit_original_baseline": {
+        "orders.csv": {
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        },
+        "created.xlsx": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "bad-styles.xlsx": {
+          "bytes": 6868,
+          "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+        }
+      }
+    },
+    {
+      "case": "create-edit",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 14,
+      "stage": "edit",
+      "run_id_hex": "0000000000000003",
+      "status": "queued",
+      "submitted_at_unix_ms": 1793342830983,
+      "frozen_prompt_matches_persisted_input": true,
+      "original_baseline": {
+        "orders.csv": {
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        },
+        "created.xlsx": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "bad-styles.xlsx": {
+          "bytes": 6868,
+          "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+        }
+      },
+      "interventions": []
     }
   ],
   "unstarted": [
@@ -886,5 +997,6 @@
     ],
     "model_attempts_started": false,
     "rule": "Each future case starts with its declared input only. Active Task36 workspace is untouched; no additional candidate or expected-value hints are injected."
-  }
+  },
+  "current_qualification": "Task36 create stage completed with a recorded neutral continuation, manual approvals, independent21 checks, own19 checks/9 requirements, exact receipt and truthful final. Frozen edit stage now submitted. Other independent repetitions and required scenes remain unqualified."
 }
