@@ -197,6 +197,7 @@ const CatalogJob = struct {
         self.outcome = if (self.catalog_port.query(.{
             .canonical_user_home = self.canonical_user_home,
             .additional_sources = additional,
+            .default_source_priority = sources.default_source_priority,
             .source_lifetime = self.source_roots.builtin_lifetime,
             .target = switch (self.scope) {
                 .personal => .management,
@@ -1986,6 +1987,7 @@ const TestHarness = struct {
     last_epoch: [32]u8 = undefined,
     last_epoch_len: usize = 0,
     last_source_count: usize = 0,
+    last_default_source_priority: i32 = 0,
     last_source_ids: [sources.definitions.len + 1]sources.Id = undefined,
     last_source_scopes: [sources.definitions.len + 1]agent.CatalogSourceScope = undefined,
 
@@ -2063,6 +2065,7 @@ const TestHarness = struct {
         self.query_count += 1;
         self.last_source_lifetime = input.source_lifetime;
         self.last_source_count = input.additional_sources.len;
+        self.last_default_source_priority = input.default_source_priority;
         for (input.additional_sources, 0..) |source, index| {
             if (std.mem.eql(u8, source.source_instance_id, sources.builtin_source_instance_id)) {
                 @memcpy(self.last_builtin_root[0..source.canonical_root.len], source.canonical_root);
@@ -3410,6 +3413,7 @@ test "source worker resolves real fixed roots and refuses partial catalog on blo
     try runtime.refreshPersonal();
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(sources.default_source_priority, harness.last_default_source_priority);
     try std.testing.expectEqual(@as(usize, 1), harness.last_source_count);
     try std.testing.expectEqual(sources.Id.claude_user, harness.last_source_ids[0]);
     try std.testing.expectEqual(agent.CatalogSourceScope.user, harness.last_source_scopes[0]);

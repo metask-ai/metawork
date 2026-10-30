@@ -64,7 +64,7 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
-`update_credential` 是 mandatory entry，但 MetaWork 当前不调用该 entry，凭据交接继续遵循既有 Product 与 Agent 生命周期。Session create/restore 的 credential 必须符合官方 credential 长度和字符约束，不建立截断、字符替换或空凭据 fallback。Skill catalog source priority 字段保持零初始化，继续使用官方默认解析语义，不开放 Host 自定义来源优先级。
+`update_credential` 是 mandatory entry，但 MetaWork 当前不调用该 entry，凭据交接继续遵循既有 Product 与 Agent 生命周期。Session create/restore 的 credential 必须符合官方 credential 长度和字符约束，不建立截断、字符替换或空凭据 fallback。Skill catalog 的 additional source priority 与默认来源 priority 通过官方字段传入；来源排序及 owner 边界见 [Skill catalog ownership](agentcore-integration.md#skill-catalog-ownership)。
 
 MetaWork 不调用 Goal 或 Team：Runtime 的 `enable_teams` 为零，Session create/restore 的 `team` 为 null，不建立 Goal continuation Run，`goal_updated` 继续在 Agent 消费边界拒绝。Agent 的当前 Run 文本提交只通过官方 `SessionApi.submitInput`，使用 generation-bound `RunControlLease`。`input_adopted` 必须匹配该 Run 已登记的 input identity、严格递增 sequence 与非零 turn；事件可早于提交回执，不得据未收到事件推断未采纳。所有已定义 Run 返回状态的 `input_accepted_count / input_adopted_count` 均须对账，已采纳必须为已接受的前缀；无可信终态计数时不制造未采纳结论。产品是否开放入口及发送行为由产品合同决定，不从 ABI entry 存在推导。
 

@@ -9,6 +9,7 @@ const agent = @import("metawork_agent");
 pub const file_name = "skill-sources.json";
 pub const max_store_bytes = 4096;
 pub const builtin_source_instance_id = "metawork.builtin";
+pub const default_source_priority: i32 = 999;
 pub const Id = enum { claude_user, claude_workspace, codex_user, codex_workspace };
 pub const Brand = enum { claude, codex };
 pub const Ecosystem = enum {
@@ -30,13 +31,16 @@ pub const Definition = struct {
     source_instance_id: []const u8,
     ecosystem: Ecosystem,
     scope: agent.CatalogSourceScope,
+    priority: i32,
 };
 
+// Leave space between compatibility sources for future directory integrations.
+// Core owns scope precedence and resolution for every source.
 pub const definitions = [_]Definition{
-    .{ .id = .claude_user, .source_instance_id = "compat.claude.user", .ecosystem = .claude, .scope = .user },
-    .{ .id = .claude_workspace, .source_instance_id = "compat.claude.workspace", .ecosystem = .claude, .scope = .workspace },
-    .{ .id = .codex_user, .source_instance_id = "compat.codex.user", .ecosystem = .codex, .scope = .user },
-    .{ .id = .codex_workspace, .source_instance_id = "compat.codex.workspace", .ecosystem = .codex, .scope = .workspace },
+    .{ .id = .claude_user, .source_instance_id = "compat.claude.user", .ecosystem = .claude, .scope = .user, .priority = 100 },
+    .{ .id = .claude_workspace, .source_instance_id = "compat.claude.workspace", .ecosystem = .claude, .scope = .workspace, .priority = 100 },
+    .{ .id = .codex_user, .source_instance_id = "compat.codex.user", .ecosystem = .codex, .scope = .user, .priority = 200 },
+    .{ .id = .codex_workspace, .source_instance_id = "compat.codex.workspace", .ecosystem = .codex, .scope = .workspace, .priority = 200 },
 };
 
 pub fn definition(id: Id) Definition {
@@ -332,6 +336,7 @@ pub const Discovery = struct {
             .canonical_root = try self.allocator.dupe(u8, canonical_root),
             .scope = .user,
             .source_instance_id = builtin_source_instance_id,
+            .priority = 0,
         };
         self.count += 1;
         self.builtin = .checked;
@@ -391,12 +396,14 @@ pub fn discover(
             if (item.scope == .workspace) {
                 result.owned_sources[index].scope = item.scope;
                 result.owned_sources[index].source_instance_id = item.source_instance_id;
+                result.owned_sources[index].priority = item.priority;
             }
         } else {
             result.owned_sources[result.count] = .{
                 .canonical_root = path,
                 .scope = item.scope,
                 .source_instance_id = item.source_instance_id,
+                .priority = item.priority,
             };
             result.count += 1;
         }

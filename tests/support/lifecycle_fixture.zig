@@ -321,6 +321,7 @@ pub const FakeSession = struct {
 
 pub const CatalogSourceObservation = struct {
     scope: u32 = 0,
+    priority: i32 = 0,
     root_hash: [32]u8 = @splat(0),
     id: [128]u8 = @splat(0),
     id_len: usize = 0,
@@ -349,6 +350,8 @@ pub const FakeCore = struct {
     runtime_destroy_busy_attempts: usize = 0,
     catalog_queries: usize = 0,
     catalog_source_count: usize = 0,
+    catalog_default_user_priority: i32 = 0,
+    catalog_default_workspace_priority: i32 = 0,
     catalog_sources: [wire.MAX_SKILL_SOURCES_V1]CatalogSourceObservation = @splat(.{}),
     catalog_releases: usize = 0,
     catalog_release_failures: usize = 0,
@@ -1162,8 +1165,7 @@ pub fn runtimeQuerySkillCatalog(
     };
     if (runtime == null or out_catalog == null or out_descriptor == null or
         input.struct_size != @sizeOf(wire.SkillCatalogQueryV1) or
-        input.reserved0 != 0 or input.default_user_source_priority != 0 or
-        input.default_workspace_source_priority != 0 or
+        input.reserved0 != 0 or
         input.additional_source_count > wire.MAX_SKILL_SOURCES_V1 or
         ((input.additional_source_count == 0) != (input.additional_sources == null)))
     {
@@ -1191,10 +1193,12 @@ pub fn runtimeQuerySkillCatalog(
     defer fake_core.unlock();
     fake_core.catalog_queries += 1;
     fake_core.catalog_source_count = @intCast(input.additional_source_count);
+    fake_core.catalog_default_user_priority = input.default_user_source_priority;
+    fake_core.catalog_default_workspace_priority = input.default_workspace_source_priority;
     if (input.additional_sources) |sources| {
         for (sources[0..fake_core.catalog_source_count], 0..) |source, index| {
             if (source.struct_size != @sizeOf(wire.SkillSourceV1) or
-                source.priority != 0 or source.reserved0 != 0 or
+                source.reserved0 != 0 or
                 !std.mem.allEqual(u64, &source.reserved, 0) or
                 (source.scope_code != wire.SKILL_SOURCE_USER and
                     source.scope_code != wire.SKILL_SOURCE_WORKSPACE)) return wire.STATUS_INVALID_ARGUMENT;
@@ -1203,7 +1207,7 @@ pub fn runtimeQuerySkillCatalog(
             if (source_root.len == 0 or source_id.len == 0 or source_id.len > 128)
                 return wire.STATUS_INVALID_ARGUMENT;
             const observation = &fake_core.catalog_sources[index];
-            observation.* = .{ .scope = source.scope_code, .id_len = source_id.len };
+            observation.* = .{ .scope = source.scope_code, .priority = source.priority, .id_len = source_id.len };
             std.crypto.hash.sha2.Sha256.hash(source_root, &observation.root_hash, .{});
             @memcpy(observation.id[0..source_id.len], source_id);
         }

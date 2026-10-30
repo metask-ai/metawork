@@ -93,11 +93,12 @@ pub const Source = struct {
     canonical_root: []const u8,
     scope: SourceScope,
     source_instance_id: []const u8,
+    priority: i32 = 0,
 };
 
 pub const QueryTarget = union(enum) {
     /// A home-only management query. Personal additions share the default
-    /// source's SDK priority; its lease can never bind a Session.
+    /// source's SDK scope; its lease can never bind a Session.
     management,
     workspace: struct {
         canonical_root: []const u8,
@@ -109,6 +110,8 @@ pub const Query = struct {
     canonical_user_home: []const u8,
     target: QueryTarget,
     additional_sources: []const Source = &.{},
+    /// Applied to both canonical .agents roots; Core still resolves scope first.
+    default_source_priority: i32 = 0,
     /// Borrowed through query completion. A successful acquisition retains one
     /// reference until its final Core catalog release, including Session and
     /// same-process restore captures. Never encoded into Core or checkpoints.
@@ -190,13 +193,14 @@ pub fn query(
         encoded.* = std.mem.zeroes(wire.SkillSourceV1);
         encoded.struct_size = @sizeOf(wire.SkillSourceV1);
         // Core registers the shared root/home default as WORKSPACE. Management
-        // has only personal inputs, which must compete at that same priority.
+        // has only personal inputs, which must compete in that same scope.
         encoded.scope_code = if (input.target == .management) wire.SKILL_SOURCE_WORKSPACE else switch (source.scope) {
             .user => wire.SKILL_SOURCE_USER,
             .workspace => wire.SKILL_SOURCE_WORKSPACE,
         };
         encoded.root = sdk.bytesView(source.canonical_root);
         encoded.source_instance_id = sdk.bytesView(source.source_instance_id);
+        encoded.priority = source.priority;
     }
 
     var query_input = std.mem.zeroes(wire.SkillCatalogQueryV1);
@@ -206,6 +210,8 @@ pub fn query(
     query_input.workspace_epoch = sdk.bytesView(input.workspaceEpoch());
     query_input.additional_sources = if (sources.len == 0) null else sources.ptr;
     query_input.additional_source_count = @intCast(sources.len);
+    query_input.default_user_source_priority = input.default_source_priority;
+    query_input.default_workspace_source_priority = input.default_source_priority;
 
     var raw: ?*wire.SkillCatalogHandle = null;
     var descriptor = emptyOwnedBytes();

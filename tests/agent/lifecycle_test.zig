@@ -1722,17 +1722,22 @@ test "Catalog additional sources are encoded exactly and borrowed only for the q
     };
     var sources: [wire.MAX_SKILL_SOURCES_V1 + 1]lifecycle.CatalogSource = @splat(source);
     sources[0].scope = .workspace;
+    for (&sources, 0..) |*entry, index| entry.priority = -@as(i32, @intCast(index)) - 1;
     for ([_]usize{ 0, 1, 4, wire.MAX_SKILL_SOURCES_V1 }) |count| {
         var acquisition = try runtime.querySkillCatalog(.{
             .canonical_user_home = root,
             .target = .{ .workspace = .{ .canonical_root = root, .epoch = "sources" } },
             .additional_sources = sources[0..count],
+            .default_source_priority = 999,
         });
         defer acquisition.projection.deinit();
         try runtime.releaseSkillCatalog(acquisition.lease);
         try std.testing.expectEqual(count, fake_core.catalog_source_count);
+        try std.testing.expectEqual(@as(i32, 999), fake_core.catalog_default_user_priority);
+        try std.testing.expectEqual(@as(i32, 999), fake_core.catalog_default_workspace_priority);
         for (fake_core.catalog_sources[0..count], 0..) |seen, index| {
             try std.testing.expectEqual(if (index == 0) wire.SKILL_SOURCE_WORKSPACE else wire.SKILL_SOURCE_USER, seen.scope);
+            try std.testing.expectEqual(sources[index].priority, seen.priority);
             try std.testing.expectEqualDeep(expected_hash, seen.root_hash);
             try std.testing.expectEqualStrings(&source_id, seen.id[0..seen.id_len]);
         }
@@ -1744,11 +1749,12 @@ test "Catalog additional sources are encoded exactly and borrowed only for the q
         .canonical_user_home = root,
         .target = .{ .workspace = .{ .canonical_root = root, .epoch = "" } },
         .additional_sources = &sources,
+        .default_source_priority = 999,
     }));
     try std.testing.expectEqual(@as(usize, 4), fake_core.catalog_queries);
 }
 
-test "Management catalog encodes personal additions at the shared default priority" {
+test "Management catalog preserves source priorities in the shared default scope" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });
     defer {
@@ -1757,21 +1763,27 @@ test "Management catalog encodes personal additions at the shared default priori
     }
     const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    const sources: [4]lifecycle.CatalogSource = @splat(.{
+    var sources: [4]lifecycle.CatalogSource = @splat(.{
         .canonical_root = root,
         .scope = .user,
         .source_instance_id = "personal",
     });
+    for (&sources, 0..) |*entry, index| entry.priority = -@as(i32, @intCast(index)) - 1;
     var acquisition = try runtime.querySkillCatalog(.{
         .canonical_user_home = root,
         .target = .management,
         .additional_sources = &sources,
+        .default_source_priority = 999,
     });
     defer acquisition.projection.deinit();
     defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
     try std.testing.expectEqual(@as(usize, 4), fake_core.catalog_source_count);
-    for (fake_core.catalog_sources[0..4]) |seen|
+    try std.testing.expectEqual(@as(i32, 999), fake_core.catalog_default_user_priority);
+    try std.testing.expectEqual(@as(i32, 999), fake_core.catalog_default_workspace_priority);
+    for (fake_core.catalog_sources[0..4], sources) |seen, source| {
         try std.testing.expectEqual(wire.SKILL_SOURCE_WORKSPACE, seen.scope);
+        try std.testing.expectEqual(source.priority, seen.priority);
+    }
     for (sources) |source| try std.testing.expectEqual(lifecycle.CatalogSourceScope.user, source.scope);
 }
 
@@ -1889,6 +1901,99 @@ test "canonical AgentCore management and Workspace resolve all personal and proj
         else
             try std.testing.expectEqual(lifecycle.CatalogIssueCode.source_conflict, shared.projection.issues[0].code);
     }
+}
+
+test "canonical AgentCore applies Product fixed source priorities across management Workspace and shared roots" {
+    const sources = fixture.product_skill.sources;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dirs = [_][]const u8{
+        "home/.agents/skills",      "home/.codex/skills",      "home/.claude/skills",      "builtin",
+        "workspace/.agents/skills", "workspace/.codex/skills", "workspace/.claude/skills",
+    };
+    for (dirs) |dir| try tmp.dir.createDirPath(std.testing.io, dir);
+    const cases = .{
+        .{ "agents", 0b1111111, "agents.workspace.default", "agents.workspace.default", "agents.workspace.default" },
+        .{ "codex", 0b1101110, "compat.codex.user", "compat.codex.workspace", "compat.codex.workspace" },
+        .{ "claude", 0b1001100, "compat.claude.user", "compat.claude.workspace", "compat.claude.workspace" },
+        .{ "builtin", 0b0001000, "metawork.builtin", "metawork.builtin", "metawork.builtin" },
+        .{ "scope", 0b1000001, "agents.workspace.default", "compat.claude.workspace", "agents.workspace.default" },
+        .{ "personal", 0b0001111, "agents.workspace.default", "agents.user.default", "agents.workspace.default" },
+        .{ "personal-codex", 0b0001110, "compat.codex.user", "compat.codex.user", "compat.codex.workspace" },
+        .{ "personal-claude", 0b0001100, "compat.claude.user", "compat.claude.user", "compat.claude.workspace" },
+    };
+    inline for (cases) |case| {
+        for (dirs, 0..) |dir, index| {
+            if (case[1] & (@as(usize, 1) << @intCast(index)) == 0) continue;
+            const entry = try std.fs.path.join(std.testing.allocator, &.{ dir, case[0] });
+            defer std.testing.allocator.free(entry);
+            try tmp.dir.createDirPath(std.testing.io, entry);
+            const file = try std.fs.path.join(std.testing.allocator, &.{ entry, "SKILL.md" });
+            defer std.testing.allocator.free(file);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file, .data = "---\nname: Review\ndescription: Review this change\n---\nInspect the requested file.\n" });
+        }
+    }
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const workspace = try tmp.dir.realPathFileAlloc(std.testing.io, "workspace", std.testing.allocator);
+    defer std.testing.allocator.free(workspace);
+    const builtin_root = try tmp.dir.realPathFileAlloc(std.testing.io, "builtin", std.testing.allocator);
+    defer std.testing.allocator.free(builtin_root);
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    for ([_]?[]const u8{ null, workspace, home }, 0..) |root, purpose| {
+        var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, root, .{ .values = @splat(true) });
+        defer discovery.deinit();
+        try discovery.appendBuiltin(std.testing.io, builtin_root);
+        for (0..2) |_| {
+            var acquisition = try runtime.querySkillCatalog(.{
+                .canonical_user_home = home,
+                .target = if (root) |path| .{ .workspace = .{ .canonical_root = path, .epoch = "priority" } } else .management,
+                .additional_sources = try discovery.additionalSources(),
+                .default_source_priority = sources.default_source_priority,
+            });
+            defer acquisition.projection.deinit();
+            defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
+            try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, acquisition.projection.health);
+            try std.testing.expectEqual(cases.len, acquisition.projection.skills.len);
+            inline for (cases) |case| {
+                var found = false;
+                for (acquisition.projection.skills) |skill| {
+                    if (!std.mem.eql(u8, case[0], skill.invocation_name)) continue;
+                    const expected = switch (purpose) {
+                        0 => case[2],
+                        1 => case[3],
+                        else => case[4],
+                    };
+                    try std.testing.expectEqualStrings(expected, skill.source_instance_id);
+                    found = true;
+                }
+                try std.testing.expect(found);
+            }
+            std.mem.reverse(lifecycle.CatalogSource, discovery.owned_sources[0..discovery.count]);
+        }
+    }
+    // An invalid higher-ranked definition must not expose a lower source.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "home/.agents/skills/personal/SKILL.md", .data = "\xff" });
+    var discovery = try sources.discover(std.testing.io, std.testing.allocator, home, null, .{ .values = @splat(true) });
+    defer discovery.deinit();
+    try discovery.appendBuiltin(std.testing.io, builtin_root);
+    var broken = try runtime.querySkillCatalog(.{
+        .canonical_user_home = home,
+        .target = .management,
+        .additional_sources = try discovery.additionalSources(),
+        .default_source_priority = sources.default_source_priority,
+    });
+    defer broken.projection.deinit();
+    defer runtime.releaseSkillCatalog(broken.lease) catch unreachable;
+    try std.testing.expectEqual(lifecycle.CatalogHealth.degraded, broken.projection.health);
+    try std.testing.expectEqual(cases.len - 1, broken.projection.skills.len);
+    for (broken.projection.skills) |skill| try std.testing.expect(!std.mem.eql(u8, "personal", skill.invocation_name));
+    try std.testing.expectEqual(@as(usize, 1), broken.projection.issues.len);
+    try std.testing.expectEqual(lifecycle.CatalogIssueCode.invalid_definition, broken.projection.issues[0].code);
 }
 
 test "Catalog invalid sources fail before Core and management rejects project sources" {
