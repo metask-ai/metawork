@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "scope": "Finite real-model PPTX create/edit/check/delivery acceptance; incomplete until frozen set is satisfied",
+  "frozen_suite": {
+    "path": "tests/fixtures/office/model-acceptance-pptx.json",
+    "bytes": 2432,
+    "sha256": "5c1f5d3f9d23cb37021b4df2220c5ebb84f16ccc8b1653e8fe45c9f55009ee3c",
+    "commit": "149194d1"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "task_id": 35,
+      "task_id_hex": "0000000000000023",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-pptx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793339364436,
+      "status": "stopped",
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "ac9ff388",
+      "interventions": [
+        "After authoritative stopped terminal with no candidate, operator sent one neutral continuation in the same Task; no script, internal path, XML repair hint or candidate was provided. Initial stopped result retained."
+      ],
+      "serial": true,
+      "outcome": "stopped",
+      "cause": null,
+      "finished_at_unix_ms": 1793339799955,
+      "tool_count": 17,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 82,
+          "output_bytes": 11082
+        },
+        {
+          "ordinal": 1,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 181,
+          "output_bytes": 219
+        },
+        {
+          "ordinal": 2,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 486,
+          "output_bytes": 921
+        },
+        {
+          "ordinal": 3,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 171,
+          "output_bytes": 16483
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 187,
+          "output_bytes": 225
+        },
+        {
+          "ordinal": 5,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 177,
+          "output_bytes": 4260
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 358,
+          "output_bytes": 698
+        },
+        {
+          "ordinal": 7,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 422,
+          "output_bytes": 64340
+        },
+        {
+          "ordinal": 8,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 223,
+          "output_bytes": 6005
+        },
+        {
+          "ordinal": 9,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 360,
+          "output_bytes": 2314
+        },
+        {
+          "ordinal": 10,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 311,
+          "output_bytes": 3889
+        },
+        {
+          "ordinal": 11,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 390,
+          "output_bytes": 806
+        },
+        {
+          "ordinal": 12,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 379,
+          "output_bytes": 2705
+        },
+        {
+          "ordinal": 13,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 402,
+          "output_bytes": 2805
+        },
+        {
+          "ordinal": 14,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 296,
+          "output_bytes": 1521
+        },
+        {
+          "ordinal": 15,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 315,
+          "output_bytes": 3794
+        },
+        {
+          "ordinal": 16,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 435,
+          "output_bytes": 2675
+        }
+      ],
+      "actual_deliveries": [],
+      "public_output": "我先读取 Skill 的参考文档并确认运行环境状态。环境已就绪（Python 与 Node 均已提前准备好，无需下载）。读取创建参考文档。现在检查生成器对“逐数据点着色”的支持，然后编写创建脚本。库支持逐点 `<c:dPt>` 着色。查看具体生成逻辑。查看折线图的 grouping 与 dataLabel 处理逻辑。",
+      "public_output_kind": null,
+      "candidate_produced": false
+    },
+    {
+      "attempt": 2,
+      "case": "create-edit",
+      "stage": "continue-create",
+      "repetition": 1,
+      "task_id": 35,
+      "task_id_hex": "0000000000000023",
+      "run_id_hex": "0000000000000002",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-pptx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793339869803,
+      "status": "running",
+      "application_source_commit": "ac9ff388",
+      "serial": true,
+      "continuation_of_attempt": 1,
+      "operator_input": "请继续完成原任务。",
+      "interventions": [
+        "Neutral continuation after a real stopped terminal; counts as assisted workflow, not a new independent repetition"
+      ],
+      "frozen_initial_requirements_unchanged": true,
+      "outcome": null,
+      "cause": null,
+      "tool_count": 0,
+      "tools": []
+    }
+  ],
+  "application": {
+    "source_commit": "ac9ff388",
+    "executable": {
+      "bytes": 47836320,
+      "sha256": "67ca0854cf8c4241d33657b013ffb58fe5677fa25b91edc5ffc76bb5db66db47"
+    },
+    "archive": {
+      "bytes": 474830,
+      "sha256": "2ede99eb3c9c8740e02ab996fe26903a69d7b10fab500b88841762da44a248ef"
+    },
+    "existing_account_and_approval_mode": true
+  },
+  "acceptance": "not passed; actual model workflow is in progress",
+  "unstarted": [
+    "repetition 1 edit/check/delivery",
+    "repetitions 2 and 3 create/edit/check/delivery",
+    "correlation model create/edit/check/delivery"
+  ],
+  "first_preparation_frozen_separately": {
+    "fixture": "tests/fixtures/office/model-acceptance-first-preparation.json",
+    "commit": "86b50f5a",
+    "case_not_started": true,
+    "counted_as_ready_repetition": false
+  }
+}

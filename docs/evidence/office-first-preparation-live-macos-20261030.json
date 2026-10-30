@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "status": "inputs_prepared_not_launched",
+  "fixture": "tests/fixtures/office/model-acceptance-first-preparation.json",
+  "fixture_commit": "86b50f5a",
+  "fixture_sha256": "76d7bb500291cbacc026d23e799fc91fc3d9f6e7a0931a0417a808337dff348e",
+  "profile": "/Users/zogien/Projects/metawork/.zig-cache/office-first-preparation-live-l58548jk/profile",
+  "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-first-preparation-live-l58548jk/profile/workspace",
+  "environment_absent_before_model": true,
+  "existing_runtime_or_credentials_copied": false,
+  "attempts": [],
+  "acceptance": "not qualified; no first-preparation model attempt yet"
+}
