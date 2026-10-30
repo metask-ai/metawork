@@ -200,6 +200,8 @@ PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 
 
 普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
+图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
+
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
 `DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。

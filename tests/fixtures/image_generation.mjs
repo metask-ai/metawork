@@ -55,6 +55,7 @@ const trace = (event) =>
   appendFileSync(tracePath, `${JSON.stringify(event)}\n`);
 let active = 0;
 let imageCalls = 0;
+let dialogueCalls = 0;
 const pending = [];
 function image(response) {
   response.writeHead(200, { "content-type": "application/json" });
@@ -152,6 +153,13 @@ const server = createServer(async (request, response) => {
       return image(response);
     }
     if (request.url !== "/v1/messages") throw Error("unexpected target");
+    const expectedDialogueKey =
+      mode === "main-rotated" && dialogueCalls > 0
+        ? "synthetic-dialogue-key-b"
+        : "synthetic-dialogue-key";
+    if (request.headers.authorization !== `Bearer ${expectedDialogueKey}`)
+      throw Error("dialogue credential");
+    dialogueCalls++;
     const encoded = JSON.stringify(payload);
     const explicitImageRead =
       mode === "read-large" &&

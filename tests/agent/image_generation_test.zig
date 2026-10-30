@@ -470,6 +470,42 @@ test "GenerateImage legacy checkpoint without grants restores complete and requi
     try checkpointTools(0, false, false);
 }
 
+test "GenerateImage canonical Core updates credentials during approval without restarting the Run" {
+    var h: Harness = undefined;
+    try h.init("main-rotated", .{});
+    defer h.deinit();
+    const session = try h.session(.accept_edits, true);
+    const raw = session.raw;
+    const identity = session.id;
+    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    defer {
+        if (!work.done.load(.acquire)) _ = session.requestTermination(work.id, .{ .interrupted = .user_cancel }) catch {};
+        thread.join();
+        if (work.result) |*result| result.deinit();
+    }
+    var updated = false;
+    for (0..20_000) |_| {
+        while (h.runtime.takeEvent()) |value| {
+            var event = value;
+            event.deinit();
+        }
+        if (work.done.load(.acquire)) break;
+        if (!updated) if (session.pendingUiRequest()) |request| {
+            try session.updateCredential("synthetic-dialogue-key-b");
+            try std.testing.expectEqual(raw, session.raw);
+            try std.testing.expectEqual(identity, session.id);
+            try session.respondPermission(work.id, request, .allow_once);
+            updated = true;
+        };
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(updated and work.done.load(.acquire));
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), work.result.?.stop_reason);
+    try h.evidence(1, 1, "saved");
+}
+
 test "GenerateImage accept_edits still requires once-only Host approval" {
     var h: Harness = undefined;
     try h.init("repeat", .{});
