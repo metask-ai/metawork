@@ -389,21 +389,11 @@ pub const Coordinator = struct {
         self.credential_renewal = renewal;
     }
 
-    pub fn credentialRefresh(self: *Coordinator) control_ports.MetaskCredentialRefresh {
-        return .{ .context = self, .refresh_fn = deliverCurrentCredential };
-    }
-
-    fn deliverCurrentCredential(context: *anyopaque) void {
-        const self: *Coordinator = @ptrCast(@alignCast(context));
-        self.assertMainThread();
-        self.publishCurrentCredential(true);
-    }
-
-    fn publishCurrentCredential(self: *Coordinator, force: bool) void {
+    fn renewDeferredCredential(self: *Coordinator) void {
         const renewal = self.credential_renewal orelse return;
         const state = self.account.authorizationState() orelse return;
         const authority: control_ports.MetaskAuthorization = .{ .scope = state.scope, .generation = state.generation };
-        if (!force and !renewal.needs(authority)) return;
+        if (!renewal.needs(authority)) return;
         var lease = (self.account.authorizationLease() catch {
             renewal.renew(authority, null);
             return;
@@ -426,8 +416,10 @@ pub const Coordinator = struct {
         self.assertMainThread();
         // Existing executions renew before any catalog work, using Account
         // authority alone. Catalog failure cannot roll this handoff back.
-        self.publishCurrentCredential(true);
         var lease = (self.account.authorizationLease() catch {
+            if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
+                renewal.renew(.{ .scope = state.scope, .generation = state.generation }, null);
+            };
             self.cancelCatalog();
             self.management.setMetaskAuthorizationUnavailable();
             self.observed_authorization_generation = 0;
@@ -441,6 +433,10 @@ pub const Coordinator = struct {
         };
         defer lease.deinit();
         if (lease.authorization_generation == self.observed_authorization_generation) return;
+        if (self.account.authorizationState()) |state| if (self.credential_renewal) |renewal| {
+            if (state.generation == lease.authorization_generation)
+                renewal.renew(.{ .scope = state.scope, .generation = state.generation }, lease.access_token);
+        };
         self.cancelCatalog();
         self.observed_authorization_generation = lease.authorization_generation;
         _ = self.startCatalogJob(&lease);
@@ -527,7 +523,7 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
-        self.publishCurrentCredential(false);
+        self.renewDeferredCredential();
         if (self.catalog_job) |job| {
             if (job.finished.load(.acquire)) {
                 job.join();

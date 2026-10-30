@@ -146,12 +146,16 @@ test "Metask credential update contract failure poisons the Session without repl
     try characterizeCredentialExpiry(.update_contract);
 }
 
-test "Metask restore candidate renews before publication after rotation" {
+test "Metask stale restore candidate is rejected without a credential hot update" {
     try characterizeCredentialExpiry(.candidate_rotation);
 }
 
 test "Metask restore candidate never borrows credentials after relogin" {
     try characterizeCredentialExpiry(.candidate_relogin);
+}
+
+test "Metask restore rejects a replaced scope even when token bytes are unchanged" {
+    try characterizeCredentialExpiry(.candidate_same_token_relogin);
 }
 
 test "Metask queued input reuses the Session renewed during an active Run" {
@@ -232,7 +236,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.finishAccountCommitNoFail();
 }
 
-const Scenario = enum { waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const rotate = scenario != .expiry;
@@ -241,7 +245,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         else => false,
     };
     const continuation_failure = continuation and scenario != .continuation_rotation and scenario != .continuation_unchanged;
-    const renewed_token = if (scenario == .continuation_unchanged) access_a else access_b;
+    const renewed_token = if (scenario == .continuation_unchanged or scenario == .candidate_same_token_relogin) access_a else access_b;
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
     var wake_loop: fixture.LifecycleWakeLoop = .{};
@@ -272,7 +276,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     defer fake_core.releaseControlledRestore();
     defer fake_core.releaseControlled();
 
-    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .rotate_token = scenario != .continuation_unchanged };
+    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
     var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
     var platform: account.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account.TestSupport.attachPlatform(&account_runtime, &platform);
@@ -297,7 +301,6 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     }
     control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
     coordinator.setCredentialRenewal(control.metaskCredentialRenewal());
-    control.setMetaskCredentialRefresh(coordinator.credentialRefresh());
     coordinator.authorizationChanged();
     try drainCatalog(&coordinator);
     try std.testing.expectEqual(@as(usize, 1), network.catalog_calls.load(.acquire));
@@ -363,7 +366,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         try runAndExpect(&wake_loop, &control, new_id, "new-authorization", .completed);
         return;
     }
-    const restoring_candidate = scenario == .candidate_rotation or scenario == .candidate_relogin;
+    const restoring_candidate = scenario == .candidate_rotation or scenario == .candidate_relogin or scenario == .candidate_same_token_relogin;
     if (restoring_candidate) {
         try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(&control, old_id));
         for (0..5000) |_| {
@@ -411,7 +414,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         coordinator.authorizationChanged();
         try drainCatalog(&coordinator);
         if (restoring_candidate) {
-            if (scenario == .candidate_relogin) {
+            if (scenario == .candidate_relogin or scenario == .candidate_same_token_relogin) {
                 try relogin(&account_runtime);
                 coordinator.authorizationChanged();
                 try drainCatalog(&coordinator);
@@ -422,15 +425,21 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
                 if (old.runtime.restore_job == null and !old.runtime.worker_leases.hasLive() and old.runtime.close_thread == null) break;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.RestoreDidNotSettle;
+            try std.testing.expectEqual(@as(usize, 0), fake_core.credential_updates);
+            try std.testing.expectEqual(.detached, std.meta.activeTag(old.runtime.attachment));
+            try std.testing.expectEqual(@as(usize, 1), runCalls());
             if (scenario == .candidate_rotation) {
-                try std.testing.expect(old.runtime.hasAttachedSession());
+                // A new explicit restore obtains the current config. Refresh
+                // itself never repairs or restarts the stale candidate.
+                _ = try control.restoreTaskConversation(old_id, old.durable.binding_epoch);
+                for (0..5000) |_| {
+                    try wake_loop.drain(&control);
+                    if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                } else return error.RestoreDidNotSettle;
                 try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
-                try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[1].credential_digest);
-                try runAndExpect(&wake_loop, &control, old_id, "restored-with-current-token", .completed);
-            } else {
-                try std.testing.expectEqual(@as(usize, 0), fake_core.credential_updates);
-                try expectBlocked(&control, old_id, "stale-restore-scope");
-            }
+                try std.testing.expectEqual(@as(usize, 1), runCalls());
+            } else try expectBlocked(&control, old_id, "stale-restore-scope");
             return;
         }
         if (scenario == .active_update_rejected or scenario == .active_update_oom) {

@@ -202,7 +202,7 @@ worker 的凭据视图必须稳定，覆盖跨 chunk、UTF-8、JSON 解码和未
 | 尚未采用的 additional input | 原 Run 可继续接收；确需下个 Run 时复用既有续跑状态机，去掉仅为换 token 建立的恢复步骤，取消不复活 |
 | 当前模型意图已切换 | 当前 Run 续其实际来源的凭据；下一轮仍按已提交意图解析完整配置 |
 | detached Task | 不为了通知而创建 Session 或把它纳入长期 token 缓存；显式恢复前读取当前 lease，同进程 scope 连续性仍有效 |
-| restore candidate 在 worker 期间遇到刷新 | candidate 回主线程后重验 scope 和实际目标；仅凭据更新时先对 candidate 原位续期，再允许安装。目标、权限或 scope 失效仍丢弃 |
+| restore candidate 在 worker 期间遇到刷新 | 保留现有恢复接纳校验；过时的 scope 或执行配置拒绝发布并走原关闭流程，不给 candidate 热更新凭据。后续显式恢复重新取得当前配置 |
 | history adoption 已提交或 outcome unknown | 先完成原 canonical 事务的确认，不改写未知候选或重放 effect；token-only 不新增历史事务，候选发布前仍重验当前授权 |
 | Task close/delete/archive | 先关闭 renewal admission；已取得 Access 和 reader 的调用完整静止后才释放。旧 route 的更新结果不得作用于新 attachment |
 | 手动 Compact 或 checkpoint | 执行中的非 Run Core 操作按第 5 节推迟更新，记录非 secret 待同步需求，边界后自主推进，不依赖其他 Task 发消息唤醒 |
@@ -308,7 +308,7 @@ git diff --check
 | --- | --- | --- |
 | 前置 | 按第 7 节三项条件确定保留生命周期；两处容量采用动态 index 和稳定 owned 节点，保留全局清洗语义 | 无需 Core 新语义；超过 128 项和分配失败回归通过。接受保留量随未收口 operation 的轮换数增长，扫描成本以实测和现有 Gate 验收 |
 | 一 | 前置项通过后，随实现更新相关合同；凭据快照、安全退役及持久化接线；Agent wrapper 与 retained Access；接通一个真实 Metask 主会话刷新链路 | 一个活动 Run 跨 A→B→C 后继续原 Session，真实 Core 的后续请求用新 token，所有版本均安全清洗，工具无重放，失败和关闭回归通过 |
-| 二 | 替换 idle／queued／追加输入的 token-only 恢复路径；candidate 发布前续期；目录与凭据 gate 分离 | 纯 token 轮换不再 create／close／restore；新执行仍受目录、scope 和 hard-expiry gate 约束 |
+| 二 | 替换 idle／queued／追加输入的 token-only 恢复路径；恢复候选沿用原接纳校验；目录与凭据 gate 分离 | 纯 token 轮换不再 create／close／restore；新执行仍受目录、scope 和 hard-expiry gate 约束 |
 | 三 | 审批保持原结构并克隆已续期快照；标题和图片在执行时读 reader；补齐 Custom 主模型图片 scope，接入阶段一的安全生命周期 | 三条独立请求路径和 A/B/C 脱敏测试通过，取消／shutdown／资源失败无泄漏 |
 | 四 | 全部关联 roots、正式 Native graph、architecture guard、当前平台桌面和必要的真实服务验收 | 移除过时 active path 和旧测试期望，结果与未验证平台边界明确，文档与实现一致 |
 

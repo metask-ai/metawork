@@ -142,17 +142,6 @@ pub const MetaskCredentialRenewal = struct {
     }
 };
 
-/// Synchronous Account lease delivery on the main thread, for the exact
-/// pre-publication boundary of a completed restore candidate.
-pub const MetaskCredentialRefresh = struct {
-    context: *anyopaque,
-    refresh_fn: *const fn (*anyopaque) void,
-
-    pub fn refresh(self: MetaskCredentialRefresh) void {
-        self.refresh_fn(self.context);
-    }
-};
-
 /// Main-thread admission call only. The returned owned value contains no
 /// mutable aggregate pointer; only the scoped effect owner is retained.
 pub const ImageRunPreparation = struct {

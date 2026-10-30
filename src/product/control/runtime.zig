@@ -1387,7 +1387,6 @@ pub const Runtime = struct {
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
-    metask_credential_refresh: ?control_ports.MetaskCredentialRefresh = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
@@ -9429,6 +9428,15 @@ pub const Runtime = struct {
             break :exact self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == query.protocol and
                 self.modelRestoreCapabilitiesExact(query.task_id);
         } else if (query.original_restore) self.modelRestoreCapabilitiesExact(query.task_id) else false;
+        const authorization_exact = scope: {
+            const task = self.task_runtime.findConst(query.task_id) orelse break :scope false;
+            const job = task.runtime.restore_job orelse break :scope true;
+            const expected = if (query.original_restore) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
+            if (expected == 0) break :scope true;
+            const check = self.metask_authorization_check orelse break :scope false;
+            const current = check.current() orelse break :scope false;
+            break :scope current.scope == expected;
+        };
         const execution_exact = if (query.model_intent != null or query.original_restore) model_intent_exact else self.modelsDefaultCurrent() and
             self.execution_state.recoveryAuthorityExact(
                 query.target_execution_generation,
@@ -9453,7 +9461,7 @@ pub const Runtime = struct {
             .shutting_down = self.shutting_down,
             .workspace_authority_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
-            .target_execution_authority_exact = execution_exact,
+            .target_execution_authority_exact = execution_exact and authorization_exact,
         };
     }
 
@@ -9477,7 +9485,6 @@ pub const Runtime = struct {
             .queue_binding_fn = queueTaskRuntimeBinding,
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
             .refresh_capabilities_fn = refreshModelRestoreCapabilities,
-            .refresh_credential_fn = refreshRecoveryCredential,
             .retire_checkpoint_fn = retireRecoveryCheckpoint,
         };
     }
@@ -10598,46 +10605,6 @@ pub const Runtime = struct {
         self.metask_authorization_check = check;
     }
 
-    pub fn setMetaskCredentialRefresh(self: *Runtime, refresh: control_ports.MetaskCredentialRefresh) void {
-        self.metask_credential_refresh = refresh;
-    }
-
-    fn refreshRecoveryCredential(context: *anyopaque, task_id: u64) bool {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        const task = self.task_runtime.find(task_id) orelse return false;
-        const job = task.runtime.restore_job orelse return false;
-        if (!job.completionReady() or job.outcome != .candidate) return false;
-        const execution = &job.outcome.candidate.execution;
-        if (!std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return true;
-        // Match metaskAuthorizationScope's isolated-Core fixture admission.
-        // Production always requires the composed Account capability.
-        if (builtin.is_test and self.metask_authorization_check == null) return true;
-        const expected_scope = self.task_runtime.metaskCredentialScope(task_id) orelse return false;
-        const check = self.metask_authorization_check orelse return false;
-        const authority = check.current() orelse return false;
-        if (authority.scope != expected_scope) return false;
-        if (execution.credential_generation != authority.generation) {
-            const refresh = self.metask_credential_refresh orelse return false;
-            refresh.refresh();
-        }
-        if (task.runtime.credential_update_failed or execution.credential_generation != authority.generation) return false;
-        // A rotation may advance the catalog's source generation. Acknowledge
-        // it only after new-execution admission proves the same actual target;
-        // all intent, workspace, capability and persistence gates still run.
-        if (job.rebind) |*rebind| if (rebind.phase != .restoring_original) {
-            const current = self.taskModelIntentAuthority(task_id) orelse return false;
-            const intent = task.durable.model_intent orelse return false;
-            if (intent.revision != rebind.selection_revision or !std.mem.eql(u8, intent.source_id, rebind.source_id)) return false;
-            var candidate = (self.custom_providers.resolveModel(intent.modelRef(), current.source_generation, current.catalog_generation) catch return false) orelse return false;
-            defer candidate.deinit();
-            if (!execution.matchesTarget(candidate.input())) return false;
-            execution.source_generation = current.source_generation;
-            rebind.source_generation = current.source_generation;
-            rebind.catalog_generation = current.catalog_generation;
-        };
-        return true;
-    }
-
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
         return .{ .context = self, .renew_fn = renewMetaskExecutionCredentials, .needs_fn = needsDeferredMetaskCredential };
     }
@@ -10654,9 +10621,7 @@ pub const Runtime = struct {
         if (!self.currentRenewalAuthority(authority)) return false;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
             if (!task.runtime.credential_renewal_deferred or self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
-            if (task.runtime.restore_job) |job| {
-                if (job.completionReady() and job.outcome == .candidate) return true;
-            } else if (task.runtime.active_operation != .compact) return true;
+            if (task.runtime.active_operation != .compact) return true;
         };
         return false;
     }

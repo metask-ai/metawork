@@ -161,7 +161,6 @@ pub const State = struct {
     metask_authorization_scope: u64 = 0,
     credential_update_failed: bool = false,
     credential_failed_generation: u64 = 0,
-    credential_failed_route_id: u64 = 0,
     credential_renewal_deferred: bool = false,
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,

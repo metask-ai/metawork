@@ -1047,7 +1047,6 @@ pub const RecoveryEffects = struct {
     queue_binding_fn: *const fn (*anyopaque, u64) anyerror!?DurableCommit,
     executor: ?ExecutorPort = null,
     refresh_capabilities_fn: ?*const fn (*anyopaque, u64) bool = null,
-    refresh_credential_fn: ?*const fn (*anyopaque, u64) bool = null,
     retire_checkpoint_fn: ?*const fn (*anyopaque, checkpoint_store.Identity) void = null,
 
     fn authority(
@@ -3232,10 +3231,7 @@ pub const Runtime = struct {
 
     pub fn metaskCredentialScope(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
-        if (task.runtime.restore_job) |job| {
-            const scope = if (job.rebind != null and job.rebind.?.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
-            return if (scope != 0) scope else null;
-        }
+        if (task.runtime.restore_job != null) return null;
         const execution = task.runtime.executionConst() orelse return null;
         if (task.runtime.metask_authorization_scope == 0 or !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return null;
         return task.runtime.metask_authorization_scope;
@@ -3245,38 +3241,10 @@ pub const Runtime = struct {
     /// the Task's original scope and owns the Session/Host atomic handoff.
     pub fn renewMetaskCredential(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: []const u8, explicit_retry: bool) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.runtime.restore_job) |job| {
-            const restore_scope = if (job.rebind != null and job.rebind.?.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
-            if (scope == 0 or restore_scope != scope) return .unrelated;
-            if (!job.completionReady() or job.outcome != .candidate) {
-                task.runtime.credential_renewal_deferred = true;
-                return .deferred;
-            }
-            const candidate = &job.outcome.candidate;
-            if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
-                task.runtime.credential_failed_route_id == candidate.binding.routeId() and !explicit_retry) return .unrelated;
-            if (!std.mem.eql(u8, candidate.execution.provider_id, models_contract.metask_source_id)) return .unrelated;
-            if (candidate.execution.credential_generation != generation) {
-                if (!std.mem.eql(u8, candidate.execution.secret, value)) {
-                    const replacement = try candidate.execution.prepareCredential(value);
-                    errdefer {
-                        std.crypto.secureZero(u8, replacement);
-                        candidate.execution.allocator.free(replacement);
-                    }
-                    var access = try candidate.binding.acquireAccess();
-                    defer access.deinit();
-                    try access.updateCredential(replacement);
-                    candidate.execution.installCredential(replacement, generation);
-                    job.credential = candidate.execution.secret;
-                } else candidate.execution.credential_generation = generation;
-            }
-            task.runtime.credential_update_failed = false;
-            task.runtime.credential_renewal_deferred = false;
-            return .updated;
-        }
+        if (task.runtime.restore_job != null) return .unrelated;
         const execution = task.runtime.execution() orelse return .unrelated;
         if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
-            task.runtime.credential_failed_route_id == task.runtime.routeId() and !explicit_retry) return .unrelated;
+            !explicit_retry) return .unrelated;
         task.runtime.credential_renewal_deferred = false;
         if (scope == 0 or task.runtime.metask_authorization_scope != scope or
             !std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
@@ -3327,14 +3295,6 @@ pub const Runtime = struct {
         task.runtime.credential_renewal_deferred = false;
         task.runtime.credential_update_failed = true;
         task.runtime.credential_failed_generation = generation;
-        task.runtime.credential_failed_route_id = task.runtime.routeId();
-        if (task.runtime.restore_job) |job| {
-            if (job.completionReady() and job.outcome == .candidate) {
-                task.runtime.credential_failed_route_id = job.outcome.candidate.binding.routeId();
-                job.outcome.candidate.rejection = .runtime_unavailable;
-            }
-            return;
-        }
         if (task.runtime.active_operation != .run) return;
         var access = task.runtime.acquireAccess() catch return;
         defer access.deinit();
@@ -6161,9 +6121,6 @@ pub const Runtime = struct {
                 },
                 .candidate => {},
             };
-            if (job.outcome == .candidate) if (effects.refresh_credential_fn) |refresh| {
-                if (!refresh(effects.context, task.durable.id)) job.outcome.candidate.rejection = .runtime_unavailable;
-            };
             const external = if (job.rebind != null) rebindAuthority(task, job, effects) else effects.authority(.{
                 .task_id = task.durable.id,
                 .workspace_id = task.durable.workspace_id,
@@ -6316,6 +6273,9 @@ pub const Runtime = struct {
                     record.deinit(self.allocator);
                 }
                 if (install_candidate) {
+                    task.runtime.credential_update_failed = false;
+                    task.runtime.credential_failed_generation = 0;
+                    task.runtime.credential_renewal_deferred = false;
                     task.runtime.metask_authorization_scope = if (job.rebind != null and job.rebind.?.phase == .restoring_original) task.runtime.metask_authorization_scope else job.metask_authorization_scope;
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = if (candidate.report) |report| .{
@@ -6355,7 +6315,6 @@ pub const Runtime = struct {
                 } else {
                     std.debug.assert(task.runtime.attachment == .detached);
                     release.redactAll(candidate.execution.input().api_key);
-                    for (candidate.execution.retired_credentials.items) |value| release.redactAll(value);
                     job.credential = &.{};
                     if (job.rebind) |*rebind| if (rebind.original_credential.ptr == candidate.execution.secret.ptr) {
                         rebind.original_credential = &.{};
@@ -8327,7 +8286,6 @@ const RetainedCredentials = struct {
     task: *const task_state.Task,
     index: usize = 0,
     retired_index: usize = 0,
-    candidate_retired_index: usize = 0,
 
     fn next(self: *RetainedCredentials) ?[]const u8 {
         while (self.index < 3 + self.task.durable.runs.len) {
@@ -8350,14 +8308,6 @@ const RetainedCredentials = struct {
                 return value;
             }
         }
-        if (self.task.runtime.restore_job) |job| if (job.completionReady() and job.outcome == .candidate) {
-            const execution = &job.outcome.candidate.execution;
-            if (self.candidate_retired_index < execution.retired_credentials.items.len) {
-                const value = execution.retired_credentials.items[self.candidate_retired_index];
-                self.candidate_retired_index += 1;
-                return value;
-            }
-        };
         return null;
     }
 };
