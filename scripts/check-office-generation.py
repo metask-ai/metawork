@@ -11,6 +11,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -22,6 +23,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--node-entry", required=True, type=Path)
 parser.add_argument("--python-entry", required=True, type=Path)
 parser.add_argument("--report", required=True, type=Path)
+parser.add_argument("--artifacts", type=Path, help="Preserve synthetic original/edit/diagnostic files in a new directory for viewer qualification")
+parser.add_argument("--diagnostic-line-grouping", choices=["standard"], help="Explicit line-chart semantics for diagnostic copies only")
 args = parser.parse_args()
 node_entry = args.node_entry.resolve(strict=True)
 python_entry = args.python_entry.resolve(strict=True)
@@ -98,6 +101,22 @@ def diagnostic_copy(source, destination):
             for shape in plot:
                 if etree.QName(shape).localname not in ("barChart", "lineChart"):
                     continue
+                if etree.QName(shape).localname == "lineChart" and shape.find(f"{{{C}}}grouping") is None and args.diagnostic_line_grouping:
+                    shape.insert(0, etree.Element(f"{{{C}}}grouping", val=args.diagnostic_line_grouping)); changed = True
+                    changes.append(name + ": inserted explicitly declared line grouping " + args.diagnostic_line_grouping)
+                if etree.QName(shape).localname == "lineChart" and args.diagnostic_line_grouping:
+                    for series in shape.findall(f"{{{C}}}ser"):
+                        invert = series.find(f"{{{C}}}invertIfNegative")
+                        if invert is not None:
+                            if dict(invert.attrib) != {"val": "0"} or len(invert):
+                                raise RuntimeError("Unqualified line invertIfNegative semantics")
+                            series.remove(invert); changed = True
+                            changes.append(name + ": removed false bar-only invertIfNegative from line series")
+                        marker = series.find(f"{{{C}}}marker")
+                        ordered_after = [child for child in series if etree.QName(child).localname in ("dPt", "dLbls")]
+                        if marker is not None and ordered_after and series.index(marker) > series.index(ordered_after[0]):
+                            series.remove(marker); series.insert(series.index(ordered_after[0]), marker); changed = True
+                            changes.append(name + ": marker before line data points/labels")
                 references = shape.findall(f"{{{C}}}axId")
                 orphan = [axis for axis in references if axis.get("val") not in defined]
                 if len(references) == 3 and len(defined) == 2 and len(orphan) == 1:
@@ -167,5 +186,7 @@ with tempfile.TemporaryDirectory(prefix="office-generation-") as directory:
               "qualified": all(item["validation"]["passed"] and item.get("targeted_edit", {"passed": True})["passed"] and item.get("read_after_edit", {"chinese_table_and_edit_present": True})["chinese_table_and_edit_present"] for item in results)}
     with args.report.open("x", encoding="utf-8") as output:
         json.dump(report, output, ensure_ascii=False, indent=2); output.write("\n")
+    if args.artifacts:
+        shutil.copytree(work, args.artifacts)
     print(json.dumps({"qualified": report["qualified"], "cases": len(results), "failed": [item["case"] for item in results if not item["validation"]["passed"]], "report": str(args.report)}))
     raise SystemExit(0 if report["qualified"] else 1)
