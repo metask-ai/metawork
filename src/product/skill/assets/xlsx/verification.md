@@ -11,6 +11,13 @@ as a read-only candidate; no new workbook or change to the original is needed.
 /bin/sh "${CLAUDE_SKILL_DIR}/environment/run.sh" python "${CLAUDE_SKILL_DIR}/scripts/verify.py" result.xlsx verification-1.json --checks checks.json
 ```
 
+Use the documented forms below to author the specification. For a matching
+cleaning/summary task, read `examples/summary.py` and
+`examples/orders-checks.json` together as the runnable starting point. Adapt the
+checks to the actual task and derive expectations from its input. You do not
+need to inspect the checker implementation to discover these fields; investigate
+implementation details when a concrete error is not explained by this reference.
+
 Read the report, paging through it when the reader truncates its output. Do not
 infer unseen check or requirement results from a partial view. Reports use
 multiline JSON so the normal text reader can inspect them directly. Read
@@ -117,24 +124,43 @@ from the task; this example does not establish all business requirements.
 the unique match, and `size: [rows, columns]` defaults to `[1, 1]`. Zero or
 multiple matches fail. A nonempty style assertion over an empty area fails;
 use an explicit `count` assertion with expected zero when the task permits an
-empty dataset. Valid coordinates outside the stored area still get checked.
+empty dataset. Valid coordinates outside the stored area still get checked. A
+requested font range includes blank cells; explicitly style those cells when
+authoring.
 
-Supported operations are finite:
+Supported operations are finite. These are the exact check-object forms for
+entries in `checks`; choose the operations needed by the task, adapt selectors
+and expectations, and map every selected check ID in `requirements` as above.
+These illustrative objects are not a complete acceptance specification for a
+user workbook.
 
-| Operation       | Expected value and scope                                                                                                                                   |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sheets`        | Exact ordered sheet-name array; no target                                                                                                                  |
-| `values`        | Matrix covering the entire target; each cell declares `type` and its expected value                                                                        |
-| `label`         | `{value, cell}`; checks a unique label at the expected coordinate                                                                                          |
-| `count`         | Number of nonempty stored cells, including formula strings                                                                                                 |
-| `font`          | Nonempty subset of `name`, `size`, `bold`, `italic`, `color`                                                                                               |
-| `fill`          | Nonempty subset of `pattern`, `color`; only directly represented solid/empty fills                                                                         |
-| `number_format` | Exact stored format string                                                                                                                                 |
-| `unchanged`     | `original` path and nonempty `properties` array of `value`, `font`, `fill`, `number_format`; target must be the same declared range in a distinct original |
-| `unsupported`   | `reason` and no target; retain necessary unimplemented checks explicitly                                                                                   |
+```json
+[
+  {"id":"sheets","op":"sheets","expected":["Data","Reference"]},
+  {"id":"values","op":"values","target":{"sheet":"Data","range":"A1:D1"},"expected":[[{"type":"string","value":"Example"},{"type":"number","value":42.75,"tolerance":0},{"type":"blank"},{"type":"boolean","value":true}]]},
+  {"id":"formula","op":"values","target":{"sheet":"Reference","range":"B2"},"expected":[[{"type":"formula","value":"=1+2"}]]},
+  {"id":"total-position","op":"label","target":{"sheet":"Data","range":"A2:A6"},"expected":{"value":"Total","cell":"A6"}},
+  {"id":"orders","op":"count","target":{"sheet":"Data","range":"A2:A5"},"expected":4},
+  {"id":"font","op":"font","target":{"sheet":"Data","range":"A1:D6"},"expected":{"name":"Arial","size":11}},
+  {"id":"fill","op":"fill","target":{"sheet":"Data","range":"A6"},"expected":{"pattern":"solid","color":"FFDEEAF6"}},
+  {"id":"percentage","op":"number_format","target":{"sheet":"Data","range":"D2:D6"},"expected":"0.0%"},
+  {"id":"preserved","op":"unchanged","target":{"sheet":"Reference","range":"A1:H20"},"original":"original.xlsx","properties":["value","font","fill","number_format"]},
+  {"id":"engine","op":"unsupported","reason":"No supported calculation engine is available"}
+]
+```
+
+`count` counts nonempty cells, including stored formula strings. To check a row
+count, select the required identifier column rather than the entire table.
+`font.expected` is a nonempty subset of `name`, `size`, `bold`, `italic`, `color`;
+`fill.expected` is a nonempty subset of `pattern`, `color` for directly represented
+solid/empty fills. `unchanged` uses top-level `original` and `properties`, without
+`expected`; it compares the same declared target in the distinct original.
+`sheets` and `unsupported` have no target. Do not add fields from another operation.
 
 Value types are `blank` (no value), `boolean`, `string`, `number`, `formula`,
-`date`, `datetime` and `error`. A number requires a nonnegative explicit
+`date`, `datetime` and `error`. A blank contains only `type`; the other value
+types include `value`. Dates, datetimes and error literals use string values.
+A number requires a nonnegative explicit
 `tolerance`; booleans and blanks do not equal numeric zero. Formulas are exact
 strings starting with `=`; dates use ISO text. Formula text checks do not
 calculate formulas or establish current cache values. Colors use explicit

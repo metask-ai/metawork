@@ -550,14 +550,18 @@
       "submitted_at_unix_ms": 1793332302726,
       "frozen_prompt_matches_persisted_input": true,
       "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-3",
-      "status": "running",
+      "status": "failed",
       "application_source_commit": "327db559",
       "interventions": [
         "Under existing synthetic acceptance scope, allowed once for canonical prepare.sh python after automatic review requested script inspection. Materialized prepare/configuration/environment/finish/managed_process scripts matched archive. The exact completed Python directory already existed as a real directory, so prepare selects check_final and exits before download/staging; no standing policy changed."
       ],
-      "outcome": null,
-      "cause": null,
-      "tool_count": 12
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 12,
+      "finished_at_unix_ms": 1793332937872,
+      "actual_deliveries": [],
+      "final_response": "共享运行时已存在（Python/Node 均已就绪，无需下载）。先做环境确认并读取原件结构。",
+      "candidate_produced": false
     },
     {
       "attempt": 11,
@@ -715,5 +719,32 @@
       "qualification": "Read-only local source corroborates error semantics; deployed server identity and live endpoint state were not verified."
     }
   },
-  "next_acceptance_policy": "After currently active attempts settle, run subsequent live-model cases serially; do not change frozen prompts/oracles or existing service/queue limits."
+  "next_acceptance_policy": "After currently active attempts settle, run subsequent live-model cases serially; do not change frozen prompts/oracles or existing service/queue limits.",
+  "specification_reference_followup": {
+    "date": "2026-10-30",
+    "trigger": "Task28 read checker source repeatedly, stopped with no candidate; precise stop_reason is not persisted, so do not infer it from tool count",
+    "change": "Exact object forms for every supported operation; explicit unchanged top-level fields, typed blanks/formulas, identifier-column counts and styling blank cells; prefer documented reference and runnable example instead of implementation discovery",
+    "inputs": [
+      {
+        "path": "src/product/skill/assets/xlsx/verification.md",
+        "bytes": 13081,
+        "sha256": "00b91c9ab57282b06ff5ce1aeaa8a74d00dac6283bfaf20ab81ee3548efd7e85"
+      },
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 474830,
+        "sha256": "2ede99eb3c9c8740e02ab996fe26903a69d7b10fab500b88841762da44a248ef"
+      }
+    ],
+    "qualification": {
+      "documented_json_blocks_parsed_by_actual_verifier": 3,
+      "supported_operations_covered": 9,
+      "resource_tests_passed": 12,
+      "only_changed_package_member": "xlsx/verification.md",
+      "archive_check": true,
+      "diff_check": true
+    },
+    "runtime_limits_or_frozen_oracles_changed": false,
+    "new_real_model_result": "pending new application resource; no completed workflow inferred from parser qualification"
+  }
 }
