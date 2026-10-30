@@ -2055,6 +2055,56 @@ function decodeFileReference(value: unknown, path: string): FileReferenceView {
     displayPath: stringValue(item.displayPath, `${path}.displayPath`),
   };
 }
+export function decodeWorkspaceDirectory(
+  value: unknown,
+): import("./contracts.ts").WorkspaceDirectory {
+  const item = object(value, "$", [
+    "state",
+    "entries",
+    "truncated",
+    "redacted",
+  ]);
+  const state = enumValue(item.state, "$.state", [
+    "ready",
+    "busy",
+    "missing",
+    "restricted",
+    "error",
+  ] as const);
+  const entries = arrayValue(item.entries, "$.entries", (value, path) => {
+    const entry = object(value, path, ["name", "kind"]);
+    const name = nonEmptyString(entry.name, `${path}.name`);
+    if (
+      name === "." ||
+      name === ".." ||
+      /[\\/:\x00-\x1f\x7f\ud800-\udfff]/u.test(name) ||
+      new TextEncoder().encode(name).length > 4096
+    )
+      fail(path, "invalid directory entry name");
+    return {
+      name,
+      kind: enumValue(entry.kind, `${path}.kind`, [
+        "file",
+        "directory",
+      ] as const),
+    };
+  });
+  const truncated = booleanValue(item.truncated, "$.truncated");
+  const redacted = booleanValue(item.redacted, "$.redacted");
+  if (
+    entries.length > 512 ||
+    entries.reduce(
+      (bytes, entry) => bytes + new TextEncoder().encode(entry.name).length,
+      0,
+    ) >
+      64 * 1024 ||
+    new Set(entries.map((entry) => entry.name)).size !== entries.length
+  )
+    fail("$.entries", "invalid directory entry set");
+  if (state !== "ready" && (entries.length || truncated || redacted))
+    fail("$", "non-ready directory contains content");
+  return { state, entries, truncated, redacted };
+}
 export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");
   const hasImage = Object.hasOwn(raw, "image");

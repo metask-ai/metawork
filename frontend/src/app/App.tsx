@@ -99,8 +99,13 @@ import { useFilePreviewTabs } from "../features/task-panel/useFilePreviewTabs.ts
 import { useTaskPanelViewStates } from "../features/task-panel/useTaskPanelViewStates.ts";
 import {
   createTaskPanelPreviewTab,
+  createTaskPanelWorkspaceTab,
   createTaskPanelReviewTab,
 } from "../features/task-panel/task-panel-state.ts";
+import {
+  WorkspaceFileTree,
+  useWorkspaceFileTree,
+} from "../features/task-panel/WorkspaceFileTree.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import {
   NewTaskApprovalModeMenu,
@@ -325,6 +330,7 @@ export default function App() {
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelSetupOpen, setModelSetupOpen] = useState(false);
   const [modelSetupHandled, setModelSetupHandled] = useState(
@@ -708,6 +714,15 @@ export default function App() {
   }
   function refreshFilePreview() {
     const active = taskPanel.activeTab;
+    if (active?.kind === "workspace") {
+      filePreviewTabs.refreshWorkspace(
+        active.taskId,
+        active.workspaceId,
+        active.workspaceEpoch,
+        active.path,
+      );
+      return;
+    }
     if (!active || active.kind !== "preview") return;
     filePreviewTabs.refresh(active.taskId, active.runId, {
       id: active.referenceId,
@@ -966,16 +981,21 @@ export default function App() {
     });
   }, [snapshot.revision, snapshot.tasks, snapshot.taskIndex]);
   const panelTask = route === "workbench" ? activeTask : null;
+  const panelWorkspace =
+    snapshot.workspaces.find(
+      (workspace) => workspace.id === panelTask?.workspaceId,
+    ) ?? null;
   const taskPanel = useTaskPanelTarget(
     panelTask,
     snapshot.capabilities.typedFileChanges,
     snapshot.taskPage?.runManifest,
+    panelWorkspace,
   );
   const previewTabIds = useMemo(
     () =>
       new Set(
         taskPanel.session.tabs.flatMap((tab) =>
-          tab.kind === "preview" ? [tab.tabId] : [],
+          tab.kind !== "review" ? [tab.tabId] : [],
         ),
       ),
     [taskPanel.session.tabs],
@@ -997,7 +1017,89 @@ export default function App() {
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
+    useCallback(
+      (
+        taskId: string,
+        workspaceId: string,
+        workspaceEpoch: string,
+        path: string,
+        options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+      ) =>
+        client.previewWorkspaceFile(
+          taskId,
+          workspaceId,
+          workspaceEpoch,
+          path,
+          options,
+        ),
+      [client],
+    ),
   );
+  const workspaceFilesAvailable = Boolean(
+    panelTask &&
+    panelTask.lifecycle === "open" &&
+    panelTask.deletionStatus === "idle" &&
+    panelWorkspace?.authorization === "available" &&
+    !panelWorkspace.redacted &&
+    bridgeReady &&
+    !viewSyncFailed,
+  );
+  const workspaceTreeScope = workspaceFilesAvailable
+    ? JSON.stringify([
+        panelTask!.id,
+        panelWorkspace!.id,
+        panelWorkspace!.epoch,
+        snapshot.securityEpoch,
+        bridgeGeneration,
+      ])
+    : null;
+  const workspaceTree = useWorkspaceFileTree(
+    workspaceTreeScope,
+    panelTask?.id ?? null,
+    panelWorkspace?.id ?? null,
+    panelWorkspace?.epoch ?? null,
+    rightPanelOpen && fileTreeOpen && !settingsOpen,
+    useCallback(
+      (
+        taskId: string,
+        workspaceId: string,
+        workspaceEpoch: string,
+        path: string,
+        options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+      ) =>
+        client.listWorkspaceDirectory(
+          taskId,
+          workspaceId,
+          workspaceEpoch,
+          path,
+          options,
+        ),
+      [client],
+    ),
+  );
+  function openWorkspaceFile(path: string, opener: HTMLButtonElement) {
+    if (!workspaceFilesAvailable || !panelTask || !panelWorkspace) return;
+    const tab = createTaskPanelWorkspaceTab(
+      panelTask.id,
+      panelWorkspace.id,
+      panelWorkspace.epoch,
+      path,
+    );
+    taskPanelOpeners.current.set(tab.tabId, opener);
+    taskPanel.openWorkspace(
+      panelTask.id,
+      panelWorkspace.id,
+      panelWorkspace.epoch,
+      path,
+    );
+    filePreviewTabs.openWorkspace(
+      panelTask.id,
+      panelWorkspace.id,
+      panelWorkspace.epoch,
+      path,
+    );
+    focusTaskPanelTab(tab.tabId);
+  }
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   useEffect(() => {
     for (const tabId of taskPanelOpeners.current.keys())
@@ -1852,7 +1954,7 @@ export default function App() {
         )
       : null;
     taskPanelOpeners.current.delete(tabId);
-    if (tab.kind === "preview") filePreviewTabs.close(tabId);
+    if (tab.kind !== "review") filePreviewTabs.close(tabId);
     else clearFileChanges();
     taskPanel.closeTab(tabId);
     if (closingLastTab) {
@@ -3814,7 +3916,7 @@ export default function App() {
     </>
   );
   const activePreview =
-    taskPanel.activeTab?.kind === "preview"
+    taskPanel.activeTab && taskPanel.activeTab.kind !== "review"
       ? filePreviewTabs.resources[taskPanel.activeTab.tabId]
       : undefined;
   const filePreviewViewState: FilePreviewViewState | null = !activePreview
@@ -3829,11 +3931,16 @@ export default function App() {
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
     : null;
   const previewMatchesTarget =
-    panelTarget.kind === "preview" &&
+    panelTarget.kind !== "empty" &&
     activePreview !== undefined &&
     panelTarget.taskId === activePreview.taskId &&
-    panelTarget.runId === activePreview.runId &&
-    panelTarget.referenceId === activePreview.reference.id;
+    ((panelTarget.kind === "preview" &&
+      panelTarget.runId === activePreview.runId &&
+      panelTarget.referenceId === activePreview.reference.id) ||
+      (panelTarget.kind === "workspace" &&
+        panelTarget.workspaceId === activePreview.workspaceId &&
+        panelTarget.workspaceEpoch === activePreview.workspaceEpoch &&
+        panelTarget.path === activePreview.reference.displayPath));
   const reviewMatchesTarget =
     panelTarget.kind === "review" &&
     fileChanges.kind !== "closed" &&
@@ -4096,12 +4203,28 @@ export default function App() {
         !settingsOpen && rightPanelOpen ? (
           <TaskPanel
             title={panelTitle}
+            fileTreeOpen={fileTreeOpen}
+            onToggleFileTree={() => setFileTreeOpen((open) => !open)}
+            fileTree={
+              <WorkspaceFileTree
+                key={workspaceTreeScope}
+                tree={workspaceTree}
+                available={workspaceFilesAvailable}
+                selectedPath={
+                  taskPanel.activeTab && taskPanel.activeTab.kind !== "review"
+                    ? taskPanel.activeTab.displayPath
+                    : null
+                }
+                onOpen={openWorkspaceFile}
+              />
+            }
             tabs={taskPanel.session.tabs}
             activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
             actions={
               !taskPanel.waitingForRun &&
-              panelTarget.kind === "preview" &&
+              (panelTarget.kind === "preview" ||
+                panelTarget.kind === "workspace") &&
               previewMatchesTarget &&
               filePreviewViewState ? (
                 <FilePreviewRefreshAction
@@ -4120,7 +4243,8 @@ export default function App() {
               </p>
             ) : panelTarget.kind === "empty" ? (
               <p className="task-panel-empty">{t("task_panel.empty")}</p>
-            ) : panelTarget.kind === "preview" &&
+            ) : (panelTarget.kind === "preview" ||
+                panelTarget.kind === "workspace") &&
               previewMatchesTarget &&
               filePreviewViewState ? (
               <FilePreviewView

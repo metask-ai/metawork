@@ -459,6 +459,14 @@ pub const TaskCatalogRefresh = struct {
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
 pub const FilePreviewKey = struct { generation: []const u8, previewId: []const u8 };
+pub const WorkspaceFileRequest = struct {
+    generation: []const u8,
+    previewId: []const u8,
+    taskId: []const u8,
+    workspaceId: []const u8,
+    workspaceEpoch: []const u8,
+    path: []const u8,
+};
 pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
 pub const FilePreviewRequest = struct {
     generation: []const u8,

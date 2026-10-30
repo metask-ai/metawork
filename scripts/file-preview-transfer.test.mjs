@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { decodeWorkspaceDirectory } from "../frontend/src/bridge/decode-contracts.ts";
 import { FilePreviewLoader } from "../frontend/src/bridge/file-preview.ts";
 import { commands } from "../frontend/src/bridge/commands.ts";
 
@@ -84,6 +86,97 @@ class Host {
     return this.loader.load("17", "23", reference, options);
   }
 }
+
+test("workspace directories use the native fixture and reject unsafe or non-ready entries", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("../src/bridge/workspace_directory.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeWorkspaceDirectory(fixture), fixture);
+  for (const name of [
+    "../outside",
+    "/root",
+    "C:\\file",
+    "a/b",
+    "file:stream",
+    "..",
+    ".",
+    "a\u0000b",
+  ])
+    assert.throws(() =>
+      decodeWorkspaceDirectory({
+        ...fixture,
+        entries: [{ name, kind: "file" }],
+      }),
+    );
+  assert.throws(() =>
+    decodeWorkspaceDirectory({ ...fixture, state: "restricted" }),
+  );
+  assert.throws(() =>
+    decodeWorkspaceDirectory({
+      ...fixture,
+      entries: [fixture.entries[0], fixture.entries[0]],
+    }),
+  );
+});
+
+test("workspace preview and directory reads share request IDs and preserve their exact authority", async () => {
+  const calls = [];
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === commands.listDirectory)
+        return {
+          state: "ready",
+          entries: [],
+          truncated: false,
+          redacted: false,
+        };
+      if (command === commands.releasePreview)
+        return {
+          generation: payload.generation,
+          previewId: payload.previewId,
+          released: true,
+        };
+      return { ...empty, state: "ready", content: "workspace file" };
+    },
+    () => "7",
+  );
+  await loader.listDirectory("17", "2", "3", "docs");
+  const preview = await loader.loadWorkspace(
+    "17",
+    "2",
+    "3",
+    "docs/unreferenced.md",
+  );
+  assert.equal(preview.content, "workspace file");
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    [
+      commands.listDirectory,
+      commands.previewWorkspaceFile,
+      commands.releasePreview,
+    ],
+  );
+  assert.deepEqual(calls[0].payload, {
+    generation: "7",
+    previewId: "1",
+    taskId: "17",
+    workspaceId: "2",
+    workspaceEpoch: "3",
+    path: "docs",
+  });
+  assert.deepEqual(calls[1].payload, {
+    generation: "7",
+    previewId: "2",
+    taskId: "17",
+    workspaceId: "2",
+    workspaceEpoch: "3",
+    path: "docs/unreferenced.md",
+  });
+});
 
 test("original bytes including a trailer round trip through sequential aligned chunks and close before display", async () => {
   const host = new Host();

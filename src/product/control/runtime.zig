@@ -1034,6 +1034,7 @@ fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
 }
 
 pub const FilePreviewState = file_preview.State;
+pub const DirectoryEntry = file_preview.DirectoryEntry;
 pub const file_preview_chunk_bytes = file_preview.image_chunk_bytes;
 const file_preview_scan_bytes = 256 * 1024;
 
@@ -1049,6 +1050,7 @@ pub const FilePreviewImage = struct {
     security_epoch: u64,
 };
 pub const FilePreviewResult = struct {
+    entries: []const DirectoryEntry = &.{},
     image: ?FilePreviewImage = null,
     completion_id: u64,
     state: FilePreviewState,
@@ -2087,7 +2089,42 @@ pub const Runtime = struct {
         return .queued;
     }
 
+    pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
+        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
+        if (binding.epoch != workspace_epoch or !self.workspaceFileAuthorized(task_id, workspace_id, binding.epoch, binding.canonical_root) or !file_preview.validWorkspacePath(path, directory) or self.workspacePathHasCredential(path)) return .{ .immediate = .restricted };
+        self.preview_lane.begin(.{
+            .source = if (directory) .directory else .workspace,
+            .completion_id = completion_id,
+            .task_id = task_id,
+            .run_id = 0,
+            .workspace_id = workspace_id,
+            .workspace_epoch = binding.epoch,
+            .reference_id = "",
+            .workspace_root = binding.canonical_root,
+            .relative_path = path,
+            .max_bytes = self.limits.max_file_preview_bytes,
+            .max_lines = self.limits.max_file_preview_lines,
+            .max_line_bytes = self.limits.max_file_preview_line_bytes,
+        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+        return .queued;
+    }
+
+    fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
+        const task = self.task_runtime.findConst(task_id) orelse return false;
+        return task.deletion == .idle and !task.runtime.close_requested and task.durable.workspace_id == workspace_id and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
+    }
+
+    fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
+        var index: usize = 0;
+        while (index < path.len) : (index += utf8CodepointLen(path, index)) {
+            if (self.knownCredentialEndAtCodepoint(path, index) != null) return true;
+        }
+        return false;
+    }
+
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+        if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
         const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
         if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
             !std.mem.eql(u8, reference.workspace_root, raw.workspace_root) or !self.filePreviewWorkspaceAuthorized(reference)) return .restricted;
@@ -2110,6 +2147,27 @@ pub const Runtime = struct {
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
+            if (raw.source == .directory) {
+                var safe_entries: [file_preview.max_directory_entries]DirectoryEntry = undefined;
+                var count: usize = 0;
+                var redacted = false;
+                if (state == .ready) for (raw.entries) |entry| {
+                    var path_buffer: [4096]u8 = undefined;
+                    const path = std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{ raw.relative_path, if (raw.relative_path.len == 0) @as([]const u8, "") else "/", entry.name }) catch {
+                        redacted = true;
+                        continue;
+                    };
+                    if (self.workspacePathHasCredential(path)) {
+                        redacted = true;
+                        continue;
+                    }
+                    safe_entries[count] = entry;
+                    count += 1;
+                };
+                sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = state, .content = "", .entries = safe_entries[0..count], .truncated = state == .ready and raw.truncated, .redacted = state == .ready and redacted });
+                self.preview_lane.release(taken);
+                continue;
+            }
             if (state == .ready and raw.image_info != null) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
@@ -19970,6 +20028,61 @@ const PreviewTestCapture = struct {
         return .{ .context = self, .complete_fn = receive };
     }
 };
+
+test "file preview workspace directory authority redacts names and rejects stale workspace bindings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "visible.txt", .data = "hello" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "SECRET-KEY.txt", .data = "secret" });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 2, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 99, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 1, "../outside", true));
+    const Capture = struct {
+        calls: usize = 0,
+        state: FilePreviewState = .failed,
+        count: usize = 0,
+        redacted: bool = false,
+        fn receive(context: *anyopaque, result: FilePreviewResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.state = result.state;
+            self.count = result.entries.len;
+            self.redacted = result.redacted;
+            for (result.entries) |entry| std.debug.assert(!std.mem.containsAtLeast(u8, entry.name, 1, "SECRET-KEY"));
+        }
+        fn sink(self: *@This()) FilePreviewSink {
+            return .{ .context = self, .complete_fn = receive };
+        }
+    };
+    var capture = Capture{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 3, 2, 1, "", true));
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqual(@as(usize, 1), capture.count);
+    try std.testing.expect(capture.redacted);
+    capture = .{};
+    _ = control.beginWorkspaceFile(92, 3, 2, 1, "", true);
+    control.task_runtime.tasks[0].?.durable.workspace_id = 1;
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try std.testing.expectEqual(@as(usize, 0), capture.count);
+}
 
 test "file preview scans all original bytes including a credential across the scan boundary in a trailer" {
     var tmp = std.testing.tmpDir(.{});

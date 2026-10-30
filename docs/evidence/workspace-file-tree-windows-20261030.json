@@ -1,0 +1,153 @@
+{
+  "id": "E-WIN-WORKSPACE-FILES-20261030",
+  "date": "2026-10-30",
+  "identity": {
+    "revision": "b1d59130ce3987dcd7472339f62917ea511239c9",
+    "sourceStatus": "clean",
+    "artifact": ".zig-cache/file-tree-acceptance/artifact/bin/metawork.exe",
+    "artifactSha256": "5fd1bb92a684e452a188df11ad99b41913cb80d41237a2cce58a6eec0f3ca087",
+    "platform": "win32",
+    "arch": "x64",
+    "release": "10.0.19045",
+    "sdk": "0.11.0-fork.4",
+    "webview": "156.0.4314.50",
+    "timestamp": "2026-10-30T07:01:17.340Z"
+  },
+  "build": {
+    "entry": "scripts/build.mjs buildNative",
+    "optimize": "Debug",
+    "automation": true,
+    "installPrefix": ".zig-cache/file-tree-acceptance/artifact",
+    "frontend": "current branch production Renderer assets",
+    "canonicalAgentCore": "0.13.0-dev+77dc64afde31 ABI 1 revision 26"
+  },
+  "desktop": {
+    "isolatedProfile": true,
+    "realHost": true,
+    "realWebView": true,
+    "inputs": "Win32 mouse/keyboard; UI Automation observations; official Native SDK automation Bridge",
+    "providerRequests": 0,
+    "cases": [
+      {
+        "name": "default collapsed",
+        "evidence": "default-collapsed.png",
+        "result": "file tree toggle offers expand and preview area is not split until explicitly opened"
+      },
+      {
+        "name": "manual workspace; empty tasks",
+        "tasks": [
+          {
+            "id": "1",
+            "runs": 0
+          },
+          {
+            "id": "2",
+            "runs": 0
+          }
+        ],
+        "providerRequests": 0
+      },
+      {
+        "name": "markdown preview and duplicate tab",
+        "evidence": "markdown-ui.json",
+        "result": "one markdown file tab with matching content; repeated opens reuse it"
+      },
+      {
+        "name": "image preview with tree collapsed",
+        "evidence": "image-ui.json",
+        "result": "image.png exposed as image and no tree exposed"
+      },
+      {
+        "name": "keyboard left/right/down",
+        "evidence": ["keyboard-left.json", "keyboard-down.json"],
+        "result": "left hides child; right restores child; down focuses child"
+      },
+      {
+        "name": "refresh reads new child and omits Windows junction",
+        "evidence": ["refresh-root.json", "refresh-child.json"],
+        "result": "刷新.md appears after refresh; junction is absent from root entries"
+      },
+      {
+        "name": "task switch scope",
+        "evidence": "task2-ui.json",
+        "result": "Task 2 contains no Task 1 preview tabs, tree root is fresh and docs collapsed; tree visibility remains open"
+      },
+      {
+        "name": "hide and reopen panel",
+        "evidence": "reopen-panel.json",
+        "result": "root.txt content and open tree retained"
+      },
+      {
+        "name": "task deletion revokes preview",
+        "evidence": "deleted-task.json",
+        "remainingTasks": ["1"]
+      },
+      {
+        "name": "real Host boundaries",
+        "evidence": "host-boundaries.json",
+        "result": "junction traversal, parent traversal, stale epoch and deleted task restricted; ordinary file ready; credential-bearing entry omitted with redacted flag"
+      },
+      {
+        "name": "390px real client width",
+        "evidence": [
+          "narrow-ui.json",
+          "narrow-markdown-ui.json",
+          "narrow-markdown.png"
+        ],
+        "result": "257px preview pane and 123px visible tree rows; preview text and controls remain within 390px client area"
+      },
+      {
+        "name": "keyboard Enter after close",
+        "evidence": "keyboard-enter.json",
+        "result": "one reopened tab and matching Markdown body"
+      }
+    ],
+    "shutdown": {
+      "command": "native automate tray-action 2",
+      "exitCode": 0,
+      "normalStop": true
+    }
+  },
+  "nativeGraph": {
+    "stepsPassed": 236,
+    "stepsTotal": 236,
+    "testsPassed": 1562,
+    "testsTotal": 1569,
+    "skipped": 7,
+    "log": ".zig-cache/file-tree-acceptance-native-unrestricted.log",
+    "sha256": "633973b4e8b82c9ff60ea23f15b68b31efaf9659bb036cd7a3d856759acb71fa",
+    "entry": "node node_modules/@native-sdk/cli/bin/native.js test . --yes",
+    "exitCode": 0,
+    "execution": "outside sandbox after local HTTP ACCESS_DENIED diagnostics"
+  },
+  "localEvidence": {
+    "directory": ".zig-cache/file-tree-acceptance",
+    "sha256": {
+      "ui.ps1": "6d3cacc8be85998a0dc527967b8bd4b20a1730145528b87ca901fc4c21c26708",
+      "rpc.mjs": "8583db681f5786caf3a91e42d039733136dfb85b9b42304dea8f322a91195486",
+      "resize.ps1": "7c74eb17dad22a326ce7ba8d119696b4a899aa0c2cf0f9f73e1644bf90e56e65",
+      "capture.ps1": "c86cb0c400eaae7b8f251cb7cc137acca6e0c3447a690b5d27568c893e4fbc48",
+      "markdown-ui.json": "7d4caa63d0ebe2f1fec2c35b2f84732a8fbafbd97950996e493a4e9804f7bd44",
+      "image-ui.json": "2b714b2951cc184c9f4e9031518e28698c2811a7dccc87a1d97f820b58d329ba",
+      "keyboard-left.json": "47be5bf1bb21b8730df0022f0f6b6026293c9565fa9d2649380f479d7358c129",
+      "keyboard-down.json": "d0ec8a55ec8774a093bca51c6f2711259daf409e057b8b8b9dedfdbab4ddb604",
+      "keyboard-enter.json": "cfbb12efdeb9b2095a495c1edd57d5bbe3964cee19182b0bef75bde3eb4526bb",
+      "refresh-root.json": "042bbd5571b0887779d0bc895a91449f535288a83fd349e1df07e0708035d1c9",
+      "refresh-child.json": "5f220e8368f493bafd0716bda74702ab1fc72ca1fd48e73d70c7e6f268b8a588",
+      "task2-ui.json": "65e157d7bcd64f805b29b85c8856ba74552c691683a912294494507a5022646a",
+      "reopen-panel.json": "d07b1a6c9481503d74a4d3fa7c3f499fc05c46be6e350a651b98c2b88999fcf9",
+      "deleted-task.json": "e04bbc3043327ad81c03005b9fcc699f4ab1c3694e75f698591aca14f06e82af",
+      "narrow-ui.json": "75922492606c1ca3e9bbaa2340b8281799831b8dbb360b1decee72e7c086cf06",
+      "narrow-markdown-ui.json": "4cd03d51b09bb43505c4fdda029f144e98a11a9db0372ea6f24bb09d248f3e66",
+      "host-boundaries.json": "42363bb96de2feb654a1579700aadb440409ce394a581f1ecd2ca3293b95f305",
+      "desktop.log": "71881a930ebb2ee51a1fdf3b17458989142c686f908c81468f5c190c30b6d119",
+      "narrow-markdown.png": "e4128090632bdbd3518ad7721082b52cc9dc99652528f77b79806a6303da0592",
+      "default-collapsed.png": "68ae3c1b853cdb128fb37683a150cb29b0d7df4be0c96bdd765abb0d0c88d54a"
+    }
+  },
+  "unverified": [
+    "macOS desktop and POSIX symlink",
+    "real desktop dark theme",
+    "live Workspace authorization changes and revocation during an in-flight read"
+  ]
+}

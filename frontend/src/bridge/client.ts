@@ -384,6 +384,36 @@ export class BridgeClient {
       }),
     );
   }
+  listWorkspaceDirectory(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+    options?: FilePreviewLoadOptions,
+  ) {
+    return this.previews.listDirectory(
+      taskId,
+      workspaceId,
+      workspaceEpoch,
+      path,
+      options,
+    );
+  }
+  previewWorkspaceFile(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+    options?: FilePreviewLoadOptions,
+  ) {
+    return this.previews.loadWorkspace(
+      taskId,
+      workspaceId,
+      workspaceEpoch,
+      path,
+      options,
+    );
+  }
   async ping() {
     return decodePingResponse(
       await this.invoke(commands.ping, {

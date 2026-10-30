@@ -9,6 +9,13 @@ type RunTarget = { taskId: string; runId: string };
 
 export type TaskPanelTarget =
   | { kind: "empty" }
+  | {
+      kind: "workspace";
+      taskId: string;
+      workspaceId: string;
+      workspaceEpoch: string;
+      path: string;
+    }
   | (RunTarget & { kind: "preview"; referenceId: string })
   | (RunTarget & { kind: "review" });
 
@@ -25,7 +32,36 @@ export type TaskPanelReviewTab = RunTarget & {
   tabId: string;
 };
 
-export type TaskPanelTab = TaskPanelPreviewTab | TaskPanelReviewTab;
+export type TaskPanelWorkspaceTab = {
+  kind: "workspace";
+  tabId: string;
+  taskId: string;
+  workspaceId: string;
+  workspaceEpoch: string;
+  path: string;
+  title: string;
+  displayPath: string;
+};
+export type TaskPanelTab =
+  TaskPanelPreviewTab | TaskPanelReviewTab | TaskPanelWorkspaceTab;
+
+export function createTaskPanelWorkspaceTab(
+  taskId: string,
+  workspaceId: string,
+  workspaceEpoch: string,
+  path: string,
+): TaskPanelWorkspaceTab {
+  return {
+    kind: "workspace",
+    tabId: tabId(["workspace", taskId, workspaceId, workspaceEpoch, path]),
+    taskId,
+    workspaceId,
+    workspaceEpoch,
+    path,
+    displayPath: path,
+    title: path.split("/").at(-1) ?? path,
+  };
+}
 
 export type TaskPanelSession = {
   taskId: string | null;
@@ -73,6 +109,14 @@ export function createTaskPanelReviewTab(
 }
 
 export function taskPanelTabTarget(tab: TaskPanelTab): TaskPanelTarget {
+  if (tab.kind === "workspace")
+    return {
+      kind: "workspace",
+      taskId: tab.taskId,
+      workspaceId: tab.workspaceId,
+      workspaceEpoch: tab.workspaceEpoch,
+      path: tab.path,
+    };
   return tab.kind === "preview"
     ? {
         kind: "preview",
@@ -96,6 +140,8 @@ function resolveTaskPanelTab(
   manifest?: readonly RunManifest[],
 ): TaskPanelTab | null {
   if (!task || tab.taskId !== task.id) return null;
+  if (tab.kind === "workspace")
+    return task.workspaceId === tab.workspaceId ? tab : null;
   const run = task.runs.find((candidate) => candidate.id === tab.runId);
   if (tab.kind === "review" && !typedFileChanges) return null;
   if (!run)
@@ -111,6 +157,16 @@ function resolveTaskPanelTab(
 }
 
 function sameTaskPanelTab(left: TaskPanelTab, right: TaskPanelTab): boolean {
+  if (left.kind === "workspace" || right.kind === "workspace")
+    return (
+      left.kind === "workspace" &&
+      right.kind === "workspace" &&
+      left.tabId === right.tabId &&
+      left.taskId === right.taskId &&
+      left.workspaceId === right.workspaceId &&
+      left.workspaceEpoch === right.workspaceEpoch &&
+      left.path === right.path
+    );
   return (
     left.kind === right.kind &&
     left.tabId === right.tabId &&
@@ -232,6 +288,15 @@ export function targetToTaskPanelTab(
   task: TaskView | null,
 ): TaskPanelTab | null {
   if (!task || task.id !== target.taskId) return null;
+  if (target.kind === "workspace")
+    return target.workspaceId === task.workspaceId
+      ? createTaskPanelWorkspaceTab(
+          task.id,
+          target.workspaceId,
+          target.workspaceEpoch,
+          target.path,
+        )
+      : null;
   const run = task.runs.find((candidate) => candidate.id === target.runId);
   if (!run) return null;
   if (target.kind === "review")

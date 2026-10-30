@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { TaskPanelTab } from "./task-panel-state.ts";
 
@@ -24,7 +25,7 @@ function revealTaskPanelTab(list: HTMLElement, tab: HTMLElement): void {
 
 export function taskPanelTabLabels(tabs: TaskPanelTab[]): Map<string, string> {
   const labels = new Map<string, string>();
-  const previews = tabs.filter((tab) => tab.kind === "preview");
+  const previews = tabs.filter((tab) => tab.kind !== "review");
   for (const tab of previews) {
     const fallback = pathSegments(tab.displayPath).at(-1) ?? tab.displayPath;
     const base = tab.title || fallback;
@@ -67,6 +68,9 @@ export function TaskPanel({
   title,
   tabs,
   activeTabId,
+  fileTreeOpen,
+  onToggleFileTree,
+  fileTree,
   children,
   attention,
   actions,
@@ -77,6 +81,9 @@ export function TaskPanel({
   title: string;
   tabs: TaskPanelTab[];
   activeTabId: string | null;
+  fileTreeOpen: boolean;
+  onToggleFileTree: () => void;
+  fileTree?: ReactNode;
   children: ReactNode;
   attention: ReactNode;
   actions?: ReactNode;
@@ -86,6 +93,9 @@ export function TaskPanel({
 }) {
   const { t } = useI18n();
   const labels = taskPanelTabLabels(tabs);
+  const fileTreeToggleLabel = t(
+    fileTreeOpen ? "task_panel.hide_file_tree" : "task_panel.show_file_tree",
+  );
   const [focusedTabId, setFocusedTabId] = useState(activeTabId);
   const tabList = useRef<HTMLDivElement | null>(null);
   const tabButtons = useRef(new Map<string, HTMLButtonElement>());
@@ -139,11 +149,11 @@ export function TaskPanel({
 
   return (
     <div className="task-panel-frame">
-      {tabs.length > 0 ? (
-        <header className="task-panel-header">
-          <h2 id="task-panel-title" className="sr-only">
-            {title}
-          </h2>
+      <header className="task-panel-header">
+        <h2 id="task-panel-title" className="sr-only">
+          {title}
+        </h2>
+        {tabs.length > 0 ? (
           <div
             ref={tabList}
             className="task-panel-tabs"
@@ -175,7 +185,7 @@ export function TaskPanel({
                     tabIndex={
                       tab.tabId === (focusedTabId ?? activeTabId) ? 0 : -1
                     }
-                    title={tab.kind === "preview" ? tab.displayPath : label}
+                    title={tab.kind !== "review" ? tab.displayPath : label}
                     onFocus={() => setFocusedTabId(tab.tabId)}
                     onClick={() => onSelectTab(tab.tabId)}
                     onKeyDown={(event) => {
@@ -206,9 +216,36 @@ export function TaskPanel({
               );
             })}
           </div>
-          <div className="task-panel-header-actions">
-            {attention}
+        ) : (
+          <div className="task-panel-header-spacer" />
+        )}
+        <div className="task-panel-header-actions">
+          {tabs.length > 0 && attention}
+          {tabs.length > 0 && (
             <span className="task-panel-context-action-slot">{actions}</span>
+          )}
+          <Tooltip.Root>
+            <Tooltip.Trigger
+              render={
+                <button
+                  type="button"
+                  className="task-panel-header-action task-panel-file-tree-toggle focus-ring"
+                  aria-label={fileTreeToggleLabel}
+                  aria-expanded={fileTreeOpen}
+                  aria-controls="task-panel-file-tree"
+                  onClick={onToggleFileTree}
+                />
+              }
+            >
+              <Icon name="file-tree" />
+            </Tooltip.Trigger>
+            <Tooltip.Portal>
+              <Tooltip.Positioner side="bottom" align="end">
+                <Tooltip.Popup>{fileTreeToggleLabel}</Tooltip.Popup>
+              </Tooltip.Positioner>
+            </Tooltip.Portal>
+          </Tooltip.Root>
+          {tabs.length > 0 && (
             <button
               type="button"
               className="task-panel-close focus-ring"
@@ -217,25 +254,36 @@ export function TaskPanel({
             >
               <Icon name="close" />
             </button>
-          </div>
-        </header>
-      ) : (
-        <h2 id="task-panel-title" className="sr-only">
-          {title}
-        </h2>
-      )}
-      {activeTabId ? (
-        <div
-          id="task-panel-tabpanel"
-          className="task-panel-content"
-          role="tabpanel"
-          aria-labelledby={`task-panel-tab-${tabs.findIndex((tab) => tab.tabId === activeTabId)}`}
-        >
-          {children}
+          )}
         </div>
-      ) : (
-        <div className="task-panel-content">{children}</div>
-      )}
+      </header>
+      <div className="task-panel-body">
+        {activeTabId ? (
+          <div
+            id="task-panel-tabpanel"
+            className="task-panel-content"
+            role="tabpanel"
+            aria-labelledby={`task-panel-tab-${tabs.findIndex((tab) => tab.tabId === activeTabId)}`}
+          >
+            {children}
+          </div>
+        ) : (
+          <div className="task-panel-content">{children}</div>
+        )}
+        {fileTreeOpen && (
+          <aside
+            id="task-panel-file-tree"
+            className="task-panel-file-tree"
+            aria-label={t("task_panel.file_tree")}
+          >
+            <h3 className="task-panel-file-tree-heading">
+              <Icon name="workspace" />
+              {t("task_panel.file_tree")}
+            </h3>
+            {fileTree}
+          </aside>
+        )}
+      </div>
     </div>
   );
 }

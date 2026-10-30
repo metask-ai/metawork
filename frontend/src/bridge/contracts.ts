@@ -290,6 +290,13 @@ export type FileReferenceView = {
   displayPath: string;
 };
 export type PreviewMediaType = "image/png" | "image/jpeg" | "image/webp";
+export type WorkspaceDirectory = {
+  state: "ready" | "busy" | "missing" | "restricted" | "error";
+  entries: { name: string; kind: "file" | "directory" }[];
+  truncated: boolean;
+  redacted: boolean;
+};
+
 export type FilePreviewImage = {
   readonly id: string;
   readonly mediaType: PreviewMediaType;
