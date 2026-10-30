@@ -1229,6 +1229,51 @@ const ProjectionCredentials = struct {
     }
 };
 
+test "Task model credential collection carries more than 128 known values and reports incomplete allocation" {
+    const Harness = struct {
+        count: usize = 0,
+        complete: bool = false,
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            var bytes: [32]u8 = undefined;
+            for (0..140) |index| try callback(context, std.fmt.bufPrint(&bytes, "renewal-fixture-{d}", .{index}) catch unreachable);
+        }
+        fn credentials(context: ?*anyopaque, values: []const []const u8, complete: bool, _: task_persistence.CredentialScrub) task_persistence.CredentialStatus {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count = values.len;
+            self.complete = complete;
+            return .{ .epoch = 1, .ready = complete };
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var harness: Harness = .{};
+    // The visitor uses one scratch buffer. Account visitors normally borrow
+    // stable owned bytes; use an owned projection to preserve that contract.
+    var owned: ProjectionCredentials = .{ .allocator = std.testing.allocator };
+    defer owned.deinit();
+    try Harness.visit(&harness, &owned, ProjectionCredentials.visit);
+    const Source = struct {
+        fn visit(context: *anyopaque, target: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            const values: *ProjectionCredentials = @ptrCast(@alignCast(context));
+            for (values.values.items) |value| try callback(target, value);
+        }
+    };
+    control.account_credentials = .{ .context = &owned, .generation_fn = Harness.generation, .visit_fn = Source.visit };
+    defer control.account_credentials = null;
+    control.task_persistence = .{ .context = &harness, .credentials_fn = Harness.credentials };
+    control.syncHistoryCredentials(null, null);
+    try std.testing.expect(harness.complete);
+    try std.testing.expect(harness.count >= 140);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    control.allocator = failing.allocator();
+    control.syncHistoryCredentials(null, null);
+    control.allocator = std.testing.allocator;
+    try std.testing.expect(!harness.complete);
+}
+
 const ViewPreparation = struct {
     const Block = struct { key: view_cache.Key, start: usize, end: usize, known: u64, version: u64 = 0, current: bool = true };
     const Tool = struct { source: ?product_task.OwnedToolProjection, child: *view_plan.Plan, state: product_task.OwnedToolProjection.State = .{} };
@@ -9775,19 +9820,18 @@ pub const Runtime = struct {
     fn syncHistoryCredentials(self: *Runtime, extra: ?[]const u8, retiring: ?[*]const u8) void {
         if (self.task_persistence.credentials_fn == null) return;
         const Collection = struct {
-            values: [128][]const u8 = undefined,
-            count: usize = 0,
+            allocator: std.mem.Allocator,
+            values: std.ArrayList([]const u8) = .empty,
             retiring: ?[*]const u8,
             fn visit(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
                 const c: *@This() = @ptrCast(@alignCast(context));
                 if (value.len == 0 or (c.retiring != null and value.ptr == c.retiring.?)) return;
-                for (c.values[0..c.count]) |existing| if (std.mem.eql(u8, existing, value)) return;
-                if (c.count == c.values.len) return error.OutOfMemory;
-                c.values[c.count] = value;
-                c.count += 1;
+                for (c.values.items) |existing| if (std.mem.eql(u8, existing, value)) return;
+                try c.values.append(c.allocator, value);
             }
         };
-        var collected: Collection = .{ .retiring = retiring };
+        var collected: Collection = .{ .allocator = self.allocator, .retiring = retiring };
+        defer collected.values.deinit(self.allocator);
         var complete = true;
         if (extra) |value| Collection.visit(&collected, value) catch {
             complete = false;
@@ -9801,7 +9845,7 @@ pub const Runtime = struct {
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
-        const status = self.task_persistence.credentials(collected.values[0..collected.count], complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
+        const status = self.task_persistence.credentials(collected.values.items, complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
         self.task_persistence.security_epoch = status.epoch;
         // Maintenance is also not ready while the original transaction is
         // unresolved. Keep that stronger fact visible until token resolution.
