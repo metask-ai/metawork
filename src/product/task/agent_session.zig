@@ -238,6 +238,10 @@ pub const Access = struct {
         return self.get().updateCredential(credential);
     }
 
+    pub fn requestTermination(self: *Access, run_id: u64, signal: agent.TerminationSignal) !void {
+        return self.get().requestTermination(run_id, signal);
+    }
+
     pub fn prepareRun(self: *Access, input: agent.RunInput) !u64 {
         return self.get().prepareRun(input);
     }

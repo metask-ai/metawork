@@ -159,6 +159,10 @@ pub const PermissionReviewState = struct {
 pub const State = struct {
     /// Task continuity survives Session detachment. Host-only, never persisted.
     metask_authorization_scope: u64 = 0,
+    credential_update_failed: bool = false,
+    credential_failed_generation: u64 = 0,
+    credential_failed_route_id: u64 = 0,
+    credential_renewal_deferred: bool = false,
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
     /// Main-thread projection retained across the old Session's close and a

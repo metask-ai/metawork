@@ -905,7 +905,11 @@ pub const RunRecord = struct {
     event_stream_finalized: bool = false,
     event_projection_failure: ?EventProjectionFailure = null,
     terminal_diagnostic: []u8,
-    redaction_secret: []const u8 = &.{},
+    initial_credentials: [2][]const u8 = .{ &.{}, &.{} },
+    /// Main-thread view of every version that may still reach this operation.
+    /// Workers use initialRedactionSecrets and their owned request copies;
+    /// mutable publication always crosses the main-thread sanitizer again.
+    credential_views: std.ArrayList([]const u8) = .empty,
     next_activity_order: u64 = 1,
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
@@ -918,8 +922,12 @@ pub const RunRecord = struct {
             self.projection_content_version = std.math.add(u64, self.projection_content_version, 1) catch 0;
     }
 
-    pub fn redactionSecrets(self: *const RunRecord) [2][]const u8 {
-        return .{ self.redaction_secret, if (self.image_execution) |*image| image.candidate.input().bearer else &.{} };
+    pub fn initialRedactionSecrets(self: *const RunRecord) [2][]const u8 {
+        return self.initial_credentials;
+    }
+
+    pub fn redactionSecrets(self: *const RunRecord) []const []const u8 {
+        return if (self.credential_views.items.len != 0) self.credential_views.items else &self.initial_credentials;
     }
 
     pub fn provisionalRedacted(self: *const RunRecord) bool {
@@ -945,6 +953,8 @@ pub const CompactRecord = struct {
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: CompactTerminalPayload = undefined,
     terminal_observed: bool = false,
+    event_drain_marked: bool = false,
+    event_stream_finalized: bool = false,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     checkpoint_export_context: CheckpointExportContext = undefined,
@@ -1636,7 +1646,7 @@ fn appendNewOutput(
     if (used > projection.max_assistant_message_bytes or
         suffix.len > projection.max_assistant_message_bytes - used)
         return error.ProjectionCapacity;
-    return projection.appendAssistant(target, suffix, run.redaction_secret);
+    return projection.appendAssistant(target, suffix, run.initial_credentials[0]);
 }
 
 /// Product history retains an image-read receipt, while Core keeps the full
@@ -1776,7 +1786,7 @@ pub fn applyEvent(
             const projected = try projection.replaceText(
                 &tool.progress,
                 progress.text,
-                run.redaction_secret,
+                run.initial_credentials[0],
             );
             tool.progress_truncated = projected.truncated;
             tool.redacted = tool.redacted or projected.redacted;
@@ -1801,12 +1811,12 @@ pub fn applyEvent(
             const input = try projection.replaceText(
                 &tool.input,
                 result.input,
-                run.redaction_secret,
+                run.initial_credentials[0],
             );
             const content = try projection.replaceText(
                 &tool.content,
                 imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
-                run.redaction_secret,
+                run.initial_credentials[0],
             );
             tool.input_truncated = input.truncated;
             tool.content_truncated = content.truncated;
@@ -1817,7 +1827,7 @@ pub fn applyEvent(
             try projection.replaceFileReferences(
                 tool,
                 envelope,
-                run.redaction_secret,
+                run.initial_credentials[0],
                 task.durable.id,
                 run.generation,
             );
@@ -2003,7 +2013,7 @@ pub fn applyEvent(
                             &run.output_continued,
                             run.output_segment.list.items,
                             &.{},
-                            run.redaction_secret,
+                            run.initial_credentials[0],
                         )) or run.output_segment_redacted or
                             run.output_continued_redacted;
                     }
@@ -2025,7 +2035,7 @@ pub fn applyEvent(
                         &run.assistant,
                         run.output_continued.list.items,
                         run.output_segment.list.items,
-                        run.redaction_secret,
+                        run.initial_credentials[0],
                     )) or run.output_continued_redacted or
                         run.output_segment_redacted or run.assistant_redacted;
                     clearTrackedText(&run.output_continued);

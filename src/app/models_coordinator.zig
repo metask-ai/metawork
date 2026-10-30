@@ -224,9 +224,9 @@ const CatalogJob = struct {
     }
 };
 
-/// Application coordinator for Models-only effects. Product Control owns
-/// registry/default-selection policy; this type only binds platform and Agent
-/// effects to its scoped management capability.
+/// Application binder for Account credential delivery and Models effects.
+/// Product Control owns consumer scope and registry/default-selection policy;
+/// credential delivery uses a separate port before catalog work.
 pub const Coordinator = struct {
     io: std.Io,
     account: *account_api.Runtime,
@@ -238,6 +238,7 @@ pub const Coordinator = struct {
     probe_job: ?*ProbeJob = null,
     catalog_job: ?*CatalogJob = null,
     observed_authorization_generation: u64 = 0,
+    credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
 
     pub fn init(
         account: *account_api.Runtime,
@@ -384,41 +385,63 @@ pub const Coordinator = struct {
         self.management.startCustomProvidersUnavailable();
     }
 
+    pub fn setCredentialRenewal(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal) void {
+        self.credential_renewal = renewal;
+    }
+
+    pub fn credentialRefresh(self: *Coordinator) control_ports.MetaskCredentialRefresh {
+        return .{ .context = self, .refresh_fn = deliverCurrentCredential };
+    }
+
+    fn deliverCurrentCredential(context: *anyopaque) void {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        self.publishCurrentCredential(true);
+    }
+
+    fn publishCurrentCredential(self: *Coordinator, force: bool) void {
+        const renewal = self.credential_renewal orelse return;
+        const state = self.account.authorizationState() orelse return;
+        const authority: control_ports.MetaskAuthorization = .{ .scope = state.scope, .generation = state.generation };
+        if (!force and !renewal.needs(authority)) return;
+        var lease = (self.account.authorizationLease() catch {
+            renewal.renew(authority, null);
+            return;
+        }) orelse return;
+        defer lease.deinit();
+        if (lease.authorization_generation != authority.generation) return;
+        renewal.renew(authority, lease.access_token);
+    }
+
+    fn cancelCatalog(self: *Coordinator) void {
+        const job = self.catalog_job orelse return;
+        job.cancel();
+        job.join();
+        self.management.failMetaskCatalogRefresh(job.attempt_id, job.authorization_generation, .authorization_unavailable, "");
+        job.deinit();
+        self.catalog_job = null;
+    }
+
     pub fn authorizationChanged(self: *Coordinator) void {
         self.assertMainThread();
-        var lease = (self.account.authorizationLease() catch return) orelse {
-            if (self.catalog_job) |job| {
-                job.cancel();
-                job.join();
-                self.management.failMetaskCatalogRefresh(
-                    job.attempt_id,
-                    job.authorization_generation,
-                    .authorization_unavailable,
-                    "",
-                );
-                job.deinit();
-                self.catalog_job = null;
-            }
+        // Existing executions renew before any catalog work, using Account
+        // authority alone. Catalog failure cannot roll this handoff back.
+        self.publishCurrentCredential(true);
+        var lease = (self.account.authorizationLease() catch {
+            self.cancelCatalog();
+            self.management.setMetaskAuthorizationUnavailable();
+            self.observed_authorization_generation = 0;
+            return;
+        }) orelse {
+            self.cancelCatalog();
             if (self.observed_authorization_generation != 0)
                 self.management.setMetaskAuthorizationUnavailable();
             self.observed_authorization_generation = 0;
             return;
         };
         defer lease.deinit();
-        if (lease.authorization_generation == self.observed_authorization_generation)
-            return;
-        if (self.catalog_job) |job| {
-            job.cancel();
-            job.join();
-            self.management.failMetaskCatalogRefresh(
-                job.attempt_id,
-                job.authorization_generation,
-                .authorization_unavailable,
-                "",
-            );
-            job.deinit();
-            self.catalog_job = null;
-        }
+        if (lease.authorization_generation == self.observed_authorization_generation) return;
+        self.cancelCatalog();
         self.observed_authorization_generation = lease.authorization_generation;
         _ = self.startCatalogJob(&lease);
     }
@@ -504,6 +527,7 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
+        self.publishCurrentCredential(false);
         if (self.catalog_job) |job| {
             if (job.finished.load(.acquire)) {
                 job.join();

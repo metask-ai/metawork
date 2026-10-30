@@ -1376,6 +1376,8 @@ pub const Runtime = struct {
     view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
+    history_credential_maintenance_ready: bool = true,
+    learned_renewal: ?control_ports.MetaskAuthorization = null,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
@@ -1385,6 +1387,7 @@ pub const Runtime = struct {
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
+    metask_credential_refresh: ?control_ports.MetaskCredentialRefresh = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
@@ -6227,12 +6230,14 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         self.advanceTaskInputs();
         self.syncPermissionReviews();
+        self.retireQuiescentCredentials();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
     }
 
     /// Lifecycle facts alone never accept or start a reviewer decision. The
     /// manual-response entry point uses this before Task's acceptance boundary.
     fn syncLifecycleFacts(self: *Runtime) bool {
+        self.scrubPublishedDiagnostics();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -6579,7 +6584,26 @@ pub const Runtime = struct {
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
     fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
+        self.scrubPublishedDiagnostics();
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
+    }
+
+    /// Workers hold immutable initial/request snapshots. A response may contain
+    /// a later token, so acquire its publication and scrub against the complete
+    /// Host set before Task observes or persists the terminal diagnostic.
+    fn scrubPublishedDiagnostics(self: *Runtime) void {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
+                if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
+                const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
+                run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
+            };
+            for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
+                if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
+                const changed = self.redactWithKnownCredentialsNoFail(compact.terminal_diagnostic[0..compact.terminal_payload.diagnostic_len]);
+                compact.terminal_payload.diagnostic_redacted = changed or compact.terminal_payload.diagnostic_redacted;
+            };
+        };
     }
 
     fn syncMcpHealthNoFail(self: *Runtime) bool {
@@ -8337,7 +8361,12 @@ pub const Runtime = struct {
             std.mem.eql(u8, installed.provider_id, "metask")
         else
             std.mem.startsWith(u8, installed.provider_id, "custom_provider:") and std.mem.eql(u8, installed.provider_id["custom_provider:".len..], intent.source_id);
-        return installed.source_generation != authority.source_generation or installed.protocol != protocol or !provider_matches;
+        if (installed.protocol != protocol or !provider_matches) return true;
+        if (installed.source_generation == authority.source_generation) return false;
+        if (task.runtime.metask_authorization_scope == 0) return true;
+        var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
+        defer candidate.deinit();
+        return !installed.matchesTarget(candidate.input());
     }
 
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
@@ -8366,7 +8395,7 @@ pub const Runtime = struct {
             if (installed.model_intent_revision == intent.revision) {
                 if (task.runtime.metask_authorization_scope == 0) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-                if (installed.source_generation == current.source_generation) return null;
+                if (!task.runtime.credential_update_failed and installed.source_generation == current.source_generation) return null;
             };
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
@@ -8374,6 +8403,24 @@ pub const Runtime = struct {
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
+        if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.matchesTarget(candidate.input())) {
+            const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
+            const current = check.current() orelse return error.ExecutionUnavailable;
+            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.scope, current.generation, candidate.input().api_key, true) catch |err| {
+                self.failMetaskCredentialUpdate(task_id, current.generation, err);
+                return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionUnavailable;
+            };
+            switch (renewal) {
+                .unrelated => return error.ExecutionUnavailable,
+                .deferred => return error.TaskBusy,
+                .updated, .unchanged => {},
+            }
+            self.task_runtime.find(task_id).?.runtime.execution().?.source_generation = candidate.input().source_generation;
+            if (installed.model_intent_revision == intent.revision) {
+                candidate.deinit();
+                return null;
+            }
+        };
         if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.model_intent_revision == intent.revision) {
             const input = candidate.input();
             if (installed.protocol != input.target.protocol or !std.mem.eql(u8, installed.base_url, input.target.base_url))
@@ -9430,6 +9477,7 @@ pub const Runtime = struct {
             .queue_binding_fn = queueTaskRuntimeBinding,
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
             .refresh_capabilities_fn = refreshModelRestoreCapabilities,
+            .refresh_credential_fn = refreshRecoveryCredential,
             .retire_checkpoint_fn = retireRecoveryCheckpoint,
         };
     }
@@ -9846,6 +9894,7 @@ pub const Runtime = struct {
             complete = false;
         };
         const status = self.task_persistence.credentials(collected.values.items, complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
+        self.history_credential_maintenance_ready = status.ready;
         self.task_persistence.security_epoch = status.epoch;
         // Maintenance is also not ready while the original transaction is
         // unresolved. Keep that stronger fact visible until token resolution.
@@ -10123,13 +10172,33 @@ pub const Runtime = struct {
         max: usize,
         credentials: []const []const u8,
     ) Error!ProjectedCopy {
+        // Synchronous main-thread preparation may borrow these values. Include
+        // every live owner, so another Task's old token is sanitized before it
+        // becomes product history, including matches across the truncation edge.
+        const Collection = struct {
+            allocator: std.mem.Allocator,
+            values: std.ArrayList([]const u8) = .empty,
+
+            fn visit(context: *anyopaque, secret: []const u8) std.mem.Allocator.Error!void {
+                const self_: *@This() = @ptrCast(@alignCast(context));
+                if (secret.len == 0) return;
+                for (self_.values.items) |known| if (std.mem.eql(u8, known, secret)) return;
+                try self_.values.append(self_.allocator, secret);
+            }
+        };
+        var known: Collection = .{ .allocator = self.allocator };
+        defer known.values.deinit(self.allocator);
+        for (credentials) |secret| try Collection.visit(&known, secret);
+        try Collection.visit(&known, self.execution_state.credential());
+        if (self.account_credentials) |source| try source.visit(&known, Collection.visit);
+        try self.task_runtime.visitExecutionCredentials(&known, Collection.visit);
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
         const result = sanitizeInto(
             scratch,
             value,
-            credentials,
+            known.values.items,
         );
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
@@ -10527,6 +10596,120 @@ pub const Runtime = struct {
 
     pub fn setMetaskAuthorizationCheck(self: *Runtime, check: control_ports.MetaskAuthorizationCheck) void {
         self.metask_authorization_check = check;
+    }
+
+    pub fn setMetaskCredentialRefresh(self: *Runtime, refresh: control_ports.MetaskCredentialRefresh) void {
+        self.metask_credential_refresh = refresh;
+    }
+
+    fn refreshRecoveryCredential(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const task = self.task_runtime.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        if (!job.completionReady() or job.outcome != .candidate) return false;
+        const execution = &job.outcome.candidate.execution;
+        if (!std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return true;
+        // Match metaskAuthorizationScope's isolated-Core fixture admission.
+        // Production always requires the composed Account capability.
+        if (builtin.is_test and self.metask_authorization_check == null) return true;
+        const expected_scope = self.task_runtime.metaskCredentialScope(task_id) orelse return false;
+        const check = self.metask_authorization_check orelse return false;
+        const authority = check.current() orelse return false;
+        if (authority.scope != expected_scope) return false;
+        if (execution.credential_generation != authority.generation) {
+            const refresh = self.metask_credential_refresh orelse return false;
+            refresh.refresh();
+        }
+        if (task.runtime.credential_update_failed or execution.credential_generation != authority.generation) return false;
+        // A rotation may advance the catalog's source generation. Acknowledge
+        // it only after new-execution admission proves the same actual target;
+        // all intent, workspace, capability and persistence gates still run.
+        if (job.rebind) |*rebind| if (rebind.phase != .restoring_original) {
+            const current = self.taskModelIntentAuthority(task_id) orelse return false;
+            const intent = task.durable.model_intent orelse return false;
+            if (intent.revision != rebind.selection_revision or !std.mem.eql(u8, intent.source_id, rebind.source_id)) return false;
+            var candidate = (self.custom_providers.resolveModel(intent.modelRef(), current.source_generation, current.catalog_generation) catch return false) orelse return false;
+            defer candidate.deinit();
+            if (!execution.matchesTarget(candidate.input())) return false;
+            execution.source_generation = current.source_generation;
+            rebind.source_generation = current.source_generation;
+            rebind.catalog_generation = current.catalog_generation;
+        };
+        return true;
+    }
+
+    pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
+        return .{ .context = self, .renew_fn = renewMetaskExecutionCredentials, .needs_fn = needsDeferredMetaskCredential };
+    }
+
+    fn currentRenewalAuthority(self: *Runtime, authority: control_ports.MetaskAuthorization) bool {
+        if (self.shutting_down or authority.scope == 0 or authority.generation == 0) return false;
+        const check = self.metask_authorization_check orelse return false;
+        const current = check.current() orelse return false;
+        return current.scope == authority.scope and current.generation == authority.generation;
+    }
+
+    fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (!self.currentRenewalAuthority(authority)) return false;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (!task.runtime.credential_renewal_deferred or self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
+            if (task.runtime.restore_job) |job| {
+                if (job.completionReady() and job.outcome == .candidate) return true;
+            } else if (task.runtime.active_operation != .compact) return true;
+        };
+        return false;
+    }
+
+    fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (!self.currentRenewalAuthority(authority)) return;
+        if (credential) |value| {
+            const previous = self.learned_renewal;
+            if (previous == null or previous.?.scope != authority.scope or previous.?.generation != authority.generation) {
+                self.learnProjectionCredential(value);
+                self.learned_renewal = authority;
+            }
+        }
+        var changed = false;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
+            const value = credential orelse {
+                self.task_runtime.failCredentialRenewal(task.durable.id, authority.generation, true, false);
+                changed = true;
+                continue;
+            };
+            const outcome = self.task_runtime.renewMetaskCredential(task.durable.id, authority.scope, authority.generation, value, false) catch |err| {
+                self.failMetaskCredentialUpdate(task.durable.id, authority.generation, err);
+                changed = true;
+                continue;
+            };
+            changed = changed or outcome == .updated;
+        };
+        self.retireQuiescentCredentials();
+        if (changed) self.bumpRevision();
+    }
+
+    fn failMetaskCredentialUpdate(self: *Runtime, task_id: u64, generation: u64, err: anyerror) void {
+        self.task_runtime.failCredentialRenewal(task_id, generation, err == error.OutOfMemory or err == error.CredentialUpdateResourceLimit, err == error.CredentialUpdateContract);
+        // A poisoned idle Session cannot accept any new work. Give it to the
+        // ordinary close owner; an explicit later admission can restore it.
+        if ((err == error.CredentialUpdateContract or err == error.SessionPoisoned) and !self.task_runtime.taskHasActiveOperation(task_id))
+            _ = self.task_runtime.beginDetach(task_id, self.taskRuntimeOperationEffects()) catch false;
+    }
+
+    fn retireQuiescentCredentials(self: *Runtime) void {
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            const reviewing = for (self.permission_jobs) |job| {
+                if (job != null and job.?.prepared.identity.task_id == task.durable.id) break true;
+            } else false;
+            if (reviewing) continue;
+            while (self.task_runtime.retiredCredential(task.durable.id)) |value| {
+                self.retireProjectionCredential(value);
+                if (!self.history_credential_maintenance_ready) break;
+                self.task_runtime.releaseRetiredCredential(task.durable.id);
+            }
+        };
     }
 
     fn metaskAuthorizationScope(self: *Runtime, provider_id: []const u8) Error!u64 {
@@ -11415,7 +11598,7 @@ fn commitTerminal(
         const diagnostic_projection = sanitizeInto(
             run.terminal_diagnostic,
             diagnostic,
-            &run.redactionSecrets(),
+            &run.initialRedactionSecrets(),
         );
         run.terminal_payload = .{
             .exclude_on_product_terminal = false,
@@ -12378,7 +12561,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
-        .redaction_secret = control.execution_state.credential(),
+        .initial_credentials = .{ control.execution_state.credential(), &.{} },
     };
     control.task_runtime.tasks[0] = try control.allocator.create(TestTask);
     control.task_runtime.tasks[0].?.* = .{
@@ -12610,7 +12793,7 @@ fn replaceTaskCredentialForTest(
     live.execution = replacement.take();
     const redaction_secret = live.execution.input().api_key;
     for (task.durable.runs) |*run_entry| {
-        if (run_entry.*) |*run| run.redaction_secret = redaction_secret;
+        if (run_entry.*) |*run| run.initial_credentials[0] = redaction_secret;
     }
 }
 
@@ -15513,7 +15696,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         control.projection_bytes -= snapshot.projected_bytes;
         snapshot.deinit();
     }
-    run.redaction_secret = &.{};
+    run.initial_credentials[0] = &.{};
 
     var storage: [16 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&storage);
@@ -16502,7 +16685,7 @@ test "default replacement preserves Task generation and installs the next admiss
         "old *** remains private",
         task.durable.runs[slot].?.input.text.value,
     );
-    try std.testing.expectEqualStrings("SECRET-KEY", task.durable.runs[slot].?.redaction_secret);
+    try std.testing.expectEqualStrings("SECRET-KEY", task.durable.runs[slot].?.initial_credentials[0]);
 
     task.durable.execution_generation = 2;
     try std.testing.expectError(
@@ -16988,7 +17171,7 @@ test "released Task credential is permanently scrubbed from every product projec
     task.runtime.active_run_id = 0;
     try control.beginExecutionReplacement();
     try std.testing.expect(task.runtime.executionConst() == null);
-    try std.testing.expectEqual(@as(usize, 0), run.redaction_secret.len);
+    try std.testing.expectEqual(@as(usize, 0), run.initial_credentials[0].len);
     try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.execution_model, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, run.output_segment.list.items, "SECRET-KEY") == null);
@@ -17601,7 +17784,7 @@ test "output partition redacts a known credential across commentary boundaries" 
     const task = control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
-    run.redaction_secret = &.{};
+    run.initial_credentials[0] = &.{};
 
     const events = [_][]const u8{
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
@@ -18392,7 +18575,7 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     defer std.testing.allocator.free(controls);
     @memset(controls, 1);
     try control.appendTrackedText(&run.assistant, controls, control.limits.max_assistant_message_bytes);
-    _ = control.redactTrackedText(&run.assistant, run.redaction_secret);
+    _ = control.redactTrackedText(&run.assistant, run.initial_credentials[0]);
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(run.assistant.committed_len);
 
@@ -18656,7 +18839,7 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
     );
     _ = control.redactTrackedText(
         &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
-        control.task_runtime.tasks[0].?.durable.runs[0].?.redaction_secret,
+        control.task_runtime.tasks[0].?.durable.runs[0].?.initial_credentials[0],
     );
     control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_count = 1;
     control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_ends[0] = @intCast(

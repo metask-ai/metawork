@@ -459,7 +459,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const projected = job.projector.project(
         &run.execution.?.automatic_title.result,
         result.text,
-        &run.redactionSecrets(),
+        &run.initialRedactionSecrets(),
     );
     run.execution.?.automatic_title.result_len = projected.len;
     run.execution.?.automatic_title.generated_redacted = projected.redacted;
@@ -499,7 +499,7 @@ pub fn commitRunTerminal(
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
-        const projected = projector.project(run.terminal_diagnostic, diagnostic, &run.redactionSecrets());
+        const projected = projector.project(run.terminal_diagnostic, diagnostic, &run.initialRedactionSecrets());
         run.terminal_payload = .{
             .exclude_on_product_terminal = exclude_on_product_terminal,
             .phase = phase,

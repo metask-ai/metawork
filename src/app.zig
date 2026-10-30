@@ -293,6 +293,8 @@ const App = struct {
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
+        models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        control_storage.setMetaskCredentialRefresh(models_management.credentialRefresh());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileSave(self.platform.outputFileSave());

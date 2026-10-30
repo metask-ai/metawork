@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const models_contract = @import("metawork_product_models_contract");
+pub const credential = @import("execution_credential.zig");
 
 pub const OwnedTaskExecution = struct {
     image_capabilities: models_contract.OwnedImageCapabilities = .{},
@@ -15,6 +16,9 @@ pub const OwnedTaskExecution = struct {
     /// Process-local proof that this attachment installed the committed intent.
     model_intent_revision: u64 = 0,
     secret: []u8,
+    credential_generation: u64 = 0,
+    credential_source: ?*credential.Source = null,
+    retired_credentials: std.ArrayList([]u8) = .empty,
     owned: bool = true,
 
     pub fn clone(
@@ -61,6 +65,8 @@ pub const OwnedTaskExecution = struct {
         self.model = &.{};
         self.base_url = &.{};
         self.secret = &.{};
+        self.credential_source = null;
+        self.retired_credentials = .empty;
         self.execution_generation = 0;
         return result;
     }
@@ -81,9 +87,34 @@ pub const OwnedTaskExecution = struct {
     }
 
     pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
-        return self.owned and models_contract.sameImageCapabilities(self.image_capabilities.entries, target.target.image_capabilities) and self.source_generation != 0 and self.source_generation == target.source_generation and
+        return self.matchesTarget(target) and self.source_generation != 0 and self.source_generation == target.source_generation and
+            std.mem.eql(u8, self.secret, target.api_key);
+    }
+
+    pub fn matchesTarget(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
+        return self.owned and models_contract.sameImageCapabilities(self.image_capabilities.entries, target.target.image_capabilities) and
             self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and
-            std.mem.eql(u8, self.base_url, target.target.base_url) and std.mem.eql(u8, self.secret, target.api_key);
+            std.mem.eql(u8, self.base_url, target.target.base_url);
+    }
+
+    pub fn reader(self: *OwnedTaskExecution, io: std.Io) std.mem.Allocator.Error!*credential.Source {
+        if (self.credential_source == null)
+            self.credential_source = try credential.Source.create(self.allocator, io, self.secret);
+        return self.credential_source.?.retain();
+    }
+
+    /// Reserves all allocation before the external Session mutation. The
+    /// caller must either install or securely discard the returned bytes.
+    pub fn prepareCredential(self: *OwnedTaskExecution, value: []const u8) std.mem.Allocator.Error![]u8 {
+        try self.retired_credentials.ensureUnusedCapacity(self.allocator, 1);
+        return self.allocator.dupe(u8, value);
+    }
+
+    pub fn installCredential(self: *OwnedTaskExecution, value: []u8, generation: u64) void {
+        self.retired_credentials.appendAssumeCapacity(self.secret);
+        self.secret = value;
+        self.credential_generation = generation;
+        if (self.credential_source) |source| source.replace(value);
     }
 
     /// A rejected restore retains only the metadata needed to close its
@@ -93,6 +124,14 @@ pub const OwnedTaskExecution = struct {
         std.crypto.secureZero(u8, self.secret);
         self.allocator.free(self.secret);
         self.secret = &.{};
+        for (self.retired_credentials.items) |value| {
+            std.crypto.secureZero(u8, value);
+            self.allocator.free(value);
+        }
+        self.retired_credentials.deinit(self.allocator);
+        self.retired_credentials = .empty;
+        if (self.credential_source) |source| source.release();
+        self.credential_source = null;
     }
 
     pub fn deinit(self: *OwnedTaskExecution) void {
@@ -110,3 +149,7 @@ pub const OwnedTaskExecution = struct {
         self.execution_generation = 0;
     }
 };
+
+test {
+    _ = credential;
+}
