@@ -16,6 +16,7 @@ import sys
 import subprocess
 import tempfile
 import threading
+import zipfile
 
 import office_qualification as qualification
 
@@ -77,6 +78,7 @@ for case in (("deny", "allow", "full") if args.permission_probe else (("docx", "
     work = scratch / case
     work.mkdir()
     output = work / ("created." + kind)
+    generator_output = work / "generated.pptx" if kind == "pptx" else output
     edited = work / ("edited." + kind)
     edit_script = work / "edit.py"
     edit_script.write_text('''import sys,zipfile,hashlib
@@ -113,7 +115,11 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         script.parent.mkdir()
         code = ('const fs=require("node:fs"),{Document,Packer,Paragraph}=require("docx");'
                 'Packer.toBuffer(new Document({sections:[{children:[new Paragraph("Office 中文")]}]})).then(b=>fs.writeFileSync(process.argv[2],b));') if kind == "docx" else (
-                'const P=require("pptxgenjs");const p=new P();p.addSlide().addText("Office 中文",{x:1,y:1,w:8,h:2});p.writeFile({fileName:process.argv[2]});')
+                'const P=require("pptxgenjs");const p=new P();const s=p.addSlide();'
+                's.addText("Office 中文",{x:1,y:0.2,w:8,h:0.5});s.addNotes("Core notes 650");'
+                's.addChart(p.ChartType.bar,[{name:"Amount",labels:["North","South"],values:[300,350]}],'
+                '{x:1,y:1,w:8,h:4,showValue:true,chartColors:["0D9488","14B8A6"]});'
+                'p.writeFile({fileName:process.argv[2]});')
         script.write_text(code, encoding="utf-8")
     state = {"calls": 0, "error": None}
 
@@ -144,22 +150,31 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                     if sys.platform == "win32":
                         def quote(value):
                             return "'" + str(value).replace("'", "''") + "'"
-                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(output)
+                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(generator_output)
+                        if kind == "pptx":
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'generate failed' }; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/finalize.py") + " " + quote(generator_output) + " " + quote(output)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'create failed' }; & " + quote(entry) + " python " + quote(edit_script) + " " + quote(output) + " " + quote(edited)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'edit failed' }; & " + quote(entry) + " python " + quote(entry.parent / "read.py") + " " + quote(edited) + " " + quote(work / "read.json")
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }"
                         if kind == "xlsx":
                             ps += "; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/verify.py") + " " + quote(edited) + " " + quote(work / "verification.json") + " --checks " + quote(work / "checks.json")
                             ps += "; if ($LASTEXITCODE -ne 0) { throw 'verification failed' }"
+                        if kind == "pptx":
+                            ps += "; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/office/validate.py") + " " + quote(edited)
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'structure failed' }"
                         ps += "; Write-Output '" + marker + "'"
                         encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
                         response = sse({"command": "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded, "timeout": 120000})
                     else:
-                        calls = [["/bin/sh", entry, language, script.relative_to(work), output],
-                                 ["/bin/sh", entry, "python", edit_script, output, edited],
-                                 ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]]
+                        calls = [["/bin/sh", entry, language, script.relative_to(work), generator_output]]
+                        if kind == "pptx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/finalize.py", generator_output, output])
+                        calls.extend([["/bin/sh", entry, "python", edit_script, output, edited],
+                                      ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]])
                         if kind == "xlsx":
                             calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/verify.py", edited, work / "verification.json", "--checks", work / "checks.json"])
+                        if kind == "pptx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/office/validate.py", edited])
                         command = " && ".join(" ".join(shlex.quote(str(a)) for a in call) for call in calls)
                         command += " && /usr/bin/printf %s " + shlex.quote(marker)
                         response = sse({"command": command, "timeout": 120000})
@@ -221,6 +236,11 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
             verification = json.loads((work / "verification.json").read_text(encoding="utf-8"))
             assert verification["status"] == "passed" and verification["conforms"] is True, verification
             assert verification["candidate"] == {"bytes": edited.stat().st_size, "sha256": hashlib.sha256(edited.read_bytes()).hexdigest()}
+        if kind == "pptx":
+            with zipfile.ZipFile(edited) as packed:
+                assert any(b"Core notes 650" in packed.read(name) for name in packed.namelist()
+                           if name.startswith("ppt/notesSlides/") and name.endswith(".xml"))
+            assert output.read_bytes() != generator_output.read_bytes(), "PPTX finishing did not run"
         assert inventory() == before_environment, "Core document processing changed the private environment"
         print(json.dumps({"skill": kind, "permission": case if args.permission_probe else "full", "materialized_entry": state["entry"], "actual_core_bash": True, "create_edit_read": True,
                           "original_sha256": hashlib.sha256(output.read_bytes()).hexdigest()}, ensure_ascii=True), flush=True)

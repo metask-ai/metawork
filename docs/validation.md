@@ -64,6 +64,8 @@ XLSX 质量资格使用 `<对应run入口> python scripts/check-office-xlsx.py -
 
 固定 Node 生成器与现有严格 validator 的组合资格使用 `<Python run入口> python scripts/check-office-generation.py --node-entry <Node run入口> --python-entry <Python run入口> --report <新报告路径>`；macOS 在入口前加 `/bin/sh`。它检查代表性 DOCX 创建、文本定向修改及原件保持，以及 PPTX 文字/备注和图表组合，记录实际生成器身份及所用 part schema。任何正式生成物校验失败都返回非零；隔离的诊断副本只用于定位差异，不是产品修复或查看器兼容性证据。已知未闭合项不得从组合资格里排除或改报通过。
 
+PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.py --entry <Python run入口> --node-entry <Node run入口>`，macOS 同样在入口前加 `/bin/sh`。它在固定生成后实际执行格式专属收尾，再检查候选、定向编辑及复验、备注/图表内容与非目标包内文件保持、候选身份和未知结构/已有目标/归档/XML 反例。原始生成器的缺陷记录继续保留，不能用生成后处理覆盖原始基线。适用的 slide、master、layout 和 notes 部分必须选择对应 Schema；缺少路由不能报告该部分通过。有限查看器兼容性证据与精确输入/往返文件见 [MetaskOffice 验收记录](evidence/office-pptx-metaskoffice-20261030.json)，由同一 suite 复核身份和严格结构；它不替代 PowerPoint 或本次生成文件的视觉验收，也不替代远端模型实际执行该流程。
+
 正式事件消费链使用 `zig build test-office-pipeline`，并纳入 Native test graph。该入口让当前 canonical Core 调用实际工具，经生产 Agent callback、event pump、Product 事件投影及 terminal drain 收口；本机 Provider 与临时凭据存储为受控 fixture，覆盖工具非零退出、实际缺环境入口、权限拒绝、重试、中断、取消和跨轮。它与只验证 Skill 资源/Shell 的探针分别结算，不替代远端模型规划或 PowerPoint 兼容性证据。拒绝观测回归还须证明首个拒绝不被后续收口覆盖、缺省/不可用及小容量诊断不改变运行结果、非法输入仍被拒绝且不泄露正文或 secret。
 
 同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。

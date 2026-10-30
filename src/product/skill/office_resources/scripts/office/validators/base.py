@@ -695,6 +695,11 @@ class BaseSchemaValidator:
         if "theme/" in str(xml_file) and xml_file.name.startswith("theme"):
             return self.schemas_dir / self.SCHEMA_MAPPINGS["theme"]
 
+        if (xml_file.parent.parent.name == "ppt" and xml_file.parent.name in {
+                "slides", "slideMasters", "slideLayouts", "notesSlides",
+                "notesMasters", "handoutMasters"}):
+            return self.schemas_dir / self.SCHEMA_MAPPINGS["ppt"]
+
         if xml_file.parent.name in self.MAIN_CONTENT_FOLDERS:
             return self.schemas_dir / self.SCHEMA_MAPPINGS[xml_file.parent.name]
 
