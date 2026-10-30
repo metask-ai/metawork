@@ -188,18 +188,19 @@
       "protocol": "anthropic_messages",
       "provider": "Metask",
       "submitted_at_unix_ms": 1793339869803,
-      "status": "running",
+      "status": "stopped",
       "application_source_commit": "ac9ff388",
       "serial": true,
       "continuation_of_attempt": 1,
       "operator_input": "请继续完成原任务。",
       "interventions": [
-        "Neutral continuation after a real stopped terminal; counts as assisted workflow, not a new independent repetition"
+        "Neutral continuation after a real stopped terminal; counts as assisted workflow, not a new independent repetition",
+        "Within existing synthetic acceptance authorization, allowed once after automatic-review timeout for materialized run.sh/read.py reading checked.pptx. Five read/run helpers matched canonical archive; no standing rule created. Current independent business oracle rejection remains in force."
       ],
       "frozen_initial_requirements_unchanged": true,
-      "outcome": null,
+      "outcome": "stopped",
       "cause": null,
-      "tool_count": 11,
+      "tool_count": 17,
       "tools": [
         {
           "ordinal": 0,
@@ -288,8 +289,69 @@
           "is_error": false,
           "input_bytes": 519,
           "output_bytes": 1192
+        },
+        {
+          "ordinal": 11,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 412,
+          "output_bytes": 676
+        },
+        {
+          "ordinal": 12,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 470,
+          "output_bytes": 1296
+        },
+        {
+          "ordinal": 13,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 358,
+          "output_bytes": 1126
+        },
+        {
+          "ordinal": 14,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 303,
+          "output_bytes": 1825
+        },
+        {
+          "ordinal": 15,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 400,
+          "output_bytes": 1620
+        },
+        {
+          "ordinal": 16,
+          "tool": "Write",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 7467,
+          "output_bytes": 15582
         }
-      ]
+      ],
+      "finished_at_unix_ms": 1793340800440,
+      "actual_deliveries": [],
+      "public_output": "确认了第二个 dPt 块属于 SCATTER 分支，折线图不会有逐点着色歧义。再核对 dataLabelPosition 对折线图的校验规则。库行为已确认：柱状图逐点色可用（`chartColors` 多色 + 单系列自动生成 `<c:dPt>`）；折线图 grouping 由 finalize 阶段补 `standard`；BAR 的 dataLabelPosition 仅接受 ctr/inBase/inEnd，LINE 仅接受 b/ctr/l/r/t。现在查看脚本入口并编写生成脚本。Skill 目录似乎在轮次间被清理了，重新运行 prepare 入口恢复环境。Skill 的临时激活目录被清理了。重新调用 Skill 恢复运行入口。Skill 已重新激活（新激活目录）。运行 prepare 入口验证环境（共享环境此前已准备完成，无需下载）。环境恢复完毕。现在编写生成脚本。运行生成器，随后执行 finalize（折线图声明 `--line-grouping standard`）。finalize 通过（structure_passed）。现在用结构化读取器核对内容。备注与页序正确。现在用 checked XML 核对两个图表的数据与结构。先查看 office_archive 的接口。现在编写结构核验脚本（通过 checked 提取路径读取图表 XML）。",
+      "public_output_kind": null,
+      "candidate_produced": true,
+      "requested_filename_produced": false,
+      "candidate_at_terminal_observation": {
+        "path": "checked.pptx",
+        "bytes": 29788,
+        "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7",
+        "frozen_oracle": "failed: Exact total text missing",
+        "delivered": false
+      }
     }
   ],
   "application": {
@@ -304,7 +366,7 @@
     },
     "existing_account_and_approval_mode": true
   },
-  "acceptance": "not passed; actual model workflow is in progress",
+  "acceptance": "not passed: two stopped Runs; checked candidate exists, complete business-check coverage and delivery not established. Original fixed oracle still rejects total text; inactive punctuation proposal awaiting explicit authorization.",
   "unstarted": [
     "repetition 1 edit/check/delivery",
     "repetitions 2 and 3 create/edit/check/delivery"
@@ -358,5 +420,38 @@
     },
     "active_live_task_uses_preceding_archive": true,
     "new_model_instruction_adoption": "not yet qualified; controlled Core execution does not substitute for model behavior"
+  },
+  "interim_independent_oracle": {
+    "candidate": {
+      "path": ".zig-cache/office-model-acceptance/serial-pptx-1/checked.pptx",
+      "bytes": 29788,
+      "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7"
+    },
+    "oracle_status": "failed",
+    "reason": "Exact total text missing",
+    "report": ".zig-cache/office-model-acceptance/task35-create-independent-1.json",
+    "observed_body_text": "总额：650",
+    "frozen_expected_paragraph": "总额650",
+    "qualification": "Interim candidate; final delivery not yet judged. Active oracle unchanged.",
+    "inactive_proposal": {
+      "patch": ".zig-cache/office-pptx-total-punctuation-proposal.patch",
+      "scope": "Allow only colon/whitespace variation around the same total label and integer650; other requirements unchanged",
+      "positive_examples": [
+        "总额650",
+        "总额：650",
+        "总额:650",
+        "总额 650",
+        " 总额： 650 "
+      ],
+      "negative_examples": [
+        "总额651",
+        "总额6500",
+        "其他650",
+        "650",
+        "总额：650.5"
+      ],
+      "applied": false,
+      "permission_source": "AGENTS.md machine-guard rejection policy; explicit approval required before expanding the fixed oracle acceptance"
+    }
   }
 }
