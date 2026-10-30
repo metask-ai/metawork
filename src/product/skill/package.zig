@@ -37,6 +37,43 @@ pub const Error = std.mem.Allocator.Error || error{
 
 pub const max_preview_definition_bytes: usize = 256 * 1024;
 
+/// Installed text is shared with other Skill consumers. Only AgentCore expands
+/// this token; other readers must keep using their own definition location.
+pub const resource_context =
+    \\Skill resource directory: ${CLAUDE_SKILL_DIR}
+    \\If this value is an expanded absolute path, resolve this Skill's relative
+    \\resource paths against it. If it is still a template token, do not use it as
+    \\a path or shell environment variable. Instead use the directory containing
+    \\this SKILL.md, as identified by the invoking tool's Skill-location context.
+    \\If neither location is available, report that resources cannot be located;
+    \\do not guess a filesystem root.
+    \\Use the existing tools and permission policy to access resources.
+    \\Use the invoking tool's activation or reload mechanism to obtain current
+    \\resource paths when continuing work.
+    \\
+    \\
+;
+
+/// Deterministic installed definition. Source bytes and metadata are preserved;
+/// only our exact leading body block is recognized on export/reimport.
+pub fn managedDefinition(allocator: std.mem.Allocator, definition: []const u8) Error![]u8 {
+    if (definition.len > max_preview_definition_bytes) return error.DefinitionTooLarge;
+    if (!std.unicode.utf8ValidateSlice(definition)) return error.InvalidDefinition;
+    const metadata = parseDefinitionMetadata(definition) orelse return error.InvalidDefinition;
+    const body = definition[metadata.body_offset..];
+    if (std.mem.startsWith(u8, body, resource_context)) return allocator.dupe(u8, definition);
+    const separator: usize = if (metadata.body_offset > 0 and definition[metadata.body_offset - 1] != '\n') 1 else 0;
+    const added = resource_context.len + separator;
+    if (added > max_preview_definition_bytes - definition.len) return error.DefinitionTooLarge;
+    const result = try allocator.alloc(u8, definition.len + added);
+    @memcpy(result[0..metadata.body_offset], definition[0..metadata.body_offset]);
+    if (separator != 0) result[metadata.body_offset] = '\n';
+    const start = metadata.body_offset + separator;
+    @memcpy(result[start..][0..resource_context.len], resource_context);
+    @memcpy(result[start + resource_context.len ..], body);
+    return result;
+}
+
 pub const Preview = struct {
     allocator: std.mem.Allocator,
     definition: []u8,
@@ -553,6 +590,7 @@ fn privateFilePermissions() std.Io.File.Permissions {
 const DefinitionMetadata = struct {
     name: []const u8,
     description: []const u8,
+    body_offset: usize,
 };
 
 fn parseDefinitionMetadata(definition: []const u8) ?DefinitionMetadata {
@@ -584,6 +622,7 @@ fn parseDefinitionMetadata(definition: []const u8) ?DefinitionMetadata {
     return .{
         .name = name orelse return null,
         .description = description orelse "",
+        .body_offset = lines.index orelse definition.len,
     };
 }
 
@@ -669,4 +708,47 @@ test "directory preview derives bounded metadata without owning runtime health" 
         preview.description,
     );
     try std.testing.expectEqual(@as(usize, 1), preview.file_count);
+}
+
+test "managed definitions preserve author bytes and are idempotent across line endings" {
+    for ([_][]const u8{ "---\nname: demo\ndescription: Demo\n---\n", "---\r\nname: demo\r\ndescription: Demo\r\n---\r\n" }) |front| {
+        const body = "Read references/中文 guide.txt.\r\n${CLAUDE_SKILL_DIR}/existing\n";
+        const original = try std.mem.concat(std.testing.allocator, u8, &.{ front, body });
+        defer std.testing.allocator.free(original);
+        const managed = try managedDefinition(std.testing.allocator, original);
+        defer std.testing.allocator.free(managed);
+        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ front, resource_context, body });
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, managed);
+        const repeated = try managedDefinition(std.testing.allocator, managed);
+        defer std.testing.allocator.free(repeated);
+        try std.testing.expectEqualStrings(managed, repeated);
+    }
+    const no_newline = "---\nname: demo\n---";
+    const managed = try managedDefinition(std.testing.allocator, no_newline);
+    defer std.testing.allocator.free(managed);
+    try std.testing.expectEqualStrings(no_newline ++ "\n" ++ resource_context, managed);
+    const repeated = try managedDefinition(std.testing.allocator, managed);
+    defer std.testing.allocator.free(repeated);
+    try std.testing.expectEqualStrings(managed, repeated);
+}
+
+test "managed definitions reject invalid input and added bytes beyond the existing limit" {
+    try std.testing.expectError(error.InvalidDefinition, managedDefinition(std.testing.allocator, "no front matter"));
+    try std.testing.expectError(error.InvalidDefinition, managedDefinition(std.testing.allocator, "---\nname: demo\n---\n\xff"));
+    const front = "---\nname: demo\n---\n";
+    const original = try std.testing.allocator.alloc(u8, max_preview_definition_bytes - resource_context.len);
+    defer std.testing.allocator.free(original);
+    @memset(original, 'a');
+    @memcpy(original[0..front.len], front);
+    const managed = try managedDefinition(std.testing.allocator, original);
+    defer std.testing.allocator.free(managed);
+    try std.testing.expectEqual(max_preview_definition_bytes, managed.len);
+    const repeated = try managedDefinition(std.testing.allocator, managed);
+    defer std.testing.allocator.free(repeated);
+    try std.testing.expectEqualStrings(managed, repeated);
+    // A single additional source byte must fail; no truncation or larger budget.
+    const oversized = try std.mem.concat(std.testing.allocator, u8, &.{ original, "a" });
+    defer std.testing.allocator.free(oversized);
+    try std.testing.expectError(error.DefinitionTooLarge, managedDefinition(std.testing.allocator, oversized));
 }
