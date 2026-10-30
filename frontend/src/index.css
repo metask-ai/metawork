@@ -2569,7 +2569,7 @@ summary::-webkit-details-marker {
 }
 
 .ai-exchange + .ai-exchange {
-  margin-top: 38px;
+  margin-top: 32px;
 }
 
 .message-info-bar {
@@ -2578,7 +2578,7 @@ summary::-webkit-details-marker {
   max-width: 100%;
   min-height: 32px;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   opacity: 0;
   transition: opacity 120ms ease;
@@ -2590,7 +2590,7 @@ summary::-webkit-details-marker {
 }
 
 .message-info-bar[data-role="assistant"] {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .message-info-metadata {
@@ -2600,11 +2600,11 @@ summary::-webkit-details-marker {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  padding-block: calc((32px - 1.4em) / 2);
   color: var(--ui-content-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
-  opacity: 0.72;
 }
 
 .message-info-metadata time {
@@ -10060,14 +10060,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-reading-flow {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 20px;
+  gap: 16px;
   min-width: 0;
 }
 .run-reading-flow > .ai-message[data-role="assistant"] {
   margin-top: 0;
 }
 .run-reading-flow:not(:empty) {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 .additional-input {
   min-width: 0;
