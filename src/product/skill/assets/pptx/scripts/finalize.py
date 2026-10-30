@@ -6,6 +6,7 @@ Only use immediately after the fixed PptxGenJS authoring step, never on an
 existing user presentation. A successful result covers structure, not visuals.
 """
 import argparse
+from collections import Counter
 from contextlib import redirect_stdout
 from dataclasses import replace
 import hashlib
@@ -58,13 +59,16 @@ def one(parent, name, *, required=False):
     return found[0] if found else None
 
 
+def numeric_id(value):
+    require(isinstance(value, str) and len(value) <= 10 and value.isascii() and value.isdecimal() and int(value) <= 0xffffffff,
+            "Unsupported axis or point identifier")
+    return int(value)
+
+
 def simple_id(element):
     require(element is not None and set(element.attrib) == {"val"} and not len(element),
             "Unsupported axis or point identifier")
-    value = element.get("val")
-    require(value.isascii() and value.isdecimal() and int(value) <= 0xffffffff,
-            "Unsupported axis or point identifier")
-    return int(value)
+    return numeric_id(element.get("val"))
 
 
 def presentation(tree):
@@ -81,7 +85,7 @@ def presentation(tree):
 
 def chart(tree, line_grouping):
     require(tree.tag == C + "chartSpace", "Unsupported chart namespace")
-    changes = []
+    changes = Counter()
     for plot in tree.iter(C + "plotArea"):
         shapes = [item for item in plot if isinstance(item.tag, str) and
                   item.tag.startswith(C) and item.tag.endswith("Chart")]
@@ -110,7 +114,7 @@ def chart(tree, line_grouping):
             require(sum(simple_id(item) == unused_id for item in tree.iter(C + "axId")) == 1,
                     "Undefined axis identifier is used elsewhere")
             shape.remove(orphan[0])
-            changes.append("removed_single_undefined_2d_axis_reference")
+            changes["removed_single_undefined_2d_axis_reference"] += 1
         else:
             require(len(references) == 2 and set(ids) == set(definitions), "Incomplete chart axis references")
         is_line = shape.tag == C + "lineChart"
@@ -119,7 +123,7 @@ def chart(tree, line_grouping):
             if grouping is None:
                 require(line_grouping == "standard", "Line grouping must be explicitly declared standard")
                 shape.insert(0, E.Element(C + "grouping", val="standard"))
-                changes.append("inserted_declared_standard_line_grouping")
+                changes["inserted_declared_standard_line_grouping"] += 1
             else:
                 require(grouping.get("val") == "standard", "Only standard line grouping is qualified")
         for series in shape.findall(C + "ser"):
@@ -127,6 +131,24 @@ def chart(tree, line_grouping):
             points = series.findall(C + "dPt")
             point_ids = [simple_id(one(point, C + "idx", required=True)) for point in points]
             require(len(point_ids) == len(set(point_ids)), "Duplicate data-point indices")
+            if points:
+                sizes = []
+                for role in ("cat", "val"):
+                    container = one(series, C + role, required=True)
+                    caches = [item for item in container.iter() if item.tag in
+                              (C + "strCache", C + "numCache", C + "strLit", C + "numLit", C + "multiLvlStrCache")]
+                    require(len(caches) == 1, "Single-level cached category/value data is required for point styling")
+                    cache = caches[0]
+                    size = simple_id(one(cache, C + "ptCount", required=True))
+                    # The pinned generator represents a single category level
+                    # inside multiLvlStrCache. Do not generalize to hierarchies.
+                    point_container = one(cache, C + "lvl", required=True) if cache.tag == C + "multiLvlStrCache" else cache
+                    indices = [numeric_id(item.get("idx")) for item in point_container.findall(C + "pt")]
+                    require(len(indices) == size and sorted(indices) == list(range(len(indices))),
+                            "Incomplete or ambiguous point cache")
+                    sizes.append(size)
+                require(sizes[0] == sizes[1] and all(index < sizes[0] for index in point_ids),
+                        "Styled point does not identify existing category/value data")
             if labels is not None:
                 for point in points:
                     if series.index(point) > series.index(labels):
@@ -137,14 +159,14 @@ def chart(tree, line_grouping):
                                 "Unrecognized series data-point ordering")
                         series.remove(point)
                         series.insert(series.index(labels), point)
-                        changes.append("data_point_before_series_labels")
+                        changes["data_point_before_series_labels"] += 1
             if is_line:
                 invert = one(series, C + "invertIfNegative")
                 if invert is not None:
                     require(dict(invert.attrib) == {"val": "0"} and not len(invert),
                             "Nontrivial line invertIfNegative is unsupported")
                     series.remove(invert)
-                    changes.append("removed_false_bar_only_line_property")
+                    changes["removed_false_bar_only_line_property"] += 1
                 marker = one(series, C + "marker")
                 after = [item for item in series if item.tag in (C + "dPt", C + "dLbls")]
                 if marker is not None and after and series.index(marker) > series.index(after[0]):
@@ -153,7 +175,7 @@ def chart(tree, line_grouping):
                             "Unrecognized line marker ordering")
                     series.remove(marker)
                     series.insert(series.index(after[0]), marker)
-                    changes.append("marker_before_line_data_points_and_labels")
+                    changes["marker_before_line_data_points_and_labels"] += 1
     return changes
 
 
@@ -165,7 +187,7 @@ def finalize(source, output, line_grouping=None):
         with zipfile.ZipFile(frozen) as packed:
             parts = {item.filename: packed.read(item) for item in packed.infolist() if not item.is_dir()}
         require("ppt/presentation.xml" in parts, "Presentation part is missing")
-        changes, nodes = {}, 0
+        changes, nodes, changed_parts = Counter(), 0, 0
         for name, data in parts.items():
             if not name.endswith((".xml", ".rels")):
                 continue
@@ -174,7 +196,8 @@ def finalize(source, output, line_grouping=None):
             require(nodes <= 600_000, "XML traversal budget exceeded")
             edits = presentation(tree) if name == "ppt/presentation.xml" else chart(tree, line_grouping) if name.startswith("ppt/charts/") and tree.tag == C + "chartSpace" else []
             if edits:
-                changes[name] = edits
+                changes.update(edits)
+                changed_parts += 1
                 parts[name] = E.tostring(tree, xml_declaration=True, encoding="UTF-8", standalone=True)
         staged = Path(directory) / "checked.pptx"
         with zipfile.ZipFile(staged, "x", zipfile.ZIP_DEFLATED) as packed:
@@ -193,7 +216,8 @@ def finalize(source, output, line_grouping=None):
                 output.unlink(missing_ok=True)
             raise
         return {"status": "structure_passed", "candidate": {"bytes": staged.stat().st_size, "sha256": digest},
-                "changes": changes, "visual_check": "not_performed", "powerpoint_check": "not_performed"}
+                "changes": dict(changes), "changed_parts": changed_parts,
+                "visual_check": "not_performed", "powerpoint_check": "not_performed"}
 
 
 def main():

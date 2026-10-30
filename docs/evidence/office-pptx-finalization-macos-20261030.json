@@ -94,5 +94,64 @@
     ],
     "core_manifest_sha256": "529d7216b841c0d102f0b5ce1b423c5debe701e6f34137b3290862590965f542"
   },
-  "model_acceptance": "pending; not implied by machine or viewer qualification"
+  "model_acceptance": "pending; not implied by machine or viewer qualification",
+  "followup_bounded_diagnostics_and_cache_premises": {
+    "date": "2026-10-30",
+    "inputs": [
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 474368,
+        "sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169"
+      },
+      {
+        "path": "src/product/skill/assets/pptx/scripts/finalize.py",
+        "bytes": 12257,
+        "sha256": "d46c0df2b74d03f2f0af92e13404dc8b31162a15518991acb4629207d4257689"
+      },
+      {
+        "path": "scripts/check-office-pptx.py",
+        "bytes": 10998,
+        "sha256": "233ec77806f1fd0d0e9ceebec55f19e7a75f68e6a9b55c31107b17aec12ec1ac"
+      }
+    ],
+    "changes": [
+      "Finite operation counters and changed-part count; no per-point or package-path stdout expansion",
+      "Styled-point indices must identify actual entries in consistent dense single-level category/value caches",
+      "Declared cache size checked against actual nodes before bounded index comparison; oversized declarations fail closed"
+    ],
+    "checks": {
+      "pptx_suite": {
+        "passed": 6,
+        "failed": 0,
+        "log": ".zig-cache/office-pptx-bounded-finalization-v3.log",
+        "negative_cases_added": [
+          "Styled point outside cache",
+          "Untrusted 4294967295 cache declaration"
+        ],
+        "stdout_bytes_each_less_than": 2048
+      },
+      "actual_core_shell": {
+        "formats": [
+          "docx",
+          "xlsx",
+          "pptx"
+        ],
+        "passed": true,
+        "log": ".zig-cache/office-core-bounded-finalization.log"
+      },
+      "node_resources_and_architecture": {
+        "passed": 45,
+        "log": ".zig-cache/office-pptx-boundary-resources.log"
+      },
+      "native_office_resources": {
+        "steps_passed": 10,
+        "tests_passed": 5,
+        "log": ".zig-cache/office-native-bounded-finalization-resources.log"
+      },
+      "archive_check": true,
+      "python_compile": true,
+      "diff_check": true
+    },
+    "limits": "Finite machine qualification; does not establish real-model or PowerPoint acceptance"
+  }
 }

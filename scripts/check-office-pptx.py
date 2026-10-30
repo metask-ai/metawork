@@ -86,6 +86,8 @@ class PPTXQualification(unittest.TestCase):
                 result, _ = self.finalize(source, output)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 report = json.loads(result.stdout)
+                self.assertLess(len(result.stdout), 2048)
+                self.assertTrue(all(type(count) is int and count > 0 for count in report["changes"].values()))
                 self.assertEqual(report["status"], "structure_passed")
                 self.assertEqual(report["candidate"], {"bytes": output.stat().st_size,
                                  "sha256": hashlib.sha256(output.read_bytes()).hexdigest()})
@@ -150,6 +152,10 @@ class PPTXQualification(unittest.TestCase):
             series = next(tree.iter(C + "ser"))
             point = next(series.iter(C + "dPt"))
             series.append(E.fromstring(E.tostring(point)))
+        def missing_point(tree):
+            next(tree.iter(C + "dPt")).find(C + "idx").set("val", "999")
+        def oversized_cache(tree):
+            next(tree.iter(C + "cat")).find(".//" + C + "ptCount").set("val", "4294967295")
         def notes_order(content):
             tree = E.fromstring(content["ppt/presentation.xml"])
             notes = tree.find(P + "notesMasterIdLst")
@@ -161,6 +167,8 @@ class PPTXQualification(unittest.TestCase):
                 ("bar-multi-labels", lambda p: chart_mutation(p, wrong_cross)),
                 ("bar-multi-labels", lambda p: chart_mutation(p, duplicate_axis)),
                 ("bar-multi-labels", lambda p: chart_mutation(p, duplicate_point)),
+                ("bar-multi-labels", lambda p: chart_mutation(p, missing_point)),
+                ("bar-multi-labels", lambda p: chart_mutation(p, oversized_cache)),
                 ("line-multi-labels", lambda p: chart_mutation(p, true_invert)),
                 ("line-multi-labels", lambda p: chart_mutation(p, stacked_line)),
                 ("text-notes", notes_order),
