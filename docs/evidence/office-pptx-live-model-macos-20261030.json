@@ -519,6 +519,7 @@
     ],
     "policy_revision": 2,
     "suite_sha256": "f650d5f62a5f23c9fbec2fdeaa42a4511c8fc68a465b882984cdc32648c455e8",
-    "rule": "Empty isolated workspaces for future representative tasks; frozen prompt/oracle, existing configured primary model, no internal-path or implementation hints. Register folders only while no Run is active."
+    "rule": "Empty isolated workspaces for future representative tasks; frozen prompt/oracle, existing configured primary model, no internal-path or implementation hints. Register folders only while no Run is active.",
+    "registered_while_no_runs_active": true
   }
 }

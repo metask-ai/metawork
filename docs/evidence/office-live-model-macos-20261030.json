@@ -862,6 +862,33 @@
         "all_original_baselines_preserved": true,
         "final_wording_truthful": true
       }
+    },
+    {
+      "case": "create-edit",
+      "stage": "create",
+      "validation_revision": "b03b173b",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 15,
+      "repetition": 2,
+      "task_id": 37,
+      "task_id_hex": "0000000000000025",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-2",
+      "status": "queued",
+      "submitted_at_unix_ms": 1793343454928,
+      "frozen_prompt_matches_persisted_input": true,
+      "interventions": [],
+      "initial_files": [
+        {
+          "path": "orders.csv",
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        }
+      ]
     }
   ],
   "unstarted": [
@@ -1073,8 +1100,10 @@
         "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
       }
     ],
-    "model_attempts_started": false,
-    "rule": "Each future case starts with its declared input only. Active Task36 workspace is untouched; no additional candidate or expected-value hints are injected."
+    "model_attempts_started": true,
+    "rule": "Each future case starts with its declared input only. Active Task36 workspace is untouched; no additional candidate or expected-value hints are injected.",
+    "registered_while_no_runs_active": true,
+    "registration_scope": "All remaining XLSX cases and PPTX2/3; only registration, no prompt sent except second independent XLSX Task."
   },
   "current_qualification": "One independent XLSX create/edit/check/delivery workflow completed with a retained stopped initial Run, neutral continuation and manual approvals. Both final artifacts independently pass, actual receipts match, originals preserved, final wording truthful. Remaining independent repetitions, bad-style correction, unsupported necessary check, second model and isolated first preparation remain unqualified.",
   "completed_workflows": [
