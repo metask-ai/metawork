@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "scope": "Finite real-model XLSX workflow acceptance; incomplete until every required case is evaluated",
+  "frozen_suite": {
+    "path": "tests/fixtures/office/model-acceptance.json",
+    "bytes": 4401,
+    "sha256": "6c81023157c8898d302ff5e1411bfc16e284c5425943baaaab9d95e80c713ecb",
+    "commit": "e9d02dfa"
+  },
+  "application": {
+    "source_commit": "e9d02dfa",
+    "executable": {
+      "bytes": 47801120,
+      "sha256": "6ce4e4a782467f6397715f3dcd89471e9ec966aa4b6cf31ed781abbe2aa879a0"
+    },
+    "artifact": "local Apple Development signed Debug; normal Product/Account/Models/Core path; no synthetic Provider"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "case": "create-edit",
+      "repetition": 1,
+      "stage": "create",
+      "task_id": 24,
+      "task_id_hex": "0000000000000018",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793327429035,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; no preparation download requested",
+      "status": "failed",
+      "interventions": [],
+      "outcome": "dependency_contract_failure",
+      "cause": "dependency_contract_failure",
+      "event_projection_failure": "dependency_contract_failure",
+      "diagnostic": "callback failed: CallbackFailed",
+      "candidate_produced": false,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 85,
+          "output_bytes": 11573,
+          "output_truncated": false,
+          "arguments": {
+            "name": "xlsx",
+            "values": ["创建 created.xlsx,含多工作表、公式与格式化"]
+          }
+        },
+        {
+          "ordinal": 1,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 103,
+          "output_bytes": 164,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/workspace/orders.csv"
+          }
+        },
+        {
+          "ordinal": 2,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 18,
+          "output_bytes": 246,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/*"
+          }
+        },
+        {
+          "ordinal": 3,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 182,
+          "output_bytes": 776,
+          "output_truncated": false
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 183,
+          "output_bytes": 4379,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/environment/**",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce"
+          }
+        },
+        {
+          "ordinal": 5,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 178,
+          "output_bytes": 224,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/verify.py",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce"
+          }
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 411,
+          "output_bytes": 772,
+          "output_truncated": false
+        },
+        {
+          "ordinal": 7,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 174,
+          "output_bytes": 12346,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/verification.md"
+          }
+        },
+        {
+          "ordinal": 8,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 178,
+          "output_bytes": 6114,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/examples/summary.py"
+          }
+        },
+        {
+          "ordinal": 9,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 186,
+          "output_bytes": 11080,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/examples/orders-checks.json"
+          }
+        },
+        {
+          "ordinal": 10,
+          "tool": "Grep",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 293,
+          "output_bytes": 348,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "def (op_count|_count|check_count)|nonempty|is_empty|value is None",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "output_mode": "content",
+            "-n": true,
+            "-i": true
+          }
+        },
+        {
+          "ordinal": 11,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 200,
+          "output_bytes": 4789,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 80,
+            "offset": 555
+          }
+        },
+        {
+          "ordinal": 12,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 201,
+          "output_bytes": 6386,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 115,
+            "offset": 200
+          }
+        },
+        {
+          "ordinal": 13,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 201,
+          "output_bytes": 4502,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 100,
+            "offset": 455
+          }
+        },
+        {
+          "ordinal": 14,
+          "tool": "Grep",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 316,
+          "output_bytes": 334,
+          "output_truncated": false,
+          "arguments": {
+            "-n": true,
+            "output_mode": "content",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "pattern": "def cells|def bounds|def target_spec|OPERATIONS =|MAX_CELLS =|def style_spec|def typed|def integer"
+          }
+        },
+        {
+          "ordinal": 15,
+          "tool": "Read",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 195,
+          "output_bytes": 119,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76d5e4_placeholder/scripts/verify.py",
+            "limit": 10,
+            "offset": 426
+          },
+          "failure": {
+            "code": "file_not_found",
+            "category": "user_error"
+          }
+        },
+        {
+          "ordinal": 16,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 200,
+          "output_bytes": 1586,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 30,
+            "offset": 426
+          }
+        }
+      ],
+      "trace_scope": "Ordered actual persisted Product tool projections; no credentials, private reasoning or arbitrary tool output copied"
+    }
+  ],
+  "unstarted": [
+    "create-edit repetitions 2 and 3",
+    "bad-styles repair",
+    "necessary recalculation unsupported",
+    "correlation model create-edit",
+    "first preparation in isolated profile with live model"
+  ],
+  "acceptance": "failed attempt retained; required finite set incomplete; investigate reproduced dependency failure before any completion claim"
+}

@@ -117,6 +117,16 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
         }
         if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
             const terminal = state.productTerminalFacts(run) orelse return error.MissingProductTerminal;
+            if (std.mem.eql(u8, mode, "callback-budget")) {
+                try std.testing.expect(terminal.phase == .failed);
+                try std.testing.expectEqual(task_api.RunOutcome.failed, terminal.outcome);
+                try std.testing.expect(terminal.cause == .event_payload_too_large);
+                const diagnostic = run.terminal_diagnostic[0..state.terminalPayload(run).?.diagnostic_len];
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "boundary=event_decode reason=oversized") != null);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, agent.core_manifest_sha256) != null);
+                try std.testing.expect(run.event_stream_finalized);
+                return;
+            }
             if (run.first_event_rejection != null or run.terminal_drain_rejection != null) {
                 std.debug.print("Office pipeline mode={s} first={any} drain={any} terminal={any}\n", .{ mode, run.first_event_rejection, run.terminal_drain_rejection, terminal });
             }
@@ -162,7 +172,9 @@ fn qualify(mode: []const u8) !void {
     defer std.testing.allocator.free(root);
     var provider = try Provider.start(root, mode);
     defer provider.deinit();
-    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    var agent_limits: agent.Limits = .{ .max_sessions = 1 };
+    if (std.mem.eql(u8, mode, "callback-budget")) agent_limits.max_event_bytes = 32;
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, agent_limits);
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
@@ -197,10 +209,20 @@ fn qualify(mode: []const u8) !void {
         const id = try f.runPreparedTask(&control, task_id, .{ .text = "Run the synthetic Office pipeline operation." });
         try finish(&control, task_id, id, mode);
     }
-    const trace = try temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024));
-    defer std.testing.allocator.free(trace);
-    try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
-    if (std.mem.eql(u8, mode, "missing-environment")) try std.testing.expect(std.mem.indexOf(u8, trace, "Office environment missing or unavailable") != null);
+    if (std.mem.eql(u8, mode, "callback-budget")) {
+        // The first actual Core event exceeds the deliberately tiny fixture
+        // limit, before any Provider request. History must retain its identity.
+        try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "trace.jsonl", .{}));
+        const saved = (try history.loadAlloc(std.testing.allocator)).?;
+        defer std.testing.allocator.free(saved);
+        try std.testing.expect(std.mem.indexOf(u8, saved, "boundary=event_decode reason=oversized") != null);
+        try std.testing.expect(std.mem.indexOf(u8, saved, agent.core_manifest_sha256) != null);
+    } else {
+        const trace = try temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024));
+        defer std.testing.allocator.free(trace);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
+        if (std.mem.eql(u8, mode, "missing-environment")) try std.testing.expect(std.mem.indexOf(u8, trace, "Office environment missing or unavailable") != null);
+    }
     if (std.mem.eql(u8, mode, "deny")) try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "denied.txt", .{}));
     var snapshot: [256 * 1024]u8 = undefined;
     const encoded = try control.writeAggregateFixture(&snapshot);
@@ -213,4 +235,8 @@ test "Office canonical Product pipeline tools, legitimate failures, denial and m
 
 test "Office canonical Product pipeline retries and closes streaming cancellation" {
     for ([_][]const u8{ "retry", "stream-interruption", "cancel" }) |mode| try qualify(mode);
+}
+
+test "Office canonical Product executor retains real callback rejection identity in terminal history" {
+    try qualify("callback-budget");
 }

@@ -1131,7 +1131,6 @@ const findRun = if (builtin.is_test) task_test_state.findRun else void;
 const pendingInterruption = if (builtin.is_test) task_test_policy.pendingInterruption else void;
 const pendingTerminationSignal = if (builtin.is_test) task_test_policy.pendingTerminationSignal else void;
 const closeFailureCompletion = if (builtin.is_test) task_test_policy.closeFailureCompletion else void;
-const classifyAgentTerminal = if (builtin.is_test) task_test_policy.classifyAgentTerminal else void;
 const hasActiveOperation = if (builtin.is_test) task_test_policy.hasActiveOperation else void;
 const continuationAvailable = if (builtin.is_test) task_test_policy.continuationAvailable else void;
 const automaticTitleCandidate = if (builtin.is_test) task_test_policy.automaticTitleCandidate else void;
@@ -11337,49 +11336,6 @@ fn commitTerminal(
     return false;
 }
 
-fn commitAgentTerminal(run: *TestRunRecord, result: *const lifecycle.TerminalResult) bool {
-    const decision = classifyAgentTerminal(result);
-    var safe_diagnostic: [1024]u8 = undefined;
-    var diagnostic = result.diagnostic();
-    var truncated = result.diagnostic_truncated;
-    if (result.first_callback_rejection != null or result.failure == .dependency_contract or result.abi_status == .callback_failed) {
-        const rejection = result.first_callback_rejection;
-        var prefix_truncated = false;
-        const prefix = std.fmt.bufPrint(&safe_diagnostic, "agent.callback_rejection core_manifest_sha256={s} boundary={s} reason={s} event={s} error={s} bytes={?d} host_run={d} observed_run={?d} state={s} handle_matches={?} identity_matches={?}; ", .{
-            lifecycle.core_manifest_sha256,
-            if (rejection) |value| @tagName(value.boundary) else "unobserved",
-            if (rejection) |value| @tagName(value.reason) else "unknown",
-            if (rejection) |value| if (value.event) |kind| @tagName(kind) else "unknown" else "unknown",
-            if (rejection) |value| if (value.failure) |failure| @errorName(failure) else "none" else "none",
-            if (rejection) |value| value.encoded_bytes else null,
-            if (rejection) |value| value.host_run_id else run.id,
-            if (rejection) |value| value.observed_run_id else null,
-            if (rejection) |value| @tagName(value.state) else "unknown",
-            if (rejection) |value| value.session_handle_matches else null,
-            if (rejection) |value| value.session_identity_matches else null,
-        }) catch prefix_failure: {
-            prefix_truncated = true;
-            break :prefix_failure "agent.callback_rejection details=unavailable; ";
-        };
-        // Prefix formatting and output capacity are diagnostic limits only.
-        // Neither can fail or change the immutable Agent terminal decision.
-        if (prefix.ptr != safe_diagnostic[0..].ptr) @memcpy(safe_diagnostic[0..prefix.len], prefix);
-        const count = @min(safe_diagnostic.len - prefix.len, diagnostic.len);
-        @memcpy(safe_diagnostic[prefix.len..][0..count], diagnostic[0..count]);
-        truncated = truncated or prefix_truncated or count != diagnostic.len;
-        diagnostic = safe_diagnostic[0 .. prefix.len + count];
-    }
-    return commitTerminal(
-        run,
-        decision.phase,
-        decision.outcome,
-        decision.cause,
-        result.session_disposition_at_completion,
-        diagnostic,
-        truncated,
-    );
-}
-
 fn commitBeginFailure(run: *TestRunRecord, failure: lifecycle.BeginRunFailure) void {
     const decision = task_test_policy.classifyBeginFailure(run, failure);
     _ = commitTerminal(
@@ -17362,50 +17318,6 @@ test "output segment byte mismatch fails the dependency protocol" {
     try std.testing.expectEqual(RunOutcome.dependency_contract_failure, productTerminalFacts(run).?.outcome);
     try std.testing.expect(run.open_output_segment == null);
     try std.testing.expect(run.event_rejection_reported and run.drain_rejection_reported);
-}
-
-test "callback diagnostic enrichment preserves terminal decisions and bounded credential redaction" {
-    for ([_]bool{ false, true }) |observed| {
-        for ([_]usize{ 1, 512 }) |capacity| {
-            var control = try testRuntime();
-            defer control.deinit();
-            defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
-            const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
-            const original_buffer = run.terminal_diagnostic;
-            run.terminal_diagnostic = original_buffer[0..capacity];
-            defer run.terminal_diagnostic = original_buffer;
-            var result: lifecycle.TerminalResult = .{
-                .allocator = std.testing.allocator,
-                .diagnostic_storage = try std.testing.allocator.dupe(u8, "SECRET-KEY"),
-                .diagnostic_len = "SECRET-KEY".len,
-                .diagnostic_truncated = false,
-                .abi_status = .callback_failed,
-                .raw_status_code = null,
-                .stop_reason = null,
-                .raw_stop_reason_code = null,
-                .abort_status = null,
-                .raw_abort_status_code = null,
-                .termination_signal = .{ .event_pump_failure = .invalid_event },
-                .failure = .abi_status,
-                .session_disposition_at_completion = .poisoned,
-                .first_callback_rejection = if (observed) .{ .boundary = .event_decode, .reason = .decode_failed, .failure = error.InvalidPayload, .encoded_bytes = 2 } else null,
-            };
-            defer result.deinit();
-            const decision = classifyAgentTerminal(&result);
-            try std.testing.expect(commitAgentTerminal(run, &result));
-            const terminal = terminalPayload(run).?;
-            try std.testing.expectEqual(decision.phase, terminal.phase);
-            try std.testing.expectEqual(decision.outcome, terminal.outcome);
-            try std.testing.expectEqual(decision.cause, terminal.cause);
-            try std.testing.expectEqual(lifecycle.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
-            const diagnostic = run.terminal_diagnostic[0..terminal.diagnostic_len];
-            try std.testing.expect(std.mem.indexOf(u8, diagnostic, "SECRET-KEY") == null);
-            if (capacity == 1) try std.testing.expect(terminal.diagnostic_truncated) else {
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, lifecycle.core_manifest_sha256) != null);
-                try std.testing.expect(std.mem.indexOf(u8, diagnostic, if (observed) "decode_failed" else "unobserved") != null);
-            }
-        }
-    }
 }
 
 test "commentary boundary capacity fails before canonical output mutation" {
