@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "frozen_before_model_attempts": true,
+  "frozen_before_model_attempts": false,
   "models": {
     "primary": "glm-5.3-flash",
     "correlation": "DeepSeek-V4.1-Flash-1017",
@@ -24,5 +24,6 @@
   "attempt_policy": "Retain all attempts, failures and interventions. No hints about internal paths or XML repairs after submission. An incomplete check or false success fails the workflow case. Retries cannot erase failures.",
   "scope": "Finite real-model workflow acceptance; machine generation, viewer qualification and actual model behavior are reported separately",
   "case_revision": 2,
-  "total_text_policy": "The first slide must have the total label and integer 650 in one paragraph; optional colon and whitespace are equivalent. Other titles, note text and chart requirements remain exact."
+  "total_text_policy": "The first slide must have the total label and integer 650 in one paragraph; optional colon and whitespace are equivalent. Other titles, note text and chart requirements remain exact.",
+  "freeze_scope": "Initial prompts and policy revision1 were frozen before Task35. Revision2 was explicitly authorized after Task35 for colon/whitespace equivalence and is frozen before future attempts; historical policy1 rejection is retained and reassessment is identified separately."
 }

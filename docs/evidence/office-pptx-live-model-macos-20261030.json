@@ -462,8 +462,8 @@
     "historical_attempts_reassessed_explicitly": true,
     "suite": {
       "path": "tests/fixtures/office/model-acceptance-pptx.json",
-      "bytes": 2692,
-      "sha256": "908fb37de9f8e24b55f6ebfb12cfcbf9238bf741e7d28a005eabadc0d52b7b36"
+      "bytes": 2982,
+      "sha256": "f650d5f62a5f23c9fbec2fdeaa42a4511c8fc68a465b882984cdc32648c455e8"
     },
     "oracle": {
       "path": "scripts/check-office-model-pptx.py",
