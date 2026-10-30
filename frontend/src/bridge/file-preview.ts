@@ -4,12 +4,17 @@ import {
   PreviewImageSecurityError as StaleSecurity,
 } from "./preview-image-pool.ts";
 import type { NativeSdkJson } from "@native-sdk/cli";
-import type { FilePreview, FilePreviewLoadOptions } from "./contracts.ts";
+import type {
+  FilePreview,
+  FilePreviewLoadOptions,
+  WorkspaceDirectory,
+} from "./contracts.ts";
 import { commands } from "./commands.ts";
 import {
   decodeFilePreview,
   decodePreviewChunk,
   decodePreviewRelease,
+  decodeWorkspaceDirectory,
 } from "./decode-contracts.ts";
 
 const abortError = () => new DOMException("Preview cancelled", "AbortError");
@@ -98,11 +103,95 @@ export class FilePreviewLoader {
       signal.addEventListener("abort", abort, { once: true });
     });
   }
-  async load(
+  load(
     taskId: string,
     runId: string,
     fileReferenceId: string,
     options: FilePreviewLoadOptions = {},
+  ): Promise<FilePreview> {
+    return this.loadTarget(taskId, { runId, fileReferenceId }, options);
+  }
+  loadWorkspace(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FilePreview> {
+    return this.loadTarget(
+      taskId,
+      { workspaceId, workspaceEpoch, path },
+      options,
+    );
+  }
+  async listDirectory(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<WorkspaceDirectory> {
+    const controller = new AbortController();
+    const session = this.session.signal;
+    const abort = () => controller.abort();
+    session.addEventListener("abort", abort, { once: true });
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (session.aborted || options.signal?.aborted) abort();
+    const timer = setTimeout(abort, 30_000);
+    const generation = this.generation();
+    try {
+      if (!generation) throw abortError();
+      let busy = 0;
+      for (;;) {
+        check(controller.signal);
+        if (generation !== this.generation()) throw abortError();
+        const release = await this.preparations.acquire(
+          controller.signal,
+          true,
+        );
+        const previewId = String(this.nextId++);
+        const cancel = () => {
+          void this.invoke(commands.releasePreview, {
+            generation,
+            previewId,
+          }).catch(() => {});
+        };
+        controller.signal.addEventListener("abort", cancel, { once: true });
+        try {
+          check(controller.signal);
+          const result = decodeWorkspaceDirectory(
+            await this.invoke(commands.listDirectory, {
+              generation,
+              previewId,
+              taskId,
+              workspaceId,
+              workspaceEpoch,
+              path,
+            }),
+          );
+          check(controller.signal);
+          if (result.state !== "busy") return result;
+        } finally {
+          release();
+          controller.signal.removeEventListener("abort", cancel);
+        }
+        await delay(
+          Math.min(1000, 100 * 2 ** Math.min(busy++, 4)),
+          controller.signal,
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+      session.removeEventListener("abort", abort);
+      options.signal?.removeEventListener("abort", abort);
+    }
+  }
+  private async loadTarget(
+    taskId: string,
+    target:
+      | { runId: string; fileReferenceId: string }
+      | { workspaceId: string; workspaceEpoch: string; path: string },
+    options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
     const sessionSignal = this.session.signal;
@@ -151,12 +240,16 @@ export class FilePreviewLoader {
         signal.addEventListener("abort", cancelHost, { once: true });
         try {
           const response = decodeFilePreview(
-            await this.invoke(commands.previewFile, {
-              ...key,
-              taskId,
-              runId,
-              fileReferenceId,
-            }),
+            await this.invoke(
+              "runId" in target
+                ? commands.previewFile
+                : commands.previewWorkspaceFile,
+              {
+                ...key,
+                taskId,
+                ...target,
+              },
+            ),
           );
           releasePreparation();
           check(signal);

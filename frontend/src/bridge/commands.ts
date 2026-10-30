@@ -49,6 +49,8 @@ export const commands = {
   outputAction: "metawork.outputs.action",
   cancelOutputAction: "metawork.outputs.cancel",
   previewFile: "metawork.files.preview",
+  listDirectory: "metawork.files.listDirectory",
+  previewWorkspaceFile: "metawork.files.previewWorkspace",
   readPreviewImage: "metawork.files.preview.readImageChunk",
   releasePreview: "metawork.files.preview.release",
   fileChangeDiff: "metawork.files.diff",
