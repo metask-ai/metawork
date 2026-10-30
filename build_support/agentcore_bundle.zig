@@ -57,6 +57,7 @@ const Manifest = struct {
 };
 
 pub const Bundle = struct {
+    manifest_sha256: [64]u8,
     deployment_target: ?std.SemanticVersion,
     link_libc: bool,
     sdk_dependency: SdkDependency,
@@ -156,7 +157,10 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         if (count != 1) @panic("AgentCore runtime asset must be checksum-pinned exactly once");
     }
 
+    var manifest_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(lock_bytes, &manifest_digest, .{});
     return .{
+        .manifest_sha256 = std.fmt.bytesToHex(manifest_digest, .lower),
         .deployment_target = target.deployment_target,
         .link_libc = lock.link.requires_c_runtime,
         .sdk_dependency = target.sdk_dependency,

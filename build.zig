@@ -91,6 +91,21 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    const office_pipeline_options = b.addOptions();
+    office_pipeline_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for Office pipeline fixture"));
+    office_pipeline_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/office_pipeline.mjs"));
+    office_pipeline_options.addOption([]const u8, "office_archive", b.pathFromRoot("src/app/office-skills.tar.gz"));
+    const office_pipeline_cases = b.createModule(.{
+        .root_source_file = b.path("tests/integration/lifecycle/office_pipeline_test.zig"),
+        .target = test_modules.app.resolved_target,
+        .optimize = test_modules.app.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    office_pipeline_cases.addImport("lifecycle_fixture", lifecycle_fixture);
+    office_pipeline_cases.addOptions("office_pipeline_options", office_pipeline_options);
+    const office_pipeline_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-office-pipeline", .root_module = office_pipeline_cases }));
+    b.step("test-office-pipeline", "Run canonical Core and Product Office event pipeline qualification").dependOn(&office_pipeline_tests.step);
+    artifacts.tests.step.dependOn(&office_pipeline_tests.step);
     const office_skill_shell = b.addExecutable(.{ .name = "office-skill-shell", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_skill_shell.zig"),
         .target = test_modules.app.resolved_target,
@@ -1356,6 +1371,9 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const core_identity = b.addOptions();
+    core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
+    session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
     session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));

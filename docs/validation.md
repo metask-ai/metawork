@@ -62,6 +62,8 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 XLSX 质量资格使用 `<对应run入口> python scripts/check-office-xlsx.py --entry <对应run入口>`；macOS 在入口前加 `/bin/sh`。合成输入与独立数值、合计定位和样式 oracle 由测试持有，读取正文成功不能替代样式检查；私有环境资格入口在准备后调用同一 suite。该入口须使用已准备的固定私有 Python，不安装全局库。整包内容更新还运行 `zig build test-office-resources`，验证 Application 资源发布、三格式入口完整性及来源损坏拒绝；catalog 和临时物化另由真实 Core 入口验证，不以资源存在代替执行。
 
+正式事件消费链使用 `zig build test-office-pipeline`，并纳入 Native test graph。该入口让当前 canonical Core 调用实际工具，经生产 Agent callback、event pump、Product 事件投影及 terminal drain 收口；本机 Provider 与临时凭据存储为受控 fixture，覆盖工具非零退出、实际缺环境入口、权限拒绝、重试、中断、取消和跨轮。它与只验证 Skill 资源/Shell 的探针分别结算，不替代远端模型规划或 PowerPoint 兼容性证据。拒绝观测回归还须证明首个拒绝不被后续收口覆盖、缺省/不可用及小容量诊断不改变运行结果、非法输入仍被拒绝且不泄露正文或 secret。
+
 同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
 
 桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。

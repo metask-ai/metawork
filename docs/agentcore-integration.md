@@ -433,6 +433,8 @@ set typed TerminationSignal if absent
 
 此路径不读取 `RunResult`。
 
+Agent 在所属 Session 的锁内保留本 Run 首次 callback 拒绝的 typed 边界、类别、身份匹配与有界计数；采集使用固定字段，不分配、不在 callback 中写日志或文件。不可关联的历史首因保持未知。Task 独立保留首次事件应用拒绝与终态 drain 发现的未闭合片段事实，后者不覆盖前者。它们只表示各 owner 同步边界内最先保存的观测，不建立跨线程因果顺序，也不改变 termination latch、outcome 或 disposition。Control 在既有终态诊断与主循环安全日志出口输出 enum、计数及由已验证 canonical manifest 派生的 artifact 身份，不记录 callback 正文、private reasoning、工具参数或原始外部身份；容量不足只标记诊断不可用或截断，不制造新 fatal，不扩展 Bridge、Snapshot 或历史 schema。
+
 ### notification、projection 与 Renderer transport
 
 Product 对精确 Bash input 的 command/description 和前台 `metacodes.bash-result.v2` UTF-8 stdout/stderr、完整性标记、非空 i32 exit_code 做有界展示转换。未知版本、其他 encoding、缺字段、解析预算耗尽或原始内容截断时不解释结果，仍保留安全原始详情；转换不参与 Agent 执行、状态推断或文件变更判定。退出码为零不等于 Run 完成，未捕获输出不证明目录为空。解析后字段再次经过 Host credential 清洗。

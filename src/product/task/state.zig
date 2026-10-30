@@ -210,6 +210,38 @@ const OpenOutputSegment = struct {
     bytes: u64 = 0,
 };
 
+/// Numeric state only. This is an owner-local observation, never raw text or
+/// an alternative outcome/termination ledger.
+pub const OutputProtocolObservation = struct {
+    next_index: u64,
+    open: ?OpenOutputSegment,
+    continued_group: ?u32,
+    retry_group: ?u32,
+    pending_segment_bytes: usize,
+    pending_continued_bytes: usize,
+    output_kind: ?AssistantOutputKind,
+    framing_seen: bool,
+
+    fn capture(run: *const RunRecord) OutputProtocolObservation {
+        return .{ .next_index = run.next_output_segment_index, .open = run.open_output_segment, .continued_group = run.output_continued_group, .retry_group = run.output_retry_group, .pending_segment_bytes = run.output_segment.list.items.len, .pending_continued_bytes = run.output_continued.list.items.len, .output_kind = run.assistant_output_kind, .framing_seen = run.output_segment_protocol_seen };
+    }
+};
+
+pub const EventRejection = struct {
+    event: ?agent.CoreEventKind,
+    failure: EventApplyError,
+    expected: OutputProtocolObservation,
+    observed_segment: ?OpenOutputSegment,
+    text_bytes: ?usize,
+    input_adoption: ?struct { id: u64, sequence: u32, turn: u32 },
+};
+
+pub const DrainRejectionDiagnostic = struct {
+    task_id: u64,
+    run_id: u64,
+    observed: OutputProtocolObservation,
+};
+
 /// A bounded, redaction-safe permission decision summary. It contains no raw
 /// arguments or response and may be attached to Run and UI occurrence history.
 pub const PermissionSummary = struct {
@@ -904,6 +936,10 @@ pub const RunRecord = struct {
     terminal_event_drain_marked: bool = false,
     event_stream_finalized: bool = false,
     event_projection_failure: ?EventProjectionFailure = null,
+    first_event_rejection: ?EventRejection = null,
+    event_rejection_reported: bool = false,
+    terminal_drain_rejection: ?OutputProtocolObservation = null,
+    drain_rejection_reported: bool = false,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
@@ -1376,6 +1412,8 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
             run.output_segment.list.items.len != 0 or
             run.output_continued.list.items.len != 0)
         {
+            if (run.terminal_drain_rejection == null)
+                run.terminal_drain_rejection = OutputProtocolObservation.capture(run);
             if (run.event_projection_failure == null)
                 run.event_projection_failure = .dependency_contract_failure;
             run.open_output_segment = null;
@@ -1689,6 +1727,33 @@ pub fn applyEvent(
     const run = findRun(task.durable.runs, envelope.run_id) orelse
         return error.NoSuchRun;
     if (run.event_stream_finalized) return .late_terminal;
+    const expected_output = OutputProtocolObservation.capture(run);
+    errdefer |failure| {
+        if (run.first_event_rejection == null) {
+            const known = switch (envelope.event.value) {
+                .known => |event| event,
+                .unknown => null,
+            };
+            run.first_event_rejection = .{
+                .event = if (known) |event| std.meta.activeTag(event) else null,
+                .failure = failure,
+                .expected = expected_output,
+                .observed_segment = if (known) |event| switch (event) {
+                    .output_segment_begin => |segment| .{ .index = segment.index, .turn = segment.turn, .group = segment.group },
+                    .output_segment_end => |segment| .{ .index = segment.index, .turn = segment.turn, .group = segment.group, .bytes = segment.bytes },
+                    else => null,
+                } else null,
+                .text_bytes = if (known) |event| switch (event) {
+                    .text_chunk => |text| text.len,
+                    else => null,
+                } else null,
+                .input_adoption = if (known) |event| switch (event) {
+                    .input_adopted => |value| .{ .id = value.input_id, .sequence = value.sequence, .turn = value.turn },
+                    else => null,
+                } else null,
+            };
+        }
+    }
     const event = switch (envelope.event.value) {
         .unknown => return if (envelope.delivered_file != null) error.InvalidDeliveryReceipt else .unknown,
         .known => |known| known,
@@ -2532,4 +2597,6 @@ test "event drain fails closed when an output segment remains unresolved" {
         productTerminalFacts(run).?.outcome,
     );
     try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
+    try std.testing.expectEqual(@as(u64, 5), run.terminal_drain_rejection.?.open.?.bytes);
+    try std.testing.expect(run.first_event_rejection == null);
 }

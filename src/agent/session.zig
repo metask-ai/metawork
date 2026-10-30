@@ -14,6 +14,7 @@ const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("session/control.zig");
+const core_identity = @import("agentcore_identity");
 const session_wire = @import("session/wire.zig");
 const capabilities = @import("capabilities.zig");
 const session_binding = @import("session/binding.zig");
@@ -127,6 +128,9 @@ pub const TerminalFailure = session_control.TerminalFailure;
 pub const SessionDisposition = session_control.SessionDisposition;
 pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
 pub const TerminalResult = session_control.TerminalResult;
+pub const CallbackRejection = session_control.CallbackRejection;
+pub const CoreEventKind = session_control.CoreEventKind;
+pub const core_manifest_sha256 = core_identity.manifest_sha256;
 pub const InputCounts = session_control.InputCounts;
 pub const InputObservation = session_control.InputObservation;
 pub const InputRejection = session_control.InputRejection;
@@ -688,6 +692,7 @@ pub const Session = struct {
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
     termination_signal: ?TerminationSignal = null,
+    first_callback_rejection: ?CallbackRejection = null,
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
@@ -838,6 +843,7 @@ pub const Session = struct {
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
         self.termination_signal = null;
+        self.first_callback_rejection = null;
         self.abort_status = null;
         self.raw_abort_status_code = null;
         self.dependency_contract_failure = false;
@@ -1443,6 +1449,7 @@ pub const Session = struct {
             return error.NoSuchRun;
         }
         self.dependency_contract_failure = true;
+        self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .identity_mismatch });
         setTerminationSignalLocked(self, .{ .callback_failure = .ui });
         wakeUiLocked(self);
         const was_queued = self.state == .queued;
@@ -2067,6 +2074,7 @@ pub const Session = struct {
         self.input_ready = false;
         while (self.input_calls_in_progress != 0) self.wait();
         if (self.active_callback_refs != 0) {
+            self.recordCallbackRejectionLocked(.{ .boundary = .core_return, .reason = .callbacks_in_flight });
             self.failCoreIdentityLocked();
             while (self.active_callback_refs != 0) self.wait();
         }
@@ -2356,6 +2364,7 @@ pub const Session = struct {
             .abort_status = self.abort_status,
             .raw_abort_status_code = self.raw_abort_status_code,
             .termination_signal = self.termination_signal,
+            .first_callback_rejection = self.first_callback_rejection,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
             .failure = if (self.dependency_contract_failure)
                 .dependency_contract
@@ -2707,6 +2716,7 @@ pub const Session = struct {
         const run_id = self.retainCoreCallback(raw_run) orelse return wire.EVENT_FATAL;
         defer self.releaseCoreCallback();
         const encoded = sdk.borrowedBytes(event_json) catch {
+            self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
             return wire.EVENT_FATAL;
         };
@@ -2716,6 +2726,7 @@ pub const Session = struct {
                 return wire.EVENT_CONTINUE;
             }
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
+            self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .oversized, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         }
         var parsed = decodeCoreEvent(self.agent_runtime.allocator, encoded) catch |err| {
@@ -2726,6 +2737,7 @@ pub const Session = struct {
                 return wire.EVENT_CONTINUE;
             }
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
+            self.recordCallbackRejection(.{ .boundary = .event_decode, .reason = .decode_failed, .failure = err, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
         switch (parsed.value) {
@@ -2757,7 +2769,16 @@ pub const Session = struct {
             .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
             else => {},
         }
-        if (!input_event_valid) self.failCoreIdentityLocked();
+        if (!input_event_valid) {
+            self.recordCallbackRejectionLocked(.{ .boundary = .input_event, .reason = .invalid_input_transition, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len, .input_adoption = switch (parsed.value.known) {
+                .input_adopted => |value| .{ .id = value.input_id, .sequence = value.sequence, .turn = value.turn },
+                else => null,
+            }, .observed_run_id = switch (parsed.value.known) {
+                .run_state => |value| value.run_id,
+                else => null,
+            } });
+            self.failCoreIdentityLocked();
+        }
         self.unlock();
         if (!input_event_valid) {
             parsed.deinit();
@@ -2768,15 +2789,18 @@ pub const Session = struct {
             .known => |known| std.meta.activeTag(known) == .file_changes,
         };
         const owned_json = self.agent_runtime.allocator.dupe(u8, encoded) catch {
+            const kind = std.meta.activeTag(parsed.value.known);
             parsed.deinit();
             if (is_file_changes) {
                 self.file_changes_lost.store(true, .release);
                 return wire.EVENT_CONTINUE;
             }
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
+            self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = kind, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
         const generated_image_path = self.takeGeneratedImagePath(parsed.value) catch {
+            self.recordCallbackRejection(.{ .boundary = .event_copy, .reason = .allocation, .event = std.meta.activeTag(parsed.value.known), .encoded_bytes = encoded.len });
             self.agent_runtime.allocator.free(owned_json);
             parsed.deinit();
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
@@ -2792,6 +2816,7 @@ pub const Session = struct {
             .event = parsed,
             .allocator = self.agent_runtime.allocator,
         };
+        const event_kind = std.meta.activeTag(parsed.value.known);
         self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
             envelope.deinit();
             if (is_file_changes and switch (err) {
@@ -2817,10 +2842,12 @@ pub const Session = struct {
                 error.DeadlineExceeded,
                 => .capacity,
             } });
+            self.recordCallbackRejection(.{ .boundary = .event_pump, .reason = .queue_rejected, .event = event_kind, .failure = err, .encoded_bytes = encoded.len });
             return wire.EVENT_FATAL;
         };
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
+            self.recordCallbackRejection(.{ .boundary = .notifier, .reason = .consumer_unavailable, .event = event_kind, .encoded_bytes = encoded.len });
             self.recordTerminationSignal(.{
                 .event_consumer_notification_failure = .unavailable,
             });
@@ -2838,6 +2865,7 @@ pub const Session = struct {
         if (out_response) |out| out.* = emptyOwnedBytes();
         const self: *Session = @ptrCast(@alignCast(context orelse return wire.UI_FATAL));
         const output = out_response orelse {
+            self.recordCallbackRejection(.{ .boundary = .ui_response, .reason = .invalid_response });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
@@ -2845,24 +2873,29 @@ pub const Session = struct {
         defer self.releaseCoreCallback();
 
         const encoded_request = sdk.borrowedBytes(request_json) catch {
+            self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .invalid_bytes });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
         if (encoded_request.len > self.agent_runtime.max_ui_request_bytes) {
+            self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .oversized, .encoded_bytes = encoded_request.len });
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.UI_FATAL;
         }
-        var parsed = decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch {
+        var parsed = decodeUiRequest(self.agent_runtime.allocator, encoded_request) catch |err| {
+            self.recordCallbackRejection(.{ .boundary = .ui_decode, .reason = .decode_failed, .failure = err, .encoded_bytes = encoded_request.len });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         };
         defer parsed.deinit();
         if (!capabilities.allowsUiRequest(parsed.value)) {
+            self.recordCallbackRejection(.{ .boundary = .ui_admission, .reason = .unsupported_request, .encoded_bytes = encoded_request.len });
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         }
         const owned_request = if (self.permission_interaction == .interactive)
             self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
+                self.recordCallbackRejection(.{ .boundary = .ui_admission, .reason = .allocation, .encoded_bytes = encoded_request.len });
                 self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
                 return wire.UI_FATAL;
             }
@@ -2873,12 +2906,14 @@ pub const Session = struct {
         if (!self.coreIdentityHealthyLocked() or
             !self.uiRequestIdentityMatchesLocked(parsed.value, callback_run_id))
         {
+            self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .identity_mismatch, .encoded_bytes = encoded_request.len });
             self.failCoreIdentityLocked();
             self.unlock();
             if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;
         }
         if (self.state != .running or self.ui_active) {
+            self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .invalid_state, .encoded_bytes = encoded_request.len });
             setTerminationSignalLocked(self, .{ .callback_failure = .ui });
             self.unlock();
             if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
@@ -2889,12 +2924,13 @@ pub const Session = struct {
             self.permission_stop_requested = true;
             self.broadcast();
             self.unlock();
-            return if (self.agent_runtime.notifyEventConsumer() == .unavailable)
-                wire.UI_FATAL
-            else
-                wire.UI_UNAVAILABLE;
+            const unavailable = self.agent_runtime.notifyEventConsumer() == .unavailable;
+            if (unavailable)
+                self.recordCallbackRejection(.{ .boundary = .notifier, .reason = .consumer_unavailable, .encoded_bytes = encoded_request.len });
+            return if (unavailable) wire.UI_FATAL else wire.UI_UNAVAILABLE;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
+            self.recordCallbackRejectionLocked(.{ .boundary = .ui_admission, .reason = .counter_exhausted, .encoded_bytes = encoded_request.len });
             self.dependency_contract_failure = true;
             self.unlock();
             self.agent_runtime.allocator.free(owned_request.?);
@@ -2916,6 +2952,7 @@ pub const Session = struct {
         const notification_failed = self.agent_runtime.notifyEventConsumer() == .unavailable;
         if (notification_failed) {
             self.lock();
+            self.recordCallbackRejectionLocked(.{ .boundary = .notifier, .reason = .consumer_unavailable, .encoded_bytes = encoded_request.len });
             setTerminationSignalLocked(self, .{
                 .event_consumer_notification_failure = .unavailable,
             });
@@ -2949,6 +2986,7 @@ pub const Session = struct {
 
         if (answered) {
             const bytes = response orelse {
+                self.recordCallbackRejection(.{ .boundary = .ui_response, .reason = .invalid_response });
                 self.recordTerminationSignal(.{ .callback_failure = .ui });
                 return wire.UI_FATAL;
             };
@@ -2979,6 +3017,7 @@ pub const Session = struct {
         raw_run: ?*const wire.RunContextV1,
     ) ?u64 {
         const run = sdk.validateRunContext(raw_run) catch {
+            self.recordCallbackRejection(.{ .boundary = .admission, .reason = .invalid_context });
             self.rejectInvalidCoreIdentity();
             return null;
         };
@@ -2989,6 +3028,7 @@ pub const Session = struct {
             !self.run_started or !self.core_call_in_progress or
             run.run_id != self.active_run_id)
         {
+            self.recordCallbackRejectionLocked(.{ .boundary = .admission, .reason = .identity_mismatch, .observed_run_id = run.run_id, .session_handle_matches = self.raw != null and run.session == self.raw.? });
             self.failCoreIdentityLocked();
             return null;
         }
@@ -3010,6 +3050,7 @@ pub const Session = struct {
                     binding.bytes[0..binding.len],
                     run.session_id,
                 )) {
+                    self.recordCallbackRejectionLocked(.{ .boundary = .admission, .reason = .identity_mismatch, .observed_run_id = run.run_id, .session_handle_matches = true, .session_identity_matches = false });
                     self.failCoreIdentityLocked();
                     return null;
                 }
@@ -3019,6 +3060,21 @@ pub const Session = struct {
         self.active_refs += 1;
         self.active_callback_refs += 1;
         return run.run_id;
+    }
+
+    fn recordCallbackRejection(self: *Session, rejection: CallbackRejection) void {
+        self.lock();
+        defer self.unlock();
+        self.recordCallbackRejectionLocked(rejection);
+    }
+
+    fn recordCallbackRejectionLocked(self: *Session, rejection: CallbackRejection) void {
+        if (!self.run_done and self.first_callback_rejection == null) {
+            var observation = rejection;
+            observation.host_run_id = self.active_run_id;
+            observation.state = self.state;
+            self.first_callback_rejection = observation;
+        }
     }
 
     fn releaseCoreCallback(self: *Session) void {

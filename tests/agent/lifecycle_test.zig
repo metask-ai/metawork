@@ -2740,6 +2740,34 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
+test "callback rejection facts survive tiny diagnostic capacity without changing failure semantics" {
+    for ([_]usize{ 1, 512 }) |capacity| {
+        fake_core.reset();
+        fake_core.setNextPlan(.malformed_event_callback);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1, .max_terminal_diagnostic_bytes = capacity });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "synthetic private text must not enter rejection facts" });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        const rejection = terminal.first_callback_rejection orelse return error.ExpectedRejection;
+        try std.testing.expectEqual(lifecycle.CallbackRejection.Boundary.event_decode, rejection.boundary);
+        try std.testing.expectEqual(lifecycle.CallbackRejection.Reason.decode_failed, rejection.reason);
+        try std.testing.expectEqual(id, rejection.host_run_id);
+        try std.testing.expectEqual(@as(?usize, 2), rejection.encoded_bytes);
+        try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+        try std.testing.expectEqual(lifecycle.TerminationSignal{ .event_pump_failure = .invalid_event }, terminal.termination_signal.?);
+        try std.testing.expectEqual(lifecycle.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
+        try std.testing.expect(runtime.takeEvent() == null);
+        try session.close(.session_close);
+    }
+}
+
 test "oversized file changes degrade without terminating the Run" {
     fake_core.reset();
     fake_core.setNextPlan(.file_changes_callback);
@@ -2865,6 +2893,14 @@ test "RunContext identity violations fail closed and poison the Session" {
             terminal.failure,
         );
         try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+        const rejection = terminal.first_callback_rejection orelse return error.ExpectedRejection;
+        try std.testing.expectEqual(lifecycle.CallbackRejection.Boundary.admission, rejection.boundary);
+        try std.testing.expectEqual(lifecycle.CallbackRejection.Reason.identity_mismatch, rejection.reason);
+        try std.testing.expectEqual(run_id, rejection.host_run_id);
+        if (plan == .wrong_event_run_id)
+            try std.testing.expectEqual(@as(?u64, run_id + 1), rejection.observed_run_id);
+        if (plan == .wrong_event_session_handle)
+            try std.testing.expectEqual(@as(?bool, false), rejection.session_handle_matches);
         try std.testing.expectError(
             error.SessionPoisoned,
             submitSession(session, "identity failure is permanent"),
