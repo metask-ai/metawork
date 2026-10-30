@@ -617,12 +617,63 @@
       "generation_observations": {
         "initial_build_failed": "decimal.InvalidOperation at Input cell conversion; no candidate",
         "debug_script_sha256": "60ce8ee046de879f3899af2b70cae6873af7c27d529f20394924e380f2a02de6",
-        "model_attempted_inline_python": "private entry rejected non-script -c invocation; no entry behavior change"
+        "model_attempted_inline_python": "private entry rejected non-script -c invocation; no entry behavior change",
+        "self_correction": "Model corrected header conversion without an implementation hint; rebuilt candidate before stopping."
       },
       "finished_at_unix_ms": 1793342270965,
       "actual_deliveries": [],
       "final_response": "我先查看工作区输入与 Skill 环境信息。CSV 有 8 行（表头 + 7 行数据），含重复 o-2、缺地区的 o-5、缺编号的行。环境表显示本机为 macOS arm64，Python 载荷约 38.9 MB。先检查共享依赖目录是否已有完整环境。共享目录中已有 Python 与 Node 环境，无需下载。运行 prepare 校验环境完整性（若已就绪则不产生下载）。环境已就绪。先读取 Skill 的校验工作流与示例脚本。verification 工作流与示例已读完。输入推导：7 行原始数据中，o-2 重复（保留首条）、o-5 缺地区、末行缺编号 → 有效 4 行（o-1/o-2/o-3/o-4），总额 650，North 300、South 350。现在确认脚本与校验器路径，并记录 orders.csv 基准哈希。verification 工作流已明确。输入基线：orders.csv SHA-256 = `11ca9b99...5756`（工作区另有一个早前的 bad-styles.xlsx，与本任务无关，不触碰）。\n\n先写生成脚本（期望值将独立从原始 CSV 推导，不复制生成脚本内部变量）。解析 Amount 字段时出错，打印各字段 repr 以定位原因。run 入口只接受脚本文件路径，改用临时脚本调试。找到原因：Input 写入循环对表头行的 \"Amount\" 也做了数字转换。修正为表头原样写入、仅转换数据行。",
-      "candidate_produced": true
+      "candidate_produced": true,
+      "independent_candidate_check": {
+        "report": ".zig-cache/office-model-acceptance/task36-create-independent-1.json",
+        "result": {
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "conforms": true,
+          "candidate": {
+            "bytes": 6874,
+            "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+          },
+          "methods": [
+            "bounded_zip_payloads",
+            "openpyxl_saved_cells_and_styles"
+          ],
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ],
+          "checks_passed": 21,
+          "requirements_completed": 21
+        },
+        "candidate_produced_before_stop": true,
+        "model_quality_check_not_yet_performed": true,
+        "delivery_absent": true
+      }
+    },
+    {
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 13,
+      "run_id_hex": "0000000000000002",
+      "status": "queued",
+      "submitted_at_unix_ms": 1793342305681,
+      "operator_prompt": "请继续完成原任务。",
+      "interventions": [
+        "Neutral continuation only; no expected values, internal paths, candidate fixes or verification hints supplied. Prior stopped Run retained; continuation is not an additional independent repetition."
+      ]
     }
   ],
   "unstarted": [
