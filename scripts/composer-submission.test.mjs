@@ -948,7 +948,8 @@ test("App sends to the current Run without preparation and shows Stop when its b
   assert.deepEqual(fixture.targets, [{ taskId: fixture.task.id }]);
   assert.equal(fixture.creations(), 0);
   fireEvent.change(editor, { target: { value: "newer unsent intent" } });
-  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  assert.ok(screen.getByRole("button", { name: "Send" }));
   fireEvent.change(editor, { target: { value: "" } });
   const stop = screen.getByRole("button", { name: "Stop task" });
   assert.equal(stop.disabled, false);

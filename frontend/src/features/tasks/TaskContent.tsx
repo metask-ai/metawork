@@ -353,6 +353,7 @@ export function TaskContent({
   const restoringTask = useRef<string | null>(null);
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
+  const historyRequestPending = useRef(false);
   const previousLayout = useRef<{
     taskId: string;
     firstRunId: string | null;
@@ -488,6 +489,7 @@ export function TaskContent({
       if (!saved || saved.followingLatest) node.scrollTop = node.scrollHeight;
       else if (!restoreReadingAnchor(node, saved))
         node.scrollTop = saved.scrollTop;
+      if (saved) reading.set(taskId, { ...saved, scrollTop: node.scrollTop });
       setShowJumpLatest(saved ? !saved.followingLatest : false);
       previousTaskId.current = taskId;
       return;
@@ -524,9 +526,14 @@ export function TaskContent({
       setShowJumpLatest(false);
     }
   }, [task?.id, task?.runs, revision, history?.loading]);
+  useLayoutEffect(() => {
+    historyRequestPending.current = history?.loading ?? false;
+  }, [task?.id, task?.runs[0]?.id, history?.loading, synchronized]);
   function updateReadingState() {
     const node = viewport.current;
     if (!node || !task || restoringTask.current !== null) return;
+    const scrollingUp =
+      node.scrollTop < (reading.get(task.id)?.scrollTop ?? node.scrollTop);
     const followingLatest =
       node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
     reading.set(task.id, {
@@ -535,6 +542,49 @@ export function TaskContent({
       anchor: followingLatest ? undefined : readingAnchor(node),
     });
     setShowJumpLatest(!followingLatest);
+    if (
+      scrollingUp &&
+      !followingLatest &&
+      node.scrollTop < 100 &&
+      history?.available &&
+      !history.loading &&
+      synchronized
+    )
+      loadEarlierHistory();
+  }
+  function loadEarlierHistory() {
+    const node = viewport.current;
+    if (
+      !node ||
+      node.scrollTop >= 100 ||
+      !task ||
+      !history?.available ||
+      history.loading ||
+      !synchronized ||
+      historyRequestPending.current
+    )
+      return;
+    historyRequestPending.current = true;
+    reading.set(task.id, {
+      scrollTop: node.scrollTop,
+      followingLatest: false,
+      anchor: readingAnchor(node),
+    });
+    history.onLoad();
+  }
+  function canScrollHistoryAtTop(target: EventTarget | null) {
+    const node = viewport.current;
+    if (!node || node.scrollTop > 0) return false;
+    // Let nested code/tool viewports consume their own upward scrolling first.
+    for (
+      let element = target instanceof Element ? target : null;
+      element && element !== node;
+      element = element.parentElement
+    ) {
+      if (element.scrollTop > 0 && element.scrollHeight > element.clientHeight)
+        return false;
+    }
+    return true;
   }
   function jumpToLatest() {
     const node = viewport.current;
@@ -568,7 +618,10 @@ export function TaskContent({
       const saved = reading.get(task.id);
       if (restoringTask.current !== null) return;
       if (!saved || saved.followingLatest) node.scrollTop = node.scrollHeight;
-      else restoreReadingAnchor(node, saved);
+      else {
+        restoreReadingAnchor(node, saved);
+        reading.set(task.id, { ...saved, scrollTop: node.scrollTop });
+      }
     });
     observer.observe(content);
     return () => observer.disconnect();
@@ -578,23 +631,41 @@ export function TaskContent({
       aria-label={task?.title}
       viewportRef={viewport}
       onViewportScroll={updateReadingState}
+      onViewportWheel={(event) => {
+        if (
+          !event.defaultPrevented &&
+          event.deltaY < 0 &&
+          canScrollHistoryAtTop(event.target)
+        )
+          loadEarlierHistory();
+      }}
+      onViewportKeyDown={(event) => {
+        if (
+          !event.defaultPrevented &&
+          ["ArrowUp", "PageUp", "Home"].includes(event.key) &&
+          !(
+            event.target instanceof Element &&
+            event.target.closest(
+              "input, textarea, select, [contenteditable=true]",
+            )
+          ) &&
+          canScrollHistoryAtTop(event.target)
+        )
+          loadEarlierHistory();
+      }}
       jumpToLatest={
         showJumpLatest
           ? { label: t("task.jump_latest"), onClick: jumpToLatest }
           : undefined
       }
     >
-      {history && (history.available || history.loading) && (
-        <Button
-          type="button"
-          variant="secondary"
-          size="md"
-          disabled={history.loading || !synchronized}
-          aria-busy={history.loading}
-          onClick={history.onLoad}
-        >
-          {t(history.loading ? "common.loading" : "task.load_earlier")}
-        </Button>
+      {history?.loading && synchronized && (
+        <p className="conversation-history-loading" role="status">
+          <span className="conversation-history-spinner">
+            <Icon name="loading" />
+          </span>
+          <span className="sr-only">{t("common.loading")}</span>
+        </p>
       )}
       {hasExcludedCompactHistory && (
         <p

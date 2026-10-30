@@ -2736,7 +2736,7 @@ test("Models keeps canonical storage recovery available without official model s
   assert.equal(screen.queryByText("Model One"), null);
 });
 
-test("current Run keeps Stop reachable alongside Send and preserves IME", () => {
+test("current Run switches between Send and Stop without disrupting IME", () => {
   let stops = 0;
   const composer = renderComposer({
     stopAction: "run",
@@ -2753,14 +2753,20 @@ test("current Run keeps Stop reachable alongside Send and preserves IME", () => 
   assert.equal(composer.submissions(), 1);
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   assert.equal(composer.submissions(), 2);
-  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
   fireEvent.change(composer.textarea, { target: { value: "" } });
   assert.equal(screen.queryByRole("button", { name: "Send" }), null);
+  fireEvent.compositionStart(composer.textarea);
+  assert.ok(screen.getByRole("button", { name: "Send" }));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  fireEvent.keyDown(composer.textarea, { key: "Enter", isComposing: true });
+  assert.equal(composer.submissions(), 2);
+  fireEvent.compositionEnd(composer.textarea);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.equal(stops, 1);
 });
 
-test("unavailable content preserves the draft and keeps Task Stop reachable", () => {
+test("unavailable content keeps disabled Send until the draft is cleared", () => {
   let stops = 0;
   const composer = renderComposer({
     stopAction: "run",
@@ -2776,8 +2782,12 @@ test("unavailable content preserves the draft and keeps Task Stop reachable", ()
   fireEvent.keyDown(composer.textarea, { key: "Enter" });
   assert.equal(composer.submissions(), 0);
   assert.ok(composer.textarea.value.length > 0);
-  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
   assert.equal(stops, 0);
+  fireEvent.change(composer.textarea, { target: { value: "" } });
+  assert.equal(screen.queryByRole("button", { name: "Send" }), null);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(stops, 1);
 });
 
 test("all interjection states render the same ordinary message with copy only", async () => {

@@ -2,6 +2,8 @@ import {
   Activity,
   Archive,
   ArrowLeft,
+  ArrowDown,
+  ArrowUp,
   Box,
   CalendarDays,
   Check,
@@ -30,7 +32,6 @@ import {
   Search,
   Download,
   ExternalLink,
-  Send,
   Settings,
   ShieldCheck,
   Info,
@@ -65,6 +66,7 @@ type IconName =
   | "shield"
   | "info"
   | "arrow-left"
+  | "arrow-down"
   | "close"
   | "warning"
   | "account"
@@ -107,7 +109,7 @@ const icons: Record<IconName, LucideIcon> = {
   chevron: ChevronDown,
   "chevron-right": ChevronRight,
   stop: Square,
-  send: Send,
+  send: ArrowUp,
   workspace: Folder,
   search: Search,
   plus: Plus,
@@ -115,6 +117,7 @@ const icons: Record<IconName, LucideIcon> = {
   shield: ShieldCheck,
   info: Info,
   "arrow-left": ArrowLeft,
+  "arrow-down": ArrowDown,
   close: X,
   warning: TriangleAlert,
   account: UserRound,

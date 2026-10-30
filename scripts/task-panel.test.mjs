@@ -2731,6 +2731,229 @@ test("prepending a history page preserves the visible reading position", () => {
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
 
+test("upward history paging preserves position and retries through continued scrolling", () => {
+  const current = task({ runs: [run({ id: "9" }), run({ id: "10" })] });
+  let loads = 0;
+  const history = { available: true, loading: false, onLoad: () => loads++ };
+  const view = render(
+    taskContentElement(current, "1", { history, synchronized: true }),
+  );
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let height = 1000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 160 },
+  });
+  assert.equal(loads, 0); // Opening a Task does not fetch its entire history.
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 0); // Moving down is not a request for earlier content.
+  viewport.scrollTop = 90;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 1);
+  viewport.scrollTop = 80;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 1); // No loop while loading, or if the request made no progress.
+
+  view.rerender(
+    taskContentElement(current, "2", {
+      history: { ...history, loading: true },
+      synchronized: true,
+    }),
+  );
+  const busy = screen.getByRole("status");
+  assert.equal(busy.textContent, "Loading…");
+  assert.ok(busy.querySelector(".conversation-history-spinner"));
+  assert.equal(
+    screen.queryByRole("button", { name: /Load earlier|Load more/ }),
+    null,
+  );
+  height = 1600;
+  const expanded = { ...current, runs: [run({ id: "5" }), ...current.runs] };
+  view.rerender(
+    taskContentElement(expanded, "3", { history, synchronized: true }),
+  );
+  assert.equal(viewport.scrollTop, 680);
+  fireEvent.scroll(viewport); // Programmatic anchor restoration is not another request.
+  assert.equal(loads, 1);
+  viewport.scrollTop = 70;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 2);
+  viewport.scrollTop = 60;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 2);
+  view.rerender(
+    taskContentElement(expanded, "4", {
+      history: { ...history, loading: true },
+      synchronized: true,
+    }),
+  );
+  view.rerender(
+    taskContentElement(expanded, "5", { history, synchronized: true }),
+  );
+  viewport.scrollTop = 0;
+  fireEvent.wheel(viewport, { deltaY: 100 });
+  assert.equal(loads, 2);
+  fireEvent.wheel(viewport, { deltaY: -100 });
+  assert.equal(loads, 3); // A new upward gesture retries even at the clamped top.
+  fireEvent.wheel(viewport, { deltaY: -100 });
+  assert.equal(loads, 3);
+});
+
+test("history autoload respects availability, synchronization and in-flight loading", () => {
+  let loads = 0;
+  const current = task({ runs: [run({ id: "9" })] });
+  const history = { available: true, loading: false, onLoad: () => loads++ };
+  const view = render(taskContentElement(current));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1000 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  for (const [index, overrides] of [
+    { history: { ...history, available: false }, synchronized: true },
+    { history: { ...history, loading: true }, synchronized: true },
+    { history, synchronized: false },
+  ].entries()) {
+    view.rerender(taskContentElement(current, String(index + 2), overrides));
+    viewport.scrollTop = 180;
+    fireEvent.scroll(viewport);
+    viewport.scrollTop = 40;
+    fireEvent.scroll(viewport);
+    viewport.scrollTop = 0;
+    fireEvent.wheel(viewport, { deltaY: -100 });
+    assert.equal(loads, 0);
+  }
+});
+
+test("layout-driven anchor restoration does not request earlier history", () => {
+  const previousObserver = globalThis.ResizeObserver;
+  let resize;
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      resize = callback;
+    }
+    observe() {}
+    disconnect() {}
+  };
+  try {
+    const memory = createTaskReadingMemory();
+    const current = task({ runs: [run({ id: "9" })] });
+    let loads = 0;
+    render(
+      taskContentElement(current, "1", {
+        memory,
+        synchronized: true,
+        history: { available: true, loading: false, onLoad: () => loads++ },
+      }),
+    );
+    const viewport = document.querySelector(".ai-conversation-viewport");
+    Object.defineProperties(viewport, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, writable: true, value: 60 },
+    });
+    viewport.getBoundingClientRect = () => ({ top: 0, bottom: 400 });
+    viewport.querySelector('[data-run-id="9"]').getBoundingClientRect = () => ({
+      top: -40,
+      bottom: 400,
+    });
+    memory.reading.set(current.id, {
+      scrollTop: 60,
+      followingLatest: false,
+      anchor: { runId: "9", offset: 0 },
+    });
+    act(() => resize());
+    assert.equal(viewport.scrollTop, 20);
+    fireEvent.scroll(viewport);
+    assert.equal(loads, 0);
+    viewport.scrollTop = 10;
+    fireEvent.scroll(viewport);
+    assert.equal(loads, 1);
+  } finally {
+    globalThis.ResizeObserver = previousObserver;
+  }
+});
+
+test("Task reading restoration and short content do not automatically page history", () => {
+  const memory = createTaskReadingMemory();
+  let loads = 0;
+  const history = { available: true, loading: false, onLoad: () => loads++ };
+  const first = task({ id: "task-a", runs: [run({ id: "9" })] });
+  const second = task({ id: "task-b", runs: [run({ id: "19" })] });
+  memory.reading.set(second.id, { scrollTop: 60, followingLatest: false });
+  const view = render(
+    taskContentElement(first, "1", { memory, history, synchronized: true }),
+  );
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  let height = 1000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+  view.rerender(
+    taskContentElement(second, "2", { memory, history, synchronized: true }),
+  );
+  assert.equal(viewport.scrollTop, 60);
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 0);
+  viewport.scrollTop = 40;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 1);
+  view.rerender(
+    taskContentElement(first, "3", { memory, history, synchronized: true }),
+  );
+  assert.equal(viewport.scrollTop, 180);
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 1);
+  height = 400;
+  viewport.scrollTop = 0;
+  fireEvent.scroll(viewport);
+  assert.equal(loads, 1);
+  fireEvent.wheel(viewport, { deltaY: -100 });
+  assert.equal(loads, 2); // Short pages still accept deliberate upward browsing.
+});
+
+test("keyboard history paging works at the top without consuming nested scroll or form input", () => {
+  let loads = 0;
+  const history = { available: true, loading: false, onLoad: () => loads++ };
+  render(
+    taskContentElement(task({ runs: [run({ id: "9" })] }), "1", {
+      history,
+      synchronized: true,
+    }),
+  );
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperty(viewport, "scrollTop", {
+    configurable: true,
+    writable: true,
+    value: 0,
+  });
+  const nested = document.createElement("pre");
+  Object.defineProperties(nested, {
+    scrollTop: { configurable: true, writable: true, value: 20 },
+    scrollHeight: { configurable: true, value: 500 },
+    clientHeight: { configurable: true, value: 200 },
+  });
+  viewport.append(nested);
+  fireEvent.wheel(nested, { deltaY: -100 });
+  fireEvent.keyDown(nested, { key: "PageUp" });
+  assert.equal(loads, 0);
+  const input = document.createElement("textarea");
+  viewport.append(input);
+  fireEvent.keyDown(input, { key: "Home" });
+  fireEvent.keyDown(viewport, { key: "ArrowDown" });
+  assert.equal(loads, 0);
+  assert.equal(viewport.tabIndex, 0);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  assert.equal(loads, 1);
+  fireEvent.keyDown(viewport, { key: "PageUp" });
+  assert.equal(loads, 1);
+});
+
 test("Tool summary expands its exact inline details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const value = task({
@@ -5834,10 +6057,22 @@ test("App pages through all retained history while keeping the current Run live"
   await selectRecentTask(/First task/);
   assert.ok(screen.getByText("History input 16"));
   assert.equal(screen.queryByText("History input 1"), null);
-  for (const first of [9, 5, 1]) {
-    fireEvent.click(
-      screen.getByRole("button", { name: "Load earlier messages" }),
-    );
+  const historyViewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(historyViewport, {
+    scrollHeight: { configurable: true, value: 2000 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 200 },
+  });
+  fireEvent.scroll(historyViewport);
+  historyViewport.scrollTop = 60;
+  fireEvent.scroll(historyViewport);
+  await screen.findByText("History input 9");
+  assert.ok(screen.getByText("History input 16"));
+  for (const first of [5, 1]) {
+    historyViewport.scrollTop = 200;
+    fireEvent.scroll(historyViewport);
+    historyViewport.scrollTop = 60;
+    fireEvent.scroll(historyViewport);
     await screen.findByText(`History input ${first}`);
     assert.ok(screen.getByText("History input 16"));
     assert.equal(
@@ -5886,9 +6121,8 @@ test("App pages through all retained history while keeping the current Run live"
   await waitFor(() => assert.equal(oldestPageRequested, true));
   assert.equal(screen.queryByText("History input 1"), null);
   assert.equal(
-    screen.getByRole("button", { name: translate("en-US", "common.loading") })
-      .disabled,
-    true,
+    document.querySelector(".conversation-history-loading").textContent,
+    translate("en-US", "common.loading"),
   );
   assert.equal(
     screen.getByRole("button", { name: "Stop task" }).disabled,
@@ -5922,8 +6156,10 @@ test("App pages through all retained history while keeping the current Run live"
   await waitFor(() =>
     assert.equal(screen.queryByText("History input 9") === null, true),
   );
-  await screen.findByRole("button", { name: "Load earlier messages" });
-  assert.ok(screen.getByText("History input 16"));
+  await waitFor(() =>
+    assert.equal(document.querySelector(".conversation-history-loading"), null),
+  );
+  assert.ok(await screen.findByText("History input 16"));
   await act(async () => fireEvent.click(recentTaskButton(/Second task/)));
   assert.equal(screen.queryByText("History input 1"), null);
 });

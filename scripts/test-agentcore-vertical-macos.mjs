@@ -3304,10 +3304,16 @@ async function sendInRenderer(taskId, text) {
     await poll(
       () =>
         webview.evaluate(
-          `document.querySelector('.composer-send')?.disabled===false && document.querySelector('.composer-stop')!==null`,
+          `document.querySelector('.composer-send')?.disabled===false && document.querySelector('.composer-stop')===null`,
         ),
       commandTimeoutMs,
-      "content shows Send and Task Stop",
+      "content shows Send without Task Stop",
+    );
+    assert.deepEqual(
+      await webview.evaluate(
+        `(() => {const r=document.querySelector('.composer-send').getBoundingClientRect();return [r.width,r.height];})()`,
+      ),
+      [44, 44],
     );
     await webview.evaluate(`(() => {
       const transport=window.chrome.webview, post=transport.postMessage;
@@ -3405,7 +3411,7 @@ async function sendInRenderer(taskId, text) {
             webview.evaluate(`(() => {
           if(innerWidth>${width} || innerWidth<${width}-32) return false;
           const message=document.querySelector('.additional-input'), actions=[...document.querySelectorAll('.composer-send,.composer-stop')];
-          if(!message || actions.length!==2 || !actions.some(action=>action.classList.contains('composer-send'))) return false;
+          if(!message || actions.length!==1 || !actions[0].classList.contains('composer-send') || actions[0].disabled) return false;
           const bubble=message.querySelector('.ai-message[data-role="user"]');
           if(!bubble) throw new Error('interjection must use the shared user message');
           const shared=document.querySelector('.ai-exchange > .ai-message[data-role="user"]');

@@ -818,14 +818,52 @@ test("a new Task draft is editable before its first send", () => {
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("an active Run with content keeps Send and Stop", () => {
+test("an active Run with content shows only Send", () => {
   const markup = render({
     draft: { kind: "text", text: "Keep working" },
     stopAction: "run",
   });
-  assert.match(markup, /aria-label="Stop task"/);
-  assert.match(markup, /class="[^\"]*composer-stop/);
+  assert.doesNotMatch(markup, /aria-label="Stop task"|composer-stop/);
   assert.match(markup, /class="[^\"]*composer-send/);
+});
+
+test("drafts that are not yet sendable never expose Stop instead", () => {
+  const drafts = [
+    { kind: "text", text: " \n" },
+    {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "file",
+          token: "draft-file",
+          displayName: "notes.txt",
+          sizeBytes: "12",
+        },
+      ],
+    },
+    {
+      kind: "skill",
+      skillId: "review",
+      invocationName: "review",
+      displayName: "Review",
+      catalogRevision: "4",
+      selectionRevision: "1",
+      argumentNames: [],
+      argumentValues: [],
+      maxValues: 0,
+    },
+  ];
+  for (const draft of drafts) {
+    for (const stopAction of ["run", "compact"]) {
+      const markup = render({ draft, stopAction, canSubmit: false });
+      assert.match(
+        markup,
+        /<button(?=[^>]*aria-label="Send")(?=[^>]*disabled)[^>]*>/,
+      );
+      assert.doesNotMatch(markup, /composer-stop/);
+    }
+  }
 });
 
 test("an unavailable workspace preserves editable text and offers folder reselection", () => {
@@ -1224,14 +1262,14 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
   );
 });
 
-test("an active Run keeps same-sized Send and Stop actions", () => {
+test("the primary action follows draft presence independently of send readiness", () => {
   const markup = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
     runInFlight: true,
     canSubmit: true,
   });
-  assert.match(markup, /aria-label="Stop task"/);
+  assert.doesNotMatch(markup, /aria-label="Stop task"/);
   assert.match(markup, /aria-label="Send"/);
   assert.doesNotMatch(markup, /composer-draft-note|await adoption/);
   const stopping = render({
@@ -1242,7 +1280,7 @@ test("an active Run keeps same-sized Send and Stop actions", () => {
     canSubmit: false,
     sendDisabledReason: "input.stopping",
   });
-  assert.match(stopping, /aria-label="Stop task"/);
+  assert.doesNotMatch(stopping, /aria-label="Stop task"/);
   assert.match(
     stopping,
     /<button(?=[^>]*aria-label="Send")(?=[^>]*disabled)[^>]*>/,

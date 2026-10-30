@@ -2563,13 +2563,46 @@ summary::-webkit-details-marker {
 }
 
 .ai-conversation-content {
+  position: relative;
   width: min(100%, 840px);
   margin: 0 auto;
   padding: 32px 32px 52px;
 }
 
 .ai-exchange + .ai-exchange {
-  margin-top: 38px;
+  margin-top: 32px;
+}
+
+.ai-conversation-viewport:focus-visible {
+  outline: 2px solid var(--ui-content-muted);
+  outline-offset: -2px;
+}
+
+.conversation-history-loading {
+  position: absolute;
+  top: 4px;
+  inset-inline: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  color: var(--ui-content-muted);
+  font-size: 16px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.conversation-history-spinner {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  animation: task-signal-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-history-spinner {
+    animation: none;
+  }
 }
 
 .message-info-bar {
@@ -2578,7 +2611,7 @@ summary::-webkit-details-marker {
   max-width: 100%;
   min-height: 32px;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   opacity: 0;
   transition: opacity 120ms ease;
@@ -2590,7 +2623,7 @@ summary::-webkit-details-marker {
 }
 
 .message-info-bar[data-role="assistant"] {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .message-info-metadata {
@@ -2600,11 +2633,11 @@ summary::-webkit-details-marker {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  padding-block: calc((32px - 1.4em) / 2);
   color: var(--ui-content-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
-  opacity: 0.72;
 }
 
 .message-info-metadata time {
@@ -2622,6 +2655,11 @@ summary::-webkit-details-marker {
   padding: 0;
   font-size: 14px;
   color: var(--ui-content-muted);
+}
+
+.message-info-copy:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
 }
 
 .message-info-bar[data-latest="true"],
@@ -2652,15 +2690,13 @@ summary::-webkit-details-marker {
   width: fit-content;
   max-width: min(78%, 660px);
   margin-left: auto;
-  padding: 12px 15px;
-  border: 1px solid
-    color-mix(in srgb, var(--ui-action-primary) 14%, var(--ui-border));
-  border-radius: 14px;
-  background: color-mix(
-    in srgb,
-    var(--ui-action-primary) 9%,
-    var(--ui-surface-panel)
-  );
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--ui-surface-panel-2);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.6;
 }
 
 .task-input-copy {
@@ -2688,19 +2724,17 @@ summary::-webkit-details-marker {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   column-gap: 7px;
-  border: 1px solid
-    color-mix(in srgb, var(--ui-action-primary) 18%, var(--ui-border));
-  border-left: 2px solid var(--ui-action-primary);
+  border: 1px solid var(--ui-border);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--ui-surface-panel) 82%, transparent);
+  background: var(--ui-surface-panel);
 }
 
 .task-input-attachment > span {
   grid-row: 1 / 3;
-  color: var(--ui-action-primary);
+  color: var(--ui-content-muted);
   font-family: var(--font-mono);
   font-size: var(--text-micro);
-  font-weight: 720;
+  font-weight: 600;
 }
 
 .task-input-attachment strong,
@@ -2727,12 +2761,14 @@ summary::-webkit-details-marker {
   color: var(--ui-content-primary);
 }
 
-.assistant-output-part {
-  line-height: 1.62;
+.run-assistant-output .assistant-output-part {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.75;
 }
 
 .assistant-output-part + .assistant-output-part {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .run-assistant-output .ai-markdown p,
@@ -2740,14 +2776,42 @@ summary::-webkit-details-marker {
 .run-assistant-output .ai-markdown ol,
 .run-assistant-output .ai-markdown blockquote,
 .run-assistant-output .ai-markdown table {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
-.run-assistant-output .ai-markdown h1,
-.run-assistant-output .ai-markdown h2,
-.run-assistant-output .ai-markdown h3,
-.run-assistant-output .ai-markdown h4 {
-  margin: 16px 0 6px;
+.run-assistant-output .ai-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 22px 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.run-assistant-output .ai-markdown h1 {
+  font-size: 20px;
+}
+
+.run-assistant-output .ai-markdown h2 {
+  font-size: 18px;
+}
+
+.run-assistant-output .ai-markdown h3 {
+  font-size: 16px;
+}
+
+.run-assistant-output .ai-markdown :is(strong, b, th) {
+  font-weight: 600;
+}
+
+.run-assistant-output .ai-markdown ul:not(.contains-task-list) {
+  list-style-type: disc;
+}
+
+.run-assistant-output .ai-markdown ol:not(.contains-task-list) {
+  list-style-type: decimal;
+}
+
+.run-assistant-output .ai-markdown li + li {
+  margin-top: 6px;
 }
 
 .run-assistant-output .ai-markdown > :first-child {
@@ -7968,10 +8032,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .new-task-content .ai-composer {
   min-height: 140px;
-  border-color: var(--ui-action-primary-border);
-  box-shadow:
-    0 1px 2px color-mix(in srgb, var(--ui-content-primary) 4%, transparent),
-    0 16px 42px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
 }
 
 .new-task-content .ai-composer textarea {
@@ -7982,16 +8042,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: auto;
 }
 
-.new-task-content .ai-composer:focus-within {
-  border-color: var(--ui-action-primary);
-  box-shadow:
-    0 16px 46px color-mix(in srgb, var(--ui-action-primary) 12%, transparent),
-    0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 9%, transparent);
-}
-
 .composer-bar {
   padding: 10px 24px 18px;
   background: var(--workbench-content-surface);
+}
+
+.composer-bar,
+.composer-model-menu,
+.task-approval-menu,
+.composer-workspace-menu {
+  --ui-focus-ring: var(--ui-content-muted);
+  --ui-action-selected-surface: color-mix(
+    in srgb,
+    var(--ui-border) 50%,
+    var(--ui-surface-panel)
+  );
+  --ui-action-selected-content: var(--ui-content-primary);
+}
+
+.composer-bar .selection-trigger:hover:not(:disabled),
+.composer-bar .selection-trigger[data-state="open"],
+.composer-bar .selection-trigger[data-popup-open] {
+  border-color: transparent;
 }
 
 .task-workspace {
@@ -8198,29 +8270,60 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border: 1px solid var(--ui-border);
   border-radius: 18px;
   background: var(--ui-surface-panel);
-  box-shadow: var(--ui-shadow-overlay);
+  box-shadow: 0 1px 3px
+    color-mix(in srgb, var(--ui-content-primary) 4%, transparent);
 }
 
 .ai-conversation-jump {
   position: absolute;
   z-index: 12;
-  right: 24px;
+  isolation: isolate;
+  left: 50%;
   bottom: 16px;
-  padding: 8px 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 999px;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  transform: translateX(-50%);
+  border: 0;
+  border-radius: 50%;
   color: var(--ui-content-primary);
+  background: transparent;
+  font-size: 20px;
+}
+
+.ai-conversation-jump::before {
+  position: absolute;
+  z-index: -1;
+  inset: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: inherit;
   background: var(--ui-surface-panel);
-  box-shadow: var(--ui-shadow-overlay);
-  font-size: var(--text-label);
-  font-weight: 650;
+  box-shadow: 0 1px 3px
+    color-mix(in srgb, var(--ui-content-primary) 4%, transparent);
+  content: "";
+}
+
+.ai-conversation-jump:hover {
+  background: transparent;
+}
+
+.ai-conversation-jump:hover::before {
+  background: var(--ui-action-hover-surface);
+}
+
+.ai-conversation-jump:focus-visible {
+  outline: 2px solid var(--ui-content-muted);
+  outline-offset: 2px;
+}
+
+.ai-conversation-jump svg {
+  stroke-width: 1.5;
 }
 
 .ai-composer:focus-within {
-  border-color: var(--ui-action-primary-border);
-  box-shadow:
-    0 10px 28px color-mix(in srgb, var(--ui-content-primary) 8%, transparent),
-    0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 7%, transparent);
+  border-color: var(--ui-content-muted);
 }
 
 .ai-composer textarea {
@@ -8235,8 +8338,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline: 0;
   color: var(--ui-content-primary);
   background: transparent;
-  font-size: var(--text-body);
-  line-height: 1.5;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.6;
 }
 
 .ai-composer textarea::placeholder {
@@ -8454,13 +8558,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .composer-attachment-remove:hover:not(:disabled),
 .composer-attachment-add:hover:not(:disabled) {
-  color: var(--ui-action-primary);
-  background: color-mix(in srgb, var(--metask-primary-soft) 58%, transparent);
+  color: var(--ui-content-primary);
+  background: var(--ui-action-hover-surface);
 }
 
 .composer-attachment-add:focus-visible,
 .composer-attachment-remove:focus-visible {
-  outline: 2px solid var(--ui-action-primary);
+  outline: 2px solid var(--ui-focus-ring);
   outline-offset: 2px;
 }
 
@@ -8502,20 +8606,31 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .ai-composer-toolbar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 34px;
   padding: 0 2px 0 5px;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 6px 14px;
 }
 
 .composer-context-actions {
   display: flex;
   flex-wrap: wrap;
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   align-items: center;
   gap: 4px;
+}
+
+.composer-model-actions {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .task-approval-mode {
@@ -8537,10 +8652,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   padding: 0 8px;
   border: 0;
   border-radius: 9px;
-  color: var(--ui-content-primary);
+  color: var(--ui-content-muted);
   background: transparent;
   font-size: var(--text-control);
-  font-weight: 620;
+  font-weight: 400;
 }
 
 /* Match the model chip's 32px surface while keeping a 44px hit target. */
@@ -8549,7 +8664,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   z-index: -1;
   inset: 6px 0;
   border-radius: inherit;
-  background: var(--ui-surface-panel-2);
+  background: transparent;
   content: "";
 }
 
@@ -8597,10 +8712,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   height: 32px;
   padding: 0 8px;
   border-radius: 9px;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-muted);
+  background: transparent;
   font-size: var(--text-control);
-  font-weight: 620;
+  font-weight: 400;
 }
 
 .composer-model-trigger .selection-trigger-leading {
@@ -8621,7 +8736,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 7px;
   color: var(--ui-content-muted);
   font-size: var(--text-control);
-  font-weight: 620;
+  font-weight: 400;
 }
 
 .composer-model-readonly span {
@@ -8662,7 +8777,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-radius: 7px;
   color: var(--ui-content-muted);
   font-size: var(--text-label);
-  font-weight: 560;
+  font-weight: 400;
 }
 
 .composer-workspace-trigger:hover:not(:disabled),
@@ -8675,7 +8790,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .composer-workspace-readonly {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
-  font-weight: 560;
+  font-weight: 400;
 }
 
 .composer-workspace-readonly span {
@@ -8701,12 +8816,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   background: transparent;
   font-size: var(--text-label);
-  font-weight: 650;
+  font-weight: 400;
 }
 
 .composer-workspace-action:hover:not(:disabled) {
-  color: var(--ui-action-primary);
-  background: color-mix(in srgb, var(--metask-primary-soft) 58%, transparent);
+  color: var(--ui-content-primary);
+  background: var(--ui-action-hover-surface);
 }
 
 .composer-workspace-action[data-emphasis="true"] {
@@ -8714,29 +8829,30 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: color-mix(in srgb, var(--ui-content-warning) 8%, transparent);
 }
 
-.composer-send {
+.composer-send,
+.composer-stop {
   display: grid;
   width: 44px;
   height: 44px;
-  padding: 0;
+  padding: 4px;
   place-items: center;
   border: 0;
   border-radius: 50%;
-  color: var(--ui-content-on-primary);
-  background: var(--ui-action-primary);
-  font-size: var(--text-title);
+  background-clip: content-box;
   transition:
     background-color 120ms ease,
     transform 120ms ease;
 }
 
-.composer-send-group,
-.composer-run-actions {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
+.composer-send {
+  color: var(--ui-content-on-primary);
+  background-color: var(--ui-action-primary);
+}
+
+.composer-send svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 2;
 }
 
 .composer-model-notice {
@@ -8801,25 +8917,44 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-send:hover:not(:disabled) {
-  background: var(--ui-action-primary-hover);
+  background-color: var(--ui-action-primary-hover);
 }
 
-.composer-send:active:not(:disabled) {
+.composer-send:active:not(:disabled),
+.composer-stop:active:not(:disabled) {
   transform: scale(0.96);
 }
 
+.composer-send:focus-visible,
+.composer-stop:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
+}
+
 .composer-send:disabled {
-  color: var(--ui-content-on-primary);
-  background: var(--ui-border);
+  color: var(--ui-content-muted);
+  background-color: var(--ui-surface-panel-2);
   opacity: 1;
 }
 
 .composer-stop {
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  border-radius: 50%;
-  font-size: var(--text-lead);
+  color: var(--ui-surface-panel);
+  background-color: var(--ui-content-primary);
+}
+
+.composer-stop:hover:not(:disabled) {
+  background-color: color-mix(
+    in srgb,
+    var(--ui-content-primary) 86%,
+    var(--ui-surface-panel)
+  );
+}
+
+.composer-stop svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke-width: 0;
 }
 
 .composer-stop:disabled {
@@ -9991,14 +10126,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-reading-flow {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 20px;
+  gap: 16px;
   min-width: 0;
 }
 .run-reading-flow > .ai-message[data-role="assistant"] {
   margin-top: 0;
 }
 .run-reading-flow:not(:empty) {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 .additional-input {
   min-width: 0;
