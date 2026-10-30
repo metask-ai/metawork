@@ -9,5 +9,19 @@
   "environment_absent_before_model": true,
   "existing_runtime_or_credentials_copied": false,
   "attempts": [],
-  "acceptance": "not qualified; no first-preparation model attempt yet"
+  "acceptance": "not qualified; no first-preparation model attempt yet",
+  "authorized_pre_attempt_policy_revision2": {
+    "suite": {
+      "path": "tests/fixtures/office/model-acceptance-first-preparation.json",
+      "bytes": 3599,
+      "sha256": "fc8f1bb96b491c828019ac29f932bff1ea6026ac3521262fedb37c5afef5fef7"
+    },
+    "business_oracle": {
+      "path": "scripts/check-office-model-pptx.py",
+      "bytes": 7171,
+      "sha256": "dd95cb96f8842f51d2316daabd5e0f3e19cb2ff95695241cff5f8ecf5bbd4b13"
+    },
+    "authorization": "User explicitly approved 允许标点等价（推荐） on 2026-10-30; only optional colon/whitespace around total label and integer650.",
+    "no_attempts_preceded_revision": true
+  }
 }

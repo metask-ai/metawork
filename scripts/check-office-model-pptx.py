@@ -6,6 +6,7 @@ final wording are evaluated separately from this content/structure oracle.
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -49,7 +50,7 @@ def check(content, edited):
                  for paragraph in tree.findall(".//a:p", NS)]
         assert titles[index] in texts, (index, "Title missing")
         if index == 0:
-            assert "总额650" in texts, "Exact total text missing"
+            assert any(re.fullmatch(r"\s*总额\s*[:：]?\s*650\s*", text) for text in texts), "Total label/value missing"
             note_rels = relations(slide)
             notes = [name for name in note_rels.values() if name.startswith("ppt/notesSlides/")]
             assert len(notes) == 1 and "验收备注：650" in ["".join(item.text or "" for item in paragraph.findall(".//a:t", NS)) for paragraph in E.fromstring(content[notes[0]]).findall(".//a:p", NS)], "Speaker note missing"

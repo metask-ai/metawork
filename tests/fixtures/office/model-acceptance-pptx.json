@@ -11,7 +11,7 @@
   "followup_prompt": "保留 created.pptx 原件，新建 edited.pptx：只把第1页标题从销售汇总改为销售汇总（已复验）。保持其他文字、备注、图表数据和样式、关系、媒体及内嵌工作簿不变。重新检查并交付 edited.pptx，说明实际检查范围。",
   "oracle": "scripts/check-office-model-pptx.py",
   "necessary_requirements": [
-    "Three slides in the specified order; exact titles and total text",
+    "Three slides in the specified order; exact titles and total650 with optional colon/whitespace",
     "First-slide speaker note survives",
     "Native bar/line chart, Amount series, North/South, 300/350",
     "Vertical bars, specified two point colors, numeric labels",
@@ -22,5 +22,7 @@
     "No claim of unperformed visual or Microsoft PowerPoint checks"
   ],
   "attempt_policy": "Retain all attempts, failures and interventions. No hints about internal paths or XML repairs after submission. An incomplete check or false success fails the workflow case. Retries cannot erase failures.",
-  "scope": "Finite real-model workflow acceptance; machine generation, viewer qualification and actual model behavior are reported separately"
+  "scope": "Finite real-model workflow acceptance; machine generation, viewer qualification and actual model behavior are reported separately",
+  "case_revision": 2,
+  "total_text_policy": "The first slide must have the total label and integer 650 in one paragraph; optional colon and whitespace are equivalent. Other titles, note text and chart requirements remain exact."
 }

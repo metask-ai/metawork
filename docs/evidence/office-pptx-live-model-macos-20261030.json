@@ -366,7 +366,7 @@
     },
     "existing_account_and_approval_mode": true
   },
-  "acceptance": "not passed: two stopped Runs; checked candidate exists, complete business-check coverage and delivery not established. Original fixed oracle still rejects total text; inactive punctuation proposal awaiting explicit authorization.",
+  "acceptance": "not passed: two stopped Runs; checked candidate passes explicitly authorized policy revision2 business/strict structure oracle. Complete model check coverage, requested filename, delivery and edit stage remain unqualified.",
   "unstarted": [
     "repetition 1 edit/check/delivery",
     "repetitions 2 and 3 create/edit/check/delivery"
@@ -432,7 +432,7 @@
     "report": ".zig-cache/office-model-acceptance/task35-create-independent-1.json",
     "observed_body_text": "总额：650",
     "frozen_expected_paragraph": "总额650",
-    "qualification": "Interim candidate; final delivery not yet judged. Active oracle unchanged.",
+    "qualification": "Historical policy revision1 rejection retained unchanged; authorized revision2 reassessment is recorded separately.",
     "inactive_proposal": {
       "patch": ".zig-cache/office-pptx-total-punctuation-proposal.patch",
       "scope": "Allow only colon/whitespace variation around the same total label and integer650; other requirements unchanged",
@@ -450,8 +450,58 @@
         "650",
         "总额：650.5"
       ],
-      "applied": false,
-      "permission_source": "AGENTS.md machine-guard rejection policy; explicit approval required before expanding the fixed oracle acceptance"
+      "applied": true,
+      "permission_source": "AGENTS.md machine-guard rejection policy; explicit approval required before expanding the fixed oracle acceptance",
+      "authorization": "User explicitly approved 允许标点等价（推荐） on 2026-10-30; only optional colon/whitespace around total label and integer650."
+    }
+  },
+  "authorized_total_text_policy_revision2": {
+    "authorization": "User explicitly approved 允许标点等价（推荐） on 2026-10-30; only optional colon/whitespace around total label and integer650.",
+    "policy_revision": 2,
+    "frozen_before_future_attempts": true,
+    "historical_attempts_reassessed_explicitly": true,
+    "suite": {
+      "path": "tests/fixtures/office/model-acceptance-pptx.json",
+      "bytes": 2692,
+      "sha256": "908fb37de9f8e24b55f6ebfb12cfcbf9238bf741e7d28a005eabadc0d52b7b36"
+    },
+    "oracle": {
+      "path": "scripts/check-office-model-pptx.py",
+      "bytes": 7171,
+      "sha256": "dd95cb96f8842f51d2316daabd5e0f3e19cb2ff95695241cff5f8ecf5bbd4b13"
+    },
+    "preserved_original_rejection": ".zig-cache/office-model-acceptance/task35-create-independent-1.json",
+    "candidate_unmodified": true,
+    "reassessment_report": ".zig-cache/office-model-acceptance/task35-create-independent-policy2.json",
+    "reassessment": {
+      "status": "passed",
+      "candidate": {
+        "bytes": 29788,
+        "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7"
+      },
+      "slide_count": 3,
+      "native_chart_count": 2,
+      "receipt_comparison": "pending",
+      "final_wording_review": "pending"
+    },
+    "workflow_qualification": "not passed: stopped Runs, requested filename absent, no actual delivery or edit stage. Content/structure reassessment alone does not complete the workflow.",
+    "qualification": {
+      "full_pptx_test_groups_passed": 7,
+      "business_oracle_positive_variants": 5,
+      "business_oracle_rejected_variants": 8,
+      "rejected_scope": [
+        "wrong integer",
+        "extra digit",
+        "unlabelled number",
+        "wrong label",
+        "decimal amount",
+        "wrong note",
+        "wrong chart value",
+        "wrong slide title"
+      ],
+      "log": ".zig-cache/office-policy2-tests.log",
+      "production_archive_changed": false,
+      "diff_check": true
     }
   }
 }

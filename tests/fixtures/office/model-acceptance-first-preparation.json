@@ -31,5 +31,6 @@
   ],
   "attempt_policy": "Retain all attempts, failures and interventions. No hints about internal paths or XML repairs after submission. An incomplete check or false success fails the workflow case. Retries cannot erase failures.",
   "counting_rule": "This separate preparation case does not count as one of the three ready-environment repetitions",
-  "selected_model": "glm-5.3-flash"
+  "selected_model": "glm-5.3-flash",
+  "business_oracle_policy_revision": 2
 }

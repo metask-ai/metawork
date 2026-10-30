@@ -121,6 +121,40 @@ class PPTXQualification(unittest.TestCase):
         self.assertIn("explicitly declared", result.stdout)
         self.assertFalse(output.exists())
 
+    def test_model_business_oracle_total_punctuation_and_unchanged_requirements(self):
+        raw = self.local / "business-raw.pptx"
+        generated = invoke(NODE, "node", ROOT / "tests/fixtures/office/model-oracle.cjs", raw)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        result, checked = self.finalize(raw)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        baseline = parts(checked)
+        def text_part(content, name, before, after):
+            tree = E.fromstring(content[name])
+            matches = [item for item in tree.iter() if item.text == before]
+            self.assertEqual(len(matches), 1)
+            matches[0].text = after
+            content[name] = E.tostring(tree)
+        variants = [(text, True) for text in ("总额650", "总额：650", "总额:650", "总额 650", " 总额： 650 ")]
+        variants += [(text, False) for text in ("总额651", "总额6500", "其他650", "650", "总额：650.5")]
+        variants += [("wrong-note", False), ("wrong-chart", False), ("wrong-title", False)]
+        for index, (text, accepted) in enumerate(variants):
+            with self.subTest(text=text):
+                content = dict(baseline)
+                if text == "wrong-note":
+                    text_part(content, "ppt/notesSlides/notesSlide1.xml", "验收备注：650", "验收备注：651")
+                elif text == "wrong-chart":
+                    text_part(content, "ppt/charts/chart1.xml", "300", "301")
+                elif text == "wrong-title":
+                    text_part(content, "ppt/slides/slide2.xml", "地区金额", "其他标题")
+                else:
+                    text_part(content, "ppt/slides/slide1.xml", "总额650", text)
+                candidate = self.local / (str(index) + ".pptx")
+                with zipfile.ZipFile(candidate, "x", zipfile.ZIP_DEFLATED) as packed:
+                    for name, data in content.items(): packed.writestr(name, data)
+                outcome = invoke(ENTRY, "python", ROOT / "scripts/check-office-model-pptx.py", candidate, "--entry", ENTRY)
+                self.assertEqual(outcome.returncode, 0 if accepted else 1, outcome.stdout + outcome.stderr)
+                self.assertEqual(json.loads(outcome.stdout)["status"], "passed" if accepted else "failed")
+
     def test_exclusive_output_and_original_protection(self):
         source = self.generated / "text-notes.pptx"
         before = source.read_bytes()
