@@ -4,11 +4,16 @@ import type {
   FileReferenceView,
   FilePreviewLoadOptions,
 } from "../../bridge/contracts.ts";
-import { createTaskPanelPreviewTab } from "./task-panel-state.ts";
+import {
+  createTaskPanelPreviewTab,
+  createTaskPanelWorkspaceTab,
+} from "./task-panel-state.ts";
 type FilePreviewIdentity = {
   tabId: string;
   taskId: string;
-  runId: string;
+  runId: string | null;
+  workspaceId: string | null;
+  workspaceEpoch: string | null;
   reference: FileReferenceView;
   requestGeneration: number;
 };
@@ -34,6 +39,13 @@ export function useFilePreviewTabs(
   activeTaskId: string | null,
   validTabIds: ReadonlySet<string>,
   load: FilePreviewLoader,
+  loadWorkspace: (
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+    options?: FilePreviewLoadOptions,
+  ) => Promise<FilePreview>,
 ) {
   const [resources, setResourceState] = useState<
     Record<string, FilePreviewTabState>
@@ -61,10 +73,20 @@ export function useFilePreviewTabs(
   }
   function request(
     taskId: string,
-    runId: string,
+    runId: string | null,
     reference: FileReferenceView,
+    workspaceId: string | null = null,
+    workspaceEpoch: string | null = null,
   ) {
-    const tab = createTaskPanelPreviewTab(taskId, runId, reference);
+    const tab =
+      workspaceId !== null
+        ? createTaskPanelWorkspaceTab(
+            taskId,
+            workspaceId,
+            workspaceEpoch!,
+            reference.displayPath,
+          )
+        : createTaskPanelPreviewTab(taskId, runId!, reference);
     invalidate(tab.tabId);
     const controller = new AbortController();
     controllers.current.set(tab.tabId, controller);
@@ -74,6 +96,8 @@ export function useFilePreviewTabs(
       tabId: tab.tabId,
       taskId,
       runId,
+      workspaceId,
+      workspaceEpoch,
       reference,
       requestGeneration,
     };
@@ -81,10 +105,21 @@ export function useFilePreviewTabs(
       ...current,
       [tab.tabId]: { kind: "loading", ...identity },
     }));
-    void load(taskId, runId, reference.id, {
+    const options: FilePreviewLoadOptions = {
       signal: controller.signal,
       priority: "interactive",
-    })
+    };
+    void (
+      workspaceId !== null
+        ? loadWorkspace(
+            taskId,
+            workspaceId,
+            workspaceEpoch!,
+            reference.displayPath,
+            options,
+          )
+        : load(taskId, runId!, reference.id, options)
+    )
       .then((preview) => {
         if (
           controller.signal.aborted ||
@@ -167,6 +202,47 @@ export function useFilePreviewTabs(
       return next;
     });
   }
+  function openWorkspace(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+  ) {
+    const tab = createTaskPanelWorkspaceTab(
+      taskId,
+      workspaceId,
+      workspaceEpoch,
+      path,
+    );
+    if (!resourcesRef.current[tab.tabId])
+      request(
+        taskId,
+        null,
+        { id: path, title: tab.title, displayPath: path },
+        workspaceId,
+        workspaceEpoch,
+      );
+  }
+  function refreshWorkspace(
+    taskId: string,
+    workspaceId: string,
+    workspaceEpoch: string,
+    path: string,
+  ) {
+    const tab = createTaskPanelWorkspaceTab(
+      taskId,
+      workspaceId,
+      workspaceEpoch,
+      path,
+    );
+    request(
+      taskId,
+      null,
+      { id: path, title: tab.title, displayPath: path },
+      workspaceId,
+      workspaceEpoch,
+    );
+  }
   function clear() {
     for (const controller of controllers.current.values()) controller.abort();
     controllers.current.clear();
@@ -189,5 +265,13 @@ export function useFilePreviewTabs(
     for (const tabId of Object.keys(resourcesRef.current))
       if (!validTabIds.has(tabId)) close(tabId);
   }, [validTabIds]);
-  return { resources, open, refresh: request, close, clear };
+  return {
+    resources,
+    open,
+    openWorkspace,
+    refreshWorkspace,
+    refresh: request,
+    close,
+    clear,
+  };
 }

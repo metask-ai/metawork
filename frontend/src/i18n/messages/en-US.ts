@@ -1056,6 +1056,19 @@ export const enUS = {
   "task_panel.title": "Side panel",
   "task_panel.empty": "Open a file or review changes from the conversation.",
   "task_panel.tabs": "Open items",
+  "task_panel.file_tree": "Workspace files",
+  "task_panel.directory_unavailable":
+    "Select a task with an available workspace to browse files.",
+  "task_panel.directory_empty": "No browsable files in this folder.",
+  "task_panel.directory_truncated":
+    "Some entries are not shown because this folder exceeds the browsing limit.",
+  "task_panel.directory_redacted": "Some entries are hidden for security.",
+  "task_panel.directory_capacity":
+    "Directory limit reached. Refresh to browse other folders.",
+  "task_panel.refresh_directory": "Refresh workspace files",
+  "task_panel.retry_directory": "Retry loading folder",
+  "task_panel.show_file_tree": "Show file tree",
+  "task_panel.hide_file_tree": "Hide file tree",
   "task_panel.close_tab": "Close {title}",
   "task_panel.hide": "Hide side panel",
   "task_panel.open": "Open side panel",

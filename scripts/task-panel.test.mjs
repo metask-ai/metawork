@@ -16,6 +16,7 @@ import {
 import {
   closeTaskPanelTab,
   createTaskPanelPreviewTab,
+  createTaskPanelWorkspaceTab,
   createTaskPanelReviewTab,
   emptyTaskPanelSession,
   emptyTaskPanelTarget,
@@ -102,6 +103,9 @@ const {
 } = await vite.ssrLoadModule("/src/features/task-panel/HighlightedSource.tsx");
 const { TaskPanel, taskPanelTabLabels } = await vite.ssrLoadModule(
   "/src/features/task-panel/TaskPanel.tsx",
+);
+const { WorkspaceFileTree, useWorkspaceFileTree } = await vite.ssrLoadModule(
+  "/src/features/task-panel/WorkspaceFileTree.tsx",
 );
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
@@ -4940,6 +4944,8 @@ test("Task Panel tabs use manual keyboard activation and one tab stop", async ()
           TaskPanel,
           {
             title: "Side panel",
+            fileTreeOpen: true,
+            onToggleFileTree() {},
             tabs,
             activeTabId,
             attention: null,
@@ -5563,13 +5569,15 @@ test("Conversation context only shows pressure; successful compaction removes th
   assert.equal(document.querySelector(".composer-context"), null);
 });
 
-test("empty detail pane omits generic visible header actions", async () => {
+test("empty detail pane keeps the file tree control without unrelated header actions", async () => {
   const view = render(
     localizedView(
       createElement(
         TaskPanel,
         {
           title: "Review",
+          fileTreeOpen: true,
+          onToggleFileTree() {},
           tabs: [],
           activeTabId: null,
           attention: createElement("button", null, "Needs your attention"),
@@ -5590,6 +5598,8 @@ test("empty detail pane omits generic visible header actions", async () => {
         TaskPanel,
         {
           title: "Tool details",
+          fileTreeOpen: true,
+          onToggleFileTree() {},
           tabs: [],
           activeTabId: null,
           attention: null,
@@ -5603,9 +5613,151 @@ test("empty detail pane omits generic visible header actions", async () => {
   );
   assert.equal(screen.queryByText("diff body"), null);
   assert.equal(screen.queryByRole("button", { name: "Back to changes" }), null);
-  assert.equal(document.querySelector(".task-panel-header"), null);
+  assert.ok(document.querySelector(".task-panel-header"));
+  assert.ok(screen.getByRole("button", { name: "Hide file tree" }));
+  assert.ok(screen.getByRole("complementary", { name: "Workspace files" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Needs your attention" }),
+    null,
+  );
   assert.equal(screen.queryByRole("button", { name: "Hide side panel" }), null);
   assert.ok(screen.getByRole("heading", { name: "Tool details" }));
+});
+
+test("workspace directory loads lazily and ignores late responses after Task switches", async () => {
+  let tree;
+  const requests = [];
+  function Fixture({ scope, visible = true }) {
+    tree = useWorkspaceFileTree(
+      scope,
+      scope,
+      "1",
+      "1",
+      visible,
+      (...args) => new Promise((resolve) => requests.push({ args, resolve })),
+    );
+    return localizedView(
+      createElement(WorkspaceFileTree, {
+        tree,
+        available: true,
+        selectedPath: null,
+        onOpen() {},
+      }),
+    );
+  }
+  const view = render(
+    createElement(Fixture, { scope: "first", visible: false }),
+  );
+  assert.equal(requests.length, 0);
+  view.rerender(createElement(Fixture, { scope: "first" }));
+  await waitFor(() => assert.equal(requests.length, 1));
+  assert.deepEqual(requests[0].args.slice(0, 4), ["first", "1", "1", ""]);
+  view.rerender(createElement(Fixture, { scope: "second" }));
+  await waitFor(() => assert.equal(requests.length, 2));
+  assert.equal(requests[0].args[4].signal.aborted, true);
+  await act(async () =>
+    requests[0].resolve({
+      state: "ready",
+      entries: [{ name: "stale.txt", kind: "file" }],
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  assert.equal(screen.queryByRole("treeitem", { name: "stale.txt" }), null);
+  await act(async () =>
+    requests[1].resolve({
+      state: "ready",
+      entries: [
+        { name: "docs", kind: "directory" },
+        { name: "readme.md", kind: "file" },
+      ],
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  const docs = screen.getByRole("treeitem", { name: "docs" });
+  docs.focus();
+  await userEvent.setup().keyboard("{ArrowRight}");
+  await waitFor(() => assert.equal(requests.length, 3));
+  assert.equal(requests[2].args[3], "docs");
+  await act(async () =>
+    requests[2].resolve({
+      state: "ready",
+      entries: [{ name: "child.md", kind: "file" }],
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  await userEvent.setup().keyboard("{ArrowRight}");
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("treeitem", { name: "child.md" }),
+  );
+});
+
+test("workspace preview tabs need no Run and retain exact workspace identity", () => {
+  const value = task({ workspaceId: "1", runs: [] });
+  const tab = createTaskPanelWorkspaceTab(value.id, "1", "2", "docs/file.md");
+  const session = openTaskPanelTab(emptyTaskPanelSession, tab, value, false);
+  assert.equal(session.tabs.length, 1);
+  assert.equal(openTaskPanelTab(session, tab, value, false).tabs.length, 1);
+  assert.equal(
+    reconcileTaskPanelSession(
+      session,
+      { ...value, workspaceId: "other" },
+      false,
+    ).tabs.length,
+    0,
+  );
+});
+
+test("file tree keyboard toggle preserves the active preview DOM and tab selection", async () => {
+  const tab = createTaskPanelPreviewTab("3", "9", {
+    id: "ref-a",
+    title: "a.txt",
+    displayPath: "a.txt",
+  });
+  function Fixture() {
+    const [fileTreeOpen, setFileTreeOpen] = useState(true);
+    return localizedView(
+      createElement(
+        TaskPanel,
+        {
+          title: "Side panel",
+          tabs: [tab],
+          activeTabId: tab.tabId,
+          fileTreeOpen,
+          onToggleFileTree: () => setFileTreeOpen((open) => !open),
+          attention: null,
+          onSelectTab() {},
+          onCloseTab() {},
+          onClose() {},
+        },
+        createElement("textarea", {
+          "aria-label": "Preview selection",
+          defaultValue: "Read me",
+        }),
+      ),
+    );
+  }
+  const user = userEvent.setup();
+  render(createElement(Fixture));
+  const preview = screen.getByRole("textbox", { name: "Preview selection" });
+  preview.setSelectionRange(2, 5);
+  const toggle = screen.getByRole("button", { name: "Hide file tree" });
+  toggle.focus();
+  await user.keyboard("{Enter}");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(screen.queryByRole("complementary"), null);
+  assert.equal(screen.getByRole("textbox"), preview);
+  assert.equal(preview.selectionStart, 2);
+  assert.equal(preview.selectionEnd, 5);
+  assert.equal(screen.getByRole("tab").getAttribute("aria-selected"), "true");
+  assert.equal(document.activeElement, toggle);
+  await user.keyboard(" ");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByRole("complementary", { name: "Workspace files" }));
+  assert.equal(screen.getByRole("textbox"), preview);
 });
 
 function recentTaskButton(name) {
@@ -5747,6 +5899,73 @@ async function renderAppFixture(
     },
   };
 }
+
+test("App opens unreferenced workspace files in preview tabs and revokes them with workspace authority", async (ctx) => {
+  const listings = [],
+    reads = [];
+  const fixture = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      listWorkspaceDirectory: async (...args) => {
+        listings.push(args);
+        return {
+          state: "ready",
+          entries:
+            args[3] === ""
+              ? [{ name: "docs", kind: "directory" }]
+              : [{ name: "unreferenced.md", kind: "file" }],
+          truncated: false,
+          redacted: false,
+        };
+      },
+      previewWorkspaceFile: (...args) =>
+        new Promise((resolve) => reads.push({ args, resolve })),
+    },
+  );
+  await selectRecentTask(/First task/);
+  fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
+  assert.equal(listings.length, 0);
+  fireEvent.click(screen.getByRole("button", { name: "Show file tree" }));
+  await screen.findByRole("treeitem", { name: "docs" });
+  assert.equal(listings.length, 1);
+  fireEvent.click(screen.getByRole("treeitem", { name: "docs" }));
+  const file = await screen.findByRole("treeitem", { name: "unreferenced.md" });
+  assert.equal(listings.length, 2);
+  fireEvent.click(file);
+  assert.deepEqual(reads[0].args.slice(0, 4), [
+    "3",
+    "1",
+    "1",
+    "docs/unreferenced.md",
+  ]);
+  await act(async () =>
+    reads[0].resolve({
+      state: "ready",
+      content: "# Workspace preview",
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  assert.ok(screen.getByRole("heading", { name: "Workspace preview" }));
+  assert.equal(fixture.previews.length, 0);
+  fireEvent.click(file);
+  assert.equal(reads.length, 1);
+  assert.equal(
+    screen.getAllByRole("tab", { name: "unreferenced.md" }).length,
+    1,
+  );
+  fixture.snapshot.workspaces[0].authorization = "unavailable";
+  fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+  await act(async () => fixture.publish());
+  await waitFor(() =>
+    assert.ok(
+      screen.queryByRole("heading", { name: "Workspace preview" }) === null,
+    ),
+  );
+  assert.equal(screen.queryByRole("treeitem"), null);
+});
 
 test("App marks retained Run state unsynchronized and disables stop until refresh succeeds", async (ctx) => {
   const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
@@ -6193,7 +6412,10 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   await act(async () => fireEvent.click(recentTaskButton(/First task/)));
   const panel = () => within(document.querySelector("#task-panel"));
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
+  assert.ok(document.querySelector("#task-panel .task-panel-header"));
+  assert.equal(panel().queryByRole("complementary"), null);
+  fireEvent.click(panel().getByRole("button", { name: "Show file tree" }));
+  assert.ok(panel().getByRole("complementary", { name: "Workspace files" }));
   assert.ok(
     panel()
       .getByRole("heading", { name: "Side panel" })
@@ -6217,6 +6439,13 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   assert.equal(screen.queryByText("stale body"), null);
   fireEvent.click(toggle);
   assert.ok(panel().getByText("stale body"));
+  assert.ok(panel().getByRole("complementary", { name: "Workspace files" }));
+  assert.equal(
+    panel()
+      .getByRole("button", { name: "Hide file tree" })
+      .getAttribute("aria-expanded"),
+    "true",
+  );
   assert.equal(previews.length, 1);
   const shell = document.querySelector(".app-window");
   const previewWidth = shell.style.getPropertyValue("--right-panel-width");
@@ -6534,7 +6763,8 @@ test("App keeps preview and Review resources independent and rejects stale respo
   assert.equal(screen.queryByText("late after switch"), null);
   assert.ok(document.querySelector("#task-panel") !== null);
   const emptyPanel = within(document.querySelector("#task-panel"));
-  assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
+  assert.ok(document.querySelector("#task-panel .task-panel-header"));
+  assert.ok(emptyPanel.getByRole("button", { name: "Show file tree" }));
   assert.ok(
     emptyPanel
       .getByRole("heading", { name: "Side panel" })

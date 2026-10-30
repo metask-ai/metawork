@@ -17,6 +17,7 @@ import {
   Pencil,
   FileDiff,
   Layers3,
+  ListTree,
   LoaderCircle,
   LogOut,
   Minus,
@@ -53,6 +54,7 @@ type IconName =
   | "activity"
   | "archive"
   | "sidebar-right"
+  | "file-tree"
   | "loading"
   | "logout"
   | "chevron"
@@ -104,6 +106,7 @@ const icons: Record<IconName, LucideIcon> = {
   activity: Activity,
   archive: Archive,
   "sidebar-right": PanelRight,
+  "file-tree": ListTree,
   loading: LoaderCircle,
   logout: LogOut,
   chevron: ChevronDown,
