@@ -1,0 +1,332 @@
+{
+  "version": 1,
+  "execution_completed": true,
+  "required_checks_completed": true,
+  "conforms": true,
+  "checks": [
+    {
+      "id": "sheets",
+      "op": "sheets",
+      "status": "passed",
+      "expected": ["Input", "Data", "Regions"],
+      "actual": ["Input", "Data", "Regions"]
+    },
+    {
+      "id": "orders",
+      "op": "values",
+      "status": "passed",
+      "expected": [
+        [{ "type": "string", "value": "o-1" }],
+        [{ "type": "string", "value": "o-2" }],
+        [{ "type": "string", "value": "o-3" }],
+        [{ "type": "string", "value": "o-4" }]
+      ],
+      "target": { "sheet": "Data", "range": "A2:A5" },
+      "matched_cells": 4,
+      "nonempty_cells": 4,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "count",
+      "op": "count",
+      "status": "passed",
+      "expected": 4,
+      "target": { "sheet": "Data", "range": "A2:A5" },
+      "matched_cells": 4,
+      "nonempty_cells": 4,
+      "actual": 4
+    },
+    {
+      "id": "amounts-and-shares",
+      "op": "values",
+      "status": "passed",
+      "expected": [
+        [
+          { "type": "number", "value": 100, "tolerance": 0 },
+          { "type": "number", "value": 0.15384615384615385, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "number", "value": 200, "tolerance": 0 },
+          { "type": "number", "value": 0.3076923076923077, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "number", "value": 150, "tolerance": 0 },
+          { "type": "number", "value": 0.23076923076923078, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "number", "value": 200, "tolerance": 0 },
+          { "type": "number", "value": 0.3076923076923077, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "number", "value": 650, "tolerance": 0 },
+          { "type": "number", "value": 1, "tolerance": 1e-12 }
+        ]
+      ],
+      "target": { "sheet": "Data", "range": "C2:D6" },
+      "matched_cells": 10,
+      "nonempty_cells": 10,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "regions",
+      "op": "values",
+      "status": "passed",
+      "expected": [
+        [
+          { "type": "string", "value": "North" },
+          { "type": "number", "value": 300, "tolerance": 0 },
+          { "type": "number", "value": 0.46153846153846156, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "string", "value": "South" },
+          { "type": "number", "value": 350, "tolerance": 0 },
+          { "type": "number", "value": 0.5384615384615384, "tolerance": 1e-12 }
+        ],
+        [
+          { "type": "string", "value": "Total" },
+          { "type": "number", "value": 650, "tolerance": 0 },
+          { "type": "number", "value": 1, "tolerance": 1e-12 }
+        ]
+      ],
+      "target": { "sheet": "Regions", "range": "A2:C4" },
+      "matched_cells": 9,
+      "nonempty_cells": 9,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Data-label",
+      "op": "label",
+      "status": "passed",
+      "expected": { "value": "Total", "cell": "A6" },
+      "target": { "sheet": "Data", "range": "A2:A6" },
+      "matched_cells": 5,
+      "nonempty_cells": 5,
+      "actual": { "count": 1, "cells": ["A6"] }
+    },
+    {
+      "id": "Data-font",
+      "op": "font",
+      "status": "passed",
+      "expected": { "name": "Arial", "size": 11 },
+      "target": { "sheet": "Data", "range": "A1:D6" },
+      "matched_cells": 24,
+      "nonempty_cells": 23,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Data-percent",
+      "op": "number_format",
+      "status": "passed",
+      "expected": "0.0%",
+      "target": { "sheet": "Data", "range": "D2:D6" },
+      "matched_cells": 5,
+      "nonempty_cells": 5,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Data-amount",
+      "op": "values",
+      "status": "passed",
+      "expected": [[{ "type": "number", "value": 650, "tolerance": 0 }]],
+      "target": {
+        "sheet": "Data",
+        "label": { "range": "A2:A6", "value": "Total" },
+        "offset": [0, 2]
+      },
+      "matched_cells": 1,
+      "nonempty_cells": 1,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Data-fill",
+      "op": "fill",
+      "status": "passed",
+      "expected": { "pattern": "solid", "color": "FFDEEAF6" },
+      "target": { "sheet": "Data", "range": "A6" },
+      "matched_cells": 1,
+      "nonempty_cells": 1,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Regions-label",
+      "op": "label",
+      "status": "passed",
+      "expected": { "value": "Total", "cell": "A4" },
+      "target": { "sheet": "Regions", "range": "A2:A4" },
+      "matched_cells": 3,
+      "nonempty_cells": 3,
+      "actual": { "count": 1, "cells": ["A4"] }
+    },
+    {
+      "id": "Regions-font",
+      "op": "font",
+      "status": "passed",
+      "expected": { "name": "Arial", "size": 11 },
+      "target": { "sheet": "Regions", "range": "A1:C4" },
+      "matched_cells": 12,
+      "nonempty_cells": 12,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Regions-percent",
+      "op": "number_format",
+      "status": "passed",
+      "expected": "0.0%",
+      "target": { "sheet": "Regions", "range": "C2:C4" },
+      "matched_cells": 3,
+      "nonempty_cells": 3,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Regions-amount",
+      "op": "values",
+      "status": "passed",
+      "expected": [[{ "type": "number", "value": 650, "tolerance": 0 }]],
+      "target": {
+        "sheet": "Regions",
+        "label": { "range": "A2:A4", "value": "Total" },
+        "offset": [0, 1]
+      },
+      "matched_cells": 1,
+      "nonempty_cells": 1,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    },
+    {
+      "id": "Regions-fill",
+      "op": "fill",
+      "status": "passed",
+      "expected": { "pattern": "solid", "color": "FFDEEAF6" },
+      "target": { "sheet": "Regions", "range": "A4" },
+      "matched_cells": 1,
+      "nonempty_cells": 1,
+      "mismatches": [],
+      "mismatch_count": 0,
+      "details_truncated": false
+    }
+  ],
+  "requirements": [
+    {
+      "id": "sheets",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["sheets"],
+      "status": "passed"
+    },
+    {
+      "id": "orders",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["orders"],
+      "status": "passed"
+    },
+    {
+      "id": "count",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["count"],
+      "status": "passed"
+    },
+    {
+      "id": "amounts-and-shares",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["amounts-and-shares"],
+      "status": "passed"
+    },
+    {
+      "id": "regions",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["regions"],
+      "status": "passed"
+    },
+    {
+      "id": "Data-label",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-label"],
+      "status": "passed"
+    },
+    {
+      "id": "Data-font",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-font"],
+      "status": "passed"
+    },
+    {
+      "id": "Data-percent",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-percent"],
+      "status": "passed"
+    },
+    {
+      "id": "Data-amount",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-amount"],
+      "status": "passed"
+    },
+    {
+      "id": "Data-fill",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-fill"],
+      "status": "passed"
+    },
+    {
+      "id": "Regions-label",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-label"],
+      "status": "passed"
+    },
+    {
+      "id": "Regions-font",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-font"],
+      "status": "passed"
+    },
+    {
+      "id": "Regions-percent",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-percent"],
+      "status": "passed"
+    },
+    {
+      "id": "Regions-amount",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-amount"],
+      "status": "passed"
+    },
+    {
+      "id": "Regions-fill",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-fill"],
+      "status": "passed"
+    }
+  ],
+  "methods": ["bounded_zip_payloads", "openpyxl_saved_cells_and_styles"],
+  "not_performed": [
+    "formula_recalculation",
+    "visual_rendering",
+    "viewer_compatibility",
+    "full_xsd_validation"
+  ],
+  "candidate": {
+    "bytes": 6581,
+    "sha256": "67ff3defafe07499c7c45dd0e9a7dfc8b67f20bf6ba904bbf5a9ebfcab1da648"
+  },
+  "details_truncated": false,
+  "status": "passed"
+}

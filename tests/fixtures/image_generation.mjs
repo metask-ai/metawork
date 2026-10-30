@@ -201,7 +201,7 @@ const server = createServer(async (request, response) => {
       schema: declaration?.input_schema,
       results: images.length ? "[image result verified]" : results,
     });
-    if (mode === "delivery") {
+    if (mode === "delivery" || mode === "delivery-xlsx") {
       const delivery = payload.tools.find(
         (tool) => tool.name === "DeliverFile",
       );
@@ -221,7 +221,9 @@ const server = createServer(async (request, response) => {
               "anthropic",
               payload.messages.length,
               "DeliverFile",
-              { path: "result.docx" },
+              {
+                path: mode === "delivery-xlsx" ? "result.xlsx" : "result.docx",
+              },
             ),
       );
     }

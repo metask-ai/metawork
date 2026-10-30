@@ -547,6 +547,19 @@ class WorkflowExample(unittest.TestCase):
         finally:
             book.close()
 
+    def test_formal_delivery_fixture_has_a_current_successful_report(self):
+        # This exact saved artifact/report pair is consumed by the real
+        # Core/Product/DeliverFile history test. Re-run the current checker so
+        # a stale committed report cannot silently remain acceptance evidence.
+        fixture = ROOT / "tests/fixtures/office"
+        candidate = fixture / "checked-summary.xlsx"
+        saved = json.loads((fixture / "checked-summary-report.json").read_text())
+        report = self.work / "delivery-report.json"
+        result = invoke(VERIFY, candidate, report, "--checks", ENTRY.parent.parent / "examples/orders-checks.json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        actual = json.loads(report.read_text())
+        self.assertEqual(actual, saved)
+
     def test_example_zero_rows_zero_amounts_and_csv_formula_like_strings_are_data(self):
         for index, rows in enumerate(((), (("one", "East", 0),), (("=1+2", "#REF!", 5),))):
             with self.subTest(rows=rows):

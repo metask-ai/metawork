@@ -1767,16 +1767,44 @@ const ProductDeliveryEffect = struct {
     }
 };
 
+const CheckedXlsxReport = struct {
+    status: []const u8,
+    conforms: bool,
+    execution_completed: bool,
+    required_checks_completed: bool,
+    candidate: struct { bytes: usize, sha256: []const u8 },
+};
+
 test "DeliverFile canonical Product registers real Core receipt and restores its metadata from actual history" {
+    try canonicalProductDelivery("explicit delivered file bytes", null, false);
+}
+
+test "DeliverFile canonical Product binds checked XLSX bytes and preserves delivery when the report is stale" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.xlsx_path, std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(bytes);
+    const report_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.xlsx_report_path, std.testing.allocator, .limited(512 * 1024));
+    defer std.testing.allocator.free(report_bytes);
+    const report = try std.json.parseFromSlice(CheckedXlsxReport, std.testing.allocator, report_bytes, .{ .ignore_unknown_fields = true });
+    defer report.deinit();
+    try std.testing.expectEqualStrings("passed", report.value.status);
+    try std.testing.expect(report.value.conforms and report.value.execution_completed and report.value.required_checks_completed);
+    // First deliver exactly the verified artifact, then change its bytes after
+    // verification. Both runs traverse canonical Core, Product and App inspection.
+    try canonicalProductDelivery(bytes, report.value, false);
+    try canonicalProductDelivery(bytes, report.value, true);
+}
+
+fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, stale: bool) !void {
     var h: Harness = undefined;
-    try h.init("delivery", .{});
+    try h.init(if (checked != null) "delivery-xlsx" else "delivery", .{});
     defer h.deinit();
     try h.runtime.shutdown();
     h.runtime.deinit();
     h.runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 2 });
-    const content = "explicit delivered file bytes";
-    const file = try h.tmp.dir.createFile(std.testing.io, "result.docx", .{});
+    const locator = if (checked != null) "result.xlsx" else "result.docx";
+    const file = try h.tmp.dir.createFile(std.testing.io, locator, .{});
     try file.writeStreamingAll(std.testing.io, content);
+    if (stale) try file.writeStreamingAll(std.testing.io, "\n");
     file.close(std.testing.io);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
@@ -1810,13 +1838,28 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
     try image_product.finish(&control, task_id, id, null);
     const task = control.task_runtime.find(task_id).?;
     const run = &task.durable.runs[0].?;
-    try std.testing.expectEqualStrings("result.docx", run.outputs[0].?.locator);
-    try std.testing.expectEqual(content.len, run.outputs[0].?.size_bytes);
+    try std.testing.expectEqualStrings(locator, run.outputs[0].?.locator);
+    try std.testing.expectEqual(content.len + @intFromBool(stale), run.outputs[0].?.size_bytes);
     const receipt_id = run.outputs[0].?.id;
     const digest = run.outputs[0].?.sha256;
     var expected: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(content, &expected, .{});
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(content);
+    if (stale) hash.update("\n");
+    hash.final(&expected);
     try std.testing.expectEqualSlices(u8, &expected, &digest);
+    if (checked) |report| {
+        var checked_digest: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&checked_digest, report.candidate.sha256);
+        const matches = report.candidate.bytes == run.outputs[0].?.size_bytes and std.mem.eql(u8, &checked_digest, &digest);
+        try std.testing.expectEqual(!stale, matches);
+        // An obsolete report does not undo delivery. The receipt always describes
+        // the actual saved bytes; quality coverage remains the Skill's decision.
+        const saved_file = try h.tmp.dir.readFileAlloc(std.testing.io, locator, std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(saved_file);
+        try std.testing.expectEqual(run.outputs[0].?.size_bytes, saved_file.len);
+        try std.testing.expectEqual(stale, !std.mem.eql(u8, saved_file, content));
+    }
     try std.testing.expect(run.outputs[1] == null);
     try std.testing.expect(run.file_delivery == null);
     try std.testing.expectEqual(@as(usize, 1), delivery.released);
@@ -1837,7 +1880,7 @@ test "DeliverFile canonical Product registers real Core receipt and restores its
     try std.testing.expect(!restored.runtime.hasAttachedSession());
     const recovered = &restored.durable.runs[0].?;
     try std.testing.expect(recovered.file_delivery == null);
-    try std.testing.expectEqualStrings("result.docx", recovered.outputs[0].?.locator);
+    try std.testing.expectEqualStrings(locator, recovered.outputs[0].?.locator);
     try std.testing.expectEqualSlices(u8, &receipt_id, &recovered.outputs[0].?.id);
     try std.testing.expectEqualSlices(u8, &digest, &recovered.outputs[0].?.sha256);
     try std.testing.expectEqual(@as(usize, 0), h.runtime.delivery_results_outstanding.load(.acquire));
