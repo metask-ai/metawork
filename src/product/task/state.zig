@@ -12,6 +12,7 @@ const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
 const worker_lease = @import("product_task_worker_lease");
+const execution_credentials = @import("product_task_execution_binding").credential;
 
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
@@ -762,6 +763,17 @@ pub const OwnedImageExecution = struct {
     output: agent.ImageGenerationOutput,
     output_owner: *anyopaque,
     release_output_fn: *const fn (*anyopaque) void,
+    metask_authorization_scope: u64 = 0,
+    credential_generation: u64 = 0,
+    credential_source: ?*execution_credentials.Source = null,
+    credential_versions: std.ArrayList([]u8) = .empty,
+
+    pub fn enableCredentialRenewal(self: *OwnedImageExecution, allocator: std.mem.Allocator, io: std.Io, scope: u64, generation: u64) std.mem.Allocator.Error!void {
+        std.debug.assert(self.credential_source == null and scope != 0 and generation != 0);
+        self.credential_source = try execution_credentials.Source.create(allocator, io, self.candidate.input().bearer);
+        self.metask_authorization_scope = scope;
+        self.credential_generation = generation;
+    }
 
     pub fn input(self: *const OwnedImageExecution) agent.ImageGenerationRunInput {
         const candidate = self.candidate.input();
@@ -769,14 +781,28 @@ pub const OwnedImageExecution = struct {
             .endpoint = candidate.endpoint,
             .model = candidate.selection.model_id,
             .credential = candidate.bearer,
+            .credential_reader = if (self.credential_source) |source| .{ .context = source, .read_fn = readCredential } else null,
             .output = self.output,
         }, .transport = self.transport };
     }
 
     pub fn deinit(self: *OwnedImageExecution) void {
         self.release_output_fn(self.output_owner);
+        if (self.credential_source) |source| {
+            for (self.credential_versions.items) |value| {
+                std.crypto.secureZero(u8, value);
+                source.allocator.free(value);
+            }
+            self.credential_versions.deinit(source.allocator);
+            source.release();
+        }
         self.candidate.deinit();
         self.* = undefined;
+    }
+
+    fn readCredential(context: *anyopaque, buffer: []u8) ?usize {
+        const source: *execution_credentials.Source = @ptrCast(@alignCast(context));
+        return (source.copyInto(buffer) catch return null).len;
     }
 };
 

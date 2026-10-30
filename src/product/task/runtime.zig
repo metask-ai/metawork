@@ -2492,7 +2492,9 @@ pub const Runtime = struct {
                 self.allocator,
                 execution,
             ) catch null;
-            if (job.title_execution == null)
+            if (job.title_execution != null)
+                job.title_credential = task.runtime.execution().?.reader(effects.worker.checkpoint.io) catch null;
+            if (job.title_execution == null or job.title_credential == null)
                 run_record.execution.?.automatic_title.state.store(.ready, .release);
         }
         run_record.execution.?.checkpoint_export_context = .{
@@ -3267,6 +3269,7 @@ pub const Runtime = struct {
         }
         if (std.mem.eql(u8, execution.secret, value)) {
             execution.credential_generation = generation;
+            if (execution.credential_source) |source| source.replace(value);
             task.runtime.credential_update_failed = false;
             return .unchanged;
         }
@@ -3295,10 +3298,41 @@ pub const Runtime = struct {
         task.runtime.credential_renewal_deferred = false;
         task.runtime.credential_update_failed = true;
         task.runtime.credential_failed_generation = generation;
+        if (task.runtime.execution()) |execution| if (execution.credential_source) |source| source.invalidate();
         if (task.runtime.active_operation != .run) return;
         var access = task.runtime.acquireAccess() catch return;
         defer access.deinit();
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
+    }
+
+    pub fn renewMetaskImages(self: *Runtime, task_id: u64, scope: u64, generation: u64, value: ?[]const u8) bool {
+        const task = self.find(task_id) orelse return false;
+        var changed = false;
+        for (task.durable.runs) |*entry| if (entry.*) |*run| if (run.image_execution) |*image| {
+            if (image.metask_authorization_scope != scope or image.credential_generation == generation) continue;
+            const source = image.credential_source orelse continue;
+            image.credential_generation = generation;
+            changed = true;
+            const key = value orelse {
+                source.invalidate();
+                continue;
+            };
+            installImageCredential(self.allocator, run, image, key) catch source.invalidate();
+        };
+        return changed;
+    }
+
+    fn installImageCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, image: *task_state.OwnedImageExecution, value: []const u8) !void {
+        const source = image.credential_source.?;
+        if (!source.matches(value)) {
+            try image.credential_versions.ensureUnusedCapacity(source.allocator, 1);
+            try run.credential_views.ensureUnusedCapacity(allocator, if (run.credential_views.items.len == 0) 3 else 1);
+            const owned = try source.allocator.dupe(u8, value);
+            image.credential_versions.appendAssumeCapacity(owned);
+            if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(&run.initial_credentials);
+            run.credential_views.appendAssumeCapacity(owned);
+        }
+        source.replace(value);
     }
 
     /// Returns one retired value only after every operation and worker that
@@ -7551,6 +7585,7 @@ fn releaseExecutionValueNoFail(
 fn releaseRunEffects(self: *Runtime, run: *task_state.RunRecord, effects: ReleaseEffects) void {
     if (run.image_execution) |*image| {
         effects.redactAll(image.candidate.input().bearer);
+        for (image.credential_versions.items) |value| effects.redactAll(value);
         image.deinit();
         run.image_execution = null;
     }
@@ -8286,6 +8321,8 @@ const RetainedCredentials = struct {
     task: *const task_state.Task,
     index: usize = 0,
     retired_index: usize = 0,
+    image_run_index: usize = 0,
+    image_version_index: usize = 0,
 
     fn next(self: *RetainedCredentials) ?[]const u8 {
         while (self.index < 3 + self.task.durable.runs.len) {
@@ -8307,6 +8344,17 @@ const RetainedCredentials = struct {
                 self.retired_index += 1;
                 return value;
             }
+        }
+        while (self.image_run_index < self.task.durable.runs.len) {
+            if (self.task.durable.runs[self.image_run_index]) |*run| if (run.image_execution) |*image| {
+                if (self.image_version_index < image.credential_versions.items.len) {
+                    const value = image.credential_versions.items[self.image_version_index];
+                    self.image_version_index += 1;
+                    return value;
+                }
+            };
+            self.image_run_index += 1;
+            self.image_version_index = 0;
         }
         return null;
     }

@@ -198,6 +198,10 @@ test "Metask hard expiry during continuation renewal prevents the next Run" {
     try characterizeCredentialExpiry(.continuation_expired);
 }
 
+test "Metask automatic title reads the current credential after the main Run finishes" {
+    try characterizeCredentialExpiry(.title_rotation);
+}
+
 test "Metask waiting approval Run resumes with the renewed credential" {
     try characterizeCredentialExpiry(.waiting_ui_rotation);
 }
@@ -236,7 +240,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.finishAccountCommitNoFail();
 }
 
-const Scenario = enum { waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const rotate = scenario != .expiry;
@@ -267,7 +271,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     var review = ReviewProbe{};
     var configuration = fixture.productControlConfiguration();
     configuration.change_notifier = .{ .context = &wake_loop, .wake = fixture.LifecycleWakeLoop.wake };
-    if (scenario == .reviewer) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
+    if (scenario == .reviewer or scenario == .title_rotation) configuration.completion_factory = .{ .context = &review, .create_fn = ReviewProbe.create };
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = home;
@@ -312,6 +316,35 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const old_epoch = old.durable.binding_epoch;
     const old_source = old.runtime.executionConst().?.source_generation;
     const old_revision = old.durable.model_intent.?.revision;
+    if (scenario == .title_rotation) {
+        review.title_success = true;
+        fake_core.setSessionPlan(.controlled);
+        _ = try control.sendInput("title-after-refresh", old_id, .{ .text = "A title should use the current credential." });
+        defer fake_core.releaseControlled();
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (runCalls() == 1) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.RunDidNotStart;
+        platform.now_unix_seconds = 150;
+        try commitRefresh(&account_runtime, &control);
+        network.expected_access = access_b;
+        coordinator.authorizationChanged();
+        try drainCatalog(&coordinator);
+        fake_core.releaseControlled();
+        for (0..5000) |_| {
+            try wake_loop.drain(&control);
+            if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.RunDidNotSettle;
+        control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 1), review.title_calls.load(.acquire));
+        try std.testing.expect(review.title_credential_matched.load(.acquire));
+        try std.testing.expect(old.durable.title_redacted);
+        try std.testing.expect(std.mem.indexOf(u8, old.durable.title, access_b) == null);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        return;
+    }
     try runAndExpect(&wake_loop, &control, old_id, "before-expiry", .completed);
     try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
     try std.testing.expectEqualDeep(fixture.credentialDigest(access_a), fake_core.sessions[0].credential_digest);
@@ -746,6 +779,9 @@ fn relogin(runtime: *account.Runtime) !void {
 const ReviewProbe = struct {
     calls: std.atomic.Value(usize) = .init(0),
     credential_matched: std.atomic.Value(bool) = .init(false),
+    title_success: bool = false,
+    title_calls: std.atomic.Value(usize) = .init(0),
+    title_credential_matched: std.atomic.Value(bool) = .init(false),
 
     fn create(context: ?*anyopaque, allocator: std.mem.Allocator, binding: fixture.lifecycle.ModelBinding) anyerror!*fixture.lifecycle.Completion {
         return fixture.lifecycle.Completion.init(allocator, .{ .context = context, .perform_fn = perform }, binding);
@@ -757,6 +793,12 @@ const ReviewProbe = struct {
             for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
                 self.credential_matched.store(std.mem.eql(u8, header.value, access_b), .release);
             };
+        } else {
+            _ = self.title_calls.fetchAdd(1, .acq_rel);
+            for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
+                self.title_credential_matched.store(std.mem.eql(u8, header.value, access_b), .release);
+            };
+            if (self.title_success) return .{ .status = 200, .body = "{\"id\":\"title\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3-flash\",\"content\":[{\"type\":\"text\",\"text\":\"safe synthetic-lifecycle-access-b title\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}" };
         }
         return .{ .status = 400, .body = "synthetic reviewer rejection" };
     }

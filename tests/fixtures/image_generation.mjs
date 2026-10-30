@@ -77,7 +77,12 @@ const server = createServer(async (request, response) => {
     const payload = JSON.parse(Buffer.concat(chunks));
     if (request.method !== "POST") throw Error("unexpected method");
     if (request.url === "/v1/images/generations") {
-      if (request.headers.authorization !== "Bearer synthetic-image-key")
+      if (
+        request.headers.authorization !==
+        (mode === "rotated"
+          ? "Bearer synthetic-image-key-b"
+          : "Bearer synthetic-image-key")
+      )
         throw Error("image credential");
       if (
         !["fixture-image", "gemini-3.1-flash-image-preview"].includes(

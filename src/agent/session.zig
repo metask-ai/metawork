@@ -46,6 +46,7 @@ pub const ImageGenerationRunInput = struct {
     binding: image_generation.BindingInput,
     transport: image_http.Transport,
 };
+pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
 
 const RunImage = struct {
     binding: image_generation.OwnedBinding,

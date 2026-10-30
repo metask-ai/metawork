@@ -289,9 +289,11 @@ pub const Coordinator = struct {
     fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
+        const authorization = self.account.authorizationState() orelse return null;
         const transport = self.completion_transport orelse return null;
         var lease = (self.account.authorizationLease() catch return null) orelse return null;
         defer lease.deinit();
+        if (authorization.generation != lease.authorization_generation) return null;
         var candidate = switch (self.management.prepareImageCandidate(.{
             .principal_ref = lease.principal_ref,
             .authorization_generation = lease.authorization_generation,
@@ -307,13 +309,18 @@ pub const Coordinator = struct {
             allocator.destroy(output);
             return null;
         };
-        return .{
+        var result: product_task.OwnedImageExecution = .{
             .candidate = candidate.take(),
             .transport = transport,
             .output = output.port(),
             .output_owner = output,
             .release_output_fn = releaseImageOutput,
         };
+        result.enableCredentialRenewal(std.heap.c_allocator, self.io, authorization.scope, authorization.generation) catch {
+            result.deinit();
+            return null;
+        };
+        return result;
     }
 
     fn releaseImageOutput(context: *anyopaque) void {

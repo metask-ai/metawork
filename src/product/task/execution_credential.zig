@@ -23,6 +23,7 @@ pub const Source = struct {
     references: std.atomic.Value(usize) = .init(1),
     current: [max_bytes]u8 = @splat(0),
     length: usize,
+    available: bool = true,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, credential: []const u8) std.mem.Allocator.Error!*Source {
         std.debug.assert(credential.len > 0 and credential.len <= max_bytes);
@@ -54,16 +55,34 @@ pub const Source = struct {
         std.crypto.secureZero(u8, &self.current);
         @memcpy(self.current[0..credential.len], credential);
         self.length = credential.len;
+        self.available = true;
     }
 
-    pub fn copy(self: *Source, allocator: std.mem.Allocator) std.mem.Allocator.Error!Owned {
+    pub fn invalidate(self: *Source) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.available = false;
+    }
+
+    pub fn matches(self: *Source, credential: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return std.mem.eql(u8, self.current[0..self.length], credential);
+    }
+
+    pub fn copyInto(self: *Source, buffer: []u8) error{CredentialUnavailable}![]const u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (!self.available or buffer.len < self.length) return error.CredentialUnavailable;
+        @memcpy(buffer[0..self.length], self.current[0..self.length]);
+        return buffer[0..self.length];
+    }
+
+    pub fn copy(self: *Source, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{CredentialUnavailable})!Owned {
         var temporary: [max_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &temporary);
-        self.mutex.lockUncancelable(self.io);
-        const length = self.length;
-        @memcpy(temporary[0..length], self.current[0..length]);
-        self.mutex.unlock(self.io);
-        return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, temporary[0..length]) };
+        const value = try self.copyInto(&temporary);
+        return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, value) };
     }
 };
 
@@ -84,4 +103,14 @@ test "Task model credential reader survives its owner and preserves in-flight re
     var after_failure = try reader.copy(std.testing.allocator);
     defer after_failure.deinit();
     try std.testing.expectEqualStrings("synthetic-b", after_failure.bytes);
+}
+
+test "Task model credential reader fails closed until a later successful handoff" {
+    const source = try Source.create(std.testing.allocator, std.testing.io, "synthetic-a");
+    defer source.release();
+    source.invalidate();
+    var buffer: [max_bytes]u8 = undefined;
+    try std.testing.expectError(error.CredentialUnavailable, source.copyInto(&buffer));
+    source.replace("synthetic-b");
+    try std.testing.expectEqualStrings("synthetic-b", try source.copyInto(&buffer));
 }

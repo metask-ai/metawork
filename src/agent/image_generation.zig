@@ -121,10 +121,18 @@ pub const OutputFailure = struct {
 
 pub const OutputResult = union(enum) { saved: Receipt, failed: OutputFailure };
 
+/// The Host retains this independent reader through Run quiescence, just as
+/// it retains the output context. A failed read must never use the initial key.
+pub const CredentialReader = struct {
+    context: *anyopaque,
+    read_fn: *const fn (*anyopaque, []u8) ?usize,
+};
+
 pub const BindingInput = struct {
     endpoint: []const u8,
     model: []const u8,
     credential: []const u8,
+    credential_reader: ?CredentialReader = null,
     output: Output,
 };
 
@@ -132,6 +140,7 @@ pub const OwnedBinding = struct {
     endpoint: []u8,
     model: []u8,
     credential: []u8,
+    credential_reader: ?CredentialReader = null,
     output: Output,
 
     pub fn init(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
@@ -154,7 +163,7 @@ pub const OwnedBinding = struct {
         const model = try allocator.dupe(u8, input.model);
         errdefer allocator.free(model);
         const credential = try allocator.dupe(u8, input.credential);
-        return .{ .endpoint = endpoint, .model = model, .credential = credential, .output = input.output };
+        return .{ .endpoint = endpoint, .model = model, .credential = credential, .credential_reader = input.credential_reader, .output = input.output };
     }
 
     pub fn clone(self: *const OwnedBinding, allocator: std.mem.Allocator) !OwnedBinding {
@@ -162,6 +171,7 @@ pub const OwnedBinding = struct {
             .endpoint = self.endpoint,
             .model = self.model,
             .credential = self.credential,
+            .credential_reader = self.credential_reader,
             .output = self.output,
         });
     }
@@ -251,7 +261,14 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         .response_format = "b64_json",
     }, .{}) catch return .{ .failed = .capacity };
     defer allocator.free(request);
-    const bearer = std.fmt.allocPrint(allocator, "Bearer {s}", .{binding.credential}) catch return .{ .failed = .capacity };
+    var current: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &current);
+    const credential = if (binding.credential_reader) |reader| live: {
+        const len = reader.read_fn(reader.context, &current) orelse return .{ .failed = .unavailable };
+        if (len == 0 or len > current.len or std.mem.indexOfAny(u8, current[0..len], "\r\n\x00") != null) return .{ .failed = .unavailable };
+        break :live current[0..len];
+    } else binding.credential;
+    const bearer = std.fmt.allocPrint(allocator, "Bearer {s}", .{credential}) catch return .{ .failed = .capacity };
     defer {
         std.crypto.secureZero(u8, bearer);
         allocator.rawFree(bearer, .of(u8), @returnAddress());
@@ -330,6 +347,34 @@ test "fixture targets cannot escape the loopback image endpoint" {
     try validateTestEndpoint("http://127.0.0.1:12345/v1/images/generations");
     for ([_][]const u8{ "https://www.metask-ai.com/v1/images/generations", "http://127.0.0.1:0/v1/images/generations", "http://127.0.0.1:10/elsewhere", "http://127.0.0.1:10@evil/v1/images/generations" }) |value|
         try std.testing.expectError(error.InvalidBinding, validateTestEndpoint(value));
+}
+
+test "image credential reader failure never sends the initial credential" {
+    const Effects = struct {
+        fn read(_: *anyopaque, _: []u8) ?usize {
+            return null;
+        }
+        fn send(_: ?*anyopaque, _: http.HttpRequest, _: *const http.Cancellation, _: []u8) http.Error!http.Response {
+            @panic("unavailable credential must not send HTTP");
+        }
+        fn commit(_: *anyopaque, _: []const u8, _: Format, _: *const http.Cancellation) OutputResult {
+            @panic("unavailable credential must not produce a file");
+        }
+    };
+    var context: u8 = 0;
+    const network: http.Transport = .{ .context = &context, .perform_fn = Effects.send };
+    var binding = try OwnedBinding.initForTesting(std.testing.allocator, .{
+        .endpoint = "http://127.0.0.1:1234/v1/images/generations",
+        .model = "fixture-image",
+        .credential = "synthetic-initial-key",
+        .credential_reader = .{ .context = &context, .read_fn = Effects.read },
+        .output = .{ .context = &context, .commit_fn = Effects.commit },
+    });
+    defer binding.deinit(std.testing.allocator);
+    var call: Call = .{ .cancellation = http.Cancellation.init(network), .deadline_ns = 0, .io = std.testing.io };
+    const outcome = perform(std.testing.allocator, network, &binding, "draw", .{}, &call);
+    try std.testing.expectEqual(Failure.unavailable, outcome.failed);
+    try std.testing.expect(!call.sent);
 }
 
 test "production image limits bound every input and allow two maximum working reservations" {

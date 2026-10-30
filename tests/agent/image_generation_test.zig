@@ -1146,8 +1146,11 @@ const image_product = struct {
             @memcpy(output[0..body.len], body);
             return .{ .status = 200, .body = output[0..body.len] };
         }
-        fn account(_: *anyopaque, _: account_api.TransportRequest, _: []u8) account_api.TransportError!account_api.TransportResponse {
-            @panic("canonical image fixture must not dispatch Account HTTP");
+        fn account(_: *anyopaque, request: account_api.TransportRequest, buffer: []u8) account_api.TransportError!account_api.TransportResponse {
+            if (request.kind != .refresh_token) return error.ProtocolFailed;
+            const body = "{\"access_token\":\"synthetic-image-key-b\",\"refresh_token\":\"synthetic-refresh-key-b\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+            @memcpy(buffer[0..body.len], body);
+            return .{ .status = 200, .body = buffer[0..body.len] };
         }
         fn notify(_: *anyopaque) void {}
         fn generate(_: *anyopaque, slot: *[ports.credential_slot_bytes]u8) anyerror!void {
@@ -1271,7 +1274,12 @@ test "GenerateImage canonical Product keeps projection authority stable with Cus
     try expectCanonicalImageProduct("success", false, false);
 }
 
+test "GenerateImage canonical Product renews image credentials during Custom Provider approval wait" {
+    try expectCanonicalImageProduct("rotated", false, false);
+}
+
 fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_admission: bool) !void {
+    const rotate_after_admission = std.mem.eql(u8, mode, "rotated");
     var h: Harness = undefined;
     try h.init(mode, .{ .timeout_ms = 10000 });
     defer h.deinit();
@@ -1311,6 +1319,8 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(effects.imageTransport());
+    control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
+    coordinator.setCredentialRenewal(control.metaskCredentialRenewal());
     var coordinator_live = true;
     defer if (coordinator_live) {
         control.setImageRunPreparation(null);
@@ -1343,7 +1353,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try std.testing.expectEqual(.custom_provider, control.execution_state.activeSource().?);
     const projection_epoch = control.projectionSecurityEpoch();
     const first_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
-    if (!logout_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
+    if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     const task = control.task_runtime.find(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
     // The Core cannot send the image request before manual once approval.
@@ -1355,9 +1365,40 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         account.commit(&logout);
         coordinator.authorizationChanged();
     }
+    if (rotate_after_admission) {
+        const scope = account.authorizationState().?.scope;
+        var refresh = switch (account.prepareTokenRefresh()) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        try std.testing.expect(account.admitEffect(&refresh));
+        account.commit(&refresh);
+        try std.testing.expect(account.dispatchCommitted(&refresh) == null);
+        image_product.account_api.TestSupport.joinNetwork(&account);
+        var rotated = switch (account.prepareNextCompletion().?) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer rotated.deinit();
+        try std.testing.expect(account.admitEffect(&rotated));
+        account.commit(&rotated);
+        try std.testing.expect(account.dispatchCommitted(&rotated) == null);
+        control.commitAccountFactNoFail(account.preparedFact(&rotated));
+        control.finishAccountCommitNoFail();
+        coordinator.authorizationChanged();
+        for (0..5000) |_| {
+            coordinator.drain();
+            if (coordinator.catalog_job == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(scope, account.authorizationState().?.scope);
+        try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
+        try std.testing.expectEqual(@as(usize, 1), task.durable.runs[0].?.image_execution.?.credential_versions.items.len);
+    }
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
-    if (!logout_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
+    if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     try std.testing.expect(task.durable.checkpoint != null);
     if (!cancelled) try expectProductGeneratedImagePreview(&control, task_id, first_id);
     try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));

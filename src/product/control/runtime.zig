@@ -10638,6 +10638,7 @@ pub const Runtime = struct {
         }
         var changed = false;
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            changed = self.task_runtime.renewMetaskImages(task.durable.id, authority.scope, authority.generation, credential) or changed;
             if (self.task_runtime.metaskCredentialScope(task.durable.id) != authority.scope) continue;
             const value = credential orelse {
                 self.task_runtime.failCredentialRenewal(task.durable.id, authority.generation, true, false);
