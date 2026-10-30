@@ -878,7 +878,7 @@
       "task_id_hex": "0000000000000025",
       "run_id_hex": "0000000000000001",
       "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-2",
-      "status": "queued",
+      "status": "completed",
       "submitted_at_unix_ms": 1793343454928,
       "frozen_prompt_matches_persisted_input": true,
       "interventions": [],
@@ -888,7 +888,21 @@
           "bytes": 108,
           "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
         }
-      ]
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 2,
+      "finished_at_unix_ms": 1793343543013,
+      "actual_deliveries": [],
+      "final_response": "数据已确认：8 行 CSV（表头 + 7 行原始数据），其中 o-2 重复 1 行、缺地区 1 行（o-5）、缺订单编号 1 行，有效订单为 o-1~o-4 共 4 条，总金额 650。\n\n按 XLSX 技能要求，首次使用需准备其私有 Python 运行时（macOS arm64，Python 载荷约 38.9 MB 下载估计；若共享缓存已存在则无需下载）。是否同意准备？同意后我将：\n\n1. 准备运行时 → 创建 `created.xlsx`（Input / Data / Regions / Reference 四表，Arial 11、0.0% 百分比、合计行淡蓝 FFDEEAF6、Reference 含 B2 公式 `=1+2`）\n2. 用 verify.py 对最终文件做完整核验\n3. 通过 DeliverFile 交付",
+      "candidate_produced": false,
+      "workflow_qualification": {
+        "status": "incomplete",
+        "reason": "Run completed with a runtime-preparation consent question; no candidate, verification or delivery. No consent reply or retry sent after user requested convergence.",
+        "candidate_produced": false,
+        "delivery_produced": false,
+        "counted_as_completed_independent_workflow": false
+      }
     }
   ],
   "unstarted": [
@@ -1131,5 +1145,25 @@
       },
       "complete_workflow_claim_limited_to_this_task": true
     }
-  ]
+  ],
+  "convergence": {
+    "user_instruction": "收敛一下吧",
+    "new_model_attempts_stopped": true,
+    "active_runs": 0,
+    "scope": "Deliver implementation and verified results; preserve unqualified fixed model cases. Full original completion criteria are not claimed achieved.",
+    "final_checks": {
+      "office_resource_tests_passed": 12,
+      "archive_check": true,
+      "branch_diff_check": true,
+      "production_changes_after_last_qualified_resource_build": false
+    },
+    "remaining": [
+      "two complete independent XLSX repetitions",
+      "current-resource bad-style correction and required unsupported-check model cases",
+      "configured second-model XLSX comparison",
+      "three complete PPTX model workflows",
+      "isolated live-model first preparation"
+    ],
+    "issue_closures": []
+  }
 }
