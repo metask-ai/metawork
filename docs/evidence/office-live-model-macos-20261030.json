@@ -742,7 +742,12 @@
       "resource_tests_passed": 12,
       "only_changed_package_member": "xlsx/verification.md",
       "archive_check": true,
-      "diff_check": true
+      "diff_check": true,
+      "native_office_resources": {
+        "steps_passed": 10,
+        "tests_passed": 5,
+        "log": ".zig-cache/office-native-ac9ff388-resources.log"
+      }
     },
     "runtime_limits_or_frozen_oracles_changed": false,
     "new_real_model_result": "pending new application resource; no completed workflow inferred from parser qualification"
