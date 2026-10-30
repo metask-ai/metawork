@@ -284,3 +284,103 @@ test "Office canonical Product executor retains real callback rejection identity
 test "Office canonical stream preserves queue rejection when the sole consumer is withheld" {
     try qualify("consumer-starvation");
 }
+
+// Same canonical runtime, Product executor and local Provider infrastructure;
+// the asset is the issue's relative-only definition, imported through Product.
+test "Skill resource context reads a managed import through tool and typed inputs" {
+    for ([_][]const u8{ "skill-resource-tool", "skill-resource-typed" }) |mode| {
+        var temporary = std.testing.tmpDir(.{ .iterate = true });
+        defer temporary.cleanup();
+        const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(root);
+        for ([_][]const u8{ "source", "stage", "work" }) |dir| try temporary.dir.createDir(std.testing.io, dir, .default_dir);
+        const source = try std.fs.path.join(std.testing.allocator, &.{ root, "source" });
+        defer std.testing.allocator.free(source);
+        const stage = try std.fs.path.join(std.testing.allocator, &.{ root, "stage" });
+        defer std.testing.allocator.free(stage);
+        const work = try std.fs.path.join(std.testing.allocator, &.{ root, "work" });
+        defer std.testing.allocator.free(work);
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "source/SKILL.md", .data = "---\nname: qa-resource-context\ndescription: QA-only marker\n---\n" ++
+            "When explicitly invoked, read the bundled qa-reference.txt, then reply exactly QA_SKILL_OK_7429 followed by its reference marker. Do not modify files or access links.\n" });
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "source/qa-reference.txt", .data = "QA028_DIRECTORY_REFERENCE_7429" });
+        var provider = try Provider.start(root, mode);
+        defer provider.deinit();
+        const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        var vault: Vault = .{};
+        defer std.crypto.secureZero(u8, &vault.key);
+        var store: f.product_skill.management.FileStore = .{ .io = std.testing.io, .dir = temporary.dir };
+        var enablement: f.product_skill.enablement.FileStore = .{ .io = std.testing.io, .dir = temporary.dir };
+        var configuration = f.productControlConfiguration();
+        configuration.directories.canonical_user_home = root;
+        configuration.schedule_timer.enabled = true;
+        configuration.schedule_timer.now_unix_seconds = struct {
+            fn now(_: ?*anyopaque) ?u64 {
+                return 1_800_000_000;
+            }
+        }.now;
+        configuration.skill_management = .{ .file_store = &store, .staging_root = stage };
+        configuration.skill_enablement = .{ .file_store = &enablement };
+        configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
+        var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+            .worker_count = 1,
+            .queue_capacity = 4,
+            .max_tasks = 1,
+            .max_workspaces = 1,
+            .max_runs_per_task = 2,
+        }, configuration);
+        defer control.deinit();
+        try control.startCustomProviders(root, vault.capability());
+        defer control.stopCustomProviders();
+        try configureProvider(&control, provider.endpoint);
+        var preview = try control.previewSkillDirectory(source);
+        defer preview.deinit();
+        _ = try control.installSkillDirectory(source, .{
+            .source_kind = .local_directory,
+            .scope = .personal,
+            .expected_invocation_name = preview.invocation_name,
+            .expected_content_hash = preview.content_hash,
+        });
+        for (0..5000) |_| {
+            try control.drainAgentEvents();
+            const available = control.skillCatalog();
+            if (available.availability == .ready or available.availability == .degraded) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.SkillCatalogTimeout;
+        const task_id = try control.createTask(.{ .workspace_root = work, .trust = .explicitly_trusted, .approval_mode = .full_access });
+        const task = control.task_runtime.find(task_id).?;
+        const workspace_id = task.durable.workspace_id;
+        for (0..5000) |_| {
+            try control.drainAgentEvents();
+            const available = try control.workspaceCatalog(workspace_id);
+            if (available.availability == .ready or available.availability == .degraded) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.SkillCatalogTimeout;
+        const catalog = try control.workspaceCatalog(workspace_id);
+        try std.testing.expectEqual(@as(usize, 1), catalog.skills.len);
+        const input: control_api.TaskRunInput = if (std.mem.eql(u8, mode, "skill-resource-typed")) .{ .skill = .{
+            .skill_id = catalog.skills[0].skill_id,
+            .catalog_revision = catalog.revision,
+            .selection_revision = catalog.selection_revision.?,
+            .argument_values = &.{},
+        } } else .{ .text = "Invoke qa-resource-context, read the bundled qa-reference.txt and return its marker. Do not search outside the Skill." };
+        const id = try f.runPreparedTask(&control, task_id, input);
+        for (0..10000) |_| {
+            try control.drainAgentEvents();
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.SkillResourceTimeout;
+        const run = state.findRun(task.durable.runs, id).?;
+        const terminal = state.productTerminalFacts(run).?;
+        try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
+        try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "QA_SKILL_OK_7429 QA028_DIRECTORY_REFERENCE_7429") != null);
+        try std.testing.expect(run.event_stream_finalized);
+        const trace = try temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(256 * 1024));
+        defer std.testing.allocator.free(trace);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
+        try std.testing.expect(std.mem.indexOf(u8, trace, "skill-resource-read") != null);
+    }
+}
