@@ -450,14 +450,18 @@
       "submitted_at_unix_ms": 1793331591126,
       "frozen_prompt_matches_persisted_input": true,
       "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-1",
-      "status": "running",
-      "outcome": null,
-      "cause": null,
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
       "interventions": [
         "User-authorized allow-once after automatic-review timeout for canonical run.sh/read.py reading only synthetic orders.csv; five relevant materialized scripts matched archive bytes, no standing rule created. Command pipes preview through head and prints pipeline status; this probe does not establish document verification success."
       ],
       "application_source_commit": "327db559",
-      "tool_count": 10
+      "tool_count": 10,
+      "finished_at_unix_ms": 1793332166443,
+      "actual_deliveries": [],
+      "final_response": "我先读取 CSV 和环境信息。CSV 共 7 行数据。先读验证工作流说明，再准备环境。数据已明确：7 行原始数据，其中 o-2 重复、o-5 缺地区、末行缺订单号，有效订单 4 条（o-1/o-2/o-3/o-4），总额 650。先看 Skill 自带示例脚本，并确认运行环境是否已就绪。环境目录已就绪（含 openpyxl）。先快速查看 verify.py 的规格校验规则，然后编写生成脚本。",
+      "candidate_produced": false
     },
     {
       "attempt": 7,
@@ -473,12 +477,13 @@
       "submitted_at_unix_ms": 1793331616684,
       "frozen_prompt_matches_persisted_input": true,
       "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-2",
-      "status": "running",
-      "outcome": null,
+      "status": "stopped",
+      "outcome": "stopped",
       "cause": null,
       "interventions": [],
       "application_source_commit": "327db559",
-      "tool_count": 8
+      "tool_count": 21,
+      "finished_at_unix_ms": 1793332669260
     },
     {
       "attempt": 8,
@@ -528,16 +533,61 @@
       "actual_deliveries": [],
       "final_response": "",
       "candidate_produced": false
+    },
+    {
+      "attempt": 10,
+      "case": "bad-styles",
+      "stage": "inspect-repair",
+      "task_id": 31,
+      "task_id_hex": "000000000000001f",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793332302726,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-3",
+      "status": "running",
+      "application_source_commit": "327db559",
+      "interventions": [
+        "Under existing synthetic acceptance scope, allowed once for canonical prepare.sh python after automatic review requested script inspection. Materialized prepare/configuration/environment/finish/managed_process scripts matched archive. The exact completed Python directory already existed as a real directory, so prepare selects check_final and exits before download/staging; no standing policy changed."
+      ],
+      "outcome": null,
+      "cause": null,
+      "tool_count": 12
+    },
+    {
+      "attempt": 11,
+      "case": "required-recalculation",
+      "stage": "required-boundary",
+      "task_id": 32,
+      "task_id_hex": "0000000000000020",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793332320011,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-correlation",
+      "status": "failed",
+      "application_source_commit": "327db559",
+      "interventions": [],
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 0,
+      "finished_at_unix_ms": 1793332469128,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
     }
   ],
   "unstarted": [
     "three successful independent create-edit repetitions",
-    "bad-styles completion and receipt",
-    "new-resource necessary recalculation unsupported retest",
-    "correlation model create-edit",
-    "first preparation in isolated profile with live model"
+    "correlation model completed create-edit",
+    "first preparation in isolated profile with live model",
+    "PPTX three independent create-edit/check/delivery repetitions"
   ],
-  "acceptance": "failed attempt retained; required finite set incomplete; investigate reproduced dependency failure before any completion claim",
+  "acceptance": "Not passed: complete fixed real-model set is still incomplete; latest attempts include provider_failure before candidates or delivery. Deterministic, Core and viewer qualifications do not substitute for real-model acceptance.",
   "runtime_followup": {
     "production_diagnostic_fix_commit": "b862a0e6",
     "native_graph": {
@@ -565,6 +615,17 @@
       "typed_first_cause_and_history_verified": true,
       "native_dialog_automated": false,
       "modal_starvation_fixed": false
+    },
+    "investigation_settlement": {
+      "status": "diagnostic_and_investigation_deliverable_complete",
+      "source_commits": [
+        "b862a0e6",
+        "1bb7051f",
+        "d3f7b2cb"
+      ],
+      "historical_issue_23_closed": false,
+      "native_modal_gap_fixed": false,
+      "canonical_gap": "docs/validation.md#e-mac-office-model-20261030"
     }
   },
   "pending_decision": "User authorized once-only approvals throughout this synthetic acceptance scope after script/path inspection; no approval mode or standing policy changed. Original pending Runs were interrupted by application shutdown before the newly authorized clicks.",
@@ -573,8 +634,8 @@
     "problem": "Actual model Read of one-line verification report was truncated, so the model authored another summary program and required an additional Shell approval",
     "change": "Multiline JSON under the same actual encoded-byte report budget; read/paginate directly",
     "machine_qualification": "Real canonical Core Read obtains report tail candidate hash plus required_checks_completed/conforms; 28 XLSX quality checks and three-format Core fixture pass",
-    "current_live_runs_use_old_archive": true,
-    "new_model_validation": "pending current runs and application restart"
+    "current_live_runs_use_old_archive": false,
+    "new_model_validation": "Latest archive exercised by Tasks27-30; no completed create/check/delivery result yet. Provider failures retained; not established as passed."
   },
   "validation_followup": {
     "delivery_fixture_commit": "7922f4ff",
@@ -601,7 +662,7 @@
     "commit": "454b614c",
     "scope": "Include read-only checking tasks and necessary unsupported mapping in the existing structured checker workflow",
     "original_failed_case_retained": true,
-    "fresh_model_retest": "pending"
+    "fresh_model_retest": "Task32 failed with provider_failure before any tool; structured-report behavior on the current archive remains unqualified by a completed real-model case"
   },
   "authorization": {
     "scope": "Synthetic Office acceptance directories only: inspect scripts first; allow-once reads, new working copies, verification and local DeliverFile",
@@ -616,5 +677,40 @@
     },
     "archive_sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169",
     "existing_account_and_approval_mode": true
-  }
+  },
+  "latest_attempt_context": {
+    "independent_task_contexts": true,
+    "overlapping_runs": true,
+    "concurrency_allowance": "unavailable in existing Account UI; do not infer zero or unlimited",
+    "provider_failure_interpretation": "Raw application log now confirms repeated HTTP 503: no compatible upstream endpoint is available, exhausting 10 attempts. Specific backend cause and per-request Task correlation remain unknown."
+  },
+  "provider_failure_evidence": {
+    "observed_at": "2026-10-30 Asia/Shanghai",
+    "source": "owned test application stderr; selected non-secret error lines only",
+    "log": ".zig-cache/office-live-model-327db559-runtime.log",
+    "http_status_counts_at_observation": {
+      "503": 57
+    },
+    "response_error_type": "api_error",
+    "response_message": "no compatible upstream endpoint is available",
+    "retry_exhaustion": "stream connect failed after 10 attempt(s): ServiceUnavailable",
+    "first_error_line": 170,
+    "interpretation": "Service returned HTTP 503 indicating no compatible upstream endpoint for those requests. This is not proof of the specific backend routing, capacity, capability, or upstream-health reason. Shared log request identities have not been mapped to every Task. Successful tools in other runs show intermittent progress; do not infer universal model unavailability.",
+    "history_diagnostic": "Provider-failure Runs have no detailed diagnostic payload in task history; UI exposes the terminal classification. Raw server responses are not made a history authority.",
+    "local_server_implementation": {
+      "repository": "metask-ai",
+      "revision": "c1c8efc",
+      "emitter": "services/sglang-proxy/main.go:2696",
+      "selector": "services/sglang-proxy/upstream_pool.go:372",
+      "nil_lease_conditions": [
+        "Required durable state unhealthy",
+        "Endpoint pools draining or empty",
+        "No endpoint supports the requested model",
+        "Compatible endpoints cooling or at in-flight limit",
+        "Shared capacity lease error or denied admission"
+      ],
+      "qualification": "Read-only local source corroborates error semantics; deployed server identity and live endpoint state were not verified."
+    }
+  },
+  "next_acceptance_policy": "After currently active attempts settle, run subsequent live-model cases serially; do not change frozen prompts/oracles or existing service/queue limits."
 }
