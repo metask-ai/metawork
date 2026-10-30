@@ -1162,7 +1162,8 @@ pub fn runtimeQuerySkillCatalog(
     };
     if (runtime == null or out_catalog == null or out_descriptor == null or
         input.struct_size != @sizeOf(wire.SkillCatalogQueryV1) or
-        input.reserved0 != 0 or input.reserved[0] != 0 or
+        input.reserved0 != 0 or input.default_user_source_priority != 0 or
+        input.default_workspace_source_priority != 0 or
         input.additional_source_count > wire.MAX_SKILL_SOURCES_V1 or
         ((input.additional_source_count == 0) != (input.additional_sources == null)))
     {
@@ -1193,6 +1194,7 @@ pub fn runtimeQuerySkillCatalog(
     if (input.additional_sources) |sources| {
         for (sources[0..fake_core.catalog_source_count], 0..) |source, index| {
             if (source.struct_size != @sizeOf(wire.SkillSourceV1) or
+                source.priority != 0 or source.reserved0 != 0 or
                 !std.mem.allEqual(u64, &source.reserved, 0) or
                 (source.scope_code != wire.SKILL_SOURCE_USER and
                     source.scope_code != wire.SKILL_SOURCE_WORKSPACE)) return wire.STATUS_INVALID_ARGUMENT;
@@ -2560,7 +2562,12 @@ const fake_session_api = wire.SessionApiV1{
     .run_input = sessionRunInput,
     .abort = sessionAbort,
     .submit_input = sessionSubmitInput,
+    .update_credential = sessionUpdateCredential,
 };
+
+fn sessionUpdateCredential(_: ?*wire.SessionHandle, _: wire.BytesViewV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork does not call Session.updateCredential");
+}
 
 fn sessionSubmitInput(handle: ?*wire.SessionHandle, run_id: u64, input: ?*const wire.SubmittedInputV1, receipt: ?*wire.InputReceiptV1, diagnostic_out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (diagnostic_out) |out| out.* = .{ .ptr = null, .len = 0 };

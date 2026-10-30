@@ -606,9 +606,10 @@ test "canonical MCP catalog expansion does not expand the original Session" {
     try expectRepeatedMcpPermission("2026-07-28", .expanded);
 }
 
-// Dependency qualification: this is an observed Core gap, not an acceptance
-// assertion that redirecting an existing Session is safe. Keep issue #29 open.
-test "canonical MCP same binding source replacement exposes an origin isolation gap" {
+// Source replacement must revoke the previous origin's Session grant. The
+// existing Session can still route to the new origin after fresh approval;
+// this is not proof of pinned source isolation. Keep issue #29 open.
+test "canonical MCP same binding source replacement requires a new Session grant" {
     try expectRepeatedMcpPermission("2026-07-28", .source_replaced);
 }
 
@@ -1155,7 +1156,9 @@ fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTi
         const result = try runWithPermission(runtime, session, run_id, choice);
         var terminal = result.terminal;
         defer terminal.deinit();
-        const cached = ((timing == .refreshed_allow or timing == .source_replaced) and index > 0) or (timing == .refreshed_deny and index == 2);
+        const cached = (timing == .refreshed_allow and index > 0) or
+            (timing == .source_replaced and index > 1) or
+            (timing == .refreshed_deny and index == 2);
         try std.testing.expectEqual(@as(usize, if (expired or cached) 0 else 1), result.answers);
         try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
         try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), terminal.stop_reason);
