@@ -4,6 +4,7 @@ Usage: <run entry> python scripts/check-office-xlsx.py --entry <run entry>
 All inputs are synthetic. Expected values are independent of authoring row indices.
 """
 import argparse
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -483,6 +484,105 @@ class Verification(unittest.TestCase):
             spec = {"version": 1, "checks": checks, "requirements": [{"id": "zero-rule", "source": "Zero total explicitly means zero share", "checks": ["total", "zero"]}]}
             result, report = self.verify(spec)
             self.assertEqual(result.returncode, 0, report)
+
+
+class WorkflowExample(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="office-example-")
+        self.work = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def generate(self, rows, name="summary"):
+        source = self.work / (name + ".csv")
+        candidate = self.work / (name + ".xlsx")
+        with source.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["Order", "Region", "Amount"])
+            writer.writerows(rows)
+        before = source.read_bytes()
+        result = invoke(ENTRY.parent.parent / "examples/summary.py", source, candidate)
+        self.assertEqual(source.read_bytes(), before)
+        return result, source, candidate
+
+    def test_example_satisfies_independent_numeric_total_and_style_requirements(self):
+        result, _, candidate = self.generate(RAW_ROWS)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        specification = quality_spec()
+        specification["checks"][0]["expected"] = ["Input", "Data", "Regions"]
+        checks = self.work / "checks.json"
+        checks.write_text(json.dumps(specification), encoding="utf-8")
+        report = self.work / "verification.json"
+        checked = invoke(VERIFY, candidate, report, "--checks", checks)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr + report.read_text())
+        book = load_workbook(candidate)
+        try:
+            self.assertEqual(book["Data"]["C6"].value, 650)
+            self.assertEqual(book["Regions"]["B2"].value, 300)
+            self.assertEqual(book["Regions"]["B3"].value, 350)
+            for sheet in book:
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        self.assertEqual(cell.font.name, "Arial")
+        finally:
+            book.close()
+
+    def test_complete_bundled_sample_and_specification_run_through_current_entry(self):
+        examples = ENTRY.parent.parent / "examples"
+        candidate, report = self.work / "bundled.xlsx", self.work / "bundled-report.json"
+        generated = invoke(examples / "summary.py", examples / "orders.csv", candidate)
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        result = invoke(VERIFY, candidate, report, "--checks", examples / "orders-checks.json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr + report.read_text())
+        parsed = json.loads(report.read_text())
+        self.assertTrue(parsed["conforms"])
+        book = load_workbook(candidate)
+        try:
+            self.assertEqual(book["Data"]["C6"].value, 650)
+            self.assertEqual(book["Regions"]["B2"].value, 300)
+            self.assertEqual(book["Regions"]["B3"].value, 350)
+            self.assertEqual(book["Data"]["D6"].number_format, "0.0%")
+            self.assertEqual(book["Regions"]["A4"].font.name, "Arial")
+        finally:
+            book.close()
+
+    def test_example_zero_rows_zero_amounts_and_csv_formula_like_strings_are_data(self):
+        for index, rows in enumerate(((), (("one", "East", 0),), (("=1+2", "#REF!", 5),))):
+            with self.subTest(rows=rows):
+                result, _, candidate = self.generate(rows, str(index))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                book = load_workbook(candidate)
+                try:
+                    data = book["Data"]
+                    total = data.max_row
+                    self.assertEqual(data.cell(total, 1).value, "Total")
+                    self.assertEqual(data.cell(total, 4).value, 0 if index < 2 else 1)
+                    self.assertEqual(data.cell(total, 4).number_format, "0.0%")
+                    if index == 2:
+                        self.assertEqual(data["A2"].value, "=1+2")
+                        self.assertEqual(data["A2"].data_type, "s")
+                        self.assertEqual(data["B2"].value, "#REF!")
+                        self.assertEqual(data["B2"].data_type, "s")
+                        self.assertEqual(book["Regions"]["A2"].data_type, "s")
+                finally:
+                    book.close()
+
+    def test_example_rejects_invalid_amount_and_never_overwrites_source_or_existing_output(self):
+        result, source, candidate = self.generate((("one", "East", "not-a-number"),), "invalid")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(candidate.exists())
+        self.assertNotIn("not-a-number", result.stdout + result.stderr)
+        result, source, candidate = self.generate(RAW_ROWS)
+        self.assertEqual(result.returncode, 0)
+        before = candidate.read_bytes()
+        repeat = invoke(ENTRY.parent.parent / "examples/summary.py", source, candidate)
+        self.assertEqual(repeat.returncode, 1)
+        self.assertEqual(candidate.read_bytes(), before)
+        before = source.read_bytes()
+        same = invoke(ENTRY.parent.parent / "examples/summary.py", source, source)
+        self.assertEqual(same.returncode, 1)
+        self.assertEqual(source.read_bytes(), before)
 
 
 

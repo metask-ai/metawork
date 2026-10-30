@@ -51,6 +51,10 @@ class BudgetError(ValueError):
     pass
 
 
+class InputError(ValueError):
+    """Fixed messages for package defects, without document-supplied strings."""
+
+
 class Unsupported(ValueError):
     pass
 
@@ -305,7 +309,7 @@ def preflight(path, budget):
     with zipfile.ZipFile(path) as archive:
         entries = set(archive.namelist())
         if not {"[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels"} <= entries:
-            raise ValueError("Missing XLSX package parts")
+            raise InputError("Missing XLSX package parts")
         if any(name.lower().endswith("vbaproject.bin") for name in entries):
             raise Unsupported("Macro-bearing workbook")
         nodes = 0
@@ -348,18 +352,18 @@ def preflight(path, budget):
                         if name.endswith(".rels") and element.tag == REL + "Relationship":
                             identity = element.get("Id")
                             if not identity or identity in relation_ids:
-                                raise ValueError("Invalid relationship identity")
+                                raise InputError("Invalid relationship identity")
                             relation_ids.add(identity)
                             target = None
                             if element.get("TargetMode") != "External":
                                 directory = posixpath.dirname(posixpath.dirname(name)) if name != "_rels/.rels" else ""
                                 parsed_target = urlsplit(element.get("Target", ""))
                                 if parsed_target.scheme or parsed_target.netloc or parsed_target.query:
-                                    raise ValueError("Invalid internal relationship URI")
+                                    raise InputError("Invalid internal relationship URI")
                                 raw_target = unquote(parsed_target.path)
                                 target = posixpath.normpath(raw_target.lstrip("/") if raw_target.startswith("/") else posixpath.join(directory, raw_target))
                                 if not raw_target or target not in entries:
-                                    raise ValueError("Missing internal relationship target")
+                                    raise InputError("Missing internal relationship target")
                             if name == "_rels/.rels" and element.get("Type") == DOC_REL[1:-1] + "/officeDocument":
                                 main_relationships += 1
                                 if target != "xl/workbook.xml" or element.get("TargetMode") == "External":
@@ -373,19 +377,19 @@ def preflight(path, budget):
                             if len(book_rels) >= 4096:
                                 raise BudgetError("Relationship allocation budget exceeded")
                             if identity in book_rels:
-                                raise ValueError("Duplicate workbook relationship")
+                                raise InputError("Duplicate workbook relationship")
                             book_rels[identity] = dict(element.attrib)
                     else:
                         depth -= 1
                         element.clear()
             geometry[name] = (conditional, merged)
         if main_relationships != 1:
-            raise ValueError("Missing/ambiguous main workbook relationship")
+            raise InputError("Missing/ambiguous main workbook relationship")
         if not 1 <= len(book_sheets) <= 64:
             raise Unsupported("Unsupported sheet namespace or count")
         names = [name for name, _ in book_sheets]
         if any(not isinstance(name, str) for name in names) or len(set(names)) != len(names):
-            raise ValueError("Invalid sheet names")
+            raise InputError("Invalid sheet names")
         per_sheet = {}
         for name, identity in book_sheets:
             relation = book_rels.get(identity, {})
@@ -394,7 +398,7 @@ def preflight(path, budget):
             if relation.get("Target", "").startswith("/"):
                 target = posixpath.normpath(raw_target.lstrip("/"))
             if relation.get("TargetMode") == "External" or target not in entries:
-                raise ValueError("Missing/internal worksheet relationship")
+                raise InputError("Missing/internal worksheet relationship")
             if relation.get("Type") != DOC_REL[1:-1] + "/worksheet":
                 raise Unsupported("Non-worksheet sheet")
             per_sheet[name] = geometry.get(target, ([], []))
@@ -415,7 +419,7 @@ def opened(stack, path, budget, candidate_report=None):
     stack.callback(book.close)
     budget.tick()
     if book.sheetnames != names:
-        raise ValueError("Workbook sheets were not all loaded")
+        raise InputError("Workbook sheets were not all loaded")
     return book, geometry, before
 
 
@@ -633,13 +637,16 @@ def run(candidate, specification):
               "methods": ["bounded_zip_payloads", "openpyxl_saved_cells_and_styles"],
               "not_performed": ["formula_recalculation", "visual_rendering", "viewer_compatibility", "full_xsd_validation"]}
     budget = Budget()
+    stage = "specification"
     try:
         if candidate.suffix.lower() != ".xlsx":
             raise SpecError("XLSX candidate required")
         spec = parse_spec(specification)
         with ExitStack() as stack:
+            stage = "candidate_input"
             book, geometry, before = opened(stack, candidate, budget, report)
             references = {}
+            stage = "reference_inputs"
             for check in spec["checks"] if spec else []:
                 if check["op"] == "unchanged" and check["original"] not in references:
                     if len(references) >= 4:
@@ -647,8 +654,10 @@ def run(candidate, specification):
                     if fingerprint(check["original"])[:2] == before[:2]:
                         raise SpecError("Original must differ from candidate")
                     references[check["original"]] = opened(stack, Path(check["original"]), budget)
+            stage = "checks"
             for check in spec["checks"] if spec else []:
                 report["checks"].append(evaluate(check, book, geometry, references, budget))
+            stage = "input_stability"
             if fingerprint(candidate) != before:
                 raise RuntimeError("Candidate changed during checking")
             for name, (_, _, original_before) in references.items():
@@ -682,7 +691,10 @@ def run(candidate, specification):
     except Exception as error:
         # Exception strings can contain cell values/XML. Keep them in neither
         # stdout nor reports; typed failure is sufficient to route recovery.
-        report.update(status="execution_error", error={"type": type(error).__name__[:80]})
+        failure = {"type": type(error).__name__[:80], "stage": stage}
+        if isinstance(error, (InputError, BudgetError)):
+            failure["reason"] = str(error)
+        report.update(status="execution_error", error=failure)
         return report, 4
 
 
