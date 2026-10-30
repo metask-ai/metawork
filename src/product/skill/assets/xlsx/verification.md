@@ -9,7 +9,10 @@ Use new paths for the candidate, check specification and every report.
 /bin/sh "${CLAUDE_SKILL_DIR}/environment/run.sh" python "${CLAUDE_SKILL_DIR}/scripts/verify.py" result.xlsx verification-1.json --checks checks.json
 ```
 
-Read the report, including `status`, `execution_completed`,
+Read the report, paging through it when the reader truncates its output. Do not
+infer unseen check or requirement results from a partial view. Reports use
+multiline JSON so the normal text reader can inspect them directly. Read
+`status`, `execution_completed`,
 `required_checks_completed`, `conforms`, the per-check results and the requirement
 mapping. Exit zero alone does not establish that the task was checked. A call
 without `--checks` only establishes the reported basic checks (`basic_passed`),

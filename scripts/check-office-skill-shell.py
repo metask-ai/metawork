@@ -55,11 +55,11 @@ def texts(value):
         yield value
 
 
-def sse(tool_input=None):
+def sse(tool_input=None, tool_name="Bash"):
     events = [{"type": "message_start", "message": {"id": "office-fixture", "role": "assistant",
               "model": "fixture", "usage": {"input_tokens": 1, "output_tokens": 1}}}]
     if tool_input:
-        block = {"type": "tool_use", "id": "office-bash", "name": "Bash", "input": {}}
+        block = {"type": "tool_use", "id": "office-" + tool_name.lower(), "name": tool_name, "input": {}}
         delta = {"type": "input_json_delta", "partial_json": json.dumps(tool_input)}
     else:
         block = {"type": "text", "text": ""}
@@ -75,6 +75,7 @@ def sse(tool_input=None):
 
 for case in (("deny", "allow", "full") if args.permission_probe else (("docx", "xlsx") if args.home_probe else ("docx", "xlsx", "pptx"))):
     kind = "xlsx" if args.permission_probe else case
+    read_report = kind == "xlsx" and not args.home_probe and not args.permission_probe
     work = scratch / case
     work.mkdir()
     output = work / ("created." + kind)
@@ -108,7 +109,8 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                   {"id": "formula", "op": "values", "target": {"sheet": "Sheet", "range": "B1"},
                    "expected": [[{"type": "formula", "value": "=1+2"}]]}]
         (work / "checks.json").write_text(json.dumps({"version": 1, "checks": checks, "requirements": [
-            {"id": "content", "source": "Fixed fixture edit and unchanged formula", "checks": ["text", "formula"]}]}), encoding="utf-8")
+            {"id": check, "source": "Fixed synthetic edit/formula requirement; deliberately long to exercise the real Read tool line boundary. " * 9, "checks": [check]}
+            for check in ("text", "formula")]}), encoding="utf-8")
     else:
         language = "node"
         script = work / "scripts" / "create.cjs"
@@ -179,16 +181,23 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                         command += " && /usr/bin/printf %s " + shlex.quote(marker)
                         response = sse({"command": command, "timeout": 120000})
                 else:
-                    assert state["calls"] == 2
+                    assert state["calls"] in (2, 3)
                     results = [c for m in payload["messages"] for c in m.get("content", []) if isinstance(c, dict) and c.get("type") == "tool_result"]
                     assert results, results
-                    if args.permission_probe and case == "deny":
+                    if state["calls"] == 3:
+                        assert read_report and not results[-1].get("is_error")
+                        report_text = "\n".join(texts(results[-1]))
+                        expected_hash = hashlib.sha256(edited.read_bytes()).hexdigest()
+                        assert expected_hash in report_text, "Real Read lost the report tail/candidate identity"
+                        assert '"required_checks_completed": true' in report_text
+                        assert '"conforms": true' in report_text
+                    elif args.permission_probe and case == "deny":
                         assert results[-1].get("is_error"), results[-1]
                         assert marker not in "\n".join(texts(results[-1])), results[-1]
                     else:
                         assert not results[-1].get("is_error"), results
                         assert marker in "\n".join(texts(results[-1])), results[-1]
-                    response = sse()
+                    response = sse({"file_path": str(work / "verification.json")}, "Read") if read_report and state["calls"] == 2 else sse()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(response)))
@@ -205,14 +214,15 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         env = dict(qualification.environment(profile) if not args.home_probe else os.environ, METAWORK_OFFICE_CORE_WORKSPACE=str(work),
                    METAWORK_OFFICE_CORE_HOME=str(Path.home().resolve()) if args.home_probe else str(profile if sys.platform == "darwin" else Path.home().resolve()),
                    METAWORK_OFFICE_CORE_SKILLS=str(skills), METAWORK_OFFICE_CORE_SKILL=kind,
-                   METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages")
+                   METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages",
+                   METAWORK_OFFICE_CORE_READ_REPORT="1" if read_report else "0")
         env.pop("METAWORK_OFFICE_CORE_PERMISSION_CASE", None)
         if args.permission_probe:
             env["METAWORK_OFFICE_CORE_PERMISSION_CASE"] = case
         result = subprocess.run([str(probe)], env=env, capture_output=True, timeout=180)
         if result.returncode or state["error"]:
             raise RuntimeError(str(scratch) + "\n" + str(state["error"]) + "\n" + result.stderr.decode("utf-8", errors="replace"))
-        assert state["calls"] == 2
+        assert state["calls"] == (3 if read_report else 2)
         if args.permission_probe:
             expected = 0 if case == "full" else 1
             assert "Office permission callbacks: " + str(expected) in result.stderr.decode("utf-8", errors="replace")

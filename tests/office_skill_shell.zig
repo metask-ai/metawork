@@ -52,12 +52,16 @@ pub fn main(init: std.process.Init) !void {
     }
     const default_permission = if (permission_case) |case| !std.mem.eql(u8, case, "full") else false;
     var permission_probe = PermissionProbe{ .deny = if (permission_case) |case| std.mem.eql(u8, case, "deny") else false };
-    const tools = [_]wire.BytesViewV1{core.bytesView("Bash")};
+    const read_report = std.mem.eql(u8, init.environ_map.get("METAWORK_OFFICE_CORE_READ_REPORT") orelse "0", "1");
+    if (read_report and (!std.mem.eql(u8, name, "xlsx") or permission_case != null))
+        return error.InvalidFixtureMode;
+    const tool_storage = [_]wire.BytesViewV1{ core.bytesView("Bash"), core.bytesView("Read") };
+    const tools = tool_storage[0..@as(usize, if (read_report) 2 else 1)];
     var diagnostic: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 };
     defer api.bufferRelease()(&diagnostic);
     var config = std.mem.zeroes(wire.RuntimeConfigV1);
     config.struct_size = @sizeOf(wire.RuntimeConfigV1);
-    config.builtin_tools = &tools;
+    config.builtin_tools = tools.ptr;
     config.builtin_tool_count = tools.len;
     var runtime: ?*wire.RuntimeHandle = null;
     try require(api.runtime().create()(&config, null, &runtime, &diagnostic), diagnostic);
@@ -101,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
     host.base_url = core.bytesView(init.environ_map.get("METAWORK_OFFICE_CORE_URL") orelse return error.MissingFixtureUrl);
     host.workspace_root = core.bytesView(workspace);
     host.workspace_home = core.bytesView(home);
-    host.allowed_tools = &tools;
+    host.allowed_tools = tools.ptr;
     host.allowed_tool_count = tools.len;
     host.skill_catalog = catalog;
     host.skill_policy = &policy;
@@ -122,7 +126,10 @@ pub fn main(init: std.process.Init) !void {
     defer _ = api.session().destroy()(session.?, null);
     var options = std.mem.zeroes(wire.RunOptionsV1);
     options.struct_size = @sizeOf(wire.RunOptionsV1);
-    options.max_turns = 2;
+    // The report-read fixture has three declared provider turns: author/edit
+    // via Bash, inspect via Read, then the final response. Other modes retain
+    // their original two-turn input and Bash-only tool selection.
+    options.max_turns = if (read_report) 3 else 2;
     var result = std.mem.zeroes(wire.RunResultV1);
     const arguments = try core.encodeSkillArguments(std.heap.c_allocator, &.{});
     defer std.heap.c_allocator.free(arguments);

@@ -724,7 +724,10 @@ def main():
     args = parser.parse_args()
     report, code = run(args.candidate, args.checks)
     try:
-        encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        # Core Read bounds each text line. Keep status/mappings/identity on
+        # separate lines so a normal report can be inspected without another
+        # generated program and Shell approval. Bound the actual encoded bytes.
+        encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, indent=2)
         if len(encoded) > MAX_REPORT:
             raise BudgetError("Report byte budget exceeded")
         # Exclusive creation rejects every existing path, including aliases.
