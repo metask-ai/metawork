@@ -119,24 +119,23 @@ function formatDate(date: string, locale: Locale) {
 }
 
 function monthLabels(days: CalendarDay[], locale: Locale) {
-  const labels: Array<{ column: number; label: string }> = [];
-  const seen = new Set<string>();
-  const occupiedColumns = new Set<number>();
+  const monthStarts = new Map<number, string>();
+  let previousMonth = "";
   for (const day of days) {
     const month = day.date.slice(0, 7);
-    if (seen.has(month)) continue;
-    seen.add(month);
-    if (occupiedColumns.has(day.column)) continue;
-    occupiedColumns.add(day.column);
-    labels.push({
-      column: day.column,
-      label: new Intl.DateTimeFormat(displayLocale(locale), {
-        month: "short",
-        timeZone: "UTC",
-      }).format(new Date(`${day.date}T12:00:00Z`)),
-    });
+    if (month === previousMonth) continue;
+    previousMonth = month;
+    // A shared starting week belongs to the later month's axis label.
+    monthStarts.set(day.column, day.date);
   }
-  return labels;
+  const formatter = new Intl.DateTimeFormat(displayLocale(locale), {
+    month: "short",
+    timeZone: "UTC",
+  });
+  return Array.from(monthStarts, ([column, date]) => ({
+    column,
+    label: formatter.format(new Date(`${date}T12:00:00Z`)),
+  }));
 }
 
 export function AccountUsageHeatmap({ history }: { history: History }) {

@@ -83,18 +83,18 @@ const history = {
   safeDiagnostic: "",
 };
 
-function renderHeatmap() {
+function renderHeatmap(visibleHistory = history, locale = "en-US") {
   return render(
     createElement(
       I18nContext.Provider,
       {
         value: {
-          locale: "en-US",
+          locale,
           setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
+          t: (id, values) => translate(locale, id, values),
         },
       },
-      createElement(AccountUsageHeatmap, { history }),
+      createElement(AccountUsageHeatmap, { history: visibleHistory }),
     ),
   );
 }
@@ -126,4 +126,76 @@ test("Account history heatmap renders the latest 13 week columns on narrow scree
   renderHeatmap();
   assert.equal(screen.getAllByRole("gridcell").length, 86);
   assert.ok(screen.getByText("Past 13 weeks · Daily"));
+});
+
+function renderedMonthLabels(container) {
+  return [...container.querySelectorAll(".settings-account-months span")].map(
+    (label) => [Number(label.style.gridColumn), label.textContent],
+  );
+}
+
+test("Account history month axis keeps November over a truncated October in the same week", () => {
+  const { container } = renderHeatmap(
+    { ...history, startDate: "2025-10-31", endDate: "2026-10-28", days: [] },
+    "zh-CN",
+  );
+  assert.deepEqual(renderedMonthLabels(container), [
+    [1, "11月"],
+    [6, "12月"],
+    [10, "1月"],
+    [14, "2月"],
+    [18, "3月"],
+    [23, "4月"],
+    [27, "5月"],
+    [32, "6月"],
+    [36, "7月"],
+    [40, "8月"],
+    [45, "9月"],
+    [49, "10月"],
+  ]);
+  assert.ok(screen.getByRole("gridcell", { name: /2025年10月31日/ }));
+});
+
+for (const compact of [false, true]) {
+  test(`Account history month axis prefers the later month across a year boundary (${compact ? 13 : 53} weeks)`, () => {
+    narrow = compact;
+    const { container } = renderHeatmap({
+      ...history,
+      startDate: "2025-12-31",
+      endDate: "2026-01-02",
+      days: [],
+    });
+    assert.deepEqual(renderedMonthLabels(container), [[1, "Jan"]]);
+    assert.equal(screen.getAllByRole("gridcell").length, 3);
+    assert.ok(screen.getByRole("gridcell", { name: /December 31, 2025/ }));
+  });
+}
+
+test("Account history month axis retains months starting in separate week columns", () => {
+  const { container } = renderHeatmap({
+    ...history,
+    startDate: "2025-10-26",
+    endDate: "2025-11-05",
+    days: [],
+  });
+  assert.deepEqual(renderedMonthLabels(container), [
+    [1, "Oct"],
+    [2, "Nov"],
+  ]);
+});
+
+test("Account history month axis follows the visible range after narrow-screen clipping", () => {
+  narrow = true;
+  const { container } = renderHeatmap({
+    ...history,
+    startDate: "2025-10-31",
+    endDate: "2026-10-28",
+    days: [],
+  });
+  assert.deepEqual(renderedMonthLabels(container), [
+    [1, "Aug"],
+    [5, "Sep"],
+    [9, "Oct"],
+  ]);
+  assert.equal(screen.getAllByRole("gridcell").length, 87);
 });
