@@ -7,6 +7,7 @@ const control_api = f.product_control;
 const task_api = f.product_task;
 const state = task_api.testing.state_module;
 const options = @import("office_pipeline_options");
+const builtin = @import("builtin");
 
 const Provider = struct {
     child: std.process.Child,
@@ -155,7 +156,8 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(run.commentary_count > 0);
                 try std.testing.expect(run.assistant_output_kind == .final);
                 try std.testing.expect(run.next_output_segment_index >= 2);
-                const tool_failed = std.mem.eql(u8, mode, "nonzero") or std.mem.eql(u8, mode, "missing-environment") or std.mem.eql(u8, mode, "deny");
+                const tool_failed = std.mem.eql(u8, mode, "nonzero") or std.mem.eql(u8, mode, "missing-environment") or
+                    std.mem.eql(u8, mode, "stale-entry") or std.mem.eql(u8, mode, "unreachable-preparation") or std.mem.eql(u8, mode, "deny");
                 try std.testing.expectEqualStrings(if (tool_failed)
                     "Checking the requested operation. The controlled tool failed as expected."
                 else
@@ -247,6 +249,7 @@ fn qualify(mode: []const u8) !void {
         defer std.testing.allocator.free(trace);
         try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
         if (std.mem.eql(u8, mode, "missing-environment")) try std.testing.expect(std.mem.indexOf(u8, trace, "Office environment missing or unavailable") != null);
+        if (std.mem.eql(u8, mode, "unreachable-preparation")) try std.testing.expect(std.mem.indexOf(u8, trace, "preparation-cleanup") != null);
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
             defer std.testing.allocator.free(saved);
@@ -262,6 +265,12 @@ fn qualify(mode: []const u8) !void {
 
 test "Office canonical Product pipeline tools, legitimate failures, denial and multi-run" {
     for ([_][]const u8{ "success", "nonzero", "missing-environment", "deny", "multi-run" }) |mode| try qualify(mode);
+}
+
+test "Office macOS original preparation errors remain ordinary tool results" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try qualify("stale-entry");
+    try qualify("unreachable-preparation");
 }
 
 test "Office canonical Product pipeline retries and closes streaming cancellation" {

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { appendFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { protocolTextSse } from "./provider_protocol.mjs";
@@ -46,6 +46,20 @@ function command() {
   if (mode === "nonzero")
     return "printf 'controlled-exit-7' > operation.txt; cat operation.txt; exit 7";
   if (mode === "deny") return "printf 'must-not-execute' > denied.txt";
+  if (mode === "stale-entry" || mode === "unreachable-preparation") {
+    if (process.platform !== "darwin") throw Error("macOS preparation-path fixture required");
+    const quote = (text) => "'" + text.replaceAll("'", "'\\''") + "'";
+    if (mode === "stale-entry")
+      return "/bin/sh " + quote(join(workspace, "expired-activation/environment/run.sh")) + " python unused.py";
+    // Only this child gets an isolated HOME and an unreachable loopback proxy.
+    // The unchanged official prepare entry cannot reach its download source.
+    const proxy = "http://127.0.0.1:1";
+    return "HOME=" + quote(workspace) + " " +
+      ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        .map((name) => name + "=" + quote(proxy)).join(" ") +
+      " NO_PROXY='' no_proxy='' /bin/sh " +
+      quote(join(resources, "xlsx/environment/prepare.sh")) + " python";
+  }
   if (mode === "missing-environment") {
     const entry = join(
       resources,
@@ -142,7 +156,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (results.length) {
-      const failed = ["nonzero", "missing-environment", "deny"].includes(mode);
+      const failed = ["nonzero", "missing-environment", "stale-entry", "unreachable-preparation", "deny"].includes(mode);
       const result = results.at(-1);
       if (mode === "deny") {
         if (!result.is_error) throw Error("denied operation was not refused");
@@ -150,13 +164,23 @@ const server = createServer(async (request, response) => {
         // Bash invocation success and the child process exit are distinct.
         // A nonzero process exit remains a structured Bash result.
         const bash = JSON.parse(result.content);
-        const expectedExit =
-          mode === "nonzero" ? 7 : mode === "missing-environment" ? 3 : 0;
+        const expectedExit = ({ nonzero: 7, "missing-environment": 3,
+          "stale-entry": 127, "unreachable-preparation": 7 })[mode] ?? 0;
         if (
           bash.schema_version !== "metacodes.bash-result.v2" ||
           bash.exit_code !== expectedExit
         )
           throw Error("unexpected process exit classification");
+        if (mode === "unreachable-preparation") {
+          if (!bash.stderr.includes("curl: (7)") || !bash.stderr.includes("127.0.0.1"))
+            throw Error("Official preparation did not fail at the loopback proxy");
+          const metadata = JSON.parse(readFileSync(join(resources, "xlsx/environment/environment.json"), "utf8"));
+          const dependencies = join(workspace, "Library/Application Support", metadata.namespace);
+          if (!existsSync(dependencies) || readdirSync(dependencies).length !== 0)
+            throw Error("Failed preparation published an environment or retained a stage");
+          trace({ kind: "preparation-cleanup", exit_code: bash.exit_code,
+            published_environment: false, stage_count: 0 });
+        }
       }
       if (mode === "deny" && existsSync(join(workspace, "denied.txt")))
         throw Error("denied operation executed");
