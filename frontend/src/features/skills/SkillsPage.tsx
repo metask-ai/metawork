@@ -957,6 +957,7 @@ export function SkillsPage({
                               ),
                             })}
                           </small>
+                          <p>{t("skills.resource_context_notice")}</p>
                         </div>
                       </div>
                       {!reimportTarget && (

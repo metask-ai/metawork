@@ -441,6 +441,8 @@ export const zhCN: Record<MessageId, string> = {
   "skills.choose_again": "重新选择",
   "skills.install_scope": "安装到",
   "skills.preview_size": "{files} 个文件 · {size} 字节",
+  "skills.resource_context_notice":
+    "MetaWork 会在安装和导出的 Skill 中补充资源定位说明，读取同一 Skill 目录的其他工具也能看到。原始文件保持不变。",
   "skills.replace_title": "此作用域中已有同名 Skill",
   "skills.replace_body":
     "仅在你信任此来源时替换；如果验证失败，MetaWork 会恢复原有 Skill。",
