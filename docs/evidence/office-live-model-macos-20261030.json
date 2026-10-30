@@ -353,11 +353,24 @@
       "frozen_prompt_matches_persisted_input": true,
       "source_commit": "b862a0e6",
       "application_sha256": "22255fc9274897529ba979819bab2c5476c2c97ece27febcafd1d31062fa0c6d",
-      "status": "running",
+      "status": "interrupted",
       "interventions": [
-        "Application auto-review timed out for Bash hashing synthetic orders.csv and running the generated create_orders.py; inspected the script (local CSV read and XLSX write only), then clicked Allow once. No task hints, artifact edits or standing permission changes."
+        "Application auto-review timed out for Bash hashing synthetic orders.csv and running the generated create_orders.py; inspected the script (local CSV read and XLSX write only), then clicked Allow once. No task hints, artifact edits or standing permission changes.",
+        "Human user explicitly authorized the one verify.py invocation after application auto-review requested manual confirmation; clicked Allow once for created.xlsx + checks.json → new verification-1.json.",
+        "Owned test application stopped cleanly while awaiting manual approval; shutdown cause not established. Cold history recovered this Run as interrupted/app_shutdown; no successful final delivery inferred."
       ],
-      "observation": "Workspace selected before submission; no MetaWork native modal opened while this run was active. MetaskOffice viewer work occurs in a separate application process."
+      "observation": "Workspace selected before submission; no MetaWork native modal opened while this run was active. MetaskOffice viewer work occurs in a separate application process.",
+      "independent_create_oracle": {
+        "status": "passed",
+        "candidate": {
+          "bytes": 6871,
+          "sha256": "36ae41566cc1d5f74ecf1ae5debb2b3ab5a80133ca26a595fbcde8397f32657a"
+        },
+        "checks": "tests/fixtures/office/model-create-checks.json"
+      },
+      "outcome": "interrupted",
+      "cause": "app_shutdown",
+      "finished_at_unix_ms": 1793331222551
     },
     {
       "attempt": 4,
@@ -372,9 +385,14 @@
       "submitted_at_unix_ms": 1793329721120,
       "frozen_prompt_matches_persisted_input": true,
       "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
-      "status": "running",
-      "interventions": [],
-      "application_source_commit": "b862a0e6"
+      "status": "interrupted",
+      "interventions": [
+        "Owned test application stopped cleanly while awaiting manual approval; shutdown cause not established. Cold history recovered this Run as interrupted/app_shutdown; no successful final delivery inferred."
+      ],
+      "application_source_commit": "b862a0e6",
+      "outcome": "interrupted",
+      "cause": "app_shutdown",
+      "finished_at_unix_ms": 1793331222551
     },
     {
       "attempt": 5,
@@ -389,14 +407,40 @@
       "submitted_at_unix_ms": 1793329740636,
       "frozen_prompt_matches_persisted_input": true,
       "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
-      "status": "running",
-      "interventions": [],
-      "application_source_commit": "b862a0e6"
+      "status": "completed",
+      "interventions": [
+        "Allowed once for the already-authorized local DeliverFile of the synthetic requested report; tool has no automatic-review support, no standing rule created"
+      ],
+      "application_source_commit": "b862a0e6",
+      "outcome": "completed",
+      "cause": null,
+      "diagnostic": "",
+      "final_response": "**结论：整体必要要求未完成。**\n\n- **无法执行 Excel 重算**：本机（macOS）未安装 Microsoft Excel（已检查 /Applications 并全盘按 Bundle ID `com.microsoft.Excel` 检索，均无）。本 XLSX 检查运行时（openpyxl）本身也不具备公式重算能力，设置“打开时重算”标志也不等于已发生的重算。\n- **未采用替代手段冒充通过**：按你的要求，Python 手算、读取公式文本、读取旧缓存值均不构成满足必要要求，故该项记为 **未支持/未完成**，不宣称重算结果为 3，也**不宣称文件全面通过检查**。\n- **原件未动**：`bad-styles.xlsx` 未被读取写入或覆盖，仅定位到路径。\n\n检查报告已生成并交付：`results/check-report.md`（2130 字节，SHA-256 `ac799315…1390ac`）。若要在装有 Microsoft Excel 的机器上完成该项验收，可让 Excel 打开该文件强制重算后核对 `Reference!B2`。",
+      "actual_deliveries": [
+        {
+          "id": "7d12dc3940158f5f4595fe248f25c5eb",
+          "locator": "results/check-report.md",
+          "size_bytes": 2130,
+          "sha256": "ac7993152b2a9cb49bc3ac650ec3fdfcbe0bdc332d725530b96bd1cbbb1390ac",
+          "redacted": false
+        }
+      ],
+      "receipt_matches_report_file": true,
+      "original_unchanged": true,
+      "boundary_result": {
+        "necessary_requirement_stated_uncompleted": true,
+        "no_false_recalculation_or_full_pass": true,
+        "structured_verifier_invoked": false,
+        "report_format": "Markdown; no machine required_checks_completed/conforms fields",
+        "frozen_machine_report_oracle": "not satisfied; truthful narrative alone does not establish the required structured result",
+        "overall_acceptance": "not passed"
+      }
     }
   ],
   "unstarted": [
-    "bad-styles repair",
-    "necessary recalculation unsupported",
+    "three successful independent create-edit repetitions",
+    "bad-styles completion and receipt",
+    "new-resource necessary recalculation unsupported retest",
     "correlation model create-edit",
     "first preparation in isolated profile with live model"
   ],
@@ -418,6 +462,57 @@
       "public_dialog_api": "synchronous showOpenDialog; no qualified asynchronous API found"
     },
     "underlying_modal_starvation_fixed": false,
-    "historical_issue_23_root_cause": "not established by these current attempts"
+    "historical_issue_23_root_cause": "not established by these current attempts",
+    "controlled_consumer_starvation": {
+      "commit": "1bb7051f",
+      "entry": "zig build test-office-pipeline --summary all",
+      "steps_passed": 9,
+      "tests_passed": 4,
+      "production_limits_unchanged": true,
+      "typed_first_cause_and_history_verified": true,
+      "native_dialog_automated": false,
+      "modal_starvation_fixed": false
+    }
+  },
+  "pending_decision": "User authorized once-only approvals throughout this synthetic acceptance scope after script/path inspection; no approval mode or standing policy changed. Original pending Runs were interrupted by application shutdown before the newly authorized clicks.",
+  "observed_workflow_fix": {
+    "commit": "8667dfe5",
+    "problem": "Actual model Read of one-line verification report was truncated, so the model authored another summary program and required an additional Shell approval",
+    "change": "Multiline JSON under the same actual encoded-byte report budget; read/paginate directly",
+    "machine_qualification": "Real canonical Core Read obtains report tail candidate hash plus required_checks_completed/conforms; 28 XLSX quality checks and three-format Core fixture pass",
+    "current_live_runs_use_old_archive": true,
+    "new_model_validation": "pending current runs and application restart"
+  },
+  "validation_followup": {
+    "delivery_fixture_commit": "7922f4ff",
+    "initial_full_graph": {
+      "log": ".zig-cache/office-native-current-workflow.log",
+      "steps_passed": 237,
+      "tests_passed": 1559,
+      "tests_total": 1569,
+      "skipped": 9,
+      "failed": 1,
+      "failure": "read-large fixture asserted image execution released before deferred ownership settlement"
+    },
+    "after_fixture_fix": {
+      "log": ".zig-cache/office-native-current-workflow-settled.log",
+      "steps_passed": 241,
+      "tests_passed": 1561,
+      "tests_total": 1570,
+      "skipped": 9,
+      "failed": 0
+    },
+    "production_limits_or_policy_changed": false
+  },
+  "verification_only_followup": {
+    "commit": "454b614c",
+    "scope": "Include read-only checking tasks and necessary unsupported mapping in the existing structured checker workflow",
+    "original_failed_case_retained": true,
+    "fresh_model_retest": "pending"
+  },
+  "authorization": {
+    "scope": "Synthetic Office acceptance directories only: inspect scripts first; allow-once reads, new working copies, verification and local DeliverFile",
+    "user_answer": "授权本次合成验收范围",
+    "standing_policy_changed": false
   }
 }
