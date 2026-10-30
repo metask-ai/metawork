@@ -61,6 +61,7 @@ pub const FilePreviewState = runtime_impl.FilePreviewState;
 pub const FilePreviewResult = runtime_impl.FilePreviewResult;
 pub const FilePreviewImage = runtime_impl.FilePreviewImage;
 pub const file_preview_chunk_bytes = runtime_impl.file_preview_chunk_bytes;
+pub const DirectoryEntry = runtime_impl.DirectoryEntry;
 pub const FilePreviewSink = runtime_impl.FilePreviewSink;
 pub const AttachmentFileStore = runtime_impl.AttachmentFileStore;
 pub const AttachmentImagePreparation = runtime_impl.AttachmentImagePreparation;

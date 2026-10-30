@@ -10,6 +10,47 @@ pub const max_image_pixels: u64 = 4096 * 4096;
 pub const max_image_side: u32 = 8192;
 pub const image_chunk_bytes: usize = 262143;
 pub const ImageInfo = image_container.Info;
+pub const Source = enum { reference, workspace, directory };
+pub const max_directory_entries = 512;
+pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
+
+pub fn validWorkspacePath(path: []const u8, allow_root: bool) bool {
+    if (path.len == 0) return allow_root;
+    if (path.len > 4096 or !std.unicode.utf8ValidateSlice(path)) return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    var depth: usize = 0;
+    while (parts.next()) |part| {
+        depth += 1;
+        if (depth > 64 or part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        for (part) |byte| if (byte < 0x20 or byte == 0x7f or byte == '\\' or byte == ':') return false;
+    }
+    return true;
+}
+
+fn openWorkspaceDirectory(io: std.Io, root: std.Io.Dir, path: []const u8) !std.Io.Dir {
+    if (!validWorkspacePath(path, true)) return error.AccessDenied;
+    if ((try root.stat(io)).kind != .directory) return error.AccessDenied;
+    var current = try root.openDir(io, ".", .{ .iterate = true, .follow_symlinks = false });
+    errdefer current.close(io);
+    if ((try current.stat(io)).kind != .directory) return error.AccessDenied;
+    if (path.len != 0) {
+        var parts = std.mem.splitScalar(u8, path, '/');
+        while (parts.next()) |part| {
+            const next = try current.openDir(io, part, .{ .iterate = true, .follow_symlinks = false });
+            const stat = next.stat(io) catch |err| {
+                next.close(io);
+                return err;
+            };
+            if (stat.kind != .directory) {
+                next.close(io);
+                return error.AccessDenied;
+            }
+            current.close(io);
+            current = next;
+        }
+    }
+    return current;
+}
 
 pub const State = enum {
     ready,
@@ -25,6 +66,7 @@ pub const State = enum {
 };
 
 pub const Input = struct {
+    source: Source = .reference,
     completion_id: u64,
     task_id: u64,
     run_id: u64,
@@ -39,6 +81,8 @@ pub const Input = struct {
 };
 
 pub const Completion = struct {
+    source: Source = .reference,
+    entries: []const DirectoryEntry = &.{},
     completion_id: u64,
     task_id: u64,
     run_id: u64,
@@ -92,6 +136,9 @@ fn isImage(bytes: []const u8) bool {
 }
 
 const Job = struct {
+    source: Source,
+    entries: [max_directory_entries]DirectoryEntry = undefined,
+    entry_count: usize = 0,
     lane: *Lane,
     completion_id: u64,
     task_id: u64,
@@ -163,7 +210,23 @@ const Job = struct {
             return .completed;
         };
         defer root.close(self.lane.io);
-        var file = root.openFile(self.lane.io, self.relative_path, .{
+        if (self.source == .directory) return self.readDirectory(root);
+        if (self.source == .workspace and !validWorkspacePath(self.relative_path, false)) {
+            self.state = .restricted;
+            return .completed;
+        }
+        var parent: ?std.Io.Dir = null;
+        defer if (parent) |*dir| dir.close(self.lane.io);
+        var file_path: []const u8 = self.relative_path;
+        if (self.source == .workspace) {
+            const split = std.mem.lastIndexOfScalar(u8, file_path, '/');
+            parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| file_path[0..index] else "") catch {
+                self.state = .restricted;
+                return .completed;
+            };
+            if (split) |index| file_path = file_path[index + 1 ..];
+        }
+        var file = (parent orelse root).openFile(self.lane.io, file_path, .{
             .allow_directory = false,
             .follow_symlinks = false,
             .resolve_beneath = true,
@@ -282,7 +345,48 @@ const Job = struct {
         return .completed;
     }
 
+    fn readDirectory(self: *Job, root: std.Io.Dir) ReadOutcome {
+        var directory = openWorkspaceDirectory(self.lane.io, root, self.relative_path) catch |err| {
+            self.state = if (err == error.FileNotFound or err == error.NotDir) .missing else .restricted;
+            return .completed;
+        };
+        defer directory.close(self.lane.io);
+        var iterator = directory.iterate();
+        var visited: usize = 0;
+        var bytes: usize = 0;
+        while (iterator.next(self.lane.io) catch {
+            self.state = .failed;
+            return .completed;
+        }) |entry| {
+            if (self.cancelled.load(.acquire)) {
+                self.state = .failed;
+                return .completed;
+            }
+            visited += 1;
+            if (visited > 4096 or self.entry_count == max_directory_entries or bytes + entry.name.len > 64 * 1024) {
+                self.truncated = true;
+                break;
+            }
+            if ((entry.kind != .file and entry.kind != .directory) or !validWorkspacePath(entry.name, false) or std.mem.indexOfScalar(u8, entry.name, '/') != null) continue;
+            const name = self.lane.allocator.dupe(u8, entry.name) catch {
+                self.state = .failed;
+                return .completed;
+            };
+            self.entries[self.entry_count] = .{ .name = name, .kind = if (entry.kind == .directory) .directory else .file };
+            self.entry_count += 1;
+            bytes += name.len;
+        }
+        self.state = .ready;
+        return .completed;
+    }
+
     fn clearContent(self: *Job) void {
+        for (self.entries[0..self.entry_count]) |entry| {
+            const name: []u8 = @constCast(entry.name);
+            std.crypto.secureZero(u8, name);
+            self.lane.allocator.free(name);
+        }
+        self.entry_count = 0;
         if (self.buffer.len != 0) {
             std.crypto.secureZero(u8, self.buffer);
             self.lane.allocator.free(self.buffer);
@@ -367,6 +471,7 @@ pub const Lane = struct {
         const relative_path = try self.allocator.dupe(u8, input.relative_path);
         errdefer self.allocator.free(relative_path);
         job.* = .{
+            .source = input.source,
             .lane = self,
             .completion_id = input.completion_id,
             .created_at = .now(self.io, .awake),
@@ -435,6 +540,8 @@ pub const Lane = struct {
         return .{
             .job = job,
             .completion = .{
+                .source = job.source,
+                .entries = job.entries[0..job.entry_count],
                 .completion_id = job.completion_id,
                 .task_id = job.task_id,
                 .run_id = job.run_id,
@@ -578,6 +685,57 @@ fn trimIncompleteUtf8Tail(bytes: []u8) []u8 {
     const sequence_len = std.unicode.utf8ByteSequenceLength(lead) catch return bytes;
     if (bytes.len - lead_index < sequence_len) return bytes[0..lead_index];
     return bytes;
+}
+
+test "file preview workspace paths reject traversal absolute paths controls and alternate streams" {
+    inline for (.{ "../secret", "/secret", "a/../b", "a//b", "a/./b", "C:/secret", "a\\b", "file:stream", "a\x00b", "a\x7fb" }) |path| try std.testing.expect(!validWorkspacePath(path, false));
+    try std.testing.expect(!validWorkspacePath("", false));
+    try std.testing.expect(validWorkspacePath("", true));
+    try std.testing.expect(validWorkspacePath("docs/中文.md", false));
+}
+
+test "file preview workspace directory reads children on demand and opens unreferenced files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "docs", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "docs/unreferenced.txt", .data = "workspace content" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const Harness = struct {
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            job.execute_fn(job.context);
+        }
+    };
+    var context: u8 = 0;
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = Harness.wake }, .{ .context = &context, .enqueue_fn = Harness.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    var input: Input = .{ .source = .directory, .completion_id = 1, .task_id = 1, .run_id = 0, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "", .workspace_root = root, .relative_path = "", .max_bytes = 1024, .max_lines = 20, .max_line_bytes = 1024 };
+    try lane.begin(input);
+    const listing = lane.take().?;
+    try std.testing.expectEqual(State.ready, listing.completion.state);
+    try std.testing.expectEqual(@as(usize, 1), listing.completion.entries.len);
+    try std.testing.expectEqualStrings("docs", listing.completion.entries[0].name);
+    try std.testing.expectEqual(.directory, listing.completion.entries[0].kind);
+    lane.release(listing);
+    input.source = .workspace;
+    input.relative_path = "docs/unreferenced.txt";
+    try lane.begin(input);
+    const file = lane.take().?;
+    try std.testing.expectEqual(State.ready, file.completion.state);
+    try std.testing.expectEqualStrings("workspace content", file.completion.content);
+    lane.release(file);
+    input.source = .directory;
+    input.relative_path = "../outside";
+    try lane.begin(input);
+    const denied = lane.take().?;
+    try std.testing.expectEqual(State.restricted, denied.completion.state);
+    lane.release(denied);
 }
 
 test "file preview lane classifies bounded text empty and unsafe files" {
