@@ -127,6 +127,15 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(run.event_stream_finalized);
                 return;
             }
+            if (std.mem.eql(u8, mode, "consumer-starvation")) {
+                try std.testing.expect(terminal.phase == .failed);
+                const diagnostic = run.terminal_diagnostic[0..state.terminalPayload(run).?.diagnostic_len];
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "boundary=event_pump reason=queue_rejected") != null);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, "error=DeadlineExceeded") != null);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, agent.core_manifest_sha256) != null);
+                try std.testing.expect(run.event_stream_finalized);
+                return;
+            }
             if (run.first_event_rejection != null or run.terminal_drain_rejection != null) {
                 std.debug.print("Office pipeline mode={s} first={any} drain={any} terminal={any}\n", .{ mode, run.first_event_rejection, run.terminal_drain_rejection, terminal });
             }
@@ -207,6 +216,22 @@ fn qualify(mode: []const u8) !void {
     const repetitions: usize = if (std.mem.eql(u8, mode, "multi-run")) 2 else 1;
     for (0..repetitions) |_| {
         const id = try f.runPreparedTask(&control, task_id, .{ .text = "Run the synthetic Office pipeline operation." });
+        if (std.mem.eql(u8, mode, "consumer-starvation")) {
+            // Deliberately withhold the sole Product consumer while actual Core
+            // receives a bounded legal stream. Keep all production queue limits
+            // and deadlines unchanged. This models an occupied Native loop; it
+            // does not assert that a particular OS dialog was exercised here.
+            var ready = false;
+            for (0..5000) |_| {
+                if (temporary.dir.statFile(std.testing.io, "starvation-ready", .{})) |_| {
+                    ready = true;
+                    break;
+                } else |err| if (err != error.FileNotFound) return err;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(ready);
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
+        }
         try finish(&control, task_id, id, mode);
     }
     if (std.mem.eql(u8, mode, "callback-budget")) {
@@ -222,6 +247,12 @@ fn qualify(mode: []const u8) !void {
         defer std.testing.allocator.free(trace);
         try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
         if (std.mem.eql(u8, mode, "missing-environment")) try std.testing.expect(std.mem.indexOf(u8, trace, "Office environment missing or unavailable") != null);
+        if (std.mem.eql(u8, mode, "consumer-starvation")) {
+            const saved = (try history.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(saved);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "boundary=event_pump reason=queue_rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "error=DeadlineExceeded") != null);
+        }
     }
     if (std.mem.eql(u8, mode, "deny")) try std.testing.expectError(error.FileNotFound, temporary.dir.statFile(std.testing.io, "denied.txt", .{}));
     var snapshot: [256 * 1024]u8 = undefined;
@@ -239,4 +270,8 @@ test "Office canonical Product pipeline retries and closes streaming cancellatio
 
 test "Office canonical Product executor retains real callback rejection identity in terminal history" {
     try qualify("callback-budget");
+}
+
+test "Office canonical stream preserves queue rejection when the sole consumer is withheld" {
+    try qualify("consumer-starvation");
 }

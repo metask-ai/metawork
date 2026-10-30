@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { appendFileSync, mkdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { protocolTextSse } from "./provider_protocol.mjs";
@@ -111,6 +111,28 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       for (const event of start()) response.write(send(event));
       return; // Product cancellation must close this actual streaming request.
+    }
+    if (mode === "consumer-starvation") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const events = start();
+      for (let index = 0; index < 256; index++)
+        events.push({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Synthetic stream chunk. " },
+        });
+      events.push(
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 256 },
+        },
+        { type: "message_stop" },
+      );
+      response.end(events.map(send).join(""));
+      writeFileSync(join(workspace, "starvation-ready"), "ready");
+      return;
     }
     if (mode === "stream-interruption" && requests === 1) {
       response.writeHead(200, { "content-type": "text/event-stream" });
