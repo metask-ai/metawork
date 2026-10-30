@@ -52,6 +52,7 @@ pub const TerminationSignal = union(enum) {
     callback_failure: CallbackFailure,
     event_pump_failure: EventPumpFailure,
     event_consumer_notification_failure: EventConsumerNotificationFailure,
+    credential_update_failure: enum { rejected, resource_limit, dependency_contract },
 };
 
 pub const TerminalFailure = enum {

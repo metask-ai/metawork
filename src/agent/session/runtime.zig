@@ -696,6 +696,7 @@ pub const Runtime = struct {
         errdefer if (restore_selection) |saved| saved.deinit();
         session.lock();
         defer session.unlock();
+        if (session.credential_updates_in_progress != 0) return error.SessionNotIdle;
         switch (session.state) {
             .idle => {},
             .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => return error.SessionNotIdle,

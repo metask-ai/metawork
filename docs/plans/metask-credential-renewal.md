@@ -109,7 +109,7 @@ Product 正常路径仅由主线程串行提交更新，不设置后台重试队
 
 Account proof 已表明存在新代次，但 owned lease 分配失败时，不得沿用当前 coordinator 的 `catch return` 静默结束。Application 以不含 secret 的失败结果通知 Product Control，由它阻止受影响消费者继续接纳，并按第 9 节收口；这与正常 logout 或授权暂不可用的处理分开，不能把资源失败伪装成用户退出。
 
-`idle`、`queued`、`running`、`waiting_ui` 支持原位更新。`compact_queued` 在执行前更新。手动 `compacting` 或独立 `checkpointing` 期间先记录非 secret 的待同步需求，在安全边界重新读取当前 lease；不根据“可与 Run 重叠”推断官方接口已承诺与所有其他 Core 操作重叠。Run 内的自动压缩仍属于官方 Run 更新合同。
+`idle`、`queued`、`running`、`waiting_ui` 支持原位更新。手动 Compact 从 `compact_queued` 到执行完成及独立 `checkpointing` 期间先记录非 secret 的待同步需求，在安全边界重新读取当前 lease；避免 queued Compact worker 与更新竞争进入 Core。不根据“可与 Run 重叠”推断官方接口已承诺与所有其他 Core 操作重叠。Run 内的自动压缩仍属于官方 Run 更新合同。
 
 成功更新不改变活动 Run id、UI request id、additional-input adoption count、工具 receipt、Session disposition、权限或 skill/MCP grants。
 

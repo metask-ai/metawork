@@ -234,6 +234,10 @@ pub const Access = struct {
         return self.get().updatePermissionMode(expected, target);
     }
 
+    pub fn updateCredential(self: *Access, credential: []const u8) !void {
+        return self.get().updateCredential(credential);
+    }
+
     pub fn prepareRun(self: *Access, input: agent.RunInput) !u64 {
         return self.get().prepareRun(input);
     }

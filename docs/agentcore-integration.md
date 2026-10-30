@@ -584,11 +584,15 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 - Provider key 从 Host process environment 或受控配置读取；
 - composition 将 execution defaults 复制进 Product Control-owned process-local storage；该 storage 不进入 Task/Run canonical state，并在 Executor 与全部 workers quiesce 后清零；
-- `session_create` 只借用 Product Control 在 Session 生命周期所需期间保持稳定的 credential view；
+- Session fresh/restore 只在同步调用期借用输入，Host 临时副本在返回后清零；Core 内部副本按锁定 bundle 合同持有；
 - 不从 Renderer command 接收 key；
 - 不写日志、event、snapshot、crash diagnostic 或持久化 view；
 - Host 临时 buffer 在不再需要时及时清理；
 - AgentCore 是否复制并如何清理 Session credential 以锁定 bundle contract 为准。
+
+Agent 的 `updateCredential` 是官方 Session credential replacement 的唯一包装。只接受共享模型输入上限内、符合 Core 可打印 ASCII 要求的非空凭据；输入只借用到同步调用返回，diagnostic 不进入产品投影。它允许与 queued/active Run 及权限等待重叠，成功后 Core 后续发送及重试使用新凭据，已发送请求保留原副本。手动 Compact 的排队和执行阶段及独立 checkpoint 操作推迟更新，不能将 Run 并发许可扩大到未登记的 Core 操作。
+
+更新使用 retained Session reference，状态锁只保护接纳和收口，不持锁跨 Core 调用；关闭等待更新和所有 retained access 静止后才销毁 raw handle。更新与非 Run mutation 的接纳必须串行。明确拒绝保留原 Core 凭据；未知 status、不允许的 BUSY 或状态违约形成 dependency contract failure，活动 Run 通过内部 typed 凭据失败信号终止并保留真实 terminal，不能伪造用户取消或 provider failure。更新不改变模型、对话、权限、operation identity 或已有工具执行。续期资格、Host 新旧副本及其安全退役归 [Product](product-architecture.md)，不由 Agent 推断 Account 或目录 authority。
 
 ### Workspace
 

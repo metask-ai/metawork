@@ -315,6 +315,7 @@ pub fn decisionForSignal(signal: ?agent.TerminationSignal) TerminalDecision {
         .callback_failure,
         .event_pump_failure,
         .event_consumer_notification_failure,
+        .credential_update_failure,
         => .{ .phase = .failed, .outcome = .failed, .cause = causeForSignal(value) },
     };
 }
@@ -338,6 +339,11 @@ pub fn causeForSignal(signal: agent.TerminationSignal) task_state.RunCause {
             .invalid_event, .allocation, .consumer_rejected => .event_pipeline_failure,
         },
         .event_consumer_notification_failure => .event_pipeline_failure,
+        .credential_update_failure => |failure| switch (failure) {
+            .rejected => .agent_failure,
+            .resource_limit => .resource_limit,
+            .dependency_contract => .dependency_contract_failure,
+        },
     };
 }
 
