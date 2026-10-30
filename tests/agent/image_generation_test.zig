@@ -1232,8 +1232,11 @@ const image_product = struct {
                 try control.cancel(task_id, id);
                 stopped = true;
             };
-            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
-                const run = task_api.testing.state_module.findRun(task.durable.runs, id).?;
+            const run = task_api.testing.state_module.findRun(task.durable.runs, id).?;
+            // A worker can finish between syncAutomaticTitles and owned-effect
+            // release in this drain pass. Wait for the lifecycle settlement,
+            // including checkpoint/title ownership, before asserting release.
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive() and run.execution == null) {
                 const terminal = task_api.testing.state_module.productTerminalFacts(run) orelse return error.TestUnexpectedResult;
                 try std.testing.expectEqual(if (stop_effects != null) task_api.RunOutcome.cancelled else .completed, terminal.outcome);
                 try std.testing.expect(run.image_execution == null);
