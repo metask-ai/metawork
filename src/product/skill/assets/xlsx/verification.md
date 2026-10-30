@@ -117,6 +117,12 @@ merged-cell style scopes can be unsupported. Stored fonts do not prove installed
 fonts or viewer appearance. The report always identifies rendering, viewer
 compatibility, recalculation and full XSD validation as unperformed.
 
+`unchanged` compares the complete saved font/fill properties, including color
+references, and requires the workbook theme and indexed palette to stay identical
+when comparing those properties. This supports preserving ordinary default theme
+styles without resolving their visual colors. Conditional/merged scope limits
+still apply; this comparison does not establish appearance in a viewer.
+
 The specification must contain `version`, `checks` and `requirements`; every
 requirement has unique `id`, `source`, `checks` and optionally `required` (default
 true). Preserve unmapped necessary requirements. Do not invent requirements just

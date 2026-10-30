@@ -521,23 +521,33 @@ def style_value(cell, op, keys=None):
         return cell.number_format
     if op == "font":
         font = cell.font
-        if keys is None:
-            return {key: color(font.color) if key == "color" else getattr(font, key)
-                    for key in font.__attrs__ + font.__elements__} if font else None
         values = {"name": font.name if font else None, "size": font.sz if font else None,
                   "bold": bool(font.b) if font else False, "italic": bool(font.i) if font else False}
-        if keys is None or "color" in keys:
+        if "color" in keys:
             values["color"] = color(font.color if font else None)
     else:
         fill = cell.fill
         if fill is not None and getattr(fill, "patternType", "unsupported") not in (None, "solid"):
             raise Unsupported("Non-solid fill")
         values = {"pattern": fill.patternType if fill else None}
-        if keys is None or "color" in keys:
+        if "color" in keys:
             values["color"] = color(fill.fgColor if fill else None)
-        if keys is None:
-            values["background_color"] = color(fill.bgColor if fill else None)
-    return {key: values[key] for key in keys} if keys is not None else values
+    return {key: values[key] for key in keys}
+
+
+def saved_style_value(cell, prop):
+    """Compare saved properties without resolving theme/indexed visual colors."""
+    if prop == "number_format":
+        return cell.number_format
+    value = getattr(cell, prop)
+    if value is None:
+        return None
+
+    def node(element):
+        return {"tag": element.tag, "attributes": dict(element.attrib),
+                "text": element.text, "children": [node(child) for child in element]}
+
+    return node(value.to_tree())
 
 
 def detail(value):
@@ -596,6 +606,14 @@ def evaluate(check, book, geometry, references, budget):
             if any(prop != "value" for prop in check["properties"]):
                 style_supported(rectangle, geometry[check["target"]["sheet"]])
                 style_supported(rectangle, original_geometry[check["target"]["sheet"]])
+            if any(prop in ("font", "fill") for prop in check["properties"]):
+                # Saved color references only retain their meaning when their
+                # workbook context is identical. Do not claim rendered equality.
+                context_matches = book.loaded_theme == original.loaded_theme and book._colors == original._colors
+                result["style_context_unchanged"] = context_matches
+                if not context_matches:
+                    result.update(status="failed", reason="Workbook theme/indexed palette changed")
+                    return result
             original = dict(original_cells)
         mismatches = []
         mismatch_count = 0
@@ -612,7 +630,7 @@ def evaluate(check, book, geometry, references, budget):
                     if prop == "value":
                         expected[prop], actual[prop] = actual_value(original[coordinate]), actual_value(cell)
                     else:
-                        expected[prop], actual[prop] = style_value(original[coordinate], prop), style_value(cell, prop)
+                        expected[prop], actual[prop] = saved_style_value(original[coordinate], prop), saved_style_value(cell, prop)
                 passed = expected == actual
             else:
                 expected = check["expected"]

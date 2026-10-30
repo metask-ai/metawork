@@ -287,6 +287,34 @@ class Verification(unittest.TestCase):
         result, report = self.verify(one_check(check))
         self.assertEqual(result.returncode, 1, report)
 
+    def test_preserved_default_theme_styles_compare_saved_properties_and_context(self):
+        from copy import copy
+        original = self.work / "original.xlsx"
+        original.write_bytes(self.candidate.read_bytes())
+        check = {"id": "default-style", "op": "unchanged", "target": {"sheet": "Reference", "range": "A1:H20"},
+                 "original": str(original), "properties": ["value", "font", "fill", "number_format"]}
+        self.change(lambda book: setattr(book["Data"]["C2"], "value", 99))
+        result, report = self.verify(one_check(check))
+        self.assertEqual(result.returncode, 0, report)
+        self.assertTrue(report["checks"][0]["style_context_unchanged"])
+        def change_theme_reference(book):
+            font = copy(book["Reference"]["A1"].font)
+            font.color = "FF123456"
+            book["Reference"]["A1"].font = font
+        self.change(change_theme_reference)
+        result, report = self.verify(one_check(check))
+        self.assertEqual(result.returncode, 1, report)
+        self.candidate.write_bytes(original.read_bytes())
+        self.change(lambda book: setattr(book, "loaded_theme", book.loaded_theme.replace(b"windowText", b"window")))
+        result, report = self.verify(one_check(check))
+        self.assertEqual(result.returncode, 1, report)
+        self.assertFalse(report["checks"][0]["style_context_unchanged"])
+        self.candidate.write_bytes(original.read_bytes())
+        self.change(lambda book: setattr(book, "_colors", ("FF123456",)))
+        result, report = self.verify(one_check(check))
+        self.assertEqual(result.returncode, 1, report)
+        self.assertFalse(report["checks"][0]["style_context_unchanged"])
+
     def test_invalid_specs_and_unknown_operations_do_not_edit_documents(self):
         before = self.candidate.read_bytes()
         valid = {"id": "value", "op": "values", "target": {"sheet": "Data", "range": "A1"}, "expected": [[{"type": "string", "value": "Order"}]]}
