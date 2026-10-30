@@ -78,6 +78,8 @@ PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.
 
 真实模型的固定任务、独立 oracle、全部尝试、人工介入及实际回执见 [Office 模型验收记录](evidence/office-live-model-macos-20261030.json)。确定性检查、受控 Core fixture 与查看器的通过不替代这组验收；固定集合尚未完成时，不宣称 Office 模型工作流整体通过。
 
+按底层机制补充的定向检查见 [Office 机制收口记录](evidence/office-mechanism-closure-macos-20261030.json)。已保存文件的独立检查通过，不能替代模型的修后复验与真实交付；中途停止的 Run 保留为未通过，获用户明确授权的续作单独记录，不能反向改写首轮结果或声称无需人工介入。
+
 本轮真实运行中，打开同步原生工作区选择器时观察到 event pump 队列期限拒绝；新增生产诊断保留该首个拒绝及精确 Core 身份，后续未闭合输出的终态清理不覆盖它。当前 canonical Native SDK 的同步对话框占用应用事件消费路径，该缺口尚未修复。受控暂停消费者的反例只证明这一机制，不能证明历史 #23 与其同因。闭合须通过 canonical 依赖能力或明确接受的产品合同方案解决消费停顿，并在实际运行与原生对话框交错时复验；不得靠增大队列或期限、增加平行消费者、跳过收口或本地修改 SDK 绕过拒绝。
 
 ### E-MAC-OFFICE-INPUTS-20261024

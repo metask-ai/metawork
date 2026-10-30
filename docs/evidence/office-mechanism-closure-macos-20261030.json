@@ -1,0 +1,420 @@
+{
+  "version": 1,
+  "scope": "Underlying failure mechanisms and targeted closure; historical full model matrices remain deferred and unqualified",
+  "date": "2026-10-30",
+  "base_commit": "a33d1313",
+  "mechanisms": {
+    "creation_structure": {
+      "status": "fixed_within_qualified_new_copy_pipeline",
+      "production_finalizer_unchanged_since_qualified_input": {
+        "path": "src/product/skill/assets/pptx/scripts/finalize.py",
+        "bytes": 12257,
+        "sha256": "d46c0df2b74d03f2f0af92e13404dc8b31162a15518991acb4629207d4257689"
+      },
+      "current_tests": {
+        "groups_passed": 7,
+        "log": ".zig-cache/office-issue28-closure.log"
+      },
+      "viewer_evidence": "docs/evidence/office-pptx-metaskoffice-20261030.json",
+      "retained_viewer_file_identities_verified": true,
+      "raw_generator_failures_retained": true,
+      "powerpoint_tested": false
+    },
+    "event_consumption": {
+      "status": "native_modal_stall_not_fixed",
+      "normal_tool_error_pipeline": {
+        "test_log": ".zig-cache/office-issue23-original-paths-v2.log",
+        "steps_passed": 9,
+        "tests_passed": 5,
+        "real_prepare_unreachable_proxy_exit": 7,
+        "real_stale_sh_entry_exit": 127,
+        "no_environment_published_or_stage_retained": true
+      },
+      "historical_first_cause": "unknown; original failing runs are not in the available Dev history, and the retained investigation has only CallbackFailed summary",
+      "current_native_sdk": {
+        "version": "0.11.0-fork.4",
+        "latest_registry_version": "0.11.0-fork.4",
+        "public_api": "Runtime.showOpenDialog is synchronous; macOS implementation uses NSOpenPanel runModal",
+        "repair_owner": "canonical zogien/native SDK publication, then MetaWork dependency acceptance",
+        "no_sdk_patch_or_guard_changes": true
+      },
+      "public_source_references": [
+        {
+          "path": "node_modules/@native-sdk/cli/src/runtime/system_services.zig",
+          "line": 74,
+          "fact": "Runtime open dialog forwards synchronously and returns the result"
+        },
+        {
+          "path": "node_modules/@native-sdk/cli/src/platform/macos/appkit_host.m",
+          "line": 14378,
+          "fact": "Open panel runs a modal loop before the SDK call returns"
+        }
+      ],
+      "required_dependency_behavior": "Start native dialogs without occupying the Application consumer call stack; complete via the canonical SDK event/result lifecycle while ordinary Application event drain remains live. Cancellation, close and shutdown must settle the owned request before release.",
+      "closure_limit": "Normal prepare-error regression is now covered; the known modal consumer stall is explicitly unresolved and requires canonical SDK capability. No inference is made that it caused historical failures."
+    },
+    "stored_style_scope": {
+      "status": "qualified_targeted_workflow_with_one_explicitly_authorized_neutral_continuation",
+      "new_gap": "Empty saved fill could be read but could not be asserted in the specification",
+      "change": "Accept fill.expected.pattern null; retains solid and other existing accepted representations",
+      "qualification": {
+        "xlsx_test_groups_passed": 29,
+        "native_resource_tests_passed": 5,
+        "native_resource_steps_passed": 10,
+        "resource_tests_passed": 12,
+        "machine_good_and_bad_control_checks": 31,
+        "control_directory": "/Users/zogien/Projects/metawork/.zig-cache/office-style-control-v2-g6xw84u8"
+      },
+      "frozen_case": {
+        "path": "tests/fixtures/office/style-repair-acceptance.json",
+        "bytes": 3513,
+        "sha256": "68e4d29bf5e6084b3e928f9a86adf4821ad719e9737c54f953917dfc96be4623"
+      },
+      "independent_oracle": {
+        "path": "scripts/check-office-model-xlsx-style.py",
+        "bytes": 2057,
+        "sha256": "d938a3bdf830bca6f8aec6c6173804ea6f2d7b84eeebee2b24b6222453b41528"
+      },
+      "input": {
+        "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style",
+        "bytes": 6868,
+        "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+      },
+      "attempts": [
+        {
+          "task_id": 38,
+          "task_id_hex": "0000000000000026",
+          "run_id_hex": "0000000000000001",
+          "status": "stopped",
+          "submitted_at_unix_ms": 1793344992863,
+          "model": "DeepSeek-V4.1-Flash-1017",
+          "protocol": "anthropic_messages",
+          "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style",
+          "frozen_prompt_matches_persisted_input": true,
+          "interventions": [
+            {
+              "operation": "Allow once for bounded repair.py and repaired.xlsx generation plus local size/hash listing",
+              "basis": "Prior explicit human authorization for this synthetic acceptance",
+              "review": "Full inline script reviewed through AX and scrolled screenshots; original read through checked_copy, candidate and repair script absent before execution. Exact run.sh/run.py/environment.sh/finish.py/office_archive.py identities match current canonical archive. No permission mode or standing rule changed.",
+              "model_guidance_added": false
+            }
+          ],
+          "application": {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-mechanism-live/MetaWork.app/Contents/MacOS/metawork",
+            "bytes": 47836320,
+            "sha256": "d3aa9ce9a593e6c247915fe1b305a0c082ee3517f547b8fc9e07e4cc04669750",
+            "base_commit": "a33d1313",
+            "uncommitted_diff_sha256": "67f98968cb63d84d99e0eedc49c710489866f0c7c069de184b40487f59a6e05d",
+            "source_changed": true
+          },
+          "outcome": "stopped",
+          "cause": null,
+          "tool_count": 17,
+          "finished_at_unix_ms": 1793345347436,
+          "actual_deliveries": [],
+          "final_response": "环境已就绪（无需下载）。先检查原文件的真实内容和格式问题。Read 输出被截断，我改用自定义脚本完整检查工作簿内容与样式。已读取全部内容。现在先确认工作簿中其他需要保留的结构（冻结窗格、自动筛选、条件格式等），再动手修复。已完整核查原文件，发现的问题如下（将写入报告）：\n\n- **Data**：第 5 行（明细 o-4）被错误加粗并填充 FFDEEAF6；真正的合计行第 6 行却是 Calibri、不加粗、无填充，D6 为 `General`（值 1 → 显示 1 而非 100.0%）。\n- **Regions**：第 3 行（明细 South）被错误加粗+填充；合计行第 4 行为 Calibri、不加粗、无填充，C4 为 `General`。\n- 其余字体/百分比（Data D2:D5、Regions C2:C3）原本已是 Arial 11 / 0.0%。\n- 数值核对：100+200+150+200=650；300+350=650；合计占比均为 1.0。\n\n先建立检查规格并保存修复前报告（保留失败结果）。`unchanged` 检查要求原件与候选文件不同。修复前报告需以原文件的副本作为候选（字节一致），我先复制再检查。修复前报告已保存（`reports/pre-fix-report.json`，status=`failed`，conforms=false）。现在生成修复文件。",
+          "candidate_produced": true,
+          "terminal_audit": {
+            "source": "Read-only persisted Task38 Run1 public terminal fields and current Host mapping",
+            "phase": "stopped",
+            "outcome": "stopped",
+            "cause": null,
+            "diagnostic": "",
+            "diagnostic_truncated": false,
+            "diagnostic_redacted": false,
+            "event_projection_failure": null,
+            "current_host_max_turns": 16,
+            "host_source": "src/agent/session.zig",
+            "mapping_source": "src/product/task/policy.zig",
+            "classification": "The current Host maps both max_turns and tool_loop to stopped with null cause. The persisted record does not distinguish them. Tool count does not prove either specific cause.",
+            "continuation": "Original Task Run2 was submitted only after explicit human authorization for one neutral continuation. Run1 remains not passed."
+          }
+        },
+        {
+          "task_id": 38,
+          "task_id_hex": "0000000000000026",
+          "run_id_hex": "0000000000000002",
+          "status": "completed",
+          "outcome": "completed",
+          "cause": null,
+          "submitted_at_unix_ms": 1793345575480,
+          "model": "DeepSeek-V4.1-Flash-1017",
+          "protocol": "anthropic_messages",
+          "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style",
+          "kind": "human_authorized_single_neutral_continuation",
+          "input": "继续完成原任务",
+          "authorization": "Human explicitly approved one continuation on 2026-10-30, after Run1 terminal audit; no further continuation authorized",
+          "interventions": [
+            {
+              "operation": "Allow once for unchanged verify command against repaired.xlsx/checks.json and new reports/post-fix-report.json",
+              "basis": "Existing explicit authorization for bounded synthetic acceptance",
+              "review": "UI command fully visible. The referenced Run1 activation was already absent after application restart, so no script was present to execute; the expected missing-entry result was allowed to reach the model. No old activation was recreated, no command altered and no internal replacement path supplied.",
+              "model_guidance_added": false
+            },
+            {
+              "operation": "Allow once for DeliverFile repaired.xlsx",
+              "basis": "Existing explicit human authorization for local synthetic delivery",
+              "review": "Candidate, model post-fix report and independent oracle all match 6884 bytes / ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f; exact tool path repaired.xlsx",
+              "model_guidance_added": false
+            },
+            {
+              "operation": "Deny removal of inspection.json, inspect_full.py, inspect_meta.py, summarize.py",
+              "basis": "Preserve the synthetic acceptance evidence; deletion is unnecessary for the requested repair/verify/deliver workflow and was outside the prior bounded action authorization",
+              "review": "Exact rm -f command was not executed. No repair/check hint was supplied. Original reports and inspection artifacts remain available.",
+              "model_guidance_added": false
+            }
+          ],
+          "application": {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-mechanism-live/MetaWork.app/Contents/MacOS/metawork",
+            "bytes": 47836320,
+            "sha256": "d3aa9ce9a593e6c247915fe1b305a0c082ee3517f547b8fc9e07e4cc04669750",
+            "base_commit": "a33d1313",
+            "uncommitted_diff_sha256": "67f98968cb63d84d99e0eedc49c710489866f0c7c069de184b40487f59a6e05d",
+            "source_changed": true
+          },
+          "same_application_binary_sha256_verified": true,
+          "tool_count": 8,
+          "finished_at_unix_ms": 1793345716959,
+          "actual_deliveries": [
+            {
+              "id": "a0c5e300f94768f7fb78593084f209be",
+              "locator": "repaired.xlsx",
+              "size_bytes": 6884,
+              "sha256": "ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f",
+              "redacted": false
+            }
+          ],
+          "final_response": "已完成并交付 `repaired.xlsx`（原 `bad-styles.xlsx` 未被改动，字节与摘要仍为 6868 B / `5ab5521a…9451`）。\n\n## 实际检查发现的问题\n\n**Data（A1:D6）**\n- 第 5 行（明细 o-4）被错误加粗并填充 FFDEEAF6；真正合计行第 6 行反而是 Calibri、不加粗、无填充。\n- D6（合计占比）数字格式为 `General`，值 1 会显示成 `1` 而非 `100.0%`。\n- 合计行 A6/B6/C6/D6 字体为 Calibri（B6 为未显式设置的默认字体）。\n\n**Regions（A1:C4）**\n- 第 3 行（明细 South）被错误加粗并填充 FFDEEAF6；合计行第 4 行为 Calibri、不加粗、无填充。\n- C4 为 `General`，值 1 显示为 `1`。\n\n**数值核对（独立复算，未改动）**：Data 100+200+150+200=650，占比 15.4/30.8/23.1/30.8/100.0%；Regions 300+350=650，46.2/53.8/100.0%。\n\n## 修正内容\n\n- Data 与 Regions 整个已用矩形（含表头、空单元格、明细、合计）统一 Arial 11。\n- 仅实际合计行（Data 第 6 行、Regions 第 4 行）加粗并填充纯色 `FFDEEAF6`；表头与明细去粗、清除填充。\n- 所有占比单元格（Data D2:D6、Regions C2:C4）设为 `0.0%`；金额列保持原 `General`。\n- 未改动任何数值、工作表顺序、Input/Reference 的内容与样式（含 Reference B2 的公式 `=1+2`）。\n\n## 检查入口与报告\n\n使用随包内置检查器 `scripts/verify.py`（25 项检查、13 项需求映射，保存于 `reports/`）：\n\n| 报告 | 结果 |\n|---|---|\n| `reports/pre-fix-report.json` | `failed`，`conforms: false`，失败结果已保留 |\n| `reports/post-fix-report.json` | `passed`，`conforms: true`，全部需求通过 |\n\n修复前失败项：Data/Regions 字体范围、合计行加粗与填充、错误位置强调（Data 第 5 行、Regions 第 3 行）、合计行百分比格式。\n\n## 交付核实\n\n`DeliverFile` 回执：6884 字节，SHA-256 `ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f`，与 `post-fix-report.json` 的 `candidate` 完全一致，即检查覆盖所交付字节。\n\n## 未执行的检查\n\n- 公式重算：本环境无计算引擎，`Reference!B2` 仅为公式串核对，未计算缓存值。\n- 视觉渲染 / 查看器兼容性：未打开 Excel 或任何查看器，未做外观确认。\n- 完整 XSD 模式校验：未执行。",
+          "candidate_produced": true
+        }
+      ],
+      "retained_model_spec_errors": [
+        {
+          "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/before-report.json",
+          "bytes": 609,
+          "sha256": "8884894f388d2623a0bface1fbd22af9277b77bea36dc7a3fc5226faa73e5e6d"
+        }
+      ],
+      "initial_attempt_result": {
+        "original_unchanged": true,
+        "model_found_misplaced_emphasis": true,
+        "model_pre_fix_report": {
+          "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/reports/pre-fix-report.json",
+          "bytes": 23573,
+          "sha256": "304a1bf67232ea8e89b7c3cee95ed94c382150e791db17dbd1837eef6242cfca",
+          "status": "failed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "failed_checks": [
+            "data-font",
+            "data-percent",
+            "data-total-bold",
+            "data-total-fill",
+            "data-body-not-bold",
+            "data-body-no-fill",
+            "regions-font",
+            "regions-percent",
+            "regions-total-bold",
+            "regions-total-fill",
+            "regions-body-not-bold",
+            "regions-body-no-fill"
+          ]
+        },
+        "candidate": {
+          "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/repaired.xlsx",
+          "bytes": 6884,
+          "sha256": "ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f"
+        },
+        "independent_report": {
+          "path": ".zig-cache/office-style-task38-independent-1.json",
+          "bytes": 24573,
+          "sha256": "887f9c41d8b89e598a99d1da4ba657461d70566a67c072be121d26119e0f49bc",
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "checks_passed": [
+            "sheets",
+            "orders",
+            "count",
+            "amounts-and-shares",
+            "regions",
+            "Data-label",
+            "Data-font",
+            "Data-percent",
+            "Data-amount",
+            "Data-fill",
+            "Regions-label",
+            "Regions-font",
+            "Regions-percent",
+            "Regions-amount",
+            "Regions-fill",
+            "reference-note",
+            "reference-outside",
+            "reference-formula",
+            "raw-input",
+            "data-headers",
+            "region-headers",
+            "Data-total-bold",
+            "Regions-total-bold",
+            "Data-total-full-fill",
+            "Regions-total-full-fill",
+            "Data-no-misplaced-bold",
+            "Regions-no-misplaced-bold",
+            "Data-no-misplaced-fill",
+            "Regions-no-misplaced-fill",
+            "Input-preserved",
+            "Reference-preserved"
+          ],
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ]
+        },
+        "model_post_fix_report_created": false,
+        "actual_delivery_count": 0,
+        "workflow_passed": false,
+        "qualification_limit": "The model found the wrong styles and produced a correct saved workbook. Its single Run then stopped without its own post-fix verification, final response or DeliverFile. The independent check does not substitute for the missing workflow steps. No cause is inferred from the tool count; no retry or continuation was issued."
+      },
+      "authorized_continuation_result": {
+        "workflow_passed": true,
+        "task_id": 38,
+        "completed_run_id": 2,
+        "initial_run_qualification": "Run1 stopped and remains not passed; no retroactive pass",
+        "human_intervention_qualification": "One explicit human-authorized neutral continuation, plus previously authorized bounded permission approvals; evidence cleanup denied to retain observations. This is not an unassisted single-Run qualification.",
+        "model_post_fix_report": {
+          "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/reports/post-fix-report.json",
+          "bytes": 16483,
+          "sha256": "724ca337e40671adddb891179784912e9d8bc1a801e25e6dfde082a5b2872dd8",
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "checks_passed": 25,
+          "requirements_passed": 13,
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ]
+        },
+        "independent_checks_passed": 31,
+        "candidate": {
+          "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/repaired.xlsx",
+          "bytes": 6884,
+          "sha256": "ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f"
+        },
+        "actual_delivery": {
+          "id": "a0c5e300f94768f7fb78593084f209be",
+          "locator": "repaired.xlsx",
+          "size_bytes": 6884,
+          "sha256": "ed03a63dafebcd4f25f4a39ec9b929bd97facef62c69ff93301c3051c6d2284f",
+          "redacted": false
+        },
+        "original_identity_unchanged": true,
+        "all_report_candidate_and_receipt_identities_equal": true,
+        "final_scope_statement_reviewed": true,
+        "retained_inspection_artifacts": [
+          {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/inspection.json",
+            "bytes": 4638,
+            "sha256": "0b132fd21dd18d9f57f083dec70351e9b5a9b69a11241dd5ad2ce6eec75fe27e"
+          },
+          {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/inspect_full.py",
+            "bytes": 2022,
+            "sha256": "bd2d5f74a7fcd2a97cc455b75b062daf3b7ca391fee5197bcbdcf786fc55a5c4"
+          },
+          {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/inspect_meta.py",
+            "bytes": 1187,
+            "sha256": "8223db164b6e7b26ed97fec25317581b397c7f72f837f03a53bc77e095ff96ba"
+          },
+          {
+            "path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-style/summarize.py",
+            "bytes": 468,
+            "sha256": "9bd0d425cbfb15275533ff7a3bc9d2652dfce5aabc2a3652fe18fb5f414bf071"
+          }
+        ],
+        "stale_activation_recovery": "After restart, the old activation path genuinely failed. The model called Skill xlsx again and used the newly returned entry without supplied replacement paths; new helper bytes matched the current archive."
+      }
+    }
+  },
+  "changed_production_inputs": [
+    {
+      "path": "src/product/skill/assets/xlsx/scripts/verify.py",
+      "bytes": 35703,
+      "sha256": "4bdd81b07feaef3b15d9fd41ce8ed81198a31fe5a8c8476e0f84085dc1e49510"
+    },
+    {
+      "path": "src/product/skill/assets/xlsx/verification.md",
+      "bytes": 13227,
+      "sha256": "1677ed0ec40758f355b4775d1b38d6131e35f96dddf6fdf750647b6fd113a21d"
+    },
+    {
+      "path": "src/app/office-skills.tar.gz",
+      "bytes": 476064,
+      "sha256": "3bab4e9be29315cfb20fc159d62b715a854e6d70c8d191f70f7e02870ba40a8c"
+    }
+  ],
+  "historical_attempts_qualification_errors_retained": [
+    {
+      "log": ".zig-cache/office-issue23-original-paths.log",
+      "reason": "Test initially expected old issue exit2; current macOS sh actually returns127; corrected fixture expectation only"
+    },
+    {
+      "report": ".zig-cache/office-style-control-hhreeuei/bad-report.json",
+      "reason": "Negative qualification initially compared original with itself; production guard correctly rejected it. A distinct byte-identical bad control was used without weakening the guard."
+    }
+  ],
+  "archive_changed_members": [
+    "xlsx/scripts/verify.py",
+    "xlsx/verification.md"
+  ],
+  "completion": "The bounded goal is achieved: finite creation-structure path qualified; normal tool failure behavior verified and native modal consumer stall identified as an explicit unresolved canonical SDK gap; targeted wrong-style discovery, copy repair, full verification and actual delivery completed in Task38 with one explicitly authorized neutral continuation. This is not a claim that the native modal stall is repaired, all Office capability is qualified, the first Run passed, or the deferred historical matrix is complete.",
+  "goal_completion_audit": [
+    {
+      "requirement": "Creation structure and MetaskOffice evidence",
+      "result": "qualified within the finite production path",
+      "evidence": [
+        "mechanisms.creation_structure",
+        "docs/evidence/office-pptx-metaskoffice-20261030.json"
+      ],
+      "retained_viewer_identities_checked": 8
+    },
+    {
+      "requirement": "Failure cause, repair or explicit dependency gap",
+      "result": "Normal tool errors pass through the production chain; native modal stall explicitly unfixed and owned by canonical SDK capability; historical first cause remains unknown",
+      "evidence": [
+        "mechanisms.event_consumption"
+      ]
+    },
+    {
+      "requirement": "Wrong-style discovery, repair copy, verification and actual delivery",
+      "result": "Qualified for this fixed case with Run1 stopped and Run2 completed after explicit authorization",
+      "evidence": [
+        "mechanisms.stored_style_scope.attempts",
+        "mechanisms.stored_style_scope.authorized_continuation_result"
+      ]
+    },
+    {
+      "requirement": "Original matrix remains deferred without erasing failures",
+      "result": "Historical evidence and frozen case unchanged; original Run1 failure retained",
+      "evidence": [
+        "docs/plans/office-capability-reliability.md",
+        "mechanisms.stored_style_scope.initial_attempt_result"
+      ]
+    },
+    {
+      "requirement": "No Git commit/push/issue close and TinyKG tracking",
+      "result": "At acceptance completion: working-tree-only changes; HEAD a33d1313; TinyKG original failures retained, authorized continuation tracked separately as task1396. The human subsequently authorized the three local commits; this does not change the recorded acceptance inputs or results."
+    }
+  ],
+  "git_commit_prohibited_during_acceptance": true,
+  "subsequent_commit_authorization": {
+    "date": "2026-10-30",
+    "scope": "Human authorized the proposed three local commits after acceptance was complete. Acceptance provenance, failed first Run, explicit continuation and remaining SDK gap remain unchanged.",
+    "push_authorized": false
+  }
+}
