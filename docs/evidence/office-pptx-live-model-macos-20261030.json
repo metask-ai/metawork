@@ -199,8 +199,97 @@
       "frozen_initial_requirements_unchanged": true,
       "outcome": null,
       "cause": null,
-      "tool_count": 0,
-      "tools": []
+      "tool_count": 11,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 302,
+          "output_bytes": 4125
+        },
+        {
+          "ordinal": 1,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 469,
+          "output_bytes": 621
+        },
+        {
+          "ordinal": 2,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 249,
+          "output_bytes": 621
+        },
+        {
+          "ordinal": 3,
+          "tool": "Glob",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 173,
+          "output_bytes": 271
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 167,
+          "output_bytes": 271
+        },
+        {
+          "ordinal": 5,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 323,
+          "output_bytes": 992
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 670,
+          "output_bytes": 1221
+        },
+        {
+          "ordinal": 7,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 72,
+          "output_bytes": 11072
+        },
+        {
+          "ordinal": 8,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 475,
+          "output_bytes": 1069
+        },
+        {
+          "ordinal": 9,
+          "tool": "Write",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 4965,
+          "output_bytes": 10579
+        },
+        {
+          "ordinal": 10,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 519,
+          "output_bytes": 1192
+        }
+      ]
     }
   ],
   "application": {
@@ -218,13 +307,56 @@
   "acceptance": "not passed; actual model workflow is in progress",
   "unstarted": [
     "repetition 1 edit/check/delivery",
-    "repetitions 2 and 3 create/edit/check/delivery",
-    "correlation model create/edit/check/delivery"
+    "repetitions 2 and 3 create/edit/check/delivery"
   ],
   "first_preparation_frozen_separately": {
     "fixture": "tests/fixtures/office/model-acceptance-first-preparation.json",
     "commit": "86b50f5a",
     "case_not_started": true,
     "counted_as_ready_repetition": false
+  },
+  "comparison_scope": "Plan §10.1 requires the configured second-model comparison for the XLSX scene. PPTX requires the three representative primary-model Tasks; no additional mandatory PPTX comparison is inferred from the frozen fixture optional model metadata.",
+  "resource_entry_followup": {
+    "date": "2026-10-30",
+    "trigger": "Task35 continuation reused an earlier activation directory, encountered missing resources, then reacquired Skill at tool ordinal 7. Initial common execution instructions omitted the planned cross-message reacquisition rule.",
+    "change": "Before each new Office request or continuation, invoke Skill for current absolute resources. Reacquire once for an unavailable old path; distinguish Skill/resource failure from a missing private runtime, retain consent/permission boundaries.",
+    "inputs": [
+      {
+        "path": "src/product/skill/office_environment/EXECUTION.md",
+        "bytes": 5398,
+        "sha256": "75890ea06f8aa4515ef5f01ea1b5bdec1bfcf46d2ea5d79bdf47dd2053e76375"
+      },
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 475952,
+        "sha256": "e92179dd6601fad1edfb7a3121a8f023d774b026c9cae885df3d1259c9968fd4"
+      }
+    ],
+    "qualification": {
+      "node_resource_tests_passed": 12,
+      "native_steps_passed": 15,
+      "native_tests_passed": 5,
+      "native_log": ".zig-cache/office-fresh-entry-native.log",
+      "actual_canonical_core_formats_passed": [
+        "docx",
+        "xlsx",
+        "pptx"
+      ],
+      "core_log": ".zig-cache/office-fresh-entry-core-shell.log",
+      "private_environment_unchanged": true,
+      "changed_archive_members": [
+        "docx/SKILL.md",
+        "docx/environment/EXECUTION.md",
+        "pptx/SKILL.md",
+        "pptx/environment/EXECUTION.md",
+        "xlsx/SKILL.md",
+        "xlsx/environment/EXECUTION.md"
+      ],
+      "all_other_members_unchanged": true,
+      "archive_check": true,
+      "diff_check": true
+    },
+    "active_live_task_uses_preceding_archive": true,
+    "new_model_instruction_adoption": "not yet qualified; controlled Core execution does not substitute for model behavior"
   }
 }

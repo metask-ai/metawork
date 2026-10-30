@@ -2,6 +2,8 @@
 
 Use only this Skill's fixed private runtimes. Match the native OS and architecture to the generated table below. The fixed prepare/run entry selects the native target automatically; no target argument is accepted. Read the download estimate directly from this table. Use Read if additional [environment input](environment/environment.json) details are needed before preparation; never choose an interpreter from PATH or infer paths from this Skill's parent directory.
 
+Before continuing Office work in a new user message, including a request to continue or revise a file, invoke this Skill again and use the absolute resource directory returned by that invocation. Materialized activation paths are temporary; do not reuse a path from an earlier message. If a remembered path is unavailable, reacquire the Skill once. If reacquiring fails, report the Skill/resource failure rather than preparing at the old path, searching its parent directories or treating it as a missing private runtime. Reacquiring the Skill does not grant download consent or tool permissions.
+
 {{OFFICE_DOWNLOAD_SUMMARY}}
 
 | Platform | Fixed prepare entry | Fixed run entry |
