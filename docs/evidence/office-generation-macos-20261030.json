@@ -1,0 +1,778 @@
+{
+  "version": 1,
+  "host": "macos-aarch64",
+  "python": "3.13.15",
+  "generators": {
+    "node": "v22.23.4",
+    "pptxgenjs": "4.0.1",
+    "docx": "9.6.1"
+  },
+  "inputs": {
+    "probe": {
+      "bytes": 10443,
+      "sha256": "d655066f0f0818ac86f4c1158072751d3bb4f8a4378791b383aa1298de0ae95e"
+    },
+    "generator": {
+      "bytes": 3352,
+      "sha256": "ff2e243086fb08e0d0a3c7ca36027f6640f17f93a1880df21dc00046154141f2"
+    },
+    "archive": {
+      "bytes": 468476,
+      "sha256": "709f4c9c18e343d002180e677c345d49157220f7ae0f8e53ad0fa9ecbd70e1f5"
+    },
+    "environment": {
+      "bytes": 5783,
+      "sha256": "43eee290cfec6792890cfdc40aa49fa6c3febb35bc866f887d03922f3b33483f"
+    }
+  },
+  "schema_policy": "Unmodified Transitional part schemas; no original-error subtraction or auto-repair",
+  "viewer_evidence": null,
+  "cases": [
+    {
+      "case": "bar-default-labels.pptx",
+      "input": {
+        "bytes": 67584,
+        "sha256": "1730d40adf0512e6785e05fc361ebd9eda8b83a5cada43dfdb9e649e5e80f878"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart2.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart2.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart2.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart2.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-default-no-labels.pptx",
+      "input": {
+        "bytes": 67584,
+        "sha256": "5dffce9bb291d3a6a3b039fd44c3a261a3fe89221f62e8bb5a77791504a2573d"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart1.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart1.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart1.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart1.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-horizontal-default-labels.pptx",
+      "input": {
+        "bytes": 67584,
+        "sha256": "5eb2f02e3cfe1694b1edd7f881f80adef9af6c03de2c9f2daf4ffb3f6ccde305"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart6.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart6.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart6.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart6.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-horizontal-default-no-labels.pptx",
+      "input": {
+        "bytes": 67584,
+        "sha256": "b8ef1bd7ea7829c93cb6ce4fb1b04cbd81e5b08f13c81752d33eb6b38b15e9e6"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart5.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart5.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart5.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart5.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-horizontal-multi-labels.pptx",
+      "input": {
+        "bytes": 67968,
+        "sha256": "7013daedce5e08c4e7529d1a5b2e14aaca90b83c3c481bec466b18bdf0941b9c"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart8.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart8.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).",
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBars, {http://schemas.openxmlformats.org/drawingml/2006/chart}cat, {http://schemas.openxmlformats.org/drawingml/2006/chart}val, {http://schemas.openxmlformats.org/drawingml/2006/chart}shape, {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart8.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart8.xml: data point before series labels",
+          "ppt/charts/chart8.xml: data point before series labels",
+          "ppt/charts/chart8.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-horizontal-multi-no-labels.pptx",
+      "input": {
+        "bytes": 67968,
+        "sha256": "a5882f7a6c78286056d6da0130548066dbd5cc17bd19a7d9885b23ecf23190a1"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart7.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart7.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).",
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBars, {http://schemas.openxmlformats.org/drawingml/2006/chart}cat, {http://schemas.openxmlformats.org/drawingml/2006/chart}val, {http://schemas.openxmlformats.org/drawingml/2006/chart}shape, {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart7.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart7.xml: data point before series labels",
+          "ppt/charts/chart7.xml: data point before series labels",
+          "ppt/charts/chart7.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-multi-labels.pptx",
+      "input": {
+        "bytes": 67968,
+        "sha256": "b4ebaf243eda46212f39c5d7cdb4a511176d35b6eac7de955bc1c630addb0193"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart4.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart4.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).",
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBars, {http://schemas.openxmlformats.org/drawingml/2006/chart}cat, {http://schemas.openxmlformats.org/drawingml/2006/chart}val, {http://schemas.openxmlformats.org/drawingml/2006/chart}shape, {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart4.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart4.xml: data point before series labels",
+          "ppt/charts/chart4.xml: data point before series labels",
+          "ppt/charts/chart4.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "bar-multi-no-labels.pptx",
+      "input": {
+        "bytes": 67968,
+        "sha256": "8e32d912645a8ad30cace3966712e10ed1a75387135048066ed3f37ad6ac3416"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart3.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart3.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).",
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBars, {http://schemas.openxmlformats.org/drawingml/2006/chart}cat, {http://schemas.openxmlformats.org/drawingml/2006/chart}val, {http://schemas.openxmlformats.org/drawingml/2006/chart}shape, {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart3.xml: 2 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}axId': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}extLst ).\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}dPt': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/drawingml/2006/chart}trendline, {http://schemas.openxmlformats.org/drawingml/2006/chart}errBa...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart3.xml: data point before series labels",
+          "ppt/charts/chart3.xml: data point before series labels",
+          "ppt/charts/chart3.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "line-default-labels.pptx",
+      "input": {
+        "bytes": 67942,
+        "sha256": "f1257e1ebd2c73f0daa5ddc5a924d55a5420e1488d3c862d9be635f902361f9c"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart10.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart10.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart10.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart10.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 1,
+          "passed": false,
+          "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/charts/chart10.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "line-default-no-labels.pptx",
+      "input": {
+        "bytes": 67933,
+        "sha256": "b29e1bd7ac13d740dd8ee31b1939e0dde57e5f0bfe82a68f85762875429db01c"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart9.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart9.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart9.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart9.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 1,
+          "passed": false,
+          "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/charts/chart9.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "line-multi-labels.pptx",
+      "input": {
+        "bytes": 67942,
+        "sha256": "1de26575e75061c1cc581613935fbda487be9717d9c63fcec01ed8f510ad174e"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart12.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart12.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart12.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart12.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 1,
+          "passed": false,
+          "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/charts/chart12.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "line-multi-no-labels.pptx",
+      "input": {
+        "bytes": 67942,
+        "sha256": "8b6a646a5948f83473acdb674672bc3d3db3c9a929e6484e6c5af493e15945fd"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart11.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        },
+        {
+          "part": "ppt/charts/chart11.xml",
+          "namespace": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+          "schema": "schemas/ISO-IEC29500-4_2016/dml-chart.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n  ppt/charts/chart11.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": [
+          "presentation: notesMasterIdLst before sldIdLst",
+          "ppt/charts/chart11.xml: removed undefined 2D axis reference 2094734556"
+        ],
+        "validation": {
+          "exit_code": 1,
+          "passed": false,
+          "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/charts/chart11.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/drawingml/2006/chart}varyColors': This element is not expected. Expected is ( {http://schemas.openxmlformats.org/drawingml/2006/chart}grouping ).\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "paragraph-table.docx",
+      "input": {
+        "bytes": 8693,
+        "sha256": "e85e71522f6981e64c484641449edd4496070afcd98c12b9d61d489ce48d5e30"
+      },
+      "validation": {
+        "exit_code": 0,
+        "passed": true,
+        "diagnostic": "\nParagraphs: 0 → 6 (+6)\nAll validations PASSED!\n"
+      },
+      "targeted_edit": {
+        "exit_code": 0,
+        "passed": true,
+        "diagnostic": "\nParagraphs: 0 → 6 (+6)\nAll validations PASSED!\n"
+      },
+      "read_after_edit": {
+        "exit_code": 0,
+        "chinese_table_and_edit_present": true
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "text-notes.pptx",
+      "input": {
+        "bytes": 44768,
+        "sha256": "187dc590e6baf9bccd65a8d0b4d80c7ecfeac67ba8630927f28032f2922de32e"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": ["presentation: notesMasterIdLst before sldIdLst"],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    },
+    {
+      "case": "text.pptx",
+      "input": {
+        "bytes": 44752,
+        "sha256": "53f001819e5e812f0b388c3076f9e1cbe81de917ecad292e267a9c60afc03270"
+      },
+      "validation": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n"
+      },
+      "applicable_schema_parts": [
+        {
+          "part": "ppt/presentation.xml",
+          "namespace": "http://schemas.openxmlformats.org/presentationml/2006/main",
+          "schema": "schemas/ISO-IEC29500-4_2016/pml.xsd",
+          "passed": false,
+          "errors": [
+            "Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentationml/2006/main}notesSz )."
+          ]
+        }
+      ],
+      "targeted_edit": {
+        "exit_code": 1,
+        "passed": false,
+        "diagnostic": "\nFAILED - Found NEW validation errors:\n  ppt/presentation.xml: 1 new error(s)\n    - Element '{http://schemas.openxmlformats.org/presentationml/2006/main}notesMasterIdLst': This element is not expected. Expected is one of ( {http://schemas.openxmlformats.org/presentationml/2006/main}sldSz, {http://schemas.openxmlformats.org/presentat...\n",
+        "all_other_parts_identical": true
+      },
+      "diagnostic_copy": {
+        "changes": ["presentation: notesMasterIdLst before sldIdLst"],
+        "validation": {
+          "exit_code": 0,
+          "passed": true,
+          "diagnostic": "All validations PASSED!\n"
+        },
+        "production_fix": false,
+        "viewer_verified": false
+      },
+      "original_unchanged": true
+    }
+  ],
+  "qualified": false,
+  "qualification_conclusion": {
+    "docx_shared_path": "passed for paragraphs, table, Chinese, targeted edit and unchanged original",
+    "pptx": "not qualified; all formal inputs fail unchanged strict validation",
+    "diagnostic_copy": "counterfactual only; no bundled repair or validation exception",
+    "powerpoint_evidence": "not available on this host; no PowerPoint application installed",
+    "followup": "D and F-PPTX remain unclosed; XLSX does not depend on this qualification"
+  }
+}
