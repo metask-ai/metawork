@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "date": "2026-10-30",
+  "scope": "Issue #70 managed import resource context: one real MetaWork model run and one Codex shared-directory reader observation",
+  "platform": {
+    "os": "macOS 27.0.1",
+    "architecture": "arm64"
+  },
+  "application": {
+    "production_source_commit": "eb2129d6bd1532dd30b7cc5640d7a59eb3bc8bff",
+    "test_source_commit": "96518256a2ff08c141c358bca800c6aca9df17b1",
+    "build": "npm run dev; canonical Native SDK packaging and Apple Development stable signing; paired built Renderer assets",
+    "artifact": {
+      "app": "/Users/zogien/Projects/metawork/.zig-cache/issue70-smoke/MetaWork.app",
+      "source": "/Users/zogien/Projects/metawork/.zig-cache/development/run-fe8vSl/app/bin/metawork",
+      "sourceSha256": "134895a71b356ddf99b6ace72c405bf1e502decbbed5090fad6936167691f245",
+      "wrappedSha256": "1b08f9dcebfc8cb3f9bd25b8a1d5f96a80b8584a4a79fff2ffa11877daaf6998",
+      "sameFileBackedSections": true,
+      "renderer": "/Users/zogien/Projects/metawork/.zig-cache/development/run-fe8vSl/renderer",
+      "signing": "canonical Apple Development stable requirement",
+      "distributionUpload": false
+    },
+    "core_lock": {
+      "schema_version": 1,
+      "vendor": "metask",
+      "name": "agentcore",
+      "version": "0.13.0-dev+77dc64afde31",
+      "source": {
+        "commit": "77dc64afde31ee110d85ce9ac0d44c7e10f42f0c",
+        "dirty": false
+      },
+      "toolchain": {
+        "zig_version": "0.16.0"
+      },
+      "target": {
+        "id": "aarch64-macos",
+        "architecture": "aarch64",
+        "os": "macos",
+        "abi": "none",
+        "zig_target": "aarch64-macos.13.0...15.6-none",
+        "rust_target": "aarch64-apple-darwin"
+      },
+      "build": {
+        "optimize": "ReleaseSafe",
+        "strip": true
+      },
+      "link": {
+        "requires_c_runtime": true,
+        "system_libraries": [],
+        "system_frameworks": []
+      },
+      "contract": {
+        "binary_abi_status": "experimental",
+        "binary_abi_version": 1,
+        "binary_abi_revision": 26,
+        "binary_abi_table_size": 80
+      },
+      "shared_library": {
+        "path": "lib/libmetask_agentcore.dylib",
+        "entry_point": "metask_agentcore_get_api",
+        "install_name": "@rpath/libmetask_agentcore.dylib",
+        "needed": [
+          "/usr/lib/libSystem.B.dylib"
+        ]
+      },
+      "runtime_assets": [
+        {
+          "name": "ripgrep",
+          "version": "15.2.0",
+          "revision": "e89fff89ac",
+          "path": "bin/rg",
+          "upstream": "https://github.com/BurntSushi/ripgrep",
+          "license": "MIT OR Unlicense",
+          "role": "Glob/Grep execution dependency"
+        }
+      ],
+      "files": [
+        {
+          "path": "lib/libmetask_agentcore.a",
+          "sha256": "c1b820bef4e2c0776c98414751fc6251d1f6b9ebcd8c9d6076c3308e2e97d3e0"
+        },
+        {
+          "path": "lib/libmetask_agentcore.dylib",
+          "sha256": "64df22f80f53a541999f1660bc861da046a386cacd6d6ee20e8bbd595f597f09"
+        },
+        {
+          "path": "bin/rg",
+          "sha256": "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e"
+        },
+        {
+          "path": "bin/ripgrep-LICENSE-MIT",
+          "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+        },
+        {
+          "path": "include/metask/agentcore.h",
+          "sha256": "f56d3e916fead0b4d862a47b93ea07beca0d68f8dc1098bc86385f77518a6f6d"
+        },
+        {
+          "path": "bindings/zig/build.zig",
+          "sha256": "7e60bab1cac9f30f5fcfb7ab800342f85954176da75ea10ba510ffd486c5b3ce"
+        },
+        {
+          "path": "bindings/zig/build.zig.zon",
+          "sha256": "dd3e7b9343e197af4987a5c2006e6f6524b35c439b342cdcb1458aaa77221ecf"
+        },
+        {
+          "path": "bindings/zig/src/root.zig",
+          "sha256": "7578923b906ffe8b26af6ea47f20b1a116a354067a7d26c4bd8119339bc6b1dc"
+        },
+        {
+          "path": "bindings/zig/src/protocol.zig",
+          "sha256": "eabb44989d6fe23aff15a11ef863661043b76101cef1d0761657a7f77888eaec"
+        },
+        {
+          "path": "bindings/zig/src/types.zig",
+          "sha256": "30955830ea0369a85f61d1ae1dd915f2b603c4fdd13d24ed59099501fcf8ea7b"
+        },
+        {
+          "path": "bindings/rust/Cargo.toml",
+          "sha256": "4e592edc9238482e9582da608908dc5de639ee50570a2cedda6234032075b961"
+        },
+        {
+          "path": "bindings/rust/Cargo.lock",
+          "sha256": "f7e00653dd17161de1e57a8d5adfe0a74b698a87def959ad6d2baced1088611e"
+        },
+        {
+          "path": "bindings/rust/link.cfg",
+          "sha256": "6b2ff8ea73c3443b7a7ab8af548e1db048bb087c898991859e64d940465f7976"
+        },
+        {
+          "path": "bindings/rust/build.rs",
+          "sha256": "740f955d63dc3dc592fde8e83d9458ce4903a263a38a32b348aa0dd0785eeab9"
+        },
+        {
+          "path": "bindings/rust/src/lib.rs",
+          "sha256": "1ec7077a9bc6fe3256e69baee1077062ff8b9a1efcb5af8165ca3524771192ab"
+        },
+        {
+          "path": "bindings/rust/src/raw.rs",
+          "sha256": "90f52a70d81f3c01d496b2bfe344117eec3e0bb25833cf90416fa386836566b2"
+        },
+        {
+          "path": "bindings/rust/examples/link_probe.rs",
+          "sha256": "30b5ead7c98c59880ac9666cf4649edd9eb9eede06ba80688cc0857929e51453"
+        },
+        {
+          "path": "README.md",
+          "sha256": "d2a7b94ccd55201bc7d55ca410f67715b03b94c6be8d9b835ede9f2a34672cd4"
+        }
+      ]
+    },
+    "no_core_patch": true
+  },
+  "managed_asset": {
+    "name": "qa-resource-context-70",
+    "import": "actual native folder picker and Product managed install in Skills page",
+    "preview_notice_observed": true,
+    "source_files": {
+      "SKILL.md": {
+        "bytes": 258,
+        "sha256": "d09720342da7098740873d37064b0efe3cc608fef1eb7ae65682fa9b1aac1483"
+      },
+      "qa-reference.txt": {
+        "bytes": 31,
+        "sha256": "9d636da01e103e9a5928e080ca93efb9f6b7d294807f467d8d7e011aef0dcbe2"
+      }
+    },
+    "installed_files": {
+      "SKILL.md": {
+        "bytes": 890,
+        "sha256": "5a9ea83adbcc39fa894c48bd71c6d0039fc5e0c6463822c92f68e51d88973aaf"
+      },
+      "qa-reference.txt": {
+        "bytes": 31,
+        "sha256": "9d636da01e103e9a5928e080ca93efb9f6b7d294807f467d8d7e011aef0dcbe2"
+      }
+    },
+    "source_definition": "---\nname: qa-resource-context-70\ndescription: Read a bundled QA-only reference marker.\n---\nWhen explicitly invoked, read the bundled qa-reference.txt, then reply exactly QA_SKILL_OK_7429 followed by its reference marker. Do not modify files or access links.\n",
+    "source_unchanged": true,
+    "resource_bytes_unchanged": true,
+    "inventory_content_hash": "3a80844d50ffea53a8f0c0c985791b2306143c1186e501607efca823519f6bfb",
+    "inventory_state": "ready"
+  },
+  "real_model": {
+    "attempts": 1,
+    "provider": "Metask",
+    "authentication": "existing development profile; no credentials copied or logged",
+    "synthetic_provider": false,
+    "task_id_hex": "0000000000000027",
+    "run": {
+      "run_id": "0000000000000001",
+      "phase": "completed",
+      "outcome": "completed",
+      "cause": null,
+      "elapsed_ms": 23125,
+      "submitted_at_unix_ms": 1793348997980,
+      "model": "glm-5.3-flash",
+      "assistant": "QA_SKILL_OK_7429\nQA028_DIRECTORY_REFERENCE_7429",
+      "event_projection_failure": null,
+      "input": {
+        "kind": "text",
+        "text": "Issue #70 smoke: Invoke the qa-resource-context-70 Skill, read its bundled qa-reference.txt and return the markers as instructed. Do not modify files or search outside the Skill.",
+        "skill_id": null,
+        "catalog_revision": null,
+        "invocation_name": null,
+        "display_name": null,
+        "argument_values": null,
+        "attachments": null,
+        "redacted": false
+      }
+    },
+    "tools": [
+      {
+        "ordinal": 0,
+        "name": "Skill",
+        "state": "completed",
+        "is_error": 0,
+        "input": {
+          "name": "qa-resource-context-70"
+        },
+        "content": "# Skill: qa-resource-context-70\n\nSkill resource directory: /var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-822a45a946cc81b89d249d52a29efaa7/activation-0b8992480c7587bc310ad9c2c6a10433\nIf this value is an expanded absolute path, resolve this Skill's relative\nresource paths against it. If it is still a template token, do not use it as\na path or shell environment variable. Instead use the directory containing\nthis SKILL.md, as identified by the invoking tool's Skill-location context.\nIf neither location is available, report that resources cannot be located;\ndo not guess a filesystem root.\nUse the existing tools and permission policy to access resources.\nUse the invoking tool's activation or reload mechanism to obtain current\nresource paths when continuing work.\n\nWhen explicitly invoked, read the bundled qa-reference.txt, then reply exactly QA_SKILL_OK_7429 followed by its reference marker. Do not modify files or access links.\n"
+      },
+      {
+        "ordinal": 1,
+        "name": "Read",
+        "state": "completed",
+        "is_error": 0,
+        "input": {
+          "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-822a45a946cc81b89d249d52a29efaa7/activation-0b8992480c7587bc310ad9c2c6a10433/qa-reference.txt"
+        },
+        "content": "     1\tQA028_DIRECTORY_REFERENCE_7429\n"
+      }
+    ],
+    "oracle": "Read returns exactly the fixture marker; Read.file_path uses the directory returned by the real Skill tool; user input contains no absolute path or placeholder",
+    "observed_ui": "Skills preview notice, ready item, final markers and expanded Skill/Read details",
+    "history_evidence": "read-only query restricted to this QA task in development SQLite history",
+    "interventions": []
+  },
+  "shared_reader": {
+    "tool": "Codex CLI 0.163.0-alpha.11.1",
+    "documentation": "https://learn.chatgpt.com/docs/non-interactive-mode",
+    "entry": "codex exec --ignore-user-config --ephemeral --skip-git-repo-check --sandbox read-only --cd <isolated-project> --json",
+    "prompt": "Use the $qa-resource-context-70 Skill and return its requested markers. Do not modify any files, do not use network tools or other skills, and do not search outside this isolated project.",
+    "asset": {
+      "project": "/private/tmp/issue70-compat-dln0shyk",
+      "source": "actual product-managed installation",
+      "copied_files": {
+        "SKILL.md": "5a9ea83adbcc39fa894c48bd71c6d0039fc5e0c6463822c92f68e51d88973aaf",
+        "qa-reference.txt": "9d636da01e103e9a5928e080ca93efb9f6b7d294807f467d8d7e011aef0dcbe2"
+      },
+      "placeholder_unexpanded": true
+    },
+    "placeholder_unexpanded": true,
+    "commands": [
+      {
+        "command": "/bin/zsh -lc 'cat .agents/skills/qa-resource-context-70/SKILL.md'",
+        "aggregated_output": "---\nname: qa-resource-context-70\ndescription: Read a bundled QA-only reference marker.\n---\nSkill resource directory: ${CLAUDE_SKILL_DIR}\nIf this value is an expanded absolute path, resolve this Skill's relative\nresource paths against it. If it is still a template token, do not use it as\na path or shell environment variable. Instead use the directory containing\nthis SKILL.md, as identified by the invoking tool's Skill-location context.\nIf neither location is available, report that resources cannot be located;\ndo not guess a filesystem root.\nUse the existing tools and permission policy to access resources.\nUse the invoking tool's activation or reload mechanism to obtain current\nresource paths when continuing work.\n\nWhen explicitly invoked, read the bundled qa-reference.txt, then reply exactly QA_SKILL_OK_7429 followed by its reference marker. Do not modify files or access links.\n",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      {
+        "command": "/bin/zsh -lc 'cat .agents/skills/qa-resource-context-70/qa-reference.txt'",
+        "aggregated_output": "QA028_DIRECTORY_REFERENCE_7429\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    ],
+    "result": "QA_SKILL_OK_7429 QA028_DIRECTORY_REFERENCE_7429",
+    "observed": "definition read with literal token; subsequent command reads sibling resource directly, with no token shell expansion or root-directory fallback",
+    "configuration_changed": false,
+    "attempts": 1
+  },
+  "limits": [
+    "Single real model run, one shared reader version, macOS arm64 development artifact; does not establish all models, operating systems or signed distribution behavior.",
+    "Existing installations require reimport; external managed Claude/Codex sources and manual Skill definitions are not rewritten.",
+    "Automated transaction and canonical Core regressions own deterministic coverage; these observations do not replace that test graph.",
+    "QA Skill and its development task remain available as local evidence; no unrelated user asset was altered."
+  ]
+}
