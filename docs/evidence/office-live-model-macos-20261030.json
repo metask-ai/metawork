@@ -31,7 +31,9 @@
       "frozen_prompt_matches_persisted_input": true,
       "environment": "existing ready private runtime; no preparation download requested",
       "status": "failed",
-      "interventions": [],
+      "interventions": [
+        "Concurrent qualification activity opened MetaWork native workspace picker while this Run was active; no user-task hints or candidate edits"
+      ],
       "outcome": "dependency_contract_failure",
       "cause": "dependency_contract_failure",
       "event_projection_failure": "dependency_contract_failure",
@@ -48,7 +50,9 @@
           "output_truncated": false,
           "arguments": {
             "name": "xlsx",
-            "values": ["创建 created.xlsx,含多工作表、公式与格式化"]
+            "values": [
+              "创建 created.xlsx,含多工作表、公式与格式化"
+            ]
           }
         },
         {
@@ -261,15 +265,159 @@
           }
         }
       ],
-      "trace_scope": "Ordered actual persisted Product tool projections; no credentials, private reasoning or arbitrary tool output copied"
+      "trace_scope": "Ordered actual persisted Product tool projections; no credentials, private reasoning or arbitrary tool output copied",
+      "failure_analysis": {
+        "observation": "The synchronous native picker occupies the main-thread dispatch while the bounded Agent event queue needs its main-thread consumer",
+        "causality": "Task 25 first typed rejection is event_pump/queue_rejected/DeadlineExceeded; this precedes the later incomplete-output drain fact. Task 24 has only legacy CallbackFailed, so its exact first cause remains unknown.",
+        "constraint": "No queue/timeout guard was weakened. No SDK implementation patch or alternative native API was used."
+      }
+    },
+    {
+      "attempt": 2,
+      "case": "create-edit",
+      "repetition": 2,
+      "stage": "create",
+      "task_id": 25,
+      "task_id_hex": "0000000000000019",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793328144508,
+      "frozen_prompt_matches_persisted_input": true,
+      "source_commit": "b862a0e6",
+      "application_sha256": "22255fc9274897529ba979819bab2c5476c2c97ece27febcafd1d31062fa0c6d",
+      "status": "failed",
+      "interventions": [
+        "Concurrent qualification activity opened MetaWork native workspace picker while this Run was active; no user-task hints or candidate edits"
+      ],
+      "runtime_diagnostics": "captured for this owned app process; only fixed typed facts may be retained",
+      "outcome": "dependency_contract_failure",
+      "cause": "dependency_contract_failure",
+      "event_projection_failure": "dependency_contract_failure",
+      "diagnostic": "agent.callback_rejection core_manifest_sha256=529d7216b841c0d102f0b5ce1b423c5debe701e6f34137b3290862590965f542 boundary=event_pump reason=queue_rejected event=thinking_chunk error=DeadlineExceeded bytes=26 host_run=1 observed_run=null state=running handle_matches=null identity_matches=null; callback failed: CallbackFailed",
+      "candidate_produced": false,
+      "observation": "Native workspace selection for repetition 3 was open during this run; callback queue deadline and later terminal drain are separately observed. Causal attribution remains under investigation.",
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 154,
+          "output_bytes": 11642
+        },
+        {
+          "ordinal": 1,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 106,
+          "output_bytes": 164
+        },
+        {
+          "ordinal": 2,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 184,
+          "output_bytes": 222
+        },
+        {
+          "ordinal": 3,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 174,
+          "output_bytes": 12346
+        }
+      ],
+      "failure_analysis": {
+        "observation": "The synchronous native picker occupies the main-thread dispatch while the bounded Agent event queue needs its main-thread consumer",
+        "causality": "Task 25 first typed rejection is event_pump/queue_rejected/DeadlineExceeded; this precedes the later incomplete-output drain fact. Task 24 has only legacy CallbackFailed, so its exact first cause remains unknown.",
+        "constraint": "No queue/timeout guard was weakened. No SDK implementation patch or alternative native API was used."
+      }
+    },
+    {
+      "attempt": 3,
+      "case": "create-edit",
+      "repetition": 3,
+      "stage": "create",
+      "task_id": 26,
+      "task_id_hex": "000000000000001a",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793328305650,
+      "frozen_prompt_matches_persisted_input": true,
+      "source_commit": "b862a0e6",
+      "application_sha256": "22255fc9274897529ba979819bab2c5476c2c97ece27febcafd1d31062fa0c6d",
+      "status": "running",
+      "interventions": [
+        "Application auto-review timed out for Bash hashing synthetic orders.csv and running the generated create_orders.py; inspected the script (local CSV read and XLSX write only), then clicked Allow once. No task hints, artifact edits or standing permission changes."
+      ],
+      "observation": "Workspace selected before submission; no MetaWork native modal opened while this run was active. MetaskOffice viewer work occurs in a separate application process."
+    },
+    {
+      "attempt": 4,
+      "case": "bad-styles",
+      "stage": "inspect-repair",
+      "task_id": 24,
+      "task_id_hex": "0000000000000018",
+      "run_id_hex": "0000000000000002",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793329721120,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
+      "status": "running",
+      "interventions": [],
+      "application_source_commit": "b862a0e6"
+    },
+    {
+      "attempt": 5,
+      "case": "required-recalculation",
+      "stage": "required-boundary",
+      "task_id": 25,
+      "task_id_hex": "0000000000000019",
+      "run_id_hex": "0000000000000002",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793329740636,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
+      "status": "running",
+      "interventions": [],
+      "application_source_commit": "b862a0e6"
     }
   ],
   "unstarted": [
-    "create-edit repetitions 2 and 3",
     "bad-styles repair",
     "necessary recalculation unsupported",
     "correlation model create-edit",
     "first preparation in isolated profile with live model"
   ],
-  "acceptance": "failed attempt retained; required finite set incomplete; investigate reproduced dependency failure before any completion claim"
+  "acceptance": "failed attempt retained; required finite set incomplete; investigate reproduced dependency failure before any completion claim",
+  "runtime_followup": {
+    "production_diagnostic_fix_commit": "b862a0e6",
+    "native_graph": {
+      "steps_passed": 241,
+      "tests_passed": 1560,
+      "tests_total": 1569,
+      "existing_skipped": 9,
+      "log": ".zig-cache/office-native-production-diagnostic-final.log"
+    },
+    "actual_failure_preserves_first_cause": true,
+    "later_terminal_drain_does_not_override_first_cause": true,
+    "native_sdk": {
+      "installed_and_registry_latest": "0.11.0-fork.4",
+      "verification": "npm view @zogien/native-sdk version --json, 2026-10-30",
+      "public_dialog_api": "synchronous showOpenDialog; no qualified asynchronous API found"
+    },
+    "underlying_modal_starvation_fixed": false,
+    "historical_issue_23_root_cause": "not established by these current attempts"
+  }
 }
