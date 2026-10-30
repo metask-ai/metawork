@@ -435,6 +435,99 @@
         "frozen_machine_report_oracle": "not satisfied; truthful narrative alone does not establish the required structured result",
         "overall_acceptance": "not passed"
       }
+    },
+    {
+      "attempt": 6,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "task_id": 27,
+      "task_id_hex": "000000000000001b",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331591126,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-1",
+      "status": "running",
+      "outcome": null,
+      "cause": null,
+      "interventions": [
+        "User-authorized allow-once after automatic-review timeout for canonical run.sh/read.py reading only synthetic orders.csv; five relevant materialized scripts matched archive bytes, no standing rule created. Command pipes preview through head and prints pipeline status; this probe does not establish document verification success."
+      ],
+      "application_source_commit": "327db559",
+      "tool_count": 10
+    },
+    {
+      "attempt": 7,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 2,
+      "task_id": 28,
+      "task_id_hex": "000000000000001c",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331616684,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-2",
+      "status": "running",
+      "outcome": null,
+      "cause": null,
+      "interventions": [],
+      "application_source_commit": "327db559",
+      "tool_count": 8
+    },
+    {
+      "attempt": 8,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 3,
+      "task_id": 29,
+      "task_id_hex": "000000000000001d",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331642368,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-3",
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "interventions": [],
+      "application_source_commit": "327db559",
+      "finished_at_unix_ms": 1793331801536,
+      "tool_count": 0,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 9,
+      "case": "create-edit",
+      "stage": "create",
+      "correlation": true,
+      "task_id": 30,
+      "task_id_hex": "000000000000001e",
+      "run_id_hex": "0000000000000001",
+      "model": "DeepSeek-V4.1-Flash-1017",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331744587,
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "327db559",
+      "interventions": [],
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 0,
+      "finished_at_unix_ms": 1793331901733,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
     }
   ],
   "unstarted": [
@@ -514,5 +607,14 @@
     "scope": "Synthetic Office acceptance directories only: inspect scripts first; allow-once reads, new working copies, verification and local DeliverFile",
     "user_answer": "授权本次合成验收范围",
     "standing_policy_changed": false
+  },
+  "latest_application": {
+    "source_commit": "327db559",
+    "executable": {
+      "bytes": 47836320,
+      "sha256": "bef80af8550536c28a43467189182b60c237eaeba0afe8303bdbd7599be17c61"
+    },
+    "archive_sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169",
+    "existing_account_and_approval_mode": true
   }
 }

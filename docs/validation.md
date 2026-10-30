@@ -74,6 +74,12 @@ PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.
 
 这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
 
+### E-MAC-OFFICE-MODEL-20261030
+
+真实模型的固定任务、独立 oracle、全部尝试、人工介入及实际回执见 [Office 模型验收记录](evidence/office-live-model-macos-20261030.json)。确定性检查、受控 Core fixture 与查看器的通过不替代这组验收；固定集合尚未完成时，不宣称 Office 模型工作流整体通过。
+
+本轮真实运行中，打开同步原生工作区选择器时观察到 event pump 队列期限拒绝；新增生产诊断保留该首个拒绝及精确 Core 身份，后续未闭合输出的终态清理不覆盖它。当前 canonical Native SDK 的同步对话框占用应用事件消费路径，该缺口尚未修复。受控暂停消费者的反例只证明这一机制，不能证明历史 #23 与其同因。闭合须通过 canonical 依赖能力或明确接受的产品合同方案解决消费停顿，并在实际运行与原生对话框交错时复验；不得靠增大队列或期限、增加平行消费者、跳过收口或本地修改 SDK 绕过拒绝。
+
 ### E-MAC-OFFICE-INPUTS-20261024
 
 2026-10-24，macOS 27.0.1 arm64、Zig 0.16.0，跨平台实施分支在 `914c5a98` 基础上进行输入资格检查。官方固定发行包与所选 wheel 已实际下载并核验摘要、大小和布局；Windows ARM64 的 CPython、Node PE machine 均为 `0xaa64`，NuGet 携带 VC runtime。macOS standalone Python 的 pip、ssl、ctypes 及锁定的 lxml、Pillow、openpyxl、defusedxml 实际加载成功；搬移到含中文、空格和单引号的目录后新进程仍能加载。Python 发行包及 arm64 wheel 的 53 个原生 image 的加载依赖未发现构建机器绝对路径。Node 固定库经私有 npm 安装及搬移后加载成功。具体接受输入由 Office 机器 manifest/lock 拥有，缓存中的候选不自动成为产品输入。
