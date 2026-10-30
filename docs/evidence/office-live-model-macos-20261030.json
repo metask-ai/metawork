@@ -767,7 +767,7 @@
       "attempt": 14,
       "stage": "edit",
       "run_id_hex": "0000000000000003",
-      "status": "queued",
+      "status": "completed",
       "submitted_at_unix_ms": 1793342830983,
       "frozen_prompt_matches_persisted_input": true,
       "original_baseline": {
@@ -784,14 +784,92 @@
           "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
         }
       },
-      "interventions": []
+      "interventions": [
+        "Under prior synthetic acceptance authorization, inspected edit_workbook.py: checked_copy source, changes only requested data/region values/font, exclusive new edited.xlsx, read-only original hashes. Fresh Skill entry run.sh/run.py/environment.sh/finish.py/office_archive.py matched canonical archive. Allowed once after automatic review timeout, no hints or standing rule.",
+        "Under prior synthetic acceptance authorization, allowed once for local DeliverFile edited.xlsx after independently rechecking 6889 bytes and SHA1c3fffb4…0af1f against both reports, plus unchanged CSV/created.xlsx/bad-styles.xlsx baselines. No standing permission or external publication."
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 8,
+      "resource_entry_observation": "First tool is Skill xlsx; current resource entry obtained before work, satisfying the cross-message entry rule on this edit request.",
+      "edit_script_sha256": "f1fc6b55665555fead56724eef1e75c8b0a45c2ad6a8f14f99c311c420f73a94",
+      "independent_candidate_check": {
+        "report": ".zig-cache/office-model-acceptance/task36-edit-independent-1.json",
+        "result": {
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "conforms": true,
+          "candidate": {
+            "bytes": 6889,
+            "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+          },
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ]
+        },
+        "checks": 23,
+        "requirements": 23,
+        "all_baseline_originals_unchanged": true
+      },
+      "own_check_result": {
+        "status": "passed",
+        "execution_completed": true,
+        "required_checks_completed": true,
+        "conforms": true,
+        "candidate": {
+          "bytes": 6889,
+          "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+        },
+        "not_performed": [
+          "formula_recalculation",
+          "visual_rendering",
+          "viewer_compatibility",
+          "full_xsd_validation"
+        ],
+        "checks": 16,
+        "requirements": 7,
+        "report": "verification-2.json",
+        "report_sha256": "f634d568c5ca412024453ecf0dbc28457f5ec9277f3f90a0a7bb6a443b5e6dc2",
+        "specification_sha256": "d8cdb1ec8e9acbaa73bcbcdc904fb5894f557f316cae796d55575635210bc2e7"
+      },
+      "own_check_specification": {
+        "checks": 16,
+        "requirements": 7,
+        "scope_review": "Exact sheet set, full Data/Regions values and headers, total labels, all used font cells, percent formats, total fills; Input A1:C8 and Reference A1:H20 values/formulas/font/fill/number_format compared against original created.xlsx. Independent expectations reflect total660, North300/South360."
+      },
+      "finished_at_unix_ms": 1793343298882,
+      "actual_deliveries": [
+        {
+          "id": "5a8cb33b27fb60176057767d387b16b0",
+          "locator": "edited.xlsx",
+          "size_bytes": 6889,
+          "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f",
+          "redacted": false
+        }
+      ],
+      "final_response": "交付完成。edited.xlsx 已提交，回执 6889 字节、SHA-256 `1c3fffb4…0af1f`，与校验报告的候选身份一致；created.xlsx（`ead88a14…64457`）与 orders.csv 哈希未变，原件完整保留。\n\n**编辑内容**（基于 created.xlsx 副本另存，未覆盖原件）：Data 中 o-3 金额 150→160，全部明细占比、地区汇总（North 300 / South 360）、总额（660）、总占比按新总额重算；Data、Regions 整个已用矩形（含表头、空白格、合计行）改为 Calibri 12。\n\n**核验结果**（verify.py 对 edited.xlsx 最终保存字节执行，16/16 项检查通过，7 项需求映射 conforms: true）：\n\n| 要求 | 核验方式与结果 |\n|---|---|\n| 四表结构不变 | sheets 精确比对通过 |\n| Data：o-1/o-2/o-3/o-4 = 100/200/160/200，占比按 660 | A1:D6 逐格断言（0.151515…/0.303030…/0.242424…/0.303030…，容差 1e-9）+ 外沿计数 23 非空格 |\n| Data 合计行 Total 660 / 100% | 唯一标签定位于 A6 |\n| Regions：North 300、South 360 按名排序，Total 660 | A1:C4 逐格断言（0.454545…/0.545454…）+ 唯一标签 A4 + 计数 12 |\n| Data/Regions 全矩形 Calibri 12 | A1:D6、A1:C4 字体断言（含空白格）通过 |\n| 保留格式：0.0% 占比、合计行 A 格 FFDEEAF6 | D2:D6、C2:C4 数字格式与 A6、A4 填充断言通过 |\n| Input 原样 | `unchanged` 与 created.xlsx 逐格比对 value/font/fill/number_format，24 格 0 差异 |\n| Reference 原样 | `unchanged` A1:H20 比对 160 格 0 差异；B2 仍为公式文本 `=1+2` |\n\n**未覆盖项（如实说明）**：公式重算（本环境不评估公式，B2 按要求未重算、无缓存值）、可视化渲染、查看器兼容性、完整 XSD 校验；Calibri 为文件内存储的字体名，不保证查看端已安装。",
+      "candidate_produced": true,
+      "edit_stage_qualification": {
+        "status": "passed_with_recorded_manual_approvals",
+        "own_checks_passed": 16,
+        "necessary_requirements_passed": 7,
+        "independent_checks_passed": 23,
+        "receipt_matches": true,
+        "all_original_baselines_preserved": true,
+        "final_wording_truthful": true
+      }
     }
   ],
   "unstarted": [
-    "three successful independent create-edit repetitions",
+    "two remaining successful independent XLSX create-edit repetitions",
+    "current-resource style correction and necessary unsupported-check cases",
     "correlation model completed create-edit",
     "first preparation in isolated profile with live model",
-    "PPTX three independent create-edit/check/delivery repetitions"
+    "PPTX three completed independent create-edit/check/delivery workflows"
   ],
   "acceptance": "Not passed: complete fixed real-model set is still incomplete; latest attempts include provider_failure before candidates or delivery. Deterministic, Core and viewer qualifications do not substitute for real-model acceptance.",
   "runtime_followup": {
@@ -998,5 +1076,31 @@
     "model_attempts_started": false,
     "rule": "Each future case starts with its declared input only. Active Task36 workspace is untouched; no additional candidate or expected-value hints are injected."
   },
-  "current_qualification": "Task36 create stage completed with a recorded neutral continuation, manual approvals, independent21 checks, own19 checks/9 requirements, exact receipt and truthful final. Frozen edit stage now submitted. Other independent repetitions and required scenes remain unqualified."
+  "current_qualification": "One independent XLSX create/edit/check/delivery workflow completed with a retained stopped initial Run, neutral continuation and manual approvals. Both final artifacts independently pass, actual receipts match, originals preserved, final wording truthful. Remaining independent repetitions, bad-style correction, unsupported necessary check, second model and isolated first preparation remain unqualified.",
+  "completed_workflows": [
+    {
+      "format": "xlsx",
+      "repetition": 1,
+      "task_id": 36,
+      "create_runs": [
+        1,
+        2
+      ],
+      "edit_runs": [
+        3
+      ],
+      "status": "completed_with_neutral_continuation_and_manual_approvals",
+      "initial_stopped_run_retained": true,
+      "independent_task_count": 1,
+      "create_candidate": {
+        "bytes": 6874,
+        "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+      },
+      "edit_candidate": {
+        "bytes": 6889,
+        "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+      },
+      "complete_workflow_claim_limited_to_this_task": true
+    }
+  ]
 }
