@@ -211,6 +211,26 @@ class Verification(unittest.TestCase):
         self.assertIn("A4", [item["cell"] for item in checks["Regions-font"]["mismatches"]])
         self.assertEqual(checks["Data-amount"]["status"], "passed")
 
+    def test_empty_fill_assertion_rejects_highlight_left_on_previous_data_row(self):
+        spec = {"version": 1, "checks": [
+            {"id": "Data-body-fill", "op": "fill", "target": {"sheet": "Data", "range": "A1:D5"}, "expected": {"pattern": None}},
+            {"id": "Regions-body-fill", "op": "fill", "target": {"sheet": "Regions", "range": "A1:C3"}, "expected": {"pattern": None}},
+        ], "requirements": [{"id": "no-misplaced-emphasis", "source": "Header and detail rows must have no fill",
+                              "checks": ["Data-body-fill", "Regions-body-fill"]}]}
+        for faulty in (False, True):
+            with self.subTest(faulty=faulty):
+                create_summary(self.candidate, faulty_totals=faulty)
+                before = self.candidate.read_bytes()
+                result, report = self.verify(spec)
+                self.assertEqual(result.returncode, 1 if faulty else 0, report)
+                self.assertTrue(report["execution_completed"] and report["required_checks_completed"])
+                self.assertEqual(report["conforms"], not faulty)
+                if faulty:
+                    mismatches = {check["id"]: [item["cell"] for item in check["mismatches"]] for check in report["checks"]}
+                    self.assertIn("A5", mismatches["Data-body-fill"])
+                    self.assertIn("A3", mismatches["Regions-body-fill"])
+                self.assertEqual(before, self.candidate.read_bytes())
+
     def test_every_necessary_mutation_fails(self):
         for sheet, coordinate, value in (("Data", "C6", 649), ("Data", "A6", "Wrong total"),
                                          ("Regions", "A2", "Wrong region"), ("Data", "A3", "duplicate")):

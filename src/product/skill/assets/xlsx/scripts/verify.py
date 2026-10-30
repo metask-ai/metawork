@@ -177,6 +177,8 @@ def style_spec(op, expected):
         elif key == "color":
             if not isinstance(value, str) or not re.fullmatch("[0-9A-F]{8}", value):
                 raise SpecError("Use explicit eight-digit ARGB")
+        elif op == "fill" and key == "pattern" and value is None:
+            pass  # The saved empty fill has no pattern; do not equate it to solid.
         else:
             string(value)
 

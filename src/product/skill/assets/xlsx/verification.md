@@ -155,6 +155,8 @@ count, select the required identifier column rather than the entire table.
 `fill.expected` is a nonempty subset of `pattern`, `color` for directly represented
 solid/empty fills. `unchanged` uses top-level `original` and `properties`, without
 `expected`; it compares the same declared target in the distinct original.
+An empty fill is asserted as `"expected":{"pattern":null}`; use it to check
+that an incorrectly highlighted detail row has actually been cleared.
 `sheets` and `unsupported` have no target. Do not add fields from another operation.
 
 Value types are `blank` (no value), `boolean`, `string`, `number`, `formula`,
