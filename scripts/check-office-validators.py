@@ -92,6 +92,20 @@ class OriginalReaders(unittest.TestCase):
         self.assertIn("Unsafe ZIP path", result.stderr)
         self.assertEqual(set(self.root.iterdir()), before)
 
+    def test_unpack_rejects_traversal_instead_of_failing_to_import_dependencies(self):
+        self.original_zip([("word/document.xml", XML), ("../escape", b"bad")])
+        for suffix in ("docx", "xlsx", "pptx"):
+            document = self.root / ("input." + suffix)
+            document.write_bytes(self.original.read_bytes())
+            output = self.root / ("unpacked-" + suffix)
+            command = (["/bin/sh", str(ENTRY), "python"] if ENTRY.suffix == ".sh" else [str(ENTRY), "python"]) if ENTRY is not None else [sys.executable, "-B"]
+            result = subprocess.run(command + [str(OFFICE / "unpack.py"), str(document), str(output)],
+                                    cwd=self.root, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Unsafe ZIP path", result.stdout + result.stderr)
+            self.assertFalse(output.exists())
+            self.assertFalse((self.root / "escape").exists())
+
     def test_xsd_original_comparison_consumes_checked_extraction_and_releases_it(self):
         self.original_zip([("word/document.xml", XML)])
         validator = DOCXSchemaValidator(self.modified, self.original)

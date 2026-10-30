@@ -90,20 +90,36 @@ const shell = [
   "",
 ].join("\n");
 const files = [];
-function collect(directory, prefix) {
-  for (const entry of readdirSync(path.join(root, directory), {
-    withFileTypes: true,
-  }).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
-    if (entry.name === "node_modules" || entry.name === "__pycache__")
+function collect(directories, prefix) {
+  const children = new Map();
+  for (const directory of directories) {
+    for (const entry of readdirSync(path.join(root, directory), {
+      withFileTypes: true,
+    })) {
+      const sources = children.get(entry.name) ?? [];
+      sources.push({ entry, source: `${directory}/${entry.name}` });
+      children.set(entry.name, sources);
+    }
+  }
+  for (const [leaf, sources] of [...children].sort(([a], [b]) =>
+    a.localeCompare(b, "en"),
+  )) {
+    if (leaf === "node_modules" || leaf === "__pycache__")
       throw new Error("Unshippable Office resource");
-    const source = `${directory}/${entry.name}`,
-      name = `${prefix}/${entry.name}`;
-    if (entry.isDirectory()) collect(source, name);
-    else if (entry.isFile()) {
+    const name = `${prefix}/${leaf}`;
+    if (sources.every(({ entry }) => entry.isDirectory()))
+      collect(
+        sources.map(({ source }) => source),
+        name,
+      );
+    else if (sources.length !== 1)
+      throw new Error(`Conflicting Office resource: ${name}`);
+    else if (sources[0].entry.isFile()) {
+      const { source } = sources[0];
       let data = read(source);
       if (
-        entry.name === "SKILL.md" &&
-        directory.startsWith("src/product/skill/assets/")
+        leaf === "SKILL.md" &&
+        source.startsWith("src/product/skill/assets/")
       ) {
         const text = data.toString("utf8");
         if (text.split("{{OFFICE_EXECUTION}}").length !== 2)
@@ -117,9 +133,9 @@ function collect(directory, prefix) {
       // Use Windows line endings for reliable cmd.exe label jumps across checkout settings.
       files.push({
         name,
-        data: entry.name.endsWith(".cmd")
+        data: leaf.endsWith(".cmd")
           ? Buffer.from(data.toString("utf8").replace(/\r?\n/g, "\r\n"))
-          : entry.name.endsWith(".sh")
+          : leaf.endsWith(".sh")
             ? Buffer.from(data.toString("utf8").replace(/\r\n/g, "\n"))
             : data,
       });
@@ -127,8 +143,11 @@ function collect(directory, prefix) {
   }
 }
 for (const skill of ["docx", "xlsx", "pptx"]) {
-  collect(`src/product/skill/assets/${skill}`, skill);
-  collect(common, `${skill}/environment`);
+  collect(
+    [`src/product/skill/assets/${skill}`, "src/product/skill/office_resources"],
+    skill,
+  );
+  collect([common], `${skill}/environment`);
   files.push({
     name: `${skill}/environment/environment.cmd`,
     data: Buffer.from(commands),

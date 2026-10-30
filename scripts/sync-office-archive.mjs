@@ -3,7 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const assets = path.join(root, "src/product/skill/assets");
 const canonical = readFileSync(
   path.join(root, "src/product/control/resources/archive.py"),
 );
@@ -14,12 +13,15 @@ const generated = Buffer.concat([
   canonical,
 ]);
 const check = process.argv.includes("--check");
-for (const skill of ["docx", "xlsx", "pptx"]) {
-  const destination = path.join(assets, skill, "scripts/office/archive.py");
+{
+  const destination = path.join(
+    root,
+    "src/product/skill/office_resources/scripts/office/archive.py",
+  );
   if (check) {
     if (!readFileSync(destination).equals(generated))
       throw new Error(
-        `${skill} archive helper differs from its canonical input`,
+        "Shared Office archive helper differs from its canonical input",
       );
   } else writeFileSync(destination, generated);
 }

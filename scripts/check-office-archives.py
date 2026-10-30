@@ -8,6 +8,7 @@ import struct
 import sys
 import subprocess
 import tempfile
+import tarfile
 import time
 import unittest
 import zipfile
@@ -202,16 +203,25 @@ class Archives(unittest.TestCase):
         source.write_bytes(data)
         self.rejected(source)
 
-    def test_all_office_entrypoints_reject_traversal_without_partial_output(self):
+    def test_all_bundled_archive_entrypoints_reject_traversal_without_partial_output(self):
         source = self.make([("../escape", b"data")])
+        resources = Path("resources").resolve()
+        with tarfile.open(ROOT / "src/app/office-skills.tar.gz", "r:gz") as bundle:
+            for member in bundle.getmembers():
+                if not member.name.endswith("/scripts/office/archive.py"):
+                    continue
+                destination = resources / member.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(bundle.extractfile(member).read())
         for skill in ("docx", "xlsx", "pptx"):
             document = Path(f"input.{skill}")
             document.write_bytes(source.read_bytes())
             result = subprocess.run([
-                sys.executable, "-B", str(ROOT / f"src/product/skill/assets/{skill}/scripts/office/unpack.py"),
-                str(document), f"unpacked-{skill}",
+                sys.executable, "-B", str(resources / f"{skill}/scripts/office/archive.py"),
+                "extract", str(document), "--output", f"unpacked-{skill}",
             ], capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Unsafe ZIP path", result.stderr)
             self.assertFalse(Path(f"unpacked-{skill}").exists())
             self.assertFalse(Path("escape").exists())
 
