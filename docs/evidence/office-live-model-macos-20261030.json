@@ -586,6 +586,30 @@
       "actual_deliveries": [],
       "final_response": "",
       "candidate_produced": false
+    },
+    {
+      "attempt": 12,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793340922124,
+      "status": "running",
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "interventions": [],
+      "workspace_context": "Contains orders.csv and the preseeded bad-styles.xlsx fixture, no previous outputs; preserve both inputs and assess actual data-source use from the tool/script trace.",
+      "outcome": null,
+      "cause": null,
+      "tool_count": 4
     }
   ],
   "unstarted": [
@@ -677,12 +701,12 @@
     "standing_policy_changed": false
   },
   "latest_application": {
-    "source_commit": "327db559",
+    "source_commit": "b03b173b",
     "executable": {
       "bytes": 47836320,
-      "sha256": "bef80af8550536c28a43467189182b60c237eaeba0afe8303bdbd7599be17c61"
+      "sha256": "476136fd6bad173238281dc02066c8837514b84f7c1d0528ca40daed727ebdc8"
     },
-    "archive_sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169",
+    "archive_sha256": "e92179dd6601fad1edfb7a3121a8f023d774b026c9cae885df3d1259c9968fd4",
     "existing_account_and_approval_mode": true
   },
   "latest_attempt_context": {
@@ -750,6 +774,17 @@
       }
     },
     "runtime_limits_or_frozen_oracles_changed": false,
-    "new_real_model_result": "pending new application resource; no completed workflow inferred from parser qualification"
-  }
+    "new_real_model_result": "Task 36 started with the original frozen create prompt, current specification reference and fresh-entry instructions; no completed workflow yet"
+  },
+  "application_history": [
+    {
+      "source_commit": "327db559",
+      "executable": {
+        "bytes": 47836320,
+        "sha256": "bef80af8550536c28a43467189182b60c237eaeba0afe8303bdbd7599be17c61"
+      },
+      "archive_sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169",
+      "existing_account_and_approval_mode": true
+    }
+  ]
 }
