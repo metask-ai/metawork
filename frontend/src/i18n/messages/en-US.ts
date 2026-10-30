@@ -993,7 +993,6 @@ export const enUS = {
     "{additions} added lines, {deletions} deleted lines",
   "file_changes.diff.unchanged_lines": "{count} unmodified lines",
   "task.jump_latest": "Jump to latest",
-  "task.load_earlier": "Load earlier messages",
   "inspector.mcp_authority": "MCP at creation",
   "inspector.mcp_selected": "Tools selected",
   "inspector.mcp_none": "Ready · no tools selected",

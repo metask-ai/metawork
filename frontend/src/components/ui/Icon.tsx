@@ -2,6 +2,7 @@ import {
   Activity,
   Archive,
   ArrowLeft,
+  ArrowDown,
   ArrowUp,
   Box,
   CalendarDays,
@@ -65,6 +66,7 @@ type IconName =
   | "shield"
   | "info"
   | "arrow-left"
+  | "arrow-down"
   | "close"
   | "warning"
   | "account"
@@ -115,6 +117,7 @@ const icons: Record<IconName, LucideIcon> = {
   shield: ShieldCheck,
   info: Info,
   "arrow-left": ArrowLeft,
+  "arrow-down": ArrowDown,
   close: X,
   warning: TriangleAlert,
   account: UserRound,

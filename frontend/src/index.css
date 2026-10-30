@@ -2563,6 +2563,7 @@ summary::-webkit-details-marker {
 }
 
 .ai-conversation-content {
+  position: relative;
   width: min(100%, 840px);
   margin: 0 auto;
   padding: 32px 32px 52px;
@@ -2570,6 +2571,38 @@ summary::-webkit-details-marker {
 
 .ai-exchange + .ai-exchange {
   margin-top: 32px;
+}
+
+.ai-conversation-viewport:focus-visible {
+  outline: 2px solid var(--ui-content-muted);
+  outline-offset: -2px;
+}
+
+.conversation-history-loading {
+  position: absolute;
+  top: 4px;
+  inset-inline: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  color: var(--ui-content-muted);
+  font-size: 16px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.conversation-history-spinner {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  animation: task-signal-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-history-spinner {
+    animation: none;
+  }
 }
 
 .message-info-bar {
@@ -8244,16 +8277,49 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .ai-conversation-jump {
   position: absolute;
   z-index: 12;
-  right: 24px;
+  isolation: isolate;
+  left: 50%;
   bottom: 16px;
-  padding: 8px 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 999px;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  transform: translateX(-50%);
+  border: 0;
+  border-radius: 50%;
   color: var(--ui-content-primary);
+  background: transparent;
+  font-size: 20px;
+}
+
+.ai-conversation-jump::before {
+  position: absolute;
+  z-index: -1;
+  inset: 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: inherit;
   background: var(--ui-surface-panel);
-  box-shadow: var(--ui-shadow-overlay);
-  font-size: var(--text-label);
-  font-weight: 650;
+  box-shadow: 0 1px 3px
+    color-mix(in srgb, var(--ui-content-primary) 4%, transparent);
+  content: "";
+}
+
+.ai-conversation-jump:hover {
+  background: transparent;
+}
+
+.ai-conversation-jump:hover::before {
+  background: var(--ui-action-hover-surface);
+}
+
+.ai-conversation-jump:focus-visible {
+  outline: 2px solid var(--ui-content-muted);
+  outline-offset: 2px;
+}
+
+.ai-conversation-jump svg {
+  stroke-width: 1.5;
 }
 
 .ai-composer:focus-within {

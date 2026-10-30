@@ -327,7 +327,7 @@ try {
   await until(
     () =>
       webview.evaluate(
-        `(() => {const button=[...document.querySelectorAll('button')].find(item=>/加载更早|Load earlier/i.test(item.textContent));if(!button||button.disabled)return false;button.click();return true;})()`,
+        `(() => {const viewport=document.querySelector('.ai-conversation-viewport');if(!viewport||document.querySelector('.conversation-history-loading'))return false;viewport.scrollTop=0;viewport.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,bubbles:true}));return true;})()`,
       ),
     "load earlier history at the configured concurrency limit",
   );
