@@ -255,6 +255,10 @@ Automatic 的 Skill query authority 来自 owning interactive Task 的可用 Ses
 
 Application 发布随主包压缩携带的完整 Office Skill、必要 helper 和 OOXML 校验资源。资源按内容哈希发布到自有目录，不覆盖已有版本；发布失败只撤销 Office 来源，应用继续启动。不维护基础/完整双来源或组件版本 catalog lease；准备依赖不替换来源，不要求刷新已有 Task。资源入口必须是明确的绝对路径，不从 AgentCore 临时物化目录的父路径推断程序位置。旧资源目录首版不自动清理。
 
+XLSX 检查脚本经所属 Skill 的固定私有 Python 入口执行，只读取受控工作副本，不编辑候选或安装依赖。检查说明是有界、不可执行的声明；检查器区分断言不满足、说明错误、必要检查未支持与执行异常，选择器缺失、歧义或空跑不能形成通过。报告绑定实际受检候选的大小与 SHA-256，声明已执行的方法、范围及未执行项；无业务说明只报告基础检查，公式字符串和存储样式不等于重算或视觉验收。报告独占创建于新路径，属于可能含文档内容的普通 Workspace 文件，不写入日志、Snapshot，也不默认交付；它不是 Host authority。候选修改后必须复验；XLSX 工作流将检查身份与真实 DeliverFile 回执比较，不匹配时保留实际交付事实并明确检查不覆盖交付字节，不自动删除或重复交付。DOCX/PPTX 使用各自格式的检查流程，不由共有执行说明追加 XLSX 检查门槛。
+
+PPTX 新建流程把固定创作依赖和严格检查作为一条生成链：格式专属处理只消费本流程新生成的工作副本，在有限且已验证的结构前提下写入新候选，不修改原件、依赖实现或其他包内内容。缺失的图表语义必须由创作意图明确给出，不能从错误结构猜测；不识别的变换前提明确拒绝。候选须全量通过原严格检查器，不豁免已有错误；格式工作流再核对业务内容及实际交付字节。处理既有用户文件仍走定向编辑与原件比较流程。结构通过、有限查看器兼容性证据与本次文件的视觉验收是不同事实，任何一个都不能替代未执行的检查。
+
 Office 的机器输入按 Windows x64/arm64 与 macOS arm64/x64 精确选择私有 Python、Node 和目标 wheel，验收范围由[验证规范](validation.md#office-skill-与私有环境验证)记录。解释器和各自文档库同处一个按环境内容命名的目录；Windows x64 的既有发行、锁、身份及 Python/Node 独立准备保持。身份采用选定发行记录 JSON、对应库锁和布局标记的同一 SHA-256 构造，不包含 Skill 文案、业务脚本、下载量或用户目录。输入和 namespace 只由 Office manifest/lock 定义，生成常量不是第二份 authority。不探测组合系统解释器和全局包，不新增 Host 工具、Product 环境对象、Bridge/Snapshot、current 指针、版本选择、修复或回收状态机。依赖准备由 Agent 经现有 Shell 和权限执行；对话下载同意不授予文件权限，full_access 不增加额外产品安装 Gate。
 
 依赖根为 Windows `%LOCALAPPDATA%/MetaWork/OfficeDependencies` 与 macOS `$HOME/Library/Application Support/MetaWork/OfficeDependencies`，不从 Task Workspace、应用数据名称或 Core 临时 Skill 路径推导。同一用户下相同内容身份有意跨构建和 Task 复用，测试以独立 HOME/LOCALAPPDATA 隔离。正式路径项必须为真实目录，符号链接或异常占位对象须保留并拒绝；不原地修改是行为合同，不保证文件系统只读或隔离同用户进程。

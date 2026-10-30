@@ -134,7 +134,12 @@ for suffix, source in [("docx", "created.docx"), ("pptx", "created.pptx"), ("xls
     result = json.loads((work / (suffix + ".json")).read_text(encoding="utf-8"))
     assert result["format"] == suffix
     assert "中文" in json.dumps(result, ensure_ascii=False)
+xlsx_entry = resources / "xlsx/environment"
+quality = qualification.command(xlsx_entry, "run.cmd", ["python", REPO / "scripts/check-office-xlsx.py", "--entry",
+    xlsx_entry / ("run.cmd" if sys.platform == "win32" else "run.sh")], offline)
+if quality.returncode:
+    raise RuntimeError(quality.stdout + quality.stderr)
 assert before == inventory(), "Document processing changed the completed environment"
 print(json.dumps({"target": args.target, "scratch": str(scratch), "concurrent_node_publish": True, "offline_reuse": True,
-                  "docx_pptx_creation": True, "xlsx_edit": True, "three_format_read": True,
+                  "docx_pptx_creation": True, "xlsx_edit": True, "xlsx_quality": True, "three_format_read": True,
                   "environment_unchanged": True, "files": len(before), "network_config_requests": len(network_requests)}, ensure_ascii=True))

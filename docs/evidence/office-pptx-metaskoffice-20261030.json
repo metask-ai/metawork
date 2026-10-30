@@ -1,0 +1,320 @@
+{
+  "version": 1,
+  "scope": "Finite MetaskOffice feature compatibility evidence for generated PPTX work copies; not a PowerPoint result or general rendering guarantee",
+  "viewer": {
+    "application": "MetaskOffice",
+    "version": "0.3.3",
+    "platform": "aarch64-macos",
+    "interaction": "Installed application, local open / Save As / close / reopen; CUA accessibility and screenshot observations; no account login or AI editing"
+  },
+  "generator": {
+    "node": "v22.23.4",
+    "pptxgenjs": "4.0.1"
+  },
+  "evidence_date": "2026-10-30",
+  "qualification": {
+    "source": "tests/fixtures/office/generation.cjs",
+    "diagnostic_probe": "scripts/check-office-generation.py",
+    "line_grouping": "Explicit standard; no inferred stacking semantics",
+    "original_inputs_are_schema_invalid": true,
+    "diagnostic_copies_are_production_fix": false,
+    "strict_policy": "Existing unmodified PPTXSchemaValidator; no original-error subtraction and no auto-repair",
+    "diagnostic_matrix": {
+      "cases": 14,
+      "strict_passed": 14
+    },
+    "checks": [
+      "Slide title and specified note survive",
+      "Chart type / category cache / numeric cache / bar orientation survive",
+      "Requested numeric data labels survive",
+      "Both input and saved copy pass strict structure and relationship validation"
+    ],
+    "cases": [
+      {
+        "case": "text-notes",
+        "files": [
+          {
+            "file": "text-notes-diagnostic.pptx",
+            "bytes": 14472,
+            "sha256": "ccb3eadf84f115f026f6bace07560d7db8de7803d940513ae61722f25b1675d5",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/text-notes-diagnostic.pptx"
+          },
+          {
+            "file": "text-notes-metaskoffice-roundtrip.pptx",
+            "bytes": 14344,
+            "sha256": "bbeb0718c07cbcfdce5ab5f3ff7fb1be20e86f1814ff65f31f4437c782535170",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/text-notes-metaskoffice-roundtrip.pptx"
+          }
+        ],
+        "source_semantics": {
+          "texts": [
+            "Office 中文验收"
+          ],
+          "notes": [
+            "Notes: total 650",
+            "1"
+          ],
+          "charts": []
+        },
+        "saved_semantics": {
+          "texts": [
+            "Office 中文验收"
+          ],
+          "notes": [
+            "Notes: total 650",
+            "1"
+          ],
+          "charts": []
+        },
+        "observed_open_before_save": true,
+        "observed_reopen_after_save": true,
+        "repair_prompt_observed": false,
+        "visual_observation": "One slide; title Office 中文验收; speaker notes Notes: total 650 survived Save As and close/reopen."
+      },
+      {
+        "case": "bar-multi-labels",
+        "files": [
+          {
+            "file": "bar-multi-labels-diagnostic.pptx",
+            "bytes": 20440,
+            "sha256": "0d0f21a21254a137ab2b6686c6db6f3c420444250b2f9ae86db14554f4b8e5bb",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/bar-multi-labels-diagnostic.pptx"
+          },
+          {
+            "file": "bar-multi-labels-metaskoffice-roundtrip.pptx",
+            "bytes": 33521,
+            "sha256": "2ba42941f05f62731819d10e275f0bdd82630f823638e76b11ba0807a5be0c2c",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/bar-multi-labels-metaskoffice-roundtrip.pptx"
+          }
+        ],
+        "source_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "barChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": [
+                "col"
+              ]
+            }
+          ]
+        },
+        "saved_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "barChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": [
+                "col"
+              ]
+            }
+          ]
+        },
+        "observed_open_before_save": true,
+        "observed_reopen_after_save": true,
+        "repair_prompt_observed": false,
+        "visual_observation": "One slide; title Independent chart qualification; North=300 and South=350 labels and 0–400 value axis visible before Save As and after close/reopen. Vertical bars, two teal point colors."
+      },
+      {
+        "case": "line-multi-labels",
+        "files": [
+          {
+            "file": "line-multi-labels-diagnostic.pptx",
+            "bytes": 20418,
+            "sha256": "b8eea5ce3d2b3b5f618b5bdc883584181a0a5256d5ed0f3bce1edec9ad69d88c",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/line-multi-labels-diagnostic.pptx"
+          },
+          {
+            "file": "line-multi-labels-metaskoffice-roundtrip.pptx",
+            "bytes": 33503,
+            "sha256": "a5d3b552af8d26a73159407715c9a221162257ecaad312d278d7ccd273a490ef",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/line-multi-labels-metaskoffice-roundtrip.pptx"
+          }
+        ],
+        "source_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "lineChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": []
+            }
+          ]
+        },
+        "saved_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "lineChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": []
+            }
+          ]
+        },
+        "observed_open_before_save": true,
+        "observed_reopen_after_save": true,
+        "repair_prompt_observed": false,
+        "visual_observation": "One slide; title Independent chart qualification; North=300 and South=350 labels and 0–400 value axis visible before Save As and after close/reopen. Two markers joined by a rising line; numeric data labels visible."
+      },
+      {
+        "case": "bar-horizontal-multi-labels",
+        "files": [
+          {
+            "file": "bar-horizontal-multi-labels-diagnostic.pptx",
+            "bytes": 20440,
+            "sha256": "784db216c68d30ff22c660c8f5dd7b647e913075e4b1141b9e13b814cbad0889",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/bar-horizontal-multi-labels-diagnostic.pptx"
+          },
+          {
+            "file": "bar-horizontal-multi-labels-metaskoffice-roundtrip.pptx",
+            "bytes": 33521,
+            "sha256": "95d45b44238c9eb64db9430ff90cfc6b52b76a0651b9ac5129b0deae45b6dda2",
+            "strict_exit_code": 0,
+            "strict_diagnostic": "All validations PASSED!\n",
+            "path": "tests/fixtures/office/metaskoffice-20261030/bar-horizontal-multi-labels-metaskoffice-roundtrip.pptx"
+          }
+        ],
+        "source_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "barChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": [
+                "bar"
+              ]
+            }
+          ]
+        },
+        "saved_semantics": {
+          "texts": [
+            "Independent chart qualification"
+          ],
+          "notes": [
+            "1"
+          ],
+          "charts": [
+            {
+              "type": "barChart",
+              "categories": [
+                "North",
+                "South"
+              ],
+              "values": [
+                "300",
+                "350"
+              ],
+              "data_label_show_value": [
+                "1",
+                "1"
+              ],
+              "bar_direction": [
+                "bar"
+              ]
+            }
+          ]
+        },
+        "observed_open_before_save": true,
+        "observed_reopen_after_save": true,
+        "repair_prompt_observed": false,
+        "visual_observation": "One slide; title Independent chart qualification; North=300 and South=350 labels and 0–400 value axis visible before Save As and after close/reopen. Horizontal bars, two teal point colors."
+      }
+    ]
+  },
+  "decision": "These same-feature observations support a finite, explicit new-work-copy processing path for the pinned generator. Production processing still requires independently tested premises, unchanged non-target parts, and strict post-validation. Microsoft PowerPoint was not tested."
+}

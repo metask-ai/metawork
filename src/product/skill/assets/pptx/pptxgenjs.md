@@ -1,6 +1,6 @@
 # PptxGenJS Tutorial
 
-Run saved authoring code with `"${CLAUDE_SKILL_DIR}/environment/run.cmd" node create.cjs`, using the fixed private PptxGenJS. Read SKILL.md for original-file handling and supported content checks.
+Run saved authoring code with `"${CLAUDE_SKILL_DIR}/environment/run.cmd" node create.cjs`, using the fixed private PptxGenJS. New presentations require the separate [finishing and checking step](creation-checks.md) before delivery. Read SKILL.md for original-file handling and supported content checks.
 
 ## Setup & Basic Structure
 
@@ -15,8 +15,10 @@ pres.title = 'Presentation Title';
 let slide = pres.addSlide();
 slide.addText("Hello World!", { x: 0.5, y: 0.5, fontSize: 36, color: "363636" });
 
-pres.writeFile({ fileName: "Presentation.pptx" });
+pres.writeFile({ fileName: "generated.pptx" });
 ```
+
+Next, produce `checked.pptx` with the fixed Python finishing entry described in [creation checks](creation-checks.md). For ordinary unstacked line charts, declare `--line-grouping standard`; the generator's missing grouping is not evidence of the user's intended chart semantics.
 
 ## Layout Dimensions
 

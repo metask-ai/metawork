@@ -1133,7 +1133,6 @@ const findRun = if (builtin.is_test) task_test_state.findRun else void;
 const pendingInterruption = if (builtin.is_test) task_test_policy.pendingInterruption else void;
 const pendingTerminationSignal = if (builtin.is_test) task_test_policy.pendingTerminationSignal else void;
 const closeFailureCompletion = if (builtin.is_test) task_test_policy.closeFailureCompletion else void;
-const classifyAgentTerminal = if (builtin.is_test) task_test_policy.classifyAgentTerminal else void;
 const hasActiveOperation = if (builtin.is_test) task_test_policy.hasActiveOperation else void;
 const continuationAvailable = if (builtin.is_test) task_test_policy.continuationAvailable else void;
 const automaticTitleCandidate = if (builtin.is_test) task_test_policy.automaticTitleCandidate else void;
@@ -6476,7 +6475,13 @@ pub const Runtime = struct {
                 .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
                 .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
             },
-        ) catch |err| return @errorCast(err);
+        ) catch |err| {
+            if (self.task_runtime.takeEventRejectionDiagnostic(envelope.session_id, envelope.run_id)) |rejection|
+                std.log.warn("task.event_rejection session_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
+                    envelope.session_id, envelope.run_id, lifecycle.core_manifest_sha256, rejection,
+                });
+            return @errorCast(err);
+        };
         switch (outcome) {
             .unknown, .unchanged => {},
             .late_terminal => |late| {
@@ -7032,9 +7037,16 @@ pub const Runtime = struct {
             finished_at_unix_ms,
         );
         if (changed) {
+            self.task_runtime.visitTerminalDrainRejections(self, logTerminalDrainRejection);
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
+    }
+
+    fn logTerminalDrainRejection(_: *anyopaque, diagnostic: product_task.DrainRejectionDiagnostic) void {
+        std.log.warn("task.terminal_drain_rejection task_id={d} run_id={d} core_manifest_sha256={s} facts={any}", .{
+            diagnostic.task_id, diagnostic.run_id, lifecycle.core_manifest_sha256, diagnostic.observed,
+        });
     }
 
     // Aggregate fixtures support existing domain tests; production has only the scoped writeSnapshot.
@@ -11388,19 +11400,6 @@ fn commitTerminal(
     }
     _ = terminalPayload(run).?;
     return false;
-}
-
-fn commitAgentTerminal(run: *TestRunRecord, result: *const lifecycle.TerminalResult) bool {
-    const decision = classifyAgentTerminal(result);
-    return commitTerminal(
-        run,
-        decision.phase,
-        decision.outcome,
-        decision.cause,
-        result.session_disposition_at_completion,
-        result.diagnostic(),
-        result.diagnostic_truncated,
-    );
 }
 
 fn commitBeginFailure(run: *TestRunRecord, failure: lifecycle.BeginRunFailure) void {
@@ -17345,6 +17344,7 @@ test "output segments commit commentary and a continued final while discarding r
 test "output segment byte mismatch fails the dependency protocol" {
     var control = try testRuntime();
     defer control.deinit();
+    defer detachTaskForTest(&control, control.task_runtime.tasks[0].?);
     const task = control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
@@ -17368,6 +17368,22 @@ test "output segment byte mismatch fails the dependency protocol" {
         error.InvalidOutputSegment,
         control.applyEvent(&invalid_end),
     );
+    const run = &task.durable.runs[0].?;
+    const first = run.first_event_rejection orelse return error.ExpectedRejection;
+    try std.testing.expectEqual(@as(u64, 2), first.expected.open.?.bytes);
+    try std.testing.expectEqual(@as(u64, 1), first.observed_segment.?.bytes);
+    var later_end = try testEnvelope(route, 7, "{\"output_segment_end\":{\"index\":0,\"turn\":99,\"group\":0,\"disposition\":\"final\",\"bytes\":2}}");
+    defer later_end.deinit();
+    try std.testing.expectError(error.InvalidOutputSegment, control.applyEvent(&later_end));
+    try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
+    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    try std.testing.expectEqual(@as(u64, 2), run.terminal_drain_rejection.?.open.?.bytes);
+    try std.testing.expectEqualDeep(first, run.first_event_rejection.?);
+    try std.testing.expectEqual(RunOutcome.dependency_contract_failure, productTerminalFacts(run).?.outcome);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(run.event_rejection_reported and run.drain_rejection_reported);
 }
 
 test "commentary boundary capacity fails before canonical output mutation" {

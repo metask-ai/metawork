@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,7 @@ function resourceFixture(t) {
     "scripts/office-environment.mjs",
     "build_support/office-environment.json",
     "src/product/skill/assets",
+    "src/product/skill/office_resources",
     "src/product/skill/office_environment",
     "src/product/control/resources/archive.py",
     "src/app/office-skills.tar.gz",
@@ -47,13 +49,30 @@ function reportedVersions(versions) {
 test("shipped full Office archive matches canonical Skills, helpers and locked environments", () => {
   execFileSync(
     process.execPath,
-    ["scripts/sync-office-archive.mjs", "--check"],
-    { stdio: "pipe" },
-  );
-  execFileSync(
-    process.execPath,
     ["scripts/build-office-skills.mjs", "--check"],
     { stdio: "pipe" },
+  );
+});
+
+test("Office archive helpers derive directly from the canonical source", (t) => {
+  const root = resourceFixture(t);
+  const canonical = path.join(root, "src/product/control/resources/archive.py");
+  writeFileSync(
+    canonical,
+    Buffer.concat([
+      readFileSync(canonical),
+      Buffer.from("\n# changed canonical helper\n"),
+    ]),
+  );
+  assert.throws(
+    () =>
+      execFileSync(
+        process.execPath,
+        ["scripts/build-office-skills.mjs", "--check"],
+        { cwd: root, stdio: "pipe" },
+      ),
+    (error) =>
+      error.stderr.toString().includes("Office Skill archive is stale"),
   );
 });
 
@@ -107,6 +126,68 @@ test("Office resource check rejects changed tar content, metadata, padding and c
     ),
   );
 });
+
+test("shared and format-specific Office resources cannot collide", (t) => {
+  const root = resourceFixture(t);
+  const collision = path.join(
+    root,
+    "src/product/skill/assets/xlsx/scripts/office/validate.py",
+  );
+  writeFileSync(collision, "# conflicting format override\n");
+  assert.throws(
+    () =>
+      execFileSync(
+        process.execPath,
+        ["scripts/build-office-skills.mjs", "--check"],
+        { cwd: root, stdio: "pipe" },
+      ),
+    (error) =>
+      error.stderr
+        .toString()
+        .includes(
+          "Conflicting Office resource: xlsx/scripts/office/validate.py",
+        ),
+  );
+});
+
+test(
+  "Office resource sources reject links",
+  {
+    skip:
+      process.platform === "win32" &&
+      "Creating symlinks requires Windows developer mode or elevation",
+  },
+  (t) => {
+    const root = resourceFixture(t);
+    const collision = path.join(
+      root,
+      "src/product/skill/assets/xlsx/scripts/office/validate.py",
+    );
+    symlinkSync("formulas.py", collision);
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          ["scripts/build-office-skills.mjs", "--check"],
+          { cwd: root, stdio: "pipe" },
+        ),
+      (error) =>
+        error.stderr.toString().includes("Conflicting Office resource"),
+    );
+    rmSync(collision);
+    const link = path.join(path.dirname(collision), "linked.py");
+    symlinkSync("formulas.py", link);
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          ["scripts/build-office-skills.mjs", "--check"],
+          { cwd: root, stdio: "pipe" },
+        ),
+      (error) => error.stderr.toString().includes("Office resource link"),
+    );
+  },
+);
 
 test("Office resource generation still requires both locked Node and zlib versions", (t) => {
   const root = resourceFixture(t);

@@ -59,6 +59,25 @@ pub const TerminalFailure = enum {
     dependency_contract,
 };
 
+/// First observation under this Session's mutex, not a global causal ordering.
+/// Contains only fixed enums and counts; callback payloads never enter it.
+pub const CallbackRejection = struct {
+    pub const Boundary = enum { admission, event_decode, input_event, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
+    pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response };
+    boundary: Boundary,
+    reason: Reason,
+    event: ?CoreEventKind = null,
+    failure: ?anyerror = null,
+    encoded_bytes: ?usize = null,
+    host_run_id: u64 = 0,
+    observed_run_id: ?u64 = null,
+    session_handle_matches: ?bool = null,
+    session_identity_matches: ?bool = null,
+    state: SessionState = .idle,
+    input_adoption: ?struct { id: u64, sequence: u32, turn: u32 } = null,
+};
+pub const CoreEventKind = std.meta.Tag(sdk.CoreEvent);
+
 pub const SessionDisposition = enum {
     reusable,
     poisoned,
@@ -199,6 +218,7 @@ pub const TerminalResult = struct {
     session_disposition_at_completion: SessionDisposition,
     durable_budget: ?DurableBudgetObservation = null,
     input_counts: ?InputCounts = null,
+    first_callback_rejection: ?CallbackRejection = null,
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];

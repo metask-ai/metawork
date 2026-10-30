@@ -1,0 +1,647 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "id": "sheets",
+      "op": "sheets",
+      "expected": ["Input", "Data", "Regions", "Reference"]
+    },
+    {
+      "id": "orders",
+      "op": "values",
+      "target": {
+        "sheet": "Data",
+        "range": "A2:A5"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "o-1"
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-2"
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-3"
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-4"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "count",
+      "op": "count",
+      "target": {
+        "sheet": "Data",
+        "range": "A2:A5"
+      },
+      "expected": 4
+    },
+    {
+      "id": "amounts-and-shares",
+      "op": "values",
+      "target": {
+        "sheet": "Data",
+        "range": "C2:D6"
+      },
+      "expected": [
+        [
+          {
+            "type": "number",
+            "value": 100,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.15384615384615385,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "number",
+            "value": 200,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.3076923076923077,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "number",
+            "value": 150,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.23076923076923078,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "number",
+            "value": 200,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.3076923076923077,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "number",
+            "value": 650,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 1,
+            "tolerance": 1e-12
+          }
+        ]
+      ]
+    },
+    {
+      "id": "regions",
+      "op": "values",
+      "target": {
+        "sheet": "Regions",
+        "range": "A2:C4"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "North"
+          },
+          {
+            "type": "number",
+            "value": 300,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.46153846153846156,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "South"
+          },
+          {
+            "type": "number",
+            "value": 350,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 0.5384615384615384,
+            "tolerance": 1e-12
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "Total"
+          },
+          {
+            "type": "number",
+            "value": 650,
+            "tolerance": 0
+          },
+          {
+            "type": "number",
+            "value": 1,
+            "tolerance": 1e-12
+          }
+        ]
+      ]
+    },
+    {
+      "id": "Data-label",
+      "op": "label",
+      "target": {
+        "sheet": "Data",
+        "range": "A2:A6"
+      },
+      "expected": {
+        "value": "Total",
+        "cell": "A6"
+      }
+    },
+    {
+      "id": "Data-font",
+      "op": "font",
+      "target": {
+        "sheet": "Data",
+        "range": "A1:D6"
+      },
+      "expected": {
+        "name": "Arial",
+        "size": 11
+      }
+    },
+    {
+      "id": "Data-percent",
+      "op": "number_format",
+      "target": {
+        "sheet": "Data",
+        "range": "D2:D6"
+      },
+      "expected": "0.0%"
+    },
+    {
+      "id": "Data-amount",
+      "op": "values",
+      "target": {
+        "sheet": "Data",
+        "label": {
+          "range": "A2:A6",
+          "value": "Total"
+        },
+        "offset": [0, 2]
+      },
+      "expected": [
+        [
+          {
+            "type": "number",
+            "value": 650,
+            "tolerance": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "Data-fill",
+      "op": "fill",
+      "target": {
+        "sheet": "Data",
+        "range": "A6"
+      },
+      "expected": {
+        "pattern": "solid",
+        "color": "FFDEEAF6"
+      }
+    },
+    {
+      "id": "Regions-label",
+      "op": "label",
+      "target": {
+        "sheet": "Regions",
+        "range": "A2:A4"
+      },
+      "expected": {
+        "value": "Total",
+        "cell": "A4"
+      }
+    },
+    {
+      "id": "Regions-font",
+      "op": "font",
+      "target": {
+        "sheet": "Regions",
+        "range": "A1:C4"
+      },
+      "expected": {
+        "name": "Arial",
+        "size": 11
+      }
+    },
+    {
+      "id": "Regions-percent",
+      "op": "number_format",
+      "target": {
+        "sheet": "Regions",
+        "range": "C2:C4"
+      },
+      "expected": "0.0%"
+    },
+    {
+      "id": "Regions-amount",
+      "op": "values",
+      "target": {
+        "sheet": "Regions",
+        "label": {
+          "range": "A2:A4",
+          "value": "Total"
+        },
+        "offset": [0, 1]
+      },
+      "expected": [
+        [
+          {
+            "type": "number",
+            "value": 650,
+            "tolerance": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "Regions-fill",
+      "op": "fill",
+      "target": {
+        "sheet": "Regions",
+        "range": "A4"
+      },
+      "expected": {
+        "pattern": "solid",
+        "color": "FFDEEAF6"
+      }
+    },
+    {
+      "id": "reference-note",
+      "op": "values",
+      "target": {
+        "sheet": "Reference",
+        "range": "A1"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "Preserve this source note"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "reference-outside",
+      "op": "values",
+      "target": {
+        "sheet": "Reference",
+        "range": "H20"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "Outside the edited range"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "reference-formula",
+      "op": "values",
+      "target": {
+        "sheet": "Reference",
+        "range": "B2"
+      },
+      "expected": [
+        [
+          {
+            "type": "formula",
+            "value": "=1+2"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "raw-input",
+      "op": "values",
+      "target": {
+        "sheet": "Input",
+        "range": "A1:C8"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "Order"
+          },
+          {
+            "type": "string",
+            "value": "Region"
+          },
+          {
+            "type": "string",
+            "value": "Amount"
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-1"
+          },
+          {
+            "type": "string",
+            "value": "North"
+          },
+          {
+            "type": "number",
+            "value": 100,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-2"
+          },
+          {
+            "type": "string",
+            "value": "North"
+          },
+          {
+            "type": "number",
+            "value": 200,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-3"
+          },
+          {
+            "type": "string",
+            "value": "South"
+          },
+          {
+            "type": "number",
+            "value": 150,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-4"
+          },
+          {
+            "type": "string",
+            "value": "South"
+          },
+          {
+            "type": "number",
+            "value": 200,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-2"
+          },
+          {
+            "type": "string",
+            "value": "North"
+          },
+          {
+            "type": "number",
+            "value": 200,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "string",
+            "value": "o-5"
+          },
+          {
+            "type": "blank"
+          },
+          {
+            "type": "number",
+            "value": 75,
+            "tolerance": 0
+          }
+        ],
+        [
+          {
+            "type": "blank"
+          },
+          {
+            "type": "string",
+            "value": "South"
+          },
+          {
+            "type": "number",
+            "value": 90,
+            "tolerance": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "data-headers",
+      "op": "values",
+      "target": {
+        "sheet": "Data",
+        "range": "A1:D1"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "Order"
+          },
+          {
+            "type": "string",
+            "value": "Region"
+          },
+          {
+            "type": "string",
+            "value": "Amount"
+          },
+          {
+            "type": "string",
+            "value": "Share"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "region-headers",
+      "op": "values",
+      "target": {
+        "sheet": "Regions",
+        "range": "A1:C1"
+      },
+      "expected": [
+        [
+          {
+            "type": "string",
+            "value": "Region"
+          },
+          {
+            "type": "string",
+            "value": "Amount"
+          },
+          {
+            "type": "string",
+            "value": "Share"
+          }
+        ]
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "sheets",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["sheets"]
+    },
+    {
+      "id": "orders",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["orders"]
+    },
+    {
+      "id": "count",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["count"]
+    },
+    {
+      "id": "amounts-and-shares",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["amounts-and-shares"]
+    },
+    {
+      "id": "regions",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["regions"]
+    },
+    {
+      "id": "Data-label",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-label"]
+    },
+    {
+      "id": "Data-font",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-font"]
+    },
+    {
+      "id": "Data-percent",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-percent"]
+    },
+    {
+      "id": "Data-amount",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-amount"]
+    },
+    {
+      "id": "Data-fill",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Data-fill"]
+    },
+    {
+      "id": "Regions-label",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-label"]
+    },
+    {
+      "id": "Regions-font",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-font"]
+    },
+    {
+      "id": "Regions-percent",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-percent"]
+    },
+    {
+      "id": "Regions-amount",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-amount"]
+    },
+    {
+      "id": "Regions-fill",
+      "source": "Synthetic task: independent expected data and requested stored formatting",
+      "checks": ["Regions-fill"]
+    },
+    {
+      "id": "reference-note",
+      "source": "Frozen task: preserve Reference saved content/formula",
+      "checks": ["reference-note"]
+    },
+    {
+      "id": "reference-outside",
+      "source": "Frozen task: preserve Reference saved content/formula",
+      "checks": ["reference-outside"]
+    },
+    {
+      "id": "reference-formula",
+      "source": "Frozen task: preserve Reference saved content/formula",
+      "checks": ["reference-formula"]
+    },
+    {
+      "id": "raw-input",
+      "source": "Frozen task: explicit input and summary headers, numeric raw amounts and blank missing fields",
+      "checks": ["raw-input"]
+    },
+    {
+      "id": "data-headers",
+      "source": "Frozen task: explicit input and summary headers, numeric raw amounts and blank missing fields",
+      "checks": ["data-headers"]
+    },
+    {
+      "id": "region-headers",
+      "source": "Frozen task: explicit input and summary headers, numeric raw amounts and blank missing fields",
+      "checks": ["region-headers"]
+    }
+  ]
+}

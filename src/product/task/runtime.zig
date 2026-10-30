@@ -4071,6 +4071,30 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Main-loop-only diagnostic consumption. The first owner-local fact is
+    /// retained; this only marks that its safe outlet has been attempted.
+    pub fn takeEventRejectionDiagnostic(self: *Runtime, route_id: u64, run_id: u64) ?task_state.EventRejection {
+        const task = self.findByRouteId(route_id) orelse return null;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        if (run.event_rejection_reported) return null;
+        const rejection = run.first_event_rejection orelse return null;
+        run.event_rejection_reported = true;
+        return rejection;
+    }
+
+    pub fn visitTerminalDrainRejections(self: *Runtime, context: *anyopaque, visit: *const fn (*anyopaque, task_state.DrainRejectionDiagnostic) void) void {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (task.durable.runs) |*slot| {
+                const run = &(slot.* orelse continue);
+                if (run.drain_rejection_reported) continue;
+                const observed = run.terminal_drain_rejection orelse continue;
+                run.drain_rejection_reported = true;
+                visit(context, .{ .task_id = task.durable.id, .run_id = run.id, .observed = observed });
+            }
+        }
+    }
+
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {

@@ -58,13 +58,29 @@ ProductDelivery 可达查询必须以行为测试证明没有业务推进副作�
 
 `python -X utf8 scripts/check-office-preparation-failures.py --download` 采用相同目标规则，覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理；Windows 保留原生负退出码用例，macOS 追加缺 Python 前置条件、空目录/普通文件/符号链接拒绝。还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。准备的外层预算覆盖生产下载、安装、发布后检查和有界收尾，文档执行仍保留独立短预算。`python3 scripts/check-office-publication.py` 在 macOS 覆盖 ctypes 排他发布的占位保留、并发唯一赢家及取消后子进程 join；Host seam 的对应回归接入正式 Native graph。
 
-真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串和空缓存，不请求远端模型。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
+真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串、空缓存和真实 Read 工具读取报告尾部身份及必要检查状态，不请求远端模型。Read 场景显式声明对应工具及三步有限交互，权限探针仍保留原 Bash-only 输入。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
+
+XLSX 质量资格使用 `<对应run入口> python scripts/check-office-xlsx.py --entry <对应run入口>`；macOS 在入口前加 `/bin/sh`。合成输入与独立数值、合计定位和样式 oracle 由测试持有，读取正文成功不能替代样式检查；私有环境资格入口在准备后调用同一 suite。该入口须使用已准备的固定私有 Python，不安装全局库。整包内容更新还运行 `zig build test-office-resources`，验证 Application 资源发布、三格式入口完整性及来源损坏拒绝；catalog 和临时物化另由真实 Core 入口验证，不以资源存在代替执行。
+
+固定 Node 生成器与现有严格 validator 的组合资格使用 `<Python run入口> python scripts/check-office-generation.py --node-entry <Node run入口> --python-entry <Python run入口> --report <新报告路径>`；macOS 在入口前加 `/bin/sh`。它检查代表性 DOCX 创建、文本定向修改及原件保持，以及 PPTX 文字/备注和图表组合，记录实际生成器身份及所用 part schema。任何正式生成物校验失败都返回非零；隔离的诊断副本只用于定位差异，不是产品修复或查看器兼容性证据。已知未闭合项不得从组合资格里排除或改报通过。
+
+PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.py --entry <Python run入口> --node-entry <Node run入口>`，macOS 同样在入口前加 `/bin/sh`。它在固定生成后实际执行格式专属收尾，再检查候选、定向编辑及复验、备注/图表内容与非目标包内文件保持、候选身份和未知结构/已有目标/归档/XML 反例。原始生成器的缺陷记录继续保留，不能用生成后处理覆盖原始基线。适用的 slide、master、layout 和 notes 部分必须选择对应 Schema；缺少路由不能报告该部分通过。有限查看器兼容性证据与精确输入/往返文件见 [MetaskOffice 验收记录](evidence/office-pptx-metaskoffice-20261030.json)，由同一 suite 复核身份和严格结构；它不替代 PowerPoint 或本次生成文件的视觉验收，也不替代远端模型实际执行该流程。
+
+正式事件消费链使用 `zig build test-office-pipeline`，并纳入 Native test graph。该入口让当前 canonical Core 调用实际工具，经生产 Agent callback、event pump、Product 事件投影及 terminal drain 收口；本机 Provider 与临时凭据存储为受控 fixture，覆盖工具非零退出、实际缺环境入口、权限拒绝、重试、中断、取消和跨轮。暂缓唯一消费者的反例保持生产队列上限及入队期限，通过真实合法流触发有界拒绝，验证其 typed 首因与历史保存；它只证明消费者被占用的机制，不冒充原生对话框实测或修复。该入口与只验证 Skill 资源/Shell 的探针分别结算，不替代远端模型规划或 PowerPoint 兼容性证据。拒绝观测回归还须证明首个拒绝不被后续收口覆盖、缺省/不可用及小容量诊断不改变运行结果、非法输入仍被拒绝且不泄露正文或 secret。
 
 同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
 
 桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。
 
 这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
+
+### E-MAC-OFFICE-MODEL-20261030
+
+真实模型的固定任务、独立 oracle、全部尝试、人工介入及实际回执见 [Office 模型验收记录](evidence/office-live-model-macos-20261030.json)。确定性检查、受控 Core fixture 与查看器的通过不替代这组验收；固定集合尚未完成时，不宣称 Office 模型工作流整体通过。
+
+按底层机制补充的定向检查见 [Office 机制收口记录](evidence/office-mechanism-closure-macos-20261030.json)。已保存文件的独立检查通过，不能替代模型的修后复验与真实交付；中途停止的 Run 保留为未通过，获用户明确授权的续作单独记录，不能反向改写首轮结果或声称无需人工介入。
+
+本轮真实运行中，打开同步原生工作区选择器时观察到 event pump 队列期限拒绝；新增生产诊断保留该首个拒绝及精确 Core 身份，后续未闭合输出的终态清理不覆盖它。当前 canonical Native SDK 的同步对话框占用应用事件消费路径，该缺口尚未修复。受控暂停消费者的反例只证明这一机制，不能证明历史 #23 与其同因。闭合须通过 canonical 依赖能力或明确接受的产品合同方案解决消费停顿，并在实际运行与原生对话框交错时复验；不得靠增大队列或期限、增加平行消费者、跳过收口或本地修改 SDK 绕过拒绝。
 
 ### E-MAC-OFFICE-INPUTS-20261024
 

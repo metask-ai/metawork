@@ -1,0 +1,8 @@
+Order,Region,Amount
+o-1,North,100
+o-2,North,200
+o-3,South,150
+o-4,South,200
+o-2,North,200
+o-5,,75
+,South,90

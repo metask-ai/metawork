@@ -524,6 +524,36 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         run.file_change_observation = .incomplete;
     }
     const decision = policy.classifyAgentTerminal(result);
+    var safe_diagnostic: [1024]u8 = undefined;
+    var diagnostic = result.diagnostic();
+    var truncated = result.diagnostic_truncated;
+    if (result.first_callback_rejection != null or result.failure == .dependency_contract or result.abi_status == .callback_failed) {
+        const rejection = result.first_callback_rejection;
+        var prefix_truncated = false;
+        const prefix = std.fmt.bufPrint(&safe_diagnostic, "agent.callback_rejection core_manifest_sha256={s} boundary={s} reason={s} event={s} error={s} bytes={?d} host_run={d} observed_run={?d} state={s} handle_matches={?} identity_matches={?}; ", .{
+            agent.core_manifest_sha256,
+            if (rejection) |value| @tagName(value.boundary) else "unobserved",
+            if (rejection) |value| @tagName(value.reason) else "unknown",
+            if (rejection) |value| if (value.event) |kind| @tagName(kind) else "unknown" else "unknown",
+            if (rejection) |value| if (value.failure) |failure| @errorName(failure) else "none" else "none",
+            if (rejection) |value| value.encoded_bytes else null,
+            if (rejection) |value| value.host_run_id else run.id,
+            if (rejection) |value| value.observed_run_id else null,
+            if (rejection) |value| @tagName(value.state) else "unknown",
+            if (rejection) |value| value.session_handle_matches else null,
+            if (rejection) |value| value.session_identity_matches else null,
+        }) catch prefix_failure: {
+            prefix_truncated = true;
+            break :prefix_failure "agent.callback_rejection details=unavailable; ";
+        };
+        // Prefix formatting and output capacity are diagnostic limits only.
+        // Neither can fail or change the immutable Agent terminal decision.
+        if (prefix.ptr != safe_diagnostic[0..].ptr) @memcpy(safe_diagnostic[0..prefix.len], prefix);
+        const count = @min(safe_diagnostic.len - prefix.len, diagnostic.len);
+        @memcpy(safe_diagnostic[prefix.len..][0..count], diagnostic[0..count]);
+        truncated = truncated or prefix_truncated or count != diagnostic.len;
+        diagnostic = safe_diagnostic[0 .. prefix.len + count];
+    }
     return commitRunTerminal(
         projector,
         run,
@@ -531,8 +561,8 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         decision.outcome,
         decision.cause,
         result.session_disposition_at_completion,
-        result.diagnostic(),
-        result.diagnostic_truncated,
+        diagnostic,
+        truncated,
         false,
     );
 }
@@ -764,4 +794,57 @@ pub fn cancelPreparedCompactOrPanic(access: *agent_session.Access, operation_id:
         "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
         .{ operation_id, @errorName(err) },
     );
+}
+
+test "callback diagnostic enrichment preserves terminal decisions and bounded credential redaction" {
+    for ([_]bool{ false, true }) |observed| {
+        for ([_]usize{ 1, 512 }) |capacity| {
+            var storage: [512]u8 = undefined;
+            var record: state.RunRecord = .{
+                .id = 7,
+                .generation = 1,
+                .execution_generation = 1,
+                .execution_protocol = .anthropic_messages,
+                .execution_model = "fixture",
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
+                .input = .{ .text = .{ .value = &.{} } },
+                .commentary_ends = &.{},
+                .tools = &.{},
+                .terminal_diagnostic = storage[0..capacity],
+                .redaction_secret = "SECRET-KEY",
+            };
+            const run = &record;
+            var result: agent.TerminalResult = .{
+                .allocator = std.testing.allocator,
+                .diagnostic_storage = try std.testing.allocator.dupe(u8, "SECRET-KEY"),
+                .diagnostic_len = "SECRET-KEY".len,
+                .diagnostic_truncated = false,
+                .abi_status = .callback_failed,
+                .raw_status_code = null,
+                .stop_reason = null,
+                .raw_stop_reason_code = null,
+                .abort_status = null,
+                .raw_abort_status_code = null,
+                .termination_signal = .{ .event_pump_failure = .invalid_event },
+                .failure = .abi_status,
+                .session_disposition_at_completion = .poisoned,
+                .first_callback_rejection = if (observed) .{ .boundary = .event_decode, .reason = .decode_failed, .failure = error.InvalidPayload, .encoded_bytes = 2 } else null,
+            };
+            defer result.deinit();
+            const decision = policy.classifyAgentTerminal(&result);
+            try std.testing.expect(commitAgentTerminal(.{ .project_fn = projectSanitized }, run, &result));
+            const terminal = state.terminalPayload(run).?;
+            try std.testing.expectEqual(decision.phase, terminal.phase);
+            try std.testing.expectEqual(decision.outcome, terminal.outcome);
+            try std.testing.expectEqual(decision.cause, terminal.cause);
+            try std.testing.expectEqual(agent.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
+            const diagnostic = run.terminal_diagnostic[0..terminal.diagnostic_len];
+            try std.testing.expect(std.mem.indexOf(u8, diagnostic, "SECRET-KEY") == null);
+            if (capacity == 1) try std.testing.expect(terminal.diagnostic_truncated) else {
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, agent.core_manifest_sha256) != null);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic, if (observed) "decode_failed" else "unobserved") != null);
+            }
+        }
+    }
 }

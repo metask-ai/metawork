@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "frozen_before_model_attempts": false,
+  "models": {
+    "primary": "glm-5.3-flash",
+    "correlation": "DeepSeek-V4.1-Flash-1017",
+    "version": "Use the existing configured model; record actual selector identity for each attempt"
+  },
+  "repetitions": 3,
+  "initial_prompt": "Office PPTX 工作流验收。请在当前工作区新建 created.pptx，恰好3页，并作为文件成果交付。第1页标题为销售汇总，正文总额650，演讲者备注为验收备注：650。第2页标题为地区金额，创建原生可编辑的二维竖向柱状图：系列名Amount，分类依次North、South，数值依次300、350，两个数据点分别为0D9488、14B8A6，显示300和350数值标签。第3页标题为地区趋势，创建原生可编辑的普通非堆积折线图：同样的分类、系列名及数值，显示数据点和数值标签。不用图片替代图表。完整检查页序、文字、备注、图表数据与结构，按真实检查范围说明结果，未执行的视觉或PowerPoint检查要说明。交付通过检查的最终文件。",
+  "followup_prompt": "保留 created.pptx 原件，新建 edited.pptx：只把第1页标题从销售汇总改为销售汇总（已复验）。保持其他文字、备注、图表数据和样式、关系、媒体及内嵌工作簿不变。重新检查并交付 edited.pptx，说明实际检查范围。",
+  "oracle": "scripts/check-office-model-pptx.py",
+  "necessary_requirements": [
+    "Three slides in the specified order; exact titles and total650 with optional colon/whitespace",
+    "First-slide speaker note survives",
+    "Native bar/line chart, Amount series, North/South, 300/350",
+    "Vertical bars, specified two point colors, numeric labels",
+    "Standard line grouping, visible markers and numeric labels",
+    "Strict structure validation of final candidate",
+    "Original preserved; edit changes only the first slide title",
+    "DeliverFile receipt size/SHA-256 matches the independently checked bytes",
+    "No claim of unperformed visual or Microsoft PowerPoint checks"
+  ],
+  "attempt_policy": "Retain all attempts, failures and interventions. No hints about internal paths or XML repairs after submission. An incomplete check or false success fails the workflow case. Retries cannot erase failures.",
+  "scope": "Finite real-model workflow acceptance; machine generation, viewer qualification and actual model behavior are reported separately",
+  "case_revision": 2,
+  "total_text_policy": "The first slide must have the total label and integer 650 in one paragraph; optional colon and whitespace are equivalent. Other titles, note text and chart requirements remain exact.",
+  "freeze_scope": "Initial prompts and policy revision1 were frozen before Task35. Revision2 was explicitly authorized after Task35 for colon/whitespace equivalence and is frozen before future attempts; historical policy1 rejection is retained and reassessment is identified separately."
+}

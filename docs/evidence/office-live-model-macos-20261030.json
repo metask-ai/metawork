@@ -1,0 +1,1169 @@
+{
+  "version": 1,
+  "scope": "Finite real-model XLSX workflow acceptance; incomplete until every required case is evaluated",
+  "frozen_suite": {
+    "path": "tests/fixtures/office/model-acceptance.json",
+    "bytes": 4401,
+    "sha256": "6c81023157c8898d302ff5e1411bfc16e284c5425943baaaab9d95e80c713ecb",
+    "commit": "e9d02dfa"
+  },
+  "application": {
+    "source_commit": "e9d02dfa",
+    "executable": {
+      "bytes": 47801120,
+      "sha256": "6ce4e4a782467f6397715f3dcd89471e9ec966aa4b6cf31ed781abbe2aa879a0"
+    },
+    "artifact": "local Apple Development signed Debug; normal Product/Account/Models/Core path; no synthetic Provider"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "case": "create-edit",
+      "repetition": 1,
+      "stage": "create",
+      "task_id": 24,
+      "task_id_hex": "0000000000000018",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793327429035,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; no preparation download requested",
+      "status": "failed",
+      "interventions": [
+        "Concurrent qualification activity opened MetaWork native workspace picker while this Run was active; no user-task hints or candidate edits"
+      ],
+      "outcome": "dependency_contract_failure",
+      "cause": "dependency_contract_failure",
+      "event_projection_failure": "dependency_contract_failure",
+      "diagnostic": "callback failed: CallbackFailed",
+      "candidate_produced": false,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 85,
+          "output_bytes": 11573,
+          "output_truncated": false,
+          "arguments": {
+            "name": "xlsx",
+            "values": [
+              "创建 created.xlsx,含多工作表、公式与格式化"
+            ]
+          }
+        },
+        {
+          "ordinal": 1,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 103,
+          "output_bytes": 164,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/workspace/orders.csv"
+          }
+        },
+        {
+          "ordinal": 2,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 18,
+          "output_bytes": 246,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/*"
+          }
+        },
+        {
+          "ordinal": 3,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 182,
+          "output_bytes": 776,
+          "output_truncated": false
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 183,
+          "output_bytes": 4379,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/environment/**",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce"
+          }
+        },
+        {
+          "ordinal": 5,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 178,
+          "output_bytes": 224,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "**/verify.py",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce"
+          }
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 411,
+          "output_bytes": 772,
+          "output_truncated": false
+        },
+        {
+          "ordinal": 7,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 174,
+          "output_bytes": 12346,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/verification.md"
+          }
+        },
+        {
+          "ordinal": 8,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 178,
+          "output_bytes": 6114,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/examples/summary.py"
+          }
+        },
+        {
+          "ordinal": 9,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 186,
+          "output_bytes": 11080,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/examples/orders-checks.json"
+          }
+        },
+        {
+          "ordinal": 10,
+          "tool": "Grep",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 293,
+          "output_bytes": 348,
+          "output_truncated": false,
+          "arguments": {
+            "pattern": "def (op_count|_count|check_count)|nonempty|is_empty|value is None",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "output_mode": "content",
+            "-n": true,
+            "-i": true
+          }
+        },
+        {
+          "ordinal": 11,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 200,
+          "output_bytes": 4789,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 80,
+            "offset": 555
+          }
+        },
+        {
+          "ordinal": 12,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 201,
+          "output_bytes": 6386,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 115,
+            "offset": 200
+          }
+        },
+        {
+          "ordinal": 13,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 201,
+          "output_bytes": 4502,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 100,
+            "offset": 455
+          }
+        },
+        {
+          "ordinal": 14,
+          "tool": "Grep",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 316,
+          "output_bytes": 334,
+          "output_truncated": false,
+          "arguments": {
+            "-n": true,
+            "output_mode": "content",
+            "path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "pattern": "def cells|def bounds|def target_spec|OPERATIONS =|MAX_CELLS =|def style_spec|def typed|def integer"
+          }
+        },
+        {
+          "ordinal": 15,
+          "tool": "Read",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 195,
+          "output_bytes": 119,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76d5e4_placeholder/scripts/verify.py",
+            "limit": 10,
+            "offset": 426
+          },
+          "failure": {
+            "code": "file_not_found",
+            "category": "user_error"
+          }
+        },
+        {
+          "ordinal": 16,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 200,
+          "output_bytes": 1586,
+          "output_truncated": false,
+          "arguments": {
+            "file_path": "/var/folders/x0/bp4wy7856dq32lq_wrvq5q4h0000gp/T/metask-agentcore-7318123f6b762cf55c1c31897ebcd5e4/activation-a7f21a83f76da9b2a683e9fe196818ce/scripts/verify.py",
+            "limit": 30,
+            "offset": 426
+          }
+        }
+      ],
+      "trace_scope": "Ordered actual persisted Product tool projections; no credentials, private reasoning or arbitrary tool output copied",
+      "failure_analysis": {
+        "observation": "The synchronous native picker occupies the main-thread dispatch while the bounded Agent event queue needs its main-thread consumer",
+        "causality": "Task 25 first typed rejection is event_pump/queue_rejected/DeadlineExceeded; this precedes the later incomplete-output drain fact. Task 24 has only legacy CallbackFailed, so its exact first cause remains unknown.",
+        "constraint": "No queue/timeout guard was weakened. No SDK implementation patch or alternative native API was used."
+      }
+    },
+    {
+      "attempt": 2,
+      "case": "create-edit",
+      "repetition": 2,
+      "stage": "create",
+      "task_id": 25,
+      "task_id_hex": "0000000000000019",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793328144508,
+      "frozen_prompt_matches_persisted_input": true,
+      "source_commit": "b862a0e6",
+      "application_sha256": "22255fc9274897529ba979819bab2c5476c2c97ece27febcafd1d31062fa0c6d",
+      "status": "failed",
+      "interventions": [
+        "Concurrent qualification activity opened MetaWork native workspace picker while this Run was active; no user-task hints or candidate edits"
+      ],
+      "runtime_diagnostics": "captured for this owned app process; only fixed typed facts may be retained",
+      "outcome": "dependency_contract_failure",
+      "cause": "dependency_contract_failure",
+      "event_projection_failure": "dependency_contract_failure",
+      "diagnostic": "agent.callback_rejection core_manifest_sha256=529d7216b841c0d102f0b5ce1b423c5debe701e6f34137b3290862590965f542 boundary=event_pump reason=queue_rejected event=thinking_chunk error=DeadlineExceeded bytes=26 host_run=1 observed_run=null state=running handle_matches=null identity_matches=null; callback failed: CallbackFailed",
+      "candidate_produced": false,
+      "observation": "Native workspace selection for repetition 3 was open during this run; callback queue deadline and later terminal drain are separately observed. Causal attribution remains under investigation.",
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 154,
+          "output_bytes": 11642
+        },
+        {
+          "ordinal": 1,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 106,
+          "output_bytes": 164
+        },
+        {
+          "ordinal": 2,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 184,
+          "output_bytes": 222
+        },
+        {
+          "ordinal": 3,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 174,
+          "output_bytes": 12346
+        }
+      ],
+      "failure_analysis": {
+        "observation": "The synchronous native picker occupies the main-thread dispatch while the bounded Agent event queue needs its main-thread consumer",
+        "causality": "Task 25 first typed rejection is event_pump/queue_rejected/DeadlineExceeded; this precedes the later incomplete-output drain fact. Task 24 has only legacy CallbackFailed, so its exact first cause remains unknown.",
+        "constraint": "No queue/timeout guard was weakened. No SDK implementation patch or alternative native API was used."
+      }
+    },
+    {
+      "attempt": 3,
+      "case": "create-edit",
+      "repetition": 3,
+      "stage": "create",
+      "task_id": 26,
+      "task_id_hex": "000000000000001a",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793328305650,
+      "frozen_prompt_matches_persisted_input": true,
+      "source_commit": "b862a0e6",
+      "application_sha256": "22255fc9274897529ba979819bab2c5476c2c97ece27febcafd1d31062fa0c6d",
+      "status": "interrupted",
+      "interventions": [
+        "Application auto-review timed out for Bash hashing synthetic orders.csv and running the generated create_orders.py; inspected the script (local CSV read and XLSX write only), then clicked Allow once. No task hints, artifact edits or standing permission changes.",
+        "Human user explicitly authorized the one verify.py invocation after application auto-review requested manual confirmation; clicked Allow once for created.xlsx + checks.json → new verification-1.json.",
+        "Owned test application stopped cleanly while awaiting manual approval; shutdown cause not established. Cold history recovered this Run as interrupted/app_shutdown; no successful final delivery inferred."
+      ],
+      "observation": "Workspace selected before submission; no MetaWork native modal opened while this run was active. MetaskOffice viewer work occurs in a separate application process.",
+      "independent_create_oracle": {
+        "status": "passed",
+        "candidate": {
+          "bytes": 6871,
+          "sha256": "36ae41566cc1d5f74ecf1ae5debb2b3ab5a80133ca26a595fbcde8397f32657a"
+        },
+        "checks": "tests/fixtures/office/model-create-checks.json"
+      },
+      "outcome": "interrupted",
+      "cause": "app_shutdown",
+      "finished_at_unix_ms": 1793331222551
+    },
+    {
+      "attempt": 4,
+      "case": "bad-styles",
+      "stage": "inspect-repair",
+      "task_id": 24,
+      "task_id_hex": "0000000000000018",
+      "run_id_hex": "0000000000000002",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793329721120,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
+      "status": "interrupted",
+      "interventions": [
+        "Owned test application stopped cleanly while awaiting manual approval; shutdown cause not established. Cold history recovered this Run as interrupted/app_shutdown; no successful final delivery inferred."
+      ],
+      "application_source_commit": "b862a0e6",
+      "outcome": "interrupted",
+      "cause": "app_shutdown",
+      "finished_at_unix_ms": 1793331222551
+    },
+    {
+      "attempt": 5,
+      "case": "required-recalculation",
+      "stage": "required-boundary",
+      "task_id": 25,
+      "task_id_hex": "0000000000000019",
+      "run_id_hex": "0000000000000002",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793329740636,
+      "frozen_prompt_matches_persisted_input": true,
+      "environment": "existing ready private runtime; original failed create Run excluded from restored model context by Product; separate frozen case, no retry of create",
+      "status": "completed",
+      "interventions": [
+        "Allowed once for the already-authorized local DeliverFile of the synthetic requested report; tool has no automatic-review support, no standing rule created"
+      ],
+      "application_source_commit": "b862a0e6",
+      "outcome": "completed",
+      "cause": null,
+      "diagnostic": "",
+      "final_response": "**结论：整体必要要求未完成。**\n\n- **无法执行 Excel 重算**：本机（macOS）未安装 Microsoft Excel（已检查 /Applications 并全盘按 Bundle ID `com.microsoft.Excel` 检索，均无）。本 XLSX 检查运行时（openpyxl）本身也不具备公式重算能力，设置“打开时重算”标志也不等于已发生的重算。\n- **未采用替代手段冒充通过**：按你的要求，Python 手算、读取公式文本、读取旧缓存值均不构成满足必要要求，故该项记为 **未支持/未完成**，不宣称重算结果为 3，也**不宣称文件全面通过检查**。\n- **原件未动**：`bad-styles.xlsx` 未被读取写入或覆盖，仅定位到路径。\n\n检查报告已生成并交付：`results/check-report.md`（2130 字节，SHA-256 `ac799315…1390ac`）。若要在装有 Microsoft Excel 的机器上完成该项验收，可让 Excel 打开该文件强制重算后核对 `Reference!B2`。",
+      "actual_deliveries": [
+        {
+          "id": "7d12dc3940158f5f4595fe248f25c5eb",
+          "locator": "results/check-report.md",
+          "size_bytes": 2130,
+          "sha256": "ac7993152b2a9cb49bc3ac650ec3fdfcbe0bdc332d725530b96bd1cbbb1390ac",
+          "redacted": false
+        }
+      ],
+      "receipt_matches_report_file": true,
+      "original_unchanged": true,
+      "boundary_result": {
+        "necessary_requirement_stated_uncompleted": true,
+        "no_false_recalculation_or_full_pass": true,
+        "structured_verifier_invoked": false,
+        "report_format": "Markdown; no machine required_checks_completed/conforms fields",
+        "frozen_machine_report_oracle": "not satisfied; truthful narrative alone does not establish the required structured result",
+        "overall_acceptance": "not passed"
+      }
+    },
+    {
+      "attempt": 6,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "task_id": 27,
+      "task_id_hex": "000000000000001b",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331591126,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-1",
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "interventions": [
+        "User-authorized allow-once after automatic-review timeout for canonical run.sh/read.py reading only synthetic orders.csv; five relevant materialized scripts matched archive bytes, no standing rule created. Command pipes preview through head and prints pipeline status; this probe does not establish document verification success."
+      ],
+      "application_source_commit": "327db559",
+      "tool_count": 10,
+      "finished_at_unix_ms": 1793332166443,
+      "actual_deliveries": [],
+      "final_response": "我先读取 CSV 和环境信息。CSV 共 7 行数据。先读验证工作流说明，再准备环境。数据已明确：7 行原始数据，其中 o-2 重复、o-5 缺地区、末行缺订单号，有效订单 4 条（o-1/o-2/o-3/o-4），总额 650。先看 Skill 自带示例脚本，并确认运行环境是否已就绪。环境目录已就绪（含 openpyxl）。先快速查看 verify.py 的规格校验规则，然后编写生成脚本。",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 7,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 2,
+      "task_id": 28,
+      "task_id_hex": "000000000000001c",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331616684,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-2",
+      "status": "stopped",
+      "outcome": "stopped",
+      "cause": null,
+      "interventions": [],
+      "application_source_commit": "327db559",
+      "tool_count": 21,
+      "finished_at_unix_ms": 1793332669260,
+      "actual_deliveries": [],
+      "final_response": "我来处理这个 Office 验收任务。先查看 xlsx Skill 的验证工作流和脚本结构。环境目录已存在。先读取验证工作流、环境状态和示例文件。验证工作流已明确。Python 运行环境目录已存在（含 openpyxl），先用 run 入口确认可用并记录 orders.csv 基准哈希。环境可用（run 入口只接受脚本文件，`-c` 不支持）。先看一下 verify.py 中 `count` 和 `font` 操作对样式空单元格的处理方式，避免规格设计踩坑。关键机制已确认：带样式空单元格会被存储并回读为带样式的 `ReadOnlyCell`（可参与字体断言），而未触碰的空单元格是 `EMPTY_CELL`（font=None，会令字体断言失败）。所以 Data/Regions 用矩形内的空白格必须显式赋样式。再确认 verify.py 的加载模式和规格解析细节。",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 8,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 3,
+      "task_id": 29,
+      "task_id_hex": "000000000000001d",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331642368,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-3",
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "interventions": [],
+      "application_source_commit": "327db559",
+      "finished_at_unix_ms": 1793331801536,
+      "tool_count": 0,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 9,
+      "case": "create-edit",
+      "stage": "create",
+      "correlation": true,
+      "task_id": 30,
+      "task_id_hex": "000000000000001e",
+      "run_id_hex": "0000000000000001",
+      "model": "DeepSeek-V4.1-Flash-1017",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793331744587,
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "327db559",
+      "interventions": [],
+      "status": "failed",
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 0,
+      "finished_at_unix_ms": 1793331901733,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 10,
+      "case": "bad-styles",
+      "stage": "inspect-repair",
+      "task_id": 31,
+      "task_id_hex": "000000000000001f",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793332302726,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-create-3",
+      "status": "failed",
+      "application_source_commit": "327db559",
+      "interventions": [
+        "Under existing synthetic acceptance scope, allowed once for canonical prepare.sh python after automatic review requested script inspection. Materialized prepare/configuration/environment/finish/managed_process scripts matched archive. The exact completed Python directory already existed as a real directory, so prepare selects check_final and exits before download/staging; no standing policy changed."
+      ],
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 12,
+      "finished_at_unix_ms": 1793332937872,
+      "actual_deliveries": [],
+      "final_response": "共享运行时已存在（Python/Node 均已就绪，无需下载）。先做环境确认并读取原件结构。",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 11,
+      "case": "required-recalculation",
+      "stage": "required-boundary",
+      "task_id": 32,
+      "task_id_hex": "0000000000000020",
+      "run_id_hex": "0000000000000001",
+      "model": "glm-5.3-flash",
+      "provider": "Metask",
+      "protocol": "anthropic_messages",
+      "submitted_at_unix_ms": 1793332320011,
+      "frozen_prompt_matches_persisted_input": true,
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/current-correlation",
+      "status": "failed",
+      "application_source_commit": "327db559",
+      "interventions": [],
+      "outcome": "failed",
+      "cause": "provider_failure",
+      "tool_count": 0,
+      "finished_at_unix_ms": 1793332469128,
+      "actual_deliveries": [],
+      "final_response": "",
+      "candidate_produced": false
+    },
+    {
+      "attempt": 12,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793340922124,
+      "status": "stopped",
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "interventions": [
+        "Under prior synthetic acceptance authorization, allowed once for materialized prepare.sh python after automatic review requested script content. prepare/environment/finish/managed_process matched canonical archive; exact completed Python directory existed as a real directory, selecting check_final before staging/download. No standing rule created.",
+        "Under prior synthetic acceptance authorization, inspected build_workbook.py and confirmed read-only orders.csv, fresh created.xlsx output and no external effects; run.sh/run.py/environment.sh/finish.py matched canonical archive. Allowed once for this generation only. No check hints or standing rule supplied.",
+        "Under prior synthetic acceptance authorization, inspected debug_csv.py: only reads synthetic orders.csv and prints CSV field representations/Decimal conversion. Allowed once for this read-only script through the previously matched canonical private entry; no diagnosis or repair hints supplied."
+      ],
+      "workspace_context": "Contains orders.csv and the preseeded bad-styles.xlsx fixture, no previous outputs; preserve both inputs and assess actual data-source use from the tool/script trace.",
+      "outcome": "stopped",
+      "cause": null,
+      "tool_count": 17,
+      "generation_observations": {
+        "initial_build_failed": "decimal.InvalidOperation at Input cell conversion; no candidate",
+        "debug_script_sha256": "60ce8ee046de879f3899af2b70cae6873af7c27d529f20394924e380f2a02de6",
+        "model_attempted_inline_python": "private entry rejected non-script -c invocation; no entry behavior change",
+        "self_correction": "Model corrected header conversion without an implementation hint; rebuilt candidate before stopping."
+      },
+      "finished_at_unix_ms": 1793342270965,
+      "actual_deliveries": [],
+      "final_response": "我先查看工作区输入与 Skill 环境信息。CSV 有 8 行（表头 + 7 行数据），含重复 o-2、缺地区的 o-5、缺编号的行。环境表显示本机为 macOS arm64，Python 载荷约 38.9 MB。先检查共享依赖目录是否已有完整环境。共享目录中已有 Python 与 Node 环境，无需下载。运行 prepare 校验环境完整性（若已就绪则不产生下载）。环境已就绪。先读取 Skill 的校验工作流与示例脚本。verification 工作流与示例已读完。输入推导：7 行原始数据中，o-2 重复（保留首条）、o-5 缺地区、末行缺编号 → 有效 4 行（o-1/o-2/o-3/o-4），总额 650，North 300、South 350。现在确认脚本与校验器路径，并记录 orders.csv 基准哈希。verification 工作流已明确。输入基线：orders.csv SHA-256 = `11ca9b99...5756`（工作区另有一个早前的 bad-styles.xlsx，与本任务无关，不触碰）。\n\n先写生成脚本（期望值将独立从原始 CSV 推导，不复制生成脚本内部变量）。解析 Amount 字段时出错，打印各字段 repr 以定位原因。run 入口只接受脚本文件路径，改用临时脚本调试。找到原因：Input 写入循环对表头行的 \"Amount\" 也做了数字转换。修正为表头原样写入、仅转换数据行。",
+      "candidate_produced": true,
+      "independent_candidate_check": {
+        "report": ".zig-cache/office-model-acceptance/task36-create-independent-1.json",
+        "result": {
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "conforms": true,
+          "candidate": {
+            "bytes": 6874,
+            "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+          },
+          "methods": [
+            "bounded_zip_payloads",
+            "openpyxl_saved_cells_and_styles"
+          ],
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ],
+          "checks_passed": 21,
+          "requirements_completed": 21
+        },
+        "candidate_produced_before_stop": true,
+        "model_quality_check_not_yet_performed": true,
+        "delivery_absent": true
+      }
+    },
+    {
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 13,
+      "run_id_hex": "0000000000000002",
+      "status": "completed",
+      "submitted_at_unix_ms": 1793342305681,
+      "operator_prompt": "请继续完成原任务。",
+      "interventions": [
+        "Neutral continuation only; no expected values, internal paths, candidate fixes or verification hints supplied. Prior stopped Run retained; continuation is not an additional independent repetition.",
+        "Under prior synthetic acceptance authorization, allowed once for the requested verify command after automatic-review timeout. Prior Run activation, run.sh and verify.py were all absent, so this command could not execute the entry; did not restore, replace, redirect or hint a path. Missing-resource outcome retained.",
+        "Under prior synthetic acceptance authorization, allowed once for local DeliverFile created.xlsx after rechecking 6874 bytes and SHAead88a14…64457 against the own report and independent oracle. CSV baseline unchanged; no standing permission or external publication."
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 7,
+      "resource_entry_observation": "Initial reacquisition rule was not followed: reused old activation, command failed EXIT127 while shell echo returned0; model correctly read the failure, invoked Skill at ordinal2 and used fresh entry at ordinal3. Recovery succeeded without an implementation hint or environment preparation.",
+      "own_check_specification": {
+        "checks": 19,
+        "requirements": 9,
+        "scope_review": "Covers exact sheet set, raw values/blanks, data/region values and shares, full requested font rectangles, percentages, total fills, reference note/outside/formula. Expectations are literal independently stated task/CSV values, not reused generator variables."
+      },
+      "own_check_result": {
+        "status": "passed",
+        "execution_completed": true,
+        "required_checks_completed": true,
+        "conforms": true,
+        "candidate": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "not_performed": [
+          "formula_recalculation",
+          "visual_rendering",
+          "viewer_compatibility",
+          "full_xsd_validation"
+        ],
+        "report": "verification-1.json",
+        "checks": 19,
+        "requirements": 9,
+        "specification_sha256": "4aec47698e7235046917b41f67dd9975b297363dedf7dc9b74f97e8c6798facf",
+        "report_sha256": "ed64f34c729862911f01b9fd24e7dde6a37c897d16a60b4ab59d0f3aa9f0fec8"
+      },
+      "receipt_observation": [
+        {
+          "id": "6c80617108d04afe064b7950217f4266",
+          "locator": "created.xlsx",
+          "size_bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457",
+          "redacted": false
+        }
+      ],
+      "finished_at_unix_ms": 1793342769282,
+      "actual_deliveries": [
+        {
+          "id": "6c80617108d04afe064b7950217f4266",
+          "locator": "created.xlsx",
+          "size_bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457",
+          "redacted": false
+        }
+      ],
+      "final_response": "交付完成。created.xlsx 已通过 DeliverFile 提交，回执 6874 字节、SHA-256 `ead88a14…64457`，与校验报告的候选文件身份一致。\n\n**核验覆盖（verify.py 对最终保存字节执行，19/19 项通过，9 项需求全部 conforms）**\n\n| 要求 | 核验方式 |\n|---|---|\n| 恰有 Input/Data/Regions/Reference 四表 | sheets 精确比对 |\n| Input 原始表头 + 7 行原样、金额为数字、空字段空白 | A1:C8 逐格值/类型断言 + 外沿计数 22 非空格 |\n| Data 4 条有效订单原顺序、去重与排除正确 | A1:D6 全值断言（o-1/o-2/o-3/o-4，100/200/150/200），期望值独立从 CSV 推导 |\n| Data/Regions 末尾 Total 行、占比、地区排序 | 唯一标签定位 Total 于 A6/A4，区域值 North 300、South 350、总额 650 |\n| 整个已用矩形 Arial 11（含表头、空白格、合计行） | Data A1:D6、Regions A1:C4、Input A1:C8 字体断言（含空白格） |\n| 占比及合计行一位小数百分比 | D2:D6、C2:C4 均为 `0.0%` |\n| 两合计行 A 格纯色淡蓝 | A6、A4 solid FFDEEAF6 |\n| Reference A1/H20 文本、B2 公式 | 逐格断言，B2 存为公式文本 `=1+2` |\n| 不修改 orders.csv | 前后 SHA-256 一致（`11ca9b99…5756`） |\n\n**未执行项（如实说明）**：公式重算（按你要求不重算，B2 无缓存值，本环境不评估公式）、可视化渲染、查看器兼容性、完整 XSD 校验；文件中存储的 Arial 字体名不保证查看端已安装该字体。工作区另存在早前的 bad-styles.xlsx，与本任务无关，未触碰。",
+      "candidate_produced": true,
+      "create_stage_qualification": {
+        "status": "passed_with_recorded_neutral_continuation_and_manual_approvals",
+        "independent_checks_passed": 21,
+        "own_checks_passed": 19,
+        "necessary_requirements_passed": 9,
+        "receipt_matches": true,
+        "final_wording_truthful": true,
+        "not_an_unassisted_run": true,
+        "edit_stage": "not yet submitted"
+      },
+      "edit_original_baseline": {
+        "orders.csv": {
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        },
+        "created.xlsx": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "bad-styles.xlsx": {
+          "bytes": 6868,
+          "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+        }
+      }
+    },
+    {
+      "case": "create-edit",
+      "repetition": 1,
+      "validation_revision": "b03b173b",
+      "task_id": 36,
+      "task_id_hex": "0000000000000024",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 14,
+      "stage": "edit",
+      "run_id_hex": "0000000000000003",
+      "status": "completed",
+      "submitted_at_unix_ms": 1793342830983,
+      "frozen_prompt_matches_persisted_input": true,
+      "original_baseline": {
+        "orders.csv": {
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        },
+        "created.xlsx": {
+          "bytes": 6874,
+          "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+        },
+        "bad-styles.xlsx": {
+          "bytes": 6868,
+          "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+        }
+      },
+      "interventions": [
+        "Under prior synthetic acceptance authorization, inspected edit_workbook.py: checked_copy source, changes only requested data/region values/font, exclusive new edited.xlsx, read-only original hashes. Fresh Skill entry run.sh/run.py/environment.sh/finish.py/office_archive.py matched canonical archive. Allowed once after automatic review timeout, no hints or standing rule.",
+        "Under prior synthetic acceptance authorization, allowed once for local DeliverFile edited.xlsx after independently rechecking 6889 bytes and SHA1c3fffb4…0af1f against both reports, plus unchanged CSV/created.xlsx/bad-styles.xlsx baselines. No standing permission or external publication."
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 8,
+      "resource_entry_observation": "First tool is Skill xlsx; current resource entry obtained before work, satisfying the cross-message entry rule on this edit request.",
+      "edit_script_sha256": "f1fc6b55665555fead56724eef1e75c8b0a45c2ad6a8f14f99c311c420f73a94",
+      "independent_candidate_check": {
+        "report": ".zig-cache/office-model-acceptance/task36-edit-independent-1.json",
+        "result": {
+          "status": "passed",
+          "execution_completed": true,
+          "required_checks_completed": true,
+          "conforms": true,
+          "candidate": {
+            "bytes": 6889,
+            "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+          },
+          "not_performed": [
+            "formula_recalculation",
+            "visual_rendering",
+            "viewer_compatibility",
+            "full_xsd_validation"
+          ]
+        },
+        "checks": 23,
+        "requirements": 23,
+        "all_baseline_originals_unchanged": true
+      },
+      "own_check_result": {
+        "status": "passed",
+        "execution_completed": true,
+        "required_checks_completed": true,
+        "conforms": true,
+        "candidate": {
+          "bytes": 6889,
+          "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+        },
+        "not_performed": [
+          "formula_recalculation",
+          "visual_rendering",
+          "viewer_compatibility",
+          "full_xsd_validation"
+        ],
+        "checks": 16,
+        "requirements": 7,
+        "report": "verification-2.json",
+        "report_sha256": "f634d568c5ca412024453ecf0dbc28457f5ec9277f3f90a0a7bb6a443b5e6dc2",
+        "specification_sha256": "d8cdb1ec8e9acbaa73bcbcdc904fb5894f557f316cae796d55575635210bc2e7"
+      },
+      "own_check_specification": {
+        "checks": 16,
+        "requirements": 7,
+        "scope_review": "Exact sheet set, full Data/Regions values and headers, total labels, all used font cells, percent formats, total fills; Input A1:C8 and Reference A1:H20 values/formulas/font/fill/number_format compared against original created.xlsx. Independent expectations reflect total660, North300/South360."
+      },
+      "finished_at_unix_ms": 1793343298882,
+      "actual_deliveries": [
+        {
+          "id": "5a8cb33b27fb60176057767d387b16b0",
+          "locator": "edited.xlsx",
+          "size_bytes": 6889,
+          "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f",
+          "redacted": false
+        }
+      ],
+      "final_response": "交付完成。edited.xlsx 已提交，回执 6889 字节、SHA-256 `1c3fffb4…0af1f`，与校验报告的候选身份一致；created.xlsx（`ead88a14…64457`）与 orders.csv 哈希未变，原件完整保留。\n\n**编辑内容**（基于 created.xlsx 副本另存，未覆盖原件）：Data 中 o-3 金额 150→160，全部明细占比、地区汇总（North 300 / South 360）、总额（660）、总占比按新总额重算；Data、Regions 整个已用矩形（含表头、空白格、合计行）改为 Calibri 12。\n\n**核验结果**（verify.py 对 edited.xlsx 最终保存字节执行，16/16 项检查通过，7 项需求映射 conforms: true）：\n\n| 要求 | 核验方式与结果 |\n|---|---|\n| 四表结构不变 | sheets 精确比对通过 |\n| Data：o-1/o-2/o-3/o-4 = 100/200/160/200，占比按 660 | A1:D6 逐格断言（0.151515…/0.303030…/0.242424…/0.303030…，容差 1e-9）+ 外沿计数 23 非空格 |\n| Data 合计行 Total 660 / 100% | 唯一标签定位于 A6 |\n| Regions：North 300、South 360 按名排序，Total 660 | A1:C4 逐格断言（0.454545…/0.545454…）+ 唯一标签 A4 + 计数 12 |\n| Data/Regions 全矩形 Calibri 12 | A1:D6、A1:C4 字体断言（含空白格）通过 |\n| 保留格式：0.0% 占比、合计行 A 格 FFDEEAF6 | D2:D6、C2:C4 数字格式与 A6、A4 填充断言通过 |\n| Input 原样 | `unchanged` 与 created.xlsx 逐格比对 value/font/fill/number_format，24 格 0 差异 |\n| Reference 原样 | `unchanged` A1:H20 比对 160 格 0 差异；B2 仍为公式文本 `=1+2` |\n\n**未覆盖项（如实说明）**：公式重算（本环境不评估公式，B2 按要求未重算、无缓存值）、可视化渲染、查看器兼容性、完整 XSD 校验；Calibri 为文件内存储的字体名，不保证查看端已安装。",
+      "candidate_produced": true,
+      "edit_stage_qualification": {
+        "status": "passed_with_recorded_manual_approvals",
+        "own_checks_passed": 16,
+        "necessary_requirements_passed": 7,
+        "independent_checks_passed": 23,
+        "receipt_matches": true,
+        "all_original_baselines_preserved": true,
+        "final_wording_truthful": true
+      }
+    },
+    {
+      "case": "create-edit",
+      "stage": "create",
+      "validation_revision": "b03b173b",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "application_source_commit": "b03b173b",
+      "serial": true,
+      "attempt": 15,
+      "repetition": 2,
+      "task_id": 37,
+      "task_id_hex": "0000000000000025",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-xlsx-2",
+      "status": "completed",
+      "submitted_at_unix_ms": 1793343454928,
+      "frozen_prompt_matches_persisted_input": true,
+      "interventions": [],
+      "initial_files": [
+        {
+          "path": "orders.csv",
+          "bytes": 108,
+          "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+        }
+      ],
+      "outcome": "completed",
+      "cause": null,
+      "tool_count": 2,
+      "finished_at_unix_ms": 1793343543013,
+      "actual_deliveries": [],
+      "final_response": "数据已确认：8 行 CSV（表头 + 7 行原始数据），其中 o-2 重复 1 行、缺地区 1 行（o-5）、缺订单编号 1 行，有效订单为 o-1~o-4 共 4 条，总金额 650。\n\n按 XLSX 技能要求，首次使用需准备其私有 Python 运行时（macOS arm64，Python 载荷约 38.9 MB 下载估计；若共享缓存已存在则无需下载）。是否同意准备？同意后我将：\n\n1. 准备运行时 → 创建 `created.xlsx`（Input / Data / Regions / Reference 四表，Arial 11、0.0% 百分比、合计行淡蓝 FFDEEAF6、Reference 含 B2 公式 `=1+2`）\n2. 用 verify.py 对最终文件做完整核验\n3. 通过 DeliverFile 交付",
+      "candidate_produced": false,
+      "workflow_qualification": {
+        "status": "incomplete",
+        "reason": "Run completed with a runtime-preparation consent question; no candidate, verification or delivery. No consent reply or retry sent after user requested convergence.",
+        "candidate_produced": false,
+        "delivery_produced": false,
+        "counted_as_completed_independent_workflow": false
+      }
+    }
+  ],
+  "unstarted": [
+    "two remaining successful independent XLSX create-edit repetitions",
+    "current-resource style correction and necessary unsupported-check cases",
+    "correlation model completed create-edit",
+    "first preparation in isolated profile with live model",
+    "PPTX three completed independent create-edit/check/delivery workflows"
+  ],
+  "acceptance": "Not passed: complete fixed real-model set is still incomplete; latest attempts include provider_failure before candidates or delivery. Deterministic, Core and viewer qualifications do not substitute for real-model acceptance.",
+  "runtime_followup": {
+    "production_diagnostic_fix_commit": "b862a0e6",
+    "native_graph": {
+      "steps_passed": 241,
+      "tests_passed": 1560,
+      "tests_total": 1569,
+      "existing_skipped": 9,
+      "log": ".zig-cache/office-native-production-diagnostic-final.log"
+    },
+    "actual_failure_preserves_first_cause": true,
+    "later_terminal_drain_does_not_override_first_cause": true,
+    "native_sdk": {
+      "installed_and_registry_latest": "0.11.0-fork.4",
+      "verification": "npm view @zogien/native-sdk version --json, 2026-10-30",
+      "public_dialog_api": "synchronous showOpenDialog; no qualified asynchronous API found"
+    },
+    "underlying_modal_starvation_fixed": false,
+    "historical_issue_23_root_cause": "not established by these current attempts",
+    "controlled_consumer_starvation": {
+      "commit": "1bb7051f",
+      "entry": "zig build test-office-pipeline --summary all",
+      "steps_passed": 9,
+      "tests_passed": 4,
+      "production_limits_unchanged": true,
+      "typed_first_cause_and_history_verified": true,
+      "native_dialog_automated": false,
+      "modal_starvation_fixed": false
+    },
+    "investigation_settlement": {
+      "status": "diagnostic_and_investigation_deliverable_complete",
+      "source_commits": [
+        "b862a0e6",
+        "1bb7051f",
+        "d3f7b2cb"
+      ],
+      "historical_issue_23_closed": false,
+      "native_modal_gap_fixed": false,
+      "canonical_gap": "docs/validation.md#e-mac-office-model-20261030"
+    }
+  },
+  "pending_decision": "User authorized once-only approvals throughout this synthetic acceptance scope after script/path inspection; no approval mode or standing policy changed. Original pending Runs were interrupted by application shutdown before the newly authorized clicks.",
+  "observed_workflow_fix": {
+    "commit": "8667dfe5",
+    "problem": "Actual model Read of one-line verification report was truncated, so the model authored another summary program and required an additional Shell approval",
+    "change": "Multiline JSON under the same actual encoded-byte report budget; read/paginate directly",
+    "machine_qualification": "Real canonical Core Read obtains report tail candidate hash plus required_checks_completed/conforms; 28 XLSX quality checks and three-format Core fixture pass",
+    "current_live_runs_use_old_archive": false,
+    "new_model_validation": "Latest archive exercised by Tasks27-30; no completed create/check/delivery result yet. Provider failures retained; not established as passed."
+  },
+  "validation_followup": {
+    "delivery_fixture_commit": "7922f4ff",
+    "initial_full_graph": {
+      "log": ".zig-cache/office-native-current-workflow.log",
+      "steps_passed": 237,
+      "tests_passed": 1559,
+      "tests_total": 1569,
+      "skipped": 9,
+      "failed": 1,
+      "failure": "read-large fixture asserted image execution released before deferred ownership settlement"
+    },
+    "after_fixture_fix": {
+      "log": ".zig-cache/office-native-current-workflow-settled.log",
+      "steps_passed": 241,
+      "tests_passed": 1561,
+      "tests_total": 1570,
+      "skipped": 9,
+      "failed": 0
+    },
+    "production_limits_or_policy_changed": false
+  },
+  "verification_only_followup": {
+    "commit": "454b614c",
+    "scope": "Include read-only checking tasks and necessary unsupported mapping in the existing structured checker workflow",
+    "original_failed_case_retained": true,
+    "fresh_model_retest": "Task32 failed with provider_failure before any tool; structured-report behavior on the current archive remains unqualified by a completed real-model case"
+  },
+  "authorization": {
+    "scope": "Synthetic Office acceptance directories only: inspect scripts first; allow-once reads, new working copies, verification and local DeliverFile",
+    "user_answer": "授权本次合成验收范围",
+    "standing_policy_changed": false
+  },
+  "latest_application": {
+    "source_commit": "b03b173b",
+    "executable": {
+      "bytes": 47836320,
+      "sha256": "476136fd6bad173238281dc02066c8837514b84f7c1d0528ca40daed727ebdc8"
+    },
+    "archive_sha256": "e92179dd6601fad1edfb7a3121a8f023d774b026c9cae885df3d1259c9968fd4",
+    "existing_account_and_approval_mode": true
+  },
+  "latest_attempt_context": {
+    "independent_task_contexts": true,
+    "overlapping_runs": true,
+    "concurrency_allowance": "unavailable in existing Account UI; do not infer zero or unlimited",
+    "provider_failure_interpretation": "Raw application log now confirms repeated HTTP 503: no compatible upstream endpoint is available, exhausting 10 attempts. Specific backend cause and per-request Task correlation remain unknown."
+  },
+  "provider_failure_evidence": {
+    "observed_at": "2026-10-30 Asia/Shanghai",
+    "source": "owned test application stderr; selected non-secret error lines only",
+    "log": ".zig-cache/office-live-model-327db559-runtime.log",
+    "http_status_counts_at_observation": {
+      "503": 57
+    },
+    "response_error_type": "api_error",
+    "response_message": "no compatible upstream endpoint is available",
+    "retry_exhaustion": "stream connect failed after 10 attempt(s): ServiceUnavailable",
+    "first_error_line": 170,
+    "interpretation": "Service returned HTTP 503 indicating no compatible upstream endpoint for those requests. This is not proof of the specific backend routing, capacity, capability, or upstream-health reason. Shared log request identities have not been mapped to every Task. Successful tools in other runs show intermittent progress; do not infer universal model unavailability.",
+    "history_diagnostic": "Provider-failure Runs have no detailed diagnostic payload in task history; UI exposes the terminal classification. Raw server responses are not made a history authority.",
+    "local_server_implementation": {
+      "repository": "metask-ai",
+      "revision": "c1c8efc",
+      "emitter": "services/sglang-proxy/main.go:2696",
+      "selector": "services/sglang-proxy/upstream_pool.go:372",
+      "nil_lease_conditions": [
+        "Required durable state unhealthy",
+        "Endpoint pools draining or empty",
+        "No endpoint supports the requested model",
+        "Compatible endpoints cooling or at in-flight limit",
+        "Shared capacity lease error or denied admission"
+      ],
+      "qualification": "Read-only local source corroborates error semantics; deployed server identity and live endpoint state were not verified."
+    }
+  },
+  "next_acceptance_policy": "After currently active attempts settle, run subsequent live-model cases serially; do not change frozen prompts/oracles or existing service/queue limits.",
+  "specification_reference_followup": {
+    "date": "2026-10-30",
+    "trigger": "Task28 read checker source repeatedly, stopped with no candidate; precise stop_reason is not persisted, so do not infer it from tool count",
+    "change": "Exact object forms for every supported operation; explicit unchanged top-level fields, typed blanks/formulas, identifier-column counts and styling blank cells; prefer documented reference and runnable example instead of implementation discovery",
+    "inputs": [
+      {
+        "path": "src/product/skill/assets/xlsx/verification.md",
+        "bytes": 13081,
+        "sha256": "00b91c9ab57282b06ff5ce1aeaa8a74d00dac6283bfaf20ab81ee3548efd7e85"
+      },
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 474830,
+        "sha256": "2ede99eb3c9c8740e02ab996fe26903a69d7b10fab500b88841762da44a248ef"
+      }
+    ],
+    "qualification": {
+      "documented_json_blocks_parsed_by_actual_verifier": 3,
+      "supported_operations_covered": 9,
+      "resource_tests_passed": 12,
+      "only_changed_package_member": "xlsx/verification.md",
+      "archive_check": true,
+      "diff_check": true,
+      "native_office_resources": {
+        "steps_passed": 10,
+        "tests_passed": 5,
+        "log": ".zig-cache/office-native-ac9ff388-resources.log"
+      }
+    },
+    "runtime_limits_or_frozen_oracles_changed": false,
+    "new_real_model_result": "Task 36 started with the original frozen create prompt, current specification reference and fresh-entry instructions; no completed workflow yet"
+  },
+  "application_history": [
+    {
+      "source_commit": "327db559",
+      "executable": {
+        "bytes": 47836320,
+        "sha256": "bef80af8550536c28a43467189182b60c237eaeba0afe8303bdbd7599be17c61"
+      },
+      "archive_sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169",
+      "existing_account_and_approval_mode": true
+    }
+  ],
+  "remaining_serial_input_setup": {
+    "cases": [
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-xlsx-2",
+        "only_input": "orders.csv",
+        "bytes": 108,
+        "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+      },
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-xlsx-3",
+        "only_input": "orders.csv",
+        "bytes": 108,
+        "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+      },
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-correlation",
+        "only_input": "orders.csv",
+        "bytes": 108,
+        "sha256": "11ca9b9995144888325182eea6a503a7e0aecaf44a3b0877aae6a572c64d5756"
+      },
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-style",
+        "only_input": "bad-styles.xlsx",
+        "bytes": 6868,
+        "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+      },
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-boundary",
+        "only_input": "bad-styles.xlsx",
+        "bytes": 6868,
+        "sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451"
+      }
+    ],
+    "model_attempts_started": true,
+    "rule": "Each future case starts with its declared input only. Active Task36 workspace is untouched; no additional candidate or expected-value hints are injected.",
+    "registered_while_no_runs_active": true,
+    "registration_scope": "All remaining XLSX cases and PPTX2/3; only registration, no prompt sent except second independent XLSX Task."
+  },
+  "current_qualification": "One independent XLSX create/edit/check/delivery workflow completed with a retained stopped initial Run, neutral continuation and manual approvals. Both final artifacts independently pass, actual receipts match, originals preserved, final wording truthful. Remaining independent repetitions, bad-style correction, unsupported necessary check, second model and isolated first preparation remain unqualified.",
+  "completed_workflows": [
+    {
+      "format": "xlsx",
+      "repetition": 1,
+      "task_id": 36,
+      "create_runs": [
+        1,
+        2
+      ],
+      "edit_runs": [
+        3
+      ],
+      "status": "completed_with_neutral_continuation_and_manual_approvals",
+      "initial_stopped_run_retained": true,
+      "independent_task_count": 1,
+      "create_candidate": {
+        "bytes": 6874,
+        "sha256": "ead88a14385f88ddc8093cbc4b84ba9f6ff94187bbd30f2e3aa0278689564457"
+      },
+      "edit_candidate": {
+        "bytes": 6889,
+        "sha256": "1c3fffb4a7d6271fb085d7c3c45e03dc2e7b589a68a92d3a41c0f511d6e0af1f"
+      },
+      "complete_workflow_claim_limited_to_this_task": true
+    }
+  ],
+  "convergence": {
+    "user_instruction": "收敛一下吧",
+    "new_model_attempts_stopped": true,
+    "active_runs": 0,
+    "scope": "Deliver implementation and verified results; preserve unqualified fixed model cases. Full original completion criteria are not claimed achieved.",
+    "final_checks": {
+      "office_resource_tests_passed": 12,
+      "archive_check": true,
+      "branch_diff_check": true,
+      "production_changes_after_last_qualified_resource_build": false
+    },
+    "remaining": [
+      "two complete independent XLSX repetitions",
+      "current-resource bad-style correction and required unsupported-check model cases",
+      "configured second-model XLSX comparison",
+      "three complete PPTX model workflows",
+      "isolated live-model first preparation"
+    ],
+    "issue_closures": []
+  }
+}

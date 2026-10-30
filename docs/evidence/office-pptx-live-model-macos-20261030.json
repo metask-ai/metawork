@@ -1,0 +1,525 @@
+{
+  "version": 1,
+  "scope": "Finite real-model PPTX create/edit/check/delivery acceptance; incomplete until frozen set is satisfied",
+  "frozen_suite": {
+    "path": "tests/fixtures/office/model-acceptance-pptx.json",
+    "bytes": 2432,
+    "sha256": "5c1f5d3f9d23cb37021b4df2220c5ebb84f16ccc8b1653e8fe45c9f55009ee3c",
+    "commit": "149194d1"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "case": "create-edit",
+      "stage": "create",
+      "repetition": 1,
+      "task_id": 35,
+      "task_id_hex": "0000000000000023",
+      "run_id_hex": "0000000000000001",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-pptx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793339364436,
+      "status": "stopped",
+      "frozen_prompt_matches_persisted_input": true,
+      "application_source_commit": "ac9ff388",
+      "interventions": [
+        "After authoritative stopped terminal with no candidate, operator sent one neutral continuation in the same Task; no script, internal path, XML repair hint or candidate was provided. Initial stopped result retained."
+      ],
+      "serial": true,
+      "outcome": "stopped",
+      "cause": null,
+      "finished_at_unix_ms": 1793339799955,
+      "tool_count": 17,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 82,
+          "output_bytes": 11082
+        },
+        {
+          "ordinal": 1,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 181,
+          "output_bytes": 219
+        },
+        {
+          "ordinal": 2,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 486,
+          "output_bytes": 921
+        },
+        {
+          "ordinal": 3,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 171,
+          "output_bytes": 16483
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 187,
+          "output_bytes": 225
+        },
+        {
+          "ordinal": 5,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 177,
+          "output_bytes": 4260
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 358,
+          "output_bytes": 698
+        },
+        {
+          "ordinal": 7,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 422,
+          "output_bytes": 64340
+        },
+        {
+          "ordinal": 8,
+          "tool": "Read",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 223,
+          "output_bytes": 6005
+        },
+        {
+          "ordinal": 9,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 360,
+          "output_bytes": 2314
+        },
+        {
+          "ordinal": 10,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 311,
+          "output_bytes": 3889
+        },
+        {
+          "ordinal": 11,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 390,
+          "output_bytes": 806
+        },
+        {
+          "ordinal": 12,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 379,
+          "output_bytes": 2705
+        },
+        {
+          "ordinal": 13,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 402,
+          "output_bytes": 2805
+        },
+        {
+          "ordinal": 14,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 296,
+          "output_bytes": 1521
+        },
+        {
+          "ordinal": 15,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 315,
+          "output_bytes": 3794
+        },
+        {
+          "ordinal": 16,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 435,
+          "output_bytes": 2675
+        }
+      ],
+      "actual_deliveries": [],
+      "public_output": "我先读取 Skill 的参考文档并确认运行环境状态。环境已就绪（Python 与 Node 均已提前准备好，无需下载）。读取创建参考文档。现在检查生成器对“逐数据点着色”的支持，然后编写创建脚本。库支持逐点 `<c:dPt>` 着色。查看具体生成逻辑。查看折线图的 grouping 与 dataLabel 处理逻辑。",
+      "public_output_kind": null,
+      "candidate_produced": false
+    },
+    {
+      "attempt": 2,
+      "case": "create-edit",
+      "stage": "continue-create",
+      "repetition": 1,
+      "task_id": 35,
+      "task_id_hex": "0000000000000023",
+      "run_id_hex": "0000000000000002",
+      "workspace": "/Users/zogien/Projects/metawork/.zig-cache/office-model-acceptance/serial-pptx-1",
+      "model": "glm-5.3-flash",
+      "protocol": "anthropic_messages",
+      "provider": "Metask",
+      "submitted_at_unix_ms": 1793339869803,
+      "status": "stopped",
+      "application_source_commit": "ac9ff388",
+      "serial": true,
+      "continuation_of_attempt": 1,
+      "operator_input": "请继续完成原任务。",
+      "interventions": [
+        "Neutral continuation after a real stopped terminal; counts as assisted workflow, not a new independent repetition",
+        "Within existing synthetic acceptance authorization, allowed once after automatic-review timeout for materialized run.sh/read.py reading checked.pptx. Five read/run helpers matched canonical archive; no standing rule created. Current independent business oracle rejection remains in force."
+      ],
+      "frozen_initial_requirements_unchanged": true,
+      "outcome": "stopped",
+      "cause": null,
+      "tool_count": 17,
+      "tools": [
+        {
+          "ordinal": 0,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 302,
+          "output_bytes": 4125
+        },
+        {
+          "ordinal": 1,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 469,
+          "output_bytes": 621
+        },
+        {
+          "ordinal": 2,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 249,
+          "output_bytes": 621
+        },
+        {
+          "ordinal": 3,
+          "tool": "Glob",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 173,
+          "output_bytes": 271
+        },
+        {
+          "ordinal": 4,
+          "tool": "Glob",
+          "state": "failed",
+          "is_error": true,
+          "input_bytes": 167,
+          "output_bytes": 271
+        },
+        {
+          "ordinal": 5,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 323,
+          "output_bytes": 992
+        },
+        {
+          "ordinal": 6,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 670,
+          "output_bytes": 1221
+        },
+        {
+          "ordinal": 7,
+          "tool": "Skill",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 72,
+          "output_bytes": 11072
+        },
+        {
+          "ordinal": 8,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 475,
+          "output_bytes": 1069
+        },
+        {
+          "ordinal": 9,
+          "tool": "Write",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 4965,
+          "output_bytes": 10579
+        },
+        {
+          "ordinal": 10,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 519,
+          "output_bytes": 1192
+        },
+        {
+          "ordinal": 11,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 412,
+          "output_bytes": 676
+        },
+        {
+          "ordinal": 12,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 470,
+          "output_bytes": 1296
+        },
+        {
+          "ordinal": 13,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 358,
+          "output_bytes": 1126
+        },
+        {
+          "ordinal": 14,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 303,
+          "output_bytes": 1825
+        },
+        {
+          "ordinal": 15,
+          "tool": "Bash",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 400,
+          "output_bytes": 1620
+        },
+        {
+          "ordinal": 16,
+          "tool": "Write",
+          "state": "completed",
+          "is_error": false,
+          "input_bytes": 7467,
+          "output_bytes": 15582
+        }
+      ],
+      "finished_at_unix_ms": 1793340800440,
+      "actual_deliveries": [],
+      "public_output": "确认了第二个 dPt 块属于 SCATTER 分支，折线图不会有逐点着色歧义。再核对 dataLabelPosition 对折线图的校验规则。库行为已确认：柱状图逐点色可用（`chartColors` 多色 + 单系列自动生成 `<c:dPt>`）；折线图 grouping 由 finalize 阶段补 `standard`；BAR 的 dataLabelPosition 仅接受 ctr/inBase/inEnd，LINE 仅接受 b/ctr/l/r/t。现在查看脚本入口并编写生成脚本。Skill 目录似乎在轮次间被清理了，重新运行 prepare 入口恢复环境。Skill 的临时激活目录被清理了。重新调用 Skill 恢复运行入口。Skill 已重新激活（新激活目录）。运行 prepare 入口验证环境（共享环境此前已准备完成，无需下载）。环境恢复完毕。现在编写生成脚本。运行生成器，随后执行 finalize（折线图声明 `--line-grouping standard`）。finalize 通过（structure_passed）。现在用结构化读取器核对内容。备注与页序正确。现在用 checked XML 核对两个图表的数据与结构。先查看 office_archive 的接口。现在编写结构核验脚本（通过 checked 提取路径读取图表 XML）。",
+      "public_output_kind": null,
+      "candidate_produced": true,
+      "requested_filename_produced": false,
+      "candidate_at_terminal_observation": {
+        "path": "checked.pptx",
+        "bytes": 29788,
+        "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7",
+        "frozen_oracle": "failed: Exact total text missing",
+        "delivered": false
+      }
+    }
+  ],
+  "application": {
+    "source_commit": "ac9ff388",
+    "executable": {
+      "bytes": 47836320,
+      "sha256": "67ca0854cf8c4241d33657b013ffb58fe5677fa25b91edc5ffc76bb5db66db47"
+    },
+    "archive": {
+      "bytes": 474830,
+      "sha256": "2ede99eb3c9c8740e02ab996fe26903a69d7b10fab500b88841762da44a248ef"
+    },
+    "existing_account_and_approval_mode": true
+  },
+  "acceptance": "not passed: two stopped Runs; checked candidate passes explicitly authorized policy revision2 business/strict structure oracle. Complete model check coverage, requested filename, delivery and edit stage remain unqualified.",
+  "unstarted": [
+    "repetition 1 edit/check/delivery",
+    "repetitions 2 and 3 create/edit/check/delivery"
+  ],
+  "first_preparation_frozen_separately": {
+    "fixture": "tests/fixtures/office/model-acceptance-first-preparation.json",
+    "commit": "86b50f5a",
+    "case_not_started": true,
+    "counted_as_ready_repetition": false
+  },
+  "comparison_scope": "Plan §10.1 requires the configured second-model comparison for the XLSX scene. PPTX requires the three representative primary-model Tasks; no additional mandatory PPTX comparison is inferred from the frozen fixture optional model metadata.",
+  "resource_entry_followup": {
+    "date": "2026-10-30",
+    "trigger": "Task35 continuation reused an earlier activation directory, encountered missing resources, then reacquired Skill at tool ordinal 7. Initial common execution instructions omitted the planned cross-message reacquisition rule.",
+    "change": "Before each new Office request or continuation, invoke Skill for current absolute resources. Reacquire once for an unavailable old path; distinguish Skill/resource failure from a missing private runtime, retain consent/permission boundaries.",
+    "inputs": [
+      {
+        "path": "src/product/skill/office_environment/EXECUTION.md",
+        "bytes": 5398,
+        "sha256": "75890ea06f8aa4515ef5f01ea1b5bdec1bfcf46d2ea5d79bdf47dd2053e76375"
+      },
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 475952,
+        "sha256": "e92179dd6601fad1edfb7a3121a8f023d774b026c9cae885df3d1259c9968fd4"
+      }
+    ],
+    "qualification": {
+      "node_resource_tests_passed": 12,
+      "native_steps_passed": 15,
+      "native_tests_passed": 5,
+      "native_log": ".zig-cache/office-fresh-entry-native.log",
+      "actual_canonical_core_formats_passed": [
+        "docx",
+        "xlsx",
+        "pptx"
+      ],
+      "core_log": ".zig-cache/office-fresh-entry-core-shell.log",
+      "private_environment_unchanged": true,
+      "changed_archive_members": [
+        "docx/SKILL.md",
+        "docx/environment/EXECUTION.md",
+        "pptx/SKILL.md",
+        "pptx/environment/EXECUTION.md",
+        "xlsx/SKILL.md",
+        "xlsx/environment/EXECUTION.md"
+      ],
+      "all_other_members_unchanged": true,
+      "archive_check": true,
+      "diff_check": true
+    },
+    "active_live_task_uses_preceding_archive": true,
+    "new_model_instruction_adoption": "not yet qualified; controlled Core execution does not substitute for model behavior"
+  },
+  "interim_independent_oracle": {
+    "candidate": {
+      "path": ".zig-cache/office-model-acceptance/serial-pptx-1/checked.pptx",
+      "bytes": 29788,
+      "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7"
+    },
+    "oracle_status": "failed",
+    "reason": "Exact total text missing",
+    "report": ".zig-cache/office-model-acceptance/task35-create-independent-1.json",
+    "observed_body_text": "总额：650",
+    "frozen_expected_paragraph": "总额650",
+    "qualification": "Historical policy revision1 rejection retained unchanged; authorized revision2 reassessment is recorded separately.",
+    "inactive_proposal": {
+      "patch": ".zig-cache/office-pptx-total-punctuation-proposal.patch",
+      "scope": "Allow only colon/whitespace variation around the same total label and integer650; other requirements unchanged",
+      "positive_examples": [
+        "总额650",
+        "总额：650",
+        "总额:650",
+        "总额 650",
+        " 总额： 650 "
+      ],
+      "negative_examples": [
+        "总额651",
+        "总额6500",
+        "其他650",
+        "650",
+        "总额：650.5"
+      ],
+      "applied": true,
+      "permission_source": "AGENTS.md machine-guard rejection policy; explicit approval required before expanding the fixed oracle acceptance",
+      "authorization": "User explicitly approved 允许标点等价（推荐） on 2026-10-30; only optional colon/whitespace around total label and integer650."
+    }
+  },
+  "authorized_total_text_policy_revision2": {
+    "authorization": "User explicitly approved 允许标点等价（推荐） on 2026-10-30; only optional colon/whitespace around total label and integer650.",
+    "policy_revision": 2,
+    "frozen_before_future_attempts": true,
+    "historical_attempts_reassessed_explicitly": true,
+    "suite": {
+      "path": "tests/fixtures/office/model-acceptance-pptx.json",
+      "bytes": 2982,
+      "sha256": "f650d5f62a5f23c9fbec2fdeaa42a4511c8fc68a465b882984cdc32648c455e8"
+    },
+    "oracle": {
+      "path": "scripts/check-office-model-pptx.py",
+      "bytes": 7171,
+      "sha256": "dd95cb96f8842f51d2316daabd5e0f3e19cb2ff95695241cff5f8ecf5bbd4b13"
+    },
+    "preserved_original_rejection": ".zig-cache/office-model-acceptance/task35-create-independent-1.json",
+    "candidate_unmodified": true,
+    "reassessment_report": ".zig-cache/office-model-acceptance/task35-create-independent-policy2.json",
+    "reassessment": {
+      "status": "passed",
+      "candidate": {
+        "bytes": 29788,
+        "sha256": "234f11b9d336cb42b93cf7fc4fc4dce3f5c6c91534557cb02393cac7b1d72aa7"
+      },
+      "slide_count": 3,
+      "native_chart_count": 2,
+      "receipt_comparison": "pending",
+      "final_wording_review": "pending"
+    },
+    "workflow_qualification": "not passed: stopped Runs, requested filename absent, no actual delivery or edit stage. Content/structure reassessment alone does not complete the workflow.",
+    "qualification": {
+      "full_pptx_test_groups_passed": 7,
+      "business_oracle_positive_variants": 5,
+      "business_oracle_rejected_variants": 8,
+      "rejected_scope": [
+        "wrong integer",
+        "extra digit",
+        "unlabelled number",
+        "wrong label",
+        "decimal amount",
+        "wrong note",
+        "wrong chart value",
+        "wrong slide title"
+      ],
+      "log": ".zig-cache/office-policy2-tests.log",
+      "production_archive_changed": false,
+      "diff_check": true
+    }
+  },
+  "remaining_serial_input_setup": {
+    "cases": [
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-pptx-2",
+        "initial_files": [],
+        "model_attempt_started": false
+      },
+      {
+        "workspace": ".zig-cache/office-model-acceptance/serial-pptx-3",
+        "initial_files": [],
+        "model_attempt_started": false
+      }
+    ],
+    "policy_revision": 2,
+    "suite_sha256": "f650d5f62a5f23c9fbec2fdeaa42a4511c8fc68a465b882984cdc32648c455e8",
+    "rule": "Empty isolated workspaces for future representative tasks; frozen prompt/oracle, existing configured primary model, no internal-path or implementation hints. Register folders only while no Run is active.",
+    "registered_while_no_runs_active": true
+  }
+}

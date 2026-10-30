@@ -16,6 +16,7 @@ import sys
 import subprocess
 import tempfile
 import threading
+import zipfile
 
 import office_qualification as qualification
 
@@ -54,11 +55,11 @@ def texts(value):
         yield value
 
 
-def sse(tool_input=None):
+def sse(tool_input=None, tool_name="Bash"):
     events = [{"type": "message_start", "message": {"id": "office-fixture", "role": "assistant",
               "model": "fixture", "usage": {"input_tokens": 1, "output_tokens": 1}}}]
     if tool_input:
-        block = {"type": "tool_use", "id": "office-bash", "name": "Bash", "input": {}}
+        block = {"type": "tool_use", "id": "office-" + tool_name.lower(), "name": tool_name, "input": {}}
         delta = {"type": "input_json_delta", "partial_json": json.dumps(tool_input)}
     else:
         block = {"type": "text", "text": ""}
@@ -74,9 +75,11 @@ def sse(tool_input=None):
 
 for case in (("deny", "allow", "full") if args.permission_probe else (("docx", "xlsx") if args.home_probe else ("docx", "xlsx", "pptx"))):
     kind = "xlsx" if args.permission_probe else case
+    read_report = kind == "xlsx" and not args.home_probe and not args.permission_probe
     work = scratch / case
     work.mkdir()
     output = work / ("created." + kind)
+    generator_output = work / "generated.pptx" if kind == "pptx" else output
     edited = work / ("edited." + kind)
     edit_script = work / "edit.py"
     edit_script.write_text('''import sys,zipfile,hashlib
@@ -101,13 +104,24 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         language = "python"
         script = work / "create.py"
         script.write_text('from openpyxl import Workbook\nimport sys\nw=Workbook();w.active["A1"]="Office 中文";w.active["B1"]="=1+2";w.save(sys.argv[1])\n', encoding="utf-8")
+        checks = [{"id": "text", "op": "values", "target": {"sheet": "Sheet", "range": "A1"},
+                   "expected": [[{"type": "string", "value": "Office 中文 edited"}]]},
+                  {"id": "formula", "op": "values", "target": {"sheet": "Sheet", "range": "B1"},
+                   "expected": [[{"type": "formula", "value": "=1+2"}]]}]
+        (work / "checks.json").write_text(json.dumps({"version": 1, "checks": checks, "requirements": [
+            {"id": check, "source": "Fixed synthetic edit/formula requirement; deliberately long to exercise the real Read tool line boundary. " * 9, "checks": [check]}
+            for check in ("text", "formula")]}), encoding="utf-8")
     else:
         language = "node"
         script = work / "scripts" / "create.cjs"
         script.parent.mkdir()
         code = ('const fs=require("node:fs"),{Document,Packer,Paragraph}=require("docx");'
                 'Packer.toBuffer(new Document({sections:[{children:[new Paragraph("Office 中文")]}]})).then(b=>fs.writeFileSync(process.argv[2],b));') if kind == "docx" else (
-                'const P=require("pptxgenjs");const p=new P();p.addSlide().addText("Office 中文",{x:1,y:1,w:8,h:2});p.writeFile({fileName:process.argv[2]});')
+                'const P=require("pptxgenjs");const p=new P();const s=p.addSlide();'
+                's.addText("Office 中文",{x:1,y:0.2,w:8,h:0.5});s.addNotes("Core notes 650");'
+                's.addChart(p.ChartType.bar,[{name:"Amount",labels:["North","South"],values:[300,350]}],'
+                '{x:1,y:1,w:8,h:4,showValue:true,chartColors:["0D9488","14B8A6"]});'
+                'p.writeFile({fileName:process.argv[2]});')
         script.write_text(code, encoding="utf-8")
     state = {"calls": 0, "error": None}
 
@@ -138,30 +152,52 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
                     if sys.platform == "win32":
                         def quote(value):
                             return "'" + str(value).replace("'", "''") + "'"
-                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(output)
+                        ps = "$ErrorActionPreference='Stop'; & " + quote(entry) + " " + language + " " + quote(script.relative_to(work)) + " " + quote(generator_output)
+                        if kind == "pptx":
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'generate failed' }; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/finalize.py") + " " + quote(generator_output) + " " + quote(output)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'create failed' }; & " + quote(entry) + " python " + quote(edit_script) + " " + quote(output) + " " + quote(edited)
                         ps += "; if ($LASTEXITCODE -ne 0) { throw 'edit failed' }; & " + quote(entry) + " python " + quote(entry.parent / "read.py") + " " + quote(edited) + " " + quote(work / "read.json")
-                        ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }; Write-Output '" + marker + "'"
+                        ps += "; if ($LASTEXITCODE -ne 0) { throw 'read failed' }"
+                        if kind == "xlsx":
+                            ps += "; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/verify.py") + " " + quote(edited) + " " + quote(work / "verification.json") + " --checks " + quote(work / "checks.json")
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'verification failed' }"
+                        if kind == "pptx":
+                            ps += "; & " + quote(entry) + " python " + quote(entry.parent.parent / "scripts/office/validate.py") + " " + quote(edited)
+                            ps += "; if ($LASTEXITCODE -ne 0) { throw 'structure failed' }"
+                        ps += "; Write-Output '" + marker + "'"
                         encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
                         response = sse({"command": "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + encoded, "timeout": 120000})
                     else:
-                        calls = [["/bin/sh", entry, language, script.relative_to(work), output],
-                                 ["/bin/sh", entry, "python", edit_script, output, edited],
-                                 ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]]
+                        calls = [["/bin/sh", entry, language, script.relative_to(work), generator_output]]
+                        if kind == "pptx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/finalize.py", generator_output, output])
+                        calls.extend([["/bin/sh", entry, "python", edit_script, output, edited],
+                                      ["/bin/sh", entry, "python", entry.parent / "read.py", edited, work / "read.json"]])
+                        if kind == "xlsx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/verify.py", edited, work / "verification.json", "--checks", work / "checks.json"])
+                        if kind == "pptx":
+                            calls.append(["/bin/sh", entry, "python", entry.parent.parent / "scripts/office/validate.py", edited])
                         command = " && ".join(" ".join(shlex.quote(str(a)) for a in call) for call in calls)
                         command += " && /usr/bin/printf %s " + shlex.quote(marker)
                         response = sse({"command": command, "timeout": 120000})
                 else:
-                    assert state["calls"] == 2
+                    assert state["calls"] in (2, 3)
                     results = [c for m in payload["messages"] for c in m.get("content", []) if isinstance(c, dict) and c.get("type") == "tool_result"]
                     assert results, results
-                    if args.permission_probe and case == "deny":
+                    if state["calls"] == 3:
+                        assert read_report and not results[-1].get("is_error")
+                        report_text = "\n".join(texts(results[-1]))
+                        expected_hash = hashlib.sha256(edited.read_bytes()).hexdigest()
+                        assert expected_hash in report_text, "Real Read lost the report tail/candidate identity"
+                        assert '"required_checks_completed": true' in report_text
+                        assert '"conforms": true' in report_text
+                    elif args.permission_probe and case == "deny":
                         assert results[-1].get("is_error"), results[-1]
                         assert marker not in "\n".join(texts(results[-1])), results[-1]
                     else:
                         assert not results[-1].get("is_error"), results
                         assert marker in "\n".join(texts(results[-1])), results[-1]
-                    response = sse()
+                    response = sse({"file_path": str(work / "verification.json")}, "Read") if read_report and state["calls"] == 2 else sse()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(response)))
@@ -178,19 +214,21 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         env = dict(qualification.environment(profile) if not args.home_probe else os.environ, METAWORK_OFFICE_CORE_WORKSPACE=str(work),
                    METAWORK_OFFICE_CORE_HOME=str(Path.home().resolve()) if args.home_probe else str(profile if sys.platform == "darwin" else Path.home().resolve()),
                    METAWORK_OFFICE_CORE_SKILLS=str(skills), METAWORK_OFFICE_CORE_SKILL=kind,
-                   METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages")
+                   METAWORK_OFFICE_CORE_URL="http://127.0.0.1:" + str(server.server_port) + "/v1/messages",
+                   METAWORK_OFFICE_CORE_READ_REPORT="1" if read_report else "0")
         env.pop("METAWORK_OFFICE_CORE_PERMISSION_CASE", None)
         if args.permission_probe:
             env["METAWORK_OFFICE_CORE_PERMISSION_CASE"] = case
         result = subprocess.run([str(probe)], env=env, capture_output=True, timeout=180)
         if result.returncode or state["error"]:
             raise RuntimeError(str(scratch) + "\n" + str(state["error"]) + "\n" + result.stderr.decode("utf-8", errors="replace"))
-        assert state["calls"] == 2
+        assert state["calls"] == (3 if read_report else 2)
         if args.permission_probe:
             expected = 0 if case == "full" else 1
             assert "Office permission callbacks: " + str(expected) in result.stderr.decode("utf-8", errors="replace")
             if case == "deny":
                 assert not output.exists() and not edited.exists() and not (work / "read.json").exists(), "Denied Shell executed a document operation"
+                assert not (work / "verification.json").exists(), "Denied Shell produced a verification report"
                 assert inventory() == before_environment, "Denied Shell changed the private environment"
                 print(json.dumps({"permission": case, "callbacks": expected, "no_execution": True, "environment_unchanged": True}), flush=True)
                 continue
@@ -205,6 +243,14 @@ assert hashlib.sha256(source.read_bytes()).hexdigest()==original_digest
         if kind == "xlsx":
             cell = next(c for sheet in parsed["sheets"] for c in sheet["cells"] if c["cell"] == "B1")
             assert cell["formula"] is True and cell["value"] == "=1+2" and cell["cached"] is None
+            verification = json.loads((work / "verification.json").read_text(encoding="utf-8"))
+            assert verification["status"] == "passed" and verification["conforms"] is True, verification
+            assert verification["candidate"] == {"bytes": edited.stat().st_size, "sha256": hashlib.sha256(edited.read_bytes()).hexdigest()}
+        if kind == "pptx":
+            with zipfile.ZipFile(edited) as packed:
+                assert any(b"Core notes 650" in packed.read(name) for name in packed.namelist()
+                           if name.startswith("ppt/notesSlides/") and name.endswith(".xml"))
+            assert output.read_bytes() != generator_output.read_bytes(), "PPTX finishing did not run"
         assert inventory() == before_environment, "Core document processing changed the private environment"
         print(json.dumps({"skill": kind, "permission": case if args.permission_probe else "full", "materialized_entry": state["entry"], "actual_core_bash": True, "create_edit_read": True,
                           "original_sha256": hashlib.sha256(output.read_bytes()).hexdigest()}, ensure_ascii=True), flush=True)

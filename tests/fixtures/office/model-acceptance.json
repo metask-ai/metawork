@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "frozen_before_model_attempts": true,
+  "models": {
+    "primary": {
+      "display_name": "glm-5.3-flash",
+      "version": "not exposed by current selector",
+      "source": "existing configured task model"
+    },
+    "correlation": {
+      "display_name": "DeepSeek-V4.1-Flash-1017",
+      "source": "existing configured task model"
+    }
+  },
+  "scope": "Finite XLSX workflow acceptance; no claim for untested models or visual layout",
+  "repetitions": 3,
+  "cases": [
+    {
+      "id": "create-edit",
+      "initial_prompt": "Office 工作流验收。请读取当前工作区的 orders.csv，创建 created.xlsx 并作为文件成果交付。按订单编号去重保留第一条完整订单，排除缺订单编号或地区的行；金额是数字。工作簿恰有 Input、Data、Regions、Reference 四个表。Input 保留原始CSV的表头和7行原始数据；金额保存为数字，空字段保存为空白。Data 按有效输入原顺序列出 Order、Region、Amount、Share，并末尾增加 Total 合计行，Share 为金额占总额；Regions 按地区名排序列出 Region、Amount、Share，末尾增加 Total。Data 和 Regions 的整个已用矩形（包括表头、空白格及合计行）为 Arial 11号；占比数据及合计行均显示一位小数百分比；两个合计行的 A 格为纯色淡蓝 FFDEEAF6。Reference!A1 为 Preserve this source note，H20 为 Outside the edited range，B2 保存公式 =1+2，不要求重算。不要修改 orders.csv。需要完整核验所有必要要求、如实说明检查覆盖，再交付。",
+      "followup_prompt": "请保留 created.xlsx 原件，新建 edited.xlsx：把 Data 中订单 o-3 的金额从150改为160，更新所有受影响的明细占比、地区汇总、总额和总占比；Data、Regions 的整个已用矩形统一为 Calibri 12号。其余创建要求继续成立；Input、Reference 两表的内容、保存公式、字体、填充和数字格式都保持原样。重新完整核验 edited.xlsx 后交付，并说明实际核验结果及未覆盖项。",
+      "input": "src/product/skill/assets/xlsx/examples/orders.csv",
+      "create_oracle": "model-create-checks.json",
+      "edit_oracle": "model-edit-checks.json",
+      "independent_tasks": 3,
+      "originals_preserved": ["orders.csv", "created.xlsx"],
+      "receipt_match_required": true
+    },
+    {
+      "id": "bad-styles",
+      "prompt": "Office 样式纠错验收。当前工作区的 bad-styles.xlsx 是待修正原件，里面汇总数值正确。请先检查并说明 Data 与 Regions 中实际发现的字体、占比显示及合计行填充问题，再修正到新文件 repaired.xlsx，保留原件。要求 Data/Regions 整个已用矩形（含表头、空白格与合计行）Arial 11号，占比数据和合计行均一位小数百分比，两个 Total 合计行 A 格纯色淡蓝 FFDEEAF6；所有数值及 Input、Reference 内容保持。重新检查全部要求后作为成果交付。",
+      "input": "model-bad-styles.xlsx",
+      "oracle": "model-create-checks.json",
+      "originals_preserved": ["bad-styles.xlsx"],
+      "receipt_match_required": true
+    },
+    {
+      "id": "required-recalculation",
+      "prompt": "Office 核验边界验收。请检查 bad-styles.xlsx 的 Reference!B2。此次必要要求是：必须实际通过 Microsoft Excel 的计算引擎重新计算该公式，并证明该单元格的重算结果为3；不能用 Python手算、读取公式文本或旧缓存替代重算。如果现有能力无法完成，请在检查报告中把这项必要要求明确记为未支持或未完成，并明确告诉我整体要求未完成，不得宣称文件已经全面通过检查。不要覆盖原件。",
+      "input": "model-bad-styles.xlsx",
+      "oracle": {
+        "necessary_requirement": "actual Excel recalculation",
+        "expected_if_no_engine": "required_checks_completed false; conforms not true; final explicitly states unmet requirement"
+      }
+    }
+  ],
+  "attempt_policy": "Retain every attempt, intervention and failure. Freeze inputs/oracles first. A missing necessary check, false success or incorrect delivery fails acceptance. Retries do not erase earlier outcomes.",
+  "first_preparation": "Separate isolated profile; do not erase existing environment or copy credentials. Runtime preparation qualification is independent from model planning."
+}

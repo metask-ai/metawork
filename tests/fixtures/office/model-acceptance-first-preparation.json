@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "frozen_before_model_attempts": true,
+  "scope": "Independent fresh-profile preparation through an actual configured model; separate from ready-environment repetitions",
+  "models": {
+    "primary": "glm-5.3-flash",
+    "correlation": "DeepSeek-V4.1-Flash-1017",
+    "version": "Use the existing configured model; record actual selector identity for each attempt"
+  },
+  "initial_prompt": "Office PPTX 工作流验收。请在当前工作区新建 created.pptx，恰好3页，并作为文件成果交付。第1页标题为销售汇总，正文总额650，演讲者备注为验收备注：650。第2页标题为地区金额，创建原生可编辑的二维竖向柱状图：系列名Amount，分类依次North、South，数值依次300、350，两个数据点分别为0D9488、14B8A6，显示300和350数值标签。第3页标题为地区趋势，创建原生可编辑的普通非堆积折线图：同样的分类、系列名及数值，显示数据点和数值标签。不用图片替代图表。完整检查页序、文字、备注、图表数据与结构，按真实检查范围说明结果，未执行的视觉或PowerPoint检查要说明。交付通过检查的最终文件。",
+  "followup_prompt": "保留 created.pptx 原件，新建 edited.pptx：只把第1页标题从销售汇总改为销售汇总（已复验）。保持其他文字、备注、图表数据和样式、关系、媒体及内嵌工作簿不变。重新检查并交付 edited.pptx，说明实际检查范围。",
+  "business_oracle": "scripts/check-office-model-pptx.py",
+  "runtime_inputs": "build_support/office-environment.json and the current bundled environment resources",
+  "profile_rules": [
+    "Use a fresh isolated profile whose OfficeDependencies directory does not exist before the task",
+    "Do not copy any existing runtime, metadata, credential, token or provider configuration into the profile",
+    "Close the prior Host before starting a Host sharing its canonical Account credential service",
+    "Account may restore only through its normal Host-owned credential port; if unavailable, leave the model case unqualified rather than inject credentials",
+    "Only this task may prepare the fixed private Python and Node environments; keep existing user environments unchanged"
+  ],
+  "download_consent_reply": "同意为本次合成验收准备随包锁定的私有 Python 和 Node 环境；请继续原任务。",
+  "consent_rule": "Use that reply only if the model requests the task-specific preparation consent; it is not a Shell grant or a standing rule",
+  "required_evidence": [
+    "Exact application and frozen task identities",
+    "Absent private environment before the first task",
+    "Actual model-controlled preparation through current materialized entry; fixed manifest identity and usable final runtimes",
+    "Create and follow-up candidates pass the same independent content/structure oracle",
+    "Original candidate preserved after follow-up",
+    "Actual DeliverFile receipt sizes/SHA-256 match checked candidate bytes",
+    "Preparation and checking claims reflect executed actions; unperformed visual/PowerPoint checks are disclosed"
+  ],
+  "attempt_policy": "Retain all attempts, failures and interventions. No hints about internal paths or XML repairs after submission. An incomplete check or false success fails the workflow case. Retries cannot erase failures.",
+  "counting_rule": "This separate preparation case does not count as one of the three ready-environment repetitions",
+  "selected_model": "glm-5.3-flash",
+  "business_oracle_policy_revision": 2
+}

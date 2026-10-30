@@ -12,7 +12,7 @@ execFileSync(
   ["-B", "scripts/check-office-archives.py"],
   { cwd: root, env: environment, timeout: 60_000, stdio: "inherit" },
 );
-execFileSync(process.execPath, ["scripts/sync-office-archive.mjs", "--check"], {
+execFileSync(process.execPath, ["scripts/build-office-skills.mjs", "--check"], {
   cwd: root,
   stdio: "inherit",
 });

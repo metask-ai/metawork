@@ -9,7 +9,7 @@ description: Create, read, edit, combine, split, and refine PowerPoint presentat
 
 ## Workflows
 
-- Create with the fixed PptxGenJS library: read [pptxgenjs.md](pptxgenjs.md), save a script and execute `run.cmd node create.cjs`.
+- Create with the fixed PptxGenJS library: read [pptxgenjs.md](pptxgenjs.md), save a script and execute `run.cmd node create.cjs`. Save the generator output to a new intermediate file, then follow [creation checks](creation-checks.md) to produce and strictly check the delivery candidate.
 - Read or edit an existing file: read [editing.md](editing.md), inspect structured text and checked XML, then make focused changes on a working copy.
 - Validate and reopen the finished file, checking slide order, text, notes, relationships and changed structures. Visual inspection and rendering are unavailable; say so explicitly.
 

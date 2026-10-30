@@ -76,6 +76,14 @@ pub fn build(b: *std.Build) void {
         .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
     });
     artifacts.tests.step.dependOn(&b.addRunArtifact(office_publish_tests).step);
+    const office_app_tests = b.addTest(.{
+        .name = "metawork-office-resources",
+        .root_module = test_modules.app,
+        .filters = &.{"full Office resources"},
+    });
+    const office_resources_step = b.step("test-office-resources", "Verify Office resource publication and complete Skill entries");
+    office_resources_step.dependOn(&b.addRunArtifact(office_publish_tests).step);
+    office_resources_step.dependOn(&b.addRunArtifact(office_app_tests).step);
     if (test_modules.app.resolved_target.?.result.os.tag == .macos) {
         if (b.sysroot) |sysroot| test_modules.app.addFrameworkPath(.{
             .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),
@@ -83,6 +91,21 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    const office_pipeline_options = b.addOptions();
+    office_pipeline_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for Office pipeline fixture"));
+    office_pipeline_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/office_pipeline.mjs"));
+    office_pipeline_options.addOption([]const u8, "office_archive", b.pathFromRoot("src/app/office-skills.tar.gz"));
+    const office_pipeline_cases = b.createModule(.{
+        .root_source_file = b.path("tests/integration/lifecycle/office_pipeline_test.zig"),
+        .target = test_modules.app.resolved_target,
+        .optimize = test_modules.app.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    office_pipeline_cases.addImport("lifecycle_fixture", lifecycle_fixture);
+    office_pipeline_cases.addOptions("office_pipeline_options", office_pipeline_options);
+    const office_pipeline_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-office-pipeline", .root_module = office_pipeline_cases }));
+    b.step("test-office-pipeline", "Run canonical Core and Product Office event pipeline qualification").dependOn(&office_pipeline_tests.step);
+    artifacts.tests.step.dependOn(&office_pipeline_tests.step);
     const office_skill_shell = b.addExecutable(.{ .name = "office-skill-shell", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_skill_shell.zig"),
         .target = test_modules.app.resolved_target,
@@ -1078,6 +1101,8 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     fixture_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for image fixture"));
     fixture_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/image_generation.mjs"));
     fixture_options.addOption([]const u8, "png_path", b.pathFromRoot("src/agent/testdata/generated.png"));
+    fixture_options.addOption([]const u8, "xlsx_path", b.pathFromRoot("tests/fixtures/office/checked-summary.xlsx"));
+    fixture_options.addOption([]const u8, "xlsx_report_path", b.pathFromRoot("tests/fixtures/office/checked-summary-report.json"));
     const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     backend.addImport("metawork_agent", modules.agent);
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
@@ -1348,6 +1373,9 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const core_identity = b.addOptions();
+    core_identity.addOption([]const u8, "manifest_sha256", &bundle.manifest_sha256);
+    session.addOptions("agentcore_identity", core_identity);
     session.addImport("metask_agentcore", sdk);
     session.addImport("agent_file_delivery", agent_file_delivery);
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));

@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "scope": "Fixed private generator → explicit new-copy finalizer → original strict validator → targeted edit → strict validator; finite machine qualification, not real model acceptance",
+  "host": "aarch64-macos",
+  "inputs": [
+    {
+      "path": "src/app/office-skills.tar.gz",
+      "bytes": 471586,
+      "sha256": "63a988a10fe0dc6244c2aeb1b4498d7a9325dc57b297172f159f7914ec58f753"
+    },
+    {
+      "path": "src/product/skill/assets/pptx/scripts/finalize.py",
+      "bytes": 10659,
+      "sha256": "59566d8583fff26cc7ecf0484f46da7d6e31c004b4456eaa677b3e269d913275"
+    },
+    {
+      "path": "src/product/skill/office_resources/scripts/office/validators/base.py",
+      "bytes": 32705,
+      "sha256": "aa5ec92296cf044ef25a863167b5af9da1d5be6b5881513d9df78d4d65a1304a"
+    },
+    {
+      "path": "scripts/check-office-pptx.py",
+      "bytes": 10430,
+      "sha256": "ea9880bf187a2df1f2355c8aed95c9f170832f3e1369ce89d8031a16a1a243ab"
+    },
+    {
+      "path": "tests/fixtures/office/generation.cjs",
+      "bytes": 3352,
+      "sha256": "ff2e243086fb08e0d0a3c7ca36027f6640f17f93a1880df21dc00046154141f2"
+    },
+    {
+      "path": "scripts/check-office-skill-shell.py",
+      "bytes": 16456,
+      "sha256": "9c9df3ace1e255b77ae406c2fabc66c5c575000554162d1d28bdd27a47e54dde"
+    }
+  ],
+  "generator": {
+    "node": "v22.23.4",
+    "pptxgenjs": "4.0.1"
+  },
+  "raw_generator_baseline": "docs/evidence/office-generation-macos-20261030.json",
+  "viewer_evidence": "docs/evidence/office-pptx-metaskoffice-20261030.json",
+  "checks": {
+    "pptx_suite": {
+      "passed": 6,
+      "failed": 0,
+      "log": ".zig-cache/office-pptx-finalization-tests-v3.log",
+      "matrix": "14 generated combinations, all finalized and targeted edits strictly pass",
+      "negative_cases": [
+        "No inferred line grouping",
+        "Existing output, input identity and hard-link protection",
+        "Invalid cross-axis, duplicate axis and duplicate point identifiers",
+        "True bar-only line property and stacked grouping",
+        "Unknown notes-list ordering",
+        "Unrelated slide schema defect",
+        "Unsafe ZIP path and DTD/XML rejection"
+      ],
+      "preserved": "Slide/master/layout/notes/relationship/media/embedded-workbook bytes outside the presentation/chart changes; chart data/formulas/point styles/markers unchanged"
+    },
+    "shared_validators": {
+      "passed": 12,
+      "failed": 0
+    },
+    "xlsx_quality_regression": {
+      "passed": 28,
+      "failed": 0
+    },
+    "resource_builder": {
+      "passed": 12,
+      "failed": 0
+    },
+    "architecture_archive": {
+      "passed": 36,
+      "failed": 0
+    },
+    "native_office_resources": {
+      "exit_code": 0
+    }
+  },
+  "schema_scope_fix": "Transitional PML schema now applies to ppt/slides, slideMasters, slideLayouts, notesSlides, notesMasters and handoutMasters; invalid slide counterexample rejects rather than silently skipping its schema",
+  "core_skill_shell": {
+    "status": "passed",
+    "log": ".zig-cache/office-core-finalization-D.log",
+    "formats": [
+      "docx",
+      "xlsx",
+      "pptx"
+    ],
+    "pptx": [
+      "Actual materialized finalize.py invocation",
+      "Notes and two-color labelled chart",
+      "Strict validation after targeted edit",
+      "Original and private environment unchanged"
+    ],
+    "core_manifest_sha256": "529d7216b841c0d102f0b5ce1b423c5debe701e6f34137b3290862590965f542"
+  },
+  "model_acceptance": "pending; not implied by machine or viewer qualification",
+  "followup_bounded_diagnostics_and_cache_premises": {
+    "date": "2026-10-30",
+    "inputs": [
+      {
+        "path": "src/app/office-skills.tar.gz",
+        "bytes": 474368,
+        "sha256": "872c96aa6650c2f13cba46e75fb52928844bbe1bcc6d68c12639e31c35cc8169"
+      },
+      {
+        "path": "src/product/skill/assets/pptx/scripts/finalize.py",
+        "bytes": 12257,
+        "sha256": "d46c0df2b74d03f2f0af92e13404dc8b31162a15518991acb4629207d4257689"
+      },
+      {
+        "path": "scripts/check-office-pptx.py",
+        "bytes": 10998,
+        "sha256": "233ec77806f1fd0d0e9ceebec55f19e7a75f68e6a9b55c31107b17aec12ec1ac"
+      }
+    ],
+    "changes": [
+      "Finite operation counters and changed-part count; no per-point or package-path stdout expansion",
+      "Styled-point indices must identify actual entries in consistent dense single-level category/value caches",
+      "Declared cache size checked against actual nodes before bounded index comparison; oversized declarations fail closed"
+    ],
+    "checks": {
+      "pptx_suite": {
+        "passed": 6,
+        "failed": 0,
+        "log": ".zig-cache/office-pptx-bounded-finalization-v3.log",
+        "negative_cases_added": [
+          "Styled point outside cache",
+          "Untrusted 4294967295 cache declaration"
+        ],
+        "stdout_bytes_each_less_than": 2048
+      },
+      "actual_core_shell": {
+        "formats": [
+          "docx",
+          "xlsx",
+          "pptx"
+        ],
+        "passed": true,
+        "log": ".zig-cache/office-core-bounded-finalization.log"
+      },
+      "node_resources_and_architecture": {
+        "passed": 45,
+        "log": ".zig-cache/office-pptx-boundary-resources.log"
+      },
+      "native_office_resources": {
+        "steps_passed": 10,
+        "tests_passed": 5,
+        "log": ".zig-cache/office-native-bounded-finalization-resources.log"
+      },
+      "archive_check": true,
+      "python_compile": true,
+      "diff_check": true
+    },
+    "limits": "Finite machine qualification; does not establish real-model or PowerPoint acceptance"
+  }
+}

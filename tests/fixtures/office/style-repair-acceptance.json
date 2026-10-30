@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "scope": "Full-range stored-style verification and misplaced total emphasis; one targeted real-model workflow, not the deferred stability matrix",
+  "model": "DeepSeek-V4.1-Flash-1017",
+  "input": "model-bad-styles.xlsx",
+  "input_sha256": "5ab5521af820c689a3cd1541f055f73d275c6c5f5f2deb97bfd823a1fc589451",
+  "prompt": "请检查工作区的 bad-styles.xlsx 并修正到新文件 repaired.xlsx，保留原件。只使用已经就绪的随包私有环境，不下载或安装。Data、Regions 的数值正确：先实际检查并说明字体、百分比和合计强调的问题，使用内置检查入口分别保存修复前与修复后的核验报告，保留修复前的失败结果。要求这两个表整个已用矩形（含表头、空白格、明细与合计）均为 Arial 11；所有占比数据及 Total 合计行显示 0.0%；只有实际 Total 合计整行加粗并填充纯色淡蓝 FFDEEAF6，表头和普通明细不加粗、无填充，清除错误位置的强调。所有数值、工作表顺序以及 Input、Reference 的内容、保存公式、字体、填充和数字格式均保持原样。完整复验修复后的文件，核对受检文件与实际交付的大小和摘要，再作为文件成果交付。报告只说明真实检查范围，未执行的重算、视觉或查看器检查要明确说明。",
+  "base_oracle": "model-create-checks.json",
+  "additional_checks": [
+    {"id":"Data-total-bold","op":"font","target":{"sheet":"Data","label":{"range":"A2:A6","value":"Total"},"size":[1,4]},"expected":{"bold":true}},
+    {"id":"Regions-total-bold","op":"font","target":{"sheet":"Regions","label":{"range":"A2:A4","value":"Total"},"size":[1,3]},"expected":{"bold":true}},
+    {"id":"Data-total-full-fill","op":"fill","target":{"sheet":"Data","label":{"range":"A2:A6","value":"Total"},"size":[1,4]},"expected":{"pattern":"solid","color":"FFDEEAF6"}},
+    {"id":"Regions-total-full-fill","op":"fill","target":{"sheet":"Regions","label":{"range":"A2:A4","value":"Total"},"size":[1,3]},"expected":{"pattern":"solid","color":"FFDEEAF6"}},
+    {"id":"Data-no-misplaced-bold","op":"font","target":{"sheet":"Data","range":"A1:D5"},"expected":{"bold":false}},
+    {"id":"Regions-no-misplaced-bold","op":"font","target":{"sheet":"Regions","range":"A1:C3"},"expected":{"bold":false}},
+    {"id":"Data-no-misplaced-fill","op":"fill","target":{"sheet":"Data","range":"A1:D5"},"expected":{"pattern":null}},
+    {"id":"Regions-no-misplaced-fill","op":"fill","target":{"sheet":"Regions","range":"A1:C3"},"expected":{"pattern":null}},
+    {"id":"Input-preserved","op":"unchanged","target":{"sheet":"Input","range":"A1:C8"},"original":"@input","properties":["value","font","fill","number_format"]},
+    {"id":"Reference-preserved","op":"unchanged","target":{"sheet":"Reference","range":"A1:H20"},"original":"@input","properties":["value","font","fill","number_format"]}
+  ],
+  "workflow_requirements": ["original byte identity preserved", "pre-repair report rejects actual stored styles", "post-repair report covers every requested scope", "independent frozen oracle passes", "actual DeliverFile receipt matches checked bytes", "truthful final scope"],
+  "attempt_policy": "One independent Task. Retain every error, permission intervention and actual result. Do not provide internal path, repair-code or expected-cell hints after submission; no repeated attempts to obtain a passing result. A preparation-consent reply within the existing authorization is recorded if needed."
+}
