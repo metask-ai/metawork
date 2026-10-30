@@ -491,6 +491,8 @@ export const enUS = {
   "skills.choose_again": "Choose again",
   "skills.install_scope": "Install for",
   "skills.preview_size": "{files} files · {size} bytes",
+  "skills.resource_context_notice":
+    "MetaWork adds resource-location instructions to the installed Skill and its exports. Other tools reading the same Skill folder will also see them. Your source files stay unchanged.",
   "skills.replace_title": "A Skill with this name already exists",
   "skills.replace_body":
     "Replace it only if you trust this package and want the existing Skill to be restored if verification fails.",

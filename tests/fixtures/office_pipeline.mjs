@@ -7,6 +7,7 @@ import { protocolTextSse } from "./provider_protocol.mjs";
 const [tracePath, mode, archive] = process.argv.slice(2);
 const workspace = dirname(tracePath);
 const resources = join(workspace, "resources");
+const skillResources = mode.startsWith("skill-resource-");
 mkdirSync(resources);
 const unpack = spawnSync(
   process.platform === "win32" ? "tar.exe" : "/usr/bin/tar",
@@ -90,6 +91,70 @@ function command() {
   }
   return "printf 'controlled-office-tool' > operation.txt; cat operation.txt";
 }
+function strings(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(strings);
+  if (value && typeof value === "object")
+    return Object.values(value).flatMap(strings);
+  return [];
+}
+function skillResponse(payload, results) {
+  const marker = "QA028_DIRECTORY_REFERENCE_7429";
+  if (
+    results.some(
+      (r) => !r.is_error && strings(r.content).join("\n").includes(marker),
+    )
+  ) {
+    trace({ kind: "skill-resource-read", success: true });
+    return protocolTextSse("anthropic", "QA_SKILL_OK_7429 " + marker);
+  }
+  const content = strings(payload.messages).join("\n");
+  const directory = content.match(/Skill resource directory: ([^\r\n]+)/)?.[1];
+  let name, input;
+  if (!directory && mode === "skill-resource-tool" && requests === 1) {
+    name = "Skill";
+    input = { name: "qa-resource-context" };
+  } else {
+    if (
+      !directory ||
+      !directory.includes("activation-") ||
+      directory.includes("${")
+    )
+      throw Error("Skill did not supply its materialized directory");
+    if (requests > 3) throw Error("Skill resource read did not complete");
+    name = "Read";
+    input = { file_path: join(directory, "qa-reference.txt") };
+    trace({ kind: "skill-resource-path", supplied_by_context: true });
+  }
+  return [
+    ...start(),
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "content_block_start",
+      index: 1,
+      content_block: {
+        type: "tool_use",
+        id: "resource-" + requests,
+        name,
+        input: {},
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+    },
+    { type: "content_block_stop", index: 1 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ]
+    .map(send)
+    .join("");
+}
 const server = createServer(async (request, response) => {
   try {
     const chunks = [];
@@ -112,6 +177,10 @@ const server = createServer(async (request, response) => {
       ? last.content.filter((part) => part.type === "tool_result")
       : [];
     trace({ kind: "request", requests, results });
+    if (skillResources) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      return response.end(skillResponse(payload, results));
+    }
     if (mode === "retry" && requests === 1) {
       response.writeHead(503, { "content-type": "application/json" });
       return response.end(

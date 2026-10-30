@@ -3605,3 +3605,97 @@ test "builtin replacement refuses malformed exhausted or closing authority witho
     runtime.beginShutdown();
     try std.testing.expectError(error.ExecutorShuttingDown, runtime.replaceBuiltinSource(.{ .root = root }, harness.budget()));
 }
+
+test "managed imports bind source grants and publish effective bytes through export and reimport" {
+    var harness: TestHarness = .{};
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    var source = std.testing.tmpDir(.{ .iterate = true });
+    defer source.cleanup();
+    var staging = std.testing.tmpDir(.{ .iterate = true });
+    defer staging.cleanup();
+    var output = std.testing.tmpDir(.{});
+    defer output.cleanup();
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var persistence: management.FileStore = .{ .io = std.testing.io, .dir = persistence_dir.dir };
+    const home_path = try home.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home_path);
+    const source_path = try source.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(source_path);
+    const staging_path = try staging.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(staging_path);
+    const output_path = try output.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(output_path);
+    const original = "---\nname: demo\ndescription: Demo\n---\nRead qa-reference.txt.\n";
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = original });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "resource marker" });
+    var preview = try package.previewDirectory(std.testing.io, std.testing.allocator, source.dir, .{});
+    defer preview.deinit();
+    var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
+        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
+        .max_workspaces = 1,
+        .canonical_user_home = home_path,
+    }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+    defer runtime.deinit();
+    const installed = try runtime.installDirectory(source_path, .{
+        .source_kind = .local_directory,
+        .scope = .personal,
+        .expected_invocation_name = preview.invocation_name,
+        .expected_content_hash = preview.content_hash,
+    }, 100);
+    const id = installed.install_id;
+    const asset = runtime.state.inventoryConst().findConst(id).?;
+    try std.testing.expect(!std.mem.eql(u8, &preview.content_hash, &asset.content_hash));
+    try std.testing.expectEqualSlices(u8, &asset.content_hash, &asset.recovery.?.candidate_hash.?);
+    const expected = try package.managedDefinition(std.testing.allocator, original);
+    defer std.testing.allocator.free(expected);
+    const source_bytes = try source.dir.readFileAlloc(std.testing.io, "SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
+    defer std.testing.allocator.free(source_bytes);
+    try std.testing.expectEqualStrings(original, source_bytes);
+    const managed_path = try std.fs.path.join(std.testing.allocator, &.{ home_path, ".agents", "skills" });
+    defer std.testing.allocator.free(managed_path);
+    var root = try management.CanonicalRoot.open(std.testing.io, std.testing.allocator, .personal, managed_path);
+    defer root.deinit();
+    const published = try root.dir.openDir(std.testing.io, "demo", .{ .iterate = true });
+    defer published.close(std.testing.io);
+    var actual = try package.previewDirectory(std.testing.io, std.testing.allocator, published, .{});
+    defer actual.deinit();
+    try std.testing.expectEqualStrings(expected, actual.definition);
+    try std.testing.expectEqualSlices(u8, &asset.content_hash, &actual.content_hash);
+    const marker = try published.readFileAlloc(std.testing.io, "qa-reference.txt", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(marker);
+    try std.testing.expectEqualStrings("resource marker", marker);
+    // Catalog behavior is separately qualified through real Core. This test
+    // isolates the file transaction and its source/effective hash invariants.
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, 101);
+    try runtime.state.transactions.?.commitReconciliation(&root, id, null, 101);
+    runtime.state.reconciliation = null;
+    const exported = try runtime.exportPackage(id, output_path);
+    const archive_path = try std.fs.path.join(std.testing.allocator, &.{ output_path, exported.fileName() });
+    defer std.testing.allocator.free(archive_path);
+    var exported_preview = try runtime.previewArchive(archive_path);
+    defer exported_preview.deinit();
+    try std.testing.expectEqualStrings(expected, exported_preview.definition);
+    try std.testing.expectEqualSlices(u8, &actual.content_hash, &exported_preview.content_hash);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "changed after preview" });
+    try std.testing.expectError(error.InvalidAsset, runtime.reimportDirectory(id, source_path, preview.invocation_name, preview.content_hash));
+    var unchanged = try package.previewDirectory(std.testing.io, std.testing.allocator, published, .{});
+    defer unchanged.deinit();
+    try std.testing.expectEqualSlices(u8, &actual.content_hash, &unchanged.content_hash);
+    _ = try runtime.reimportArchive(id, archive_path, exported_preview.invocation_name, exported_preview.content_hash);
+    const after = runtime.state.inventoryConst().findConst(id).?;
+    try std.testing.expectEqualSlices(u8, &actual.content_hash, &after.recovery.?.candidate_hash.?);
+    const reimported = try root.dir.openDir(std.testing.io, "demo", .{ .iterate = true });
+    defer reimported.close(std.testing.io);
+    var round_trip = try package.previewDirectory(std.testing.io, std.testing.allocator, reimported, .{});
+    defer round_trip.deinit();
+    try std.testing.expectEqualStrings(expected, round_trip.definition);
+    try std.testing.expectEqualSlices(u8, &actual.content_hash, &round_trip.content_hash);
+    var walker = try staging.dir.walk(std.testing.allocator);
+    defer walker.deinit();
+    try std.testing.expect((try walker.next(std.testing.io)) == null);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, 102);
+}

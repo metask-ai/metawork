@@ -105,6 +105,12 @@ pub fn build(b: *std.Build) void {
     office_pipeline_cases.addOptions("office_pipeline_options", office_pipeline_options);
     const office_pipeline_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-office-pipeline", .root_module = office_pipeline_cases }));
     b.step("test-office-pipeline", "Run canonical Core and Product Office event pipeline qualification").dependOn(&office_pipeline_tests.step);
+    const skill_resource_tests = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-skill-resource-context",
+        .root_module = office_pipeline_cases,
+        .filters = &.{"Skill resource context"},
+    }));
+    b.step("test-skill-resource-context", "Verify managed Skill resource reads through both canonical Core inputs").dependOn(&skill_resource_tests.step);
     artifacts.tests.step.dependOn(&office_pipeline_tests.step);
     const office_skill_shell = b.addExecutable(.{ .name = "office-skill-shell", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_skill_shell.zig"),

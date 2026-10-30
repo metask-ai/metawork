@@ -554,6 +554,8 @@ fn installSource(
     defer manifest.deinit();
     if (!std.mem.eql(u8, &manifest.content_hash, &input.expected_content_hash))
         return error.InvalidAsset;
+    var prepared = try prepareManagedSource(context, source, &manifest);
+    defer prepared.deinit(context.io);
     var root = try openManagedRoot(context, input.scope, canonical_base);
     defer root.deinit();
     const now = validTimestamp(now_unix_seconds) orelse return error.PersistenceFailed;
@@ -562,13 +564,13 @@ fn installSource(
         else => error.PersistenceFailed,
     };
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
-    const published = transactions.publish(&root, source, &manifest, .{
+    const published = transactions.publish(&root, prepared.dir, &prepared.manifest, .{
         .asset = .{
             .install_id = install_id,
             .source_kind = input.source_kind,
             .scope = input.scope,
             .target_entry = preview.invocation_name,
-            .content_hash = manifest.content_hash,
+            .content_hash = prepared.manifest.content_hash,
             .installed_at_unix_seconds = now,
         },
         .allow_replace = input.allow_replace,
@@ -613,10 +615,12 @@ fn reimportSource(
     defer manifest.deinit();
     if (!std.mem.eql(u8, &manifest.content_hash, &expected_content_hash))
         return error.InvalidAsset;
+    var prepared = try prepareManagedSource(context, source, &manifest);
+    defer prepared.deinit(context.io);
     var root = try openManagedRoot(context, scope, canonical_base);
     defer root.deinit();
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
-    transactions.reimport(&root, install_id, source, &manifest) catch |err| {
+    transactions.reimport(&root, install_id, prepared.dir, &prepared.manifest) catch |err| {
         recoverAfterFileFailure(context, &root, install_id, null, err);
         return err;
     };
@@ -626,6 +630,49 @@ fn reimportSource(
     };
     setReconciliation(context, install_id, scope, target_entry, .replace);
     return .{ .install_id = install_id, .verification_pending = true };
+}
+
+/// A private, verified snapshot, never a second discoverable Skill source.
+const ManagedSource = struct {
+    staging: std.Io.Dir,
+    name: [47]u8,
+    dir: std.Io.Dir,
+    manifest: package.Manifest,
+
+    fn deinit(self: *ManagedSource, io: std.Io) void {
+        self.manifest.deinit();
+        self.dir.close(io);
+        self.staging.deleteTree(io, &self.name) catch {};
+        self.staging.close(io);
+    }
+};
+
+fn prepareManagedSource(context: Context, source: std.Io.Dir, manifest: *const package.Manifest) Error!ManagedSource {
+    const staging = try openStagingRoot(context);
+    errdefer staging.close(context.io);
+    var random: [16]u8 = undefined;
+    std.Io.randomSecure(context.io, &random) catch return error.PersistenceFailed;
+    const hex = std.fmt.bytesToHex(random, .lower);
+    var name: [47]u8 = undefined;
+    @memcpy(name[0..15], ".skill-managed-");
+    @memcpy(name[15..], &hex);
+    staging.createDir(context.io, &name, privateDirectoryPermissions()) catch return error.PersistenceFailed;
+    errdefer staging.deleteTree(context.io, &name) catch {};
+    const candidate = staging.openDir(context.io, &name, .{ .follow_symlinks = false, .iterate = true }) catch return error.PersistenceFailed;
+    errdefer candidate.close(context.io);
+    try package.stageDirectory(context.io, source, candidate, manifest);
+    var copied = try package.previewDirectory(context.io, context.allocator, candidate, .{});
+    defer copied.deinit();
+    if (!std.mem.eql(u8, &copied.content_hash, &manifest.content_hash)) return error.InvalidAsset;
+    const definition = try package.managedDefinition(context.allocator, copied.definition);
+    defer context.allocator.free(definition);
+    candidate.writeFile(context.io, .{ .sub_path = "SKILL.md", .data = definition }) catch return error.WriteFailed;
+    return .{
+        .staging = staging,
+        .name = name,
+        .dir = candidate,
+        .manifest = try package.inspectDirectory(context.io, context.allocator, candidate, .{}),
+    };
 }
 
 fn openStagingRoot(context: Context) Error!std.Io.Dir {
