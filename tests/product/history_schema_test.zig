@@ -68,6 +68,7 @@ fn modelErrorFixture() history.wire.ModelErrorWire {
         .truncated = true,
         .host_redacted = false,
         .host_truncated = true,
+        .source = .metask,
     };
 }
 
@@ -143,6 +144,7 @@ test "model error history survives restart and credential sanitization with exac
     try std.testing.expectEqual(std.math.maxInt(u64), detail.run_id);
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), detail.retry_after_ms);
     try std.testing.expectEqual(.authentication, detail.category);
+    try std.testing.expectEqual(.metask, detail.source.?);
     // Enum names are structure even when a credential has the same bytes.
     try std.testing.expect(!try history.wire.security.contains(a, detail, "authentication"));
     inline for (.{ "[]", "{}", "null", "invalid" }) |raw| {

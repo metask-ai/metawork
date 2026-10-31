@@ -9376,6 +9376,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   cursor: pointer;
   width: fit-content;
 }
+.model-error-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.run-diagnostics .task-facts > div {
+  flex-wrap: wrap;
+}
+.run-diagnostics .task-facts dd {
+  min-width: 0;
+}
 .task-facts {
   display: grid;
   gap: 8px;

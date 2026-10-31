@@ -778,6 +778,7 @@ pub const BindingWire = struct {
 pub const OperationWire = struct { kind: []const u8, id: u64 };
 
 pub const ModelErrorWire = struct {
+    source: ?task_state.RunModelError.Source = null,
     run_id: u64,
     category: agent.ModelError.Category,
     code: ?[]const u8,
@@ -795,6 +796,7 @@ pub const ModelErrorWire = struct {
     pub fn fromRecord(record: *const task_state.RunModelError) ModelErrorWire {
         const value = record.detail.view();
         return .{
+            .source = record.source,
             .run_id = value.run_id,
             .category = value.category,
             .code = value.code,
@@ -812,7 +814,7 @@ pub const ModelErrorWire = struct {
     }
 
     pub fn toRecord(self: ModelErrorWire) error{InvalidModelError}!task_state.RunModelError {
-        return .{ .detail = try agent.ModelError.init(.{
+        return .{ .source = self.source, .detail = try agent.ModelError.init(.{
             .run_id = self.run_id,
             .category = self.category,
             .code = self.code,

@@ -989,6 +989,7 @@ function finishWithPendingContinuation(fixture) {
       outcome: "completed",
       cause: null,
       diagnosticDisposition: "absent",
+      modelError: null,
     },
     additionalInputs: [
       {
@@ -1134,6 +1135,7 @@ test("App uncertain submission is retained as a message and never replays on com
       outcome: "completed",
       cause: null,
       diagnosticDisposition: "absent",
+      modelError: null,
     },
   });
   await fixture.publish();
@@ -1193,6 +1195,7 @@ test("App idle follow-up addresses only Task when currentRunId is zero", async (
       outcome: "completed",
       cause: null,
       diagnosticDisposition: "absent",
+      modelError: null,
     },
   });
   await fixture.publish();

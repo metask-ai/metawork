@@ -413,7 +413,9 @@ pub const PendingInterruption = enum(u8) {
 
 /// Owned safe observation, separate from the decision about the Run outcome.
 pub const RunModelError = struct {
+    pub const Source = models_contract.Source;
     detail: agent.ModelError,
+    source: ?Source = null,
     host_redacted: bool = false,
     host_truncated: bool = false,
 };
@@ -984,6 +986,7 @@ pub const RunRecord = struct {
     /// Reserved before execution; publication only copies into this owned value.
     /// Restored history allocates it only when a model error is present.
     model_error_storage: ?*RunModelError = null,
+    model_error_source: ?models_contract.Source = null,
     initial_credentials: [2][]const u8 = .{ &.{}, &.{} },
     /// Main-thread view of every version that may still reach this operation.
     /// Workers use initialRedactionSecrets and their owned request copies;

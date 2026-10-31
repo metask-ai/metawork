@@ -509,8 +509,61 @@ test("Run submitted time is nullable, bounded, and valid before completion", () 
 });
 
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
-  return { outcome, cause, diagnosticDisposition };
+  return { outcome, cause, diagnosticDisposition, modelError: null };
 }
+
+test("model error details accept the Host fixture and reject malformed or authority-expanding shapes", () => {
+  const detail = JSON.parse(
+    readFileSync(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  const run = task.runs[0];
+  run.phase = "failed";
+  run.activity = null;
+  run.terminal = {
+    ...terminal("failed", "provider_failure"),
+    modelError: detail,
+  };
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(value).tasks[0].runs[0].terminal.modelError,
+    detail,
+  );
+  for (const patch of [
+    { agentRunId: "0" },
+    { agentRunId: "01" },
+    { category: "future" },
+    { message: "é".repeat(513) },
+    { code: "x".repeat(129) },
+    { attempts: "0" },
+    { attempts: "4294967296" },
+    { retryAfterMs: "18446744073709551616" },
+    { httpStatus: -1 },
+    { retry: "yes" },
+    { hostRedacted: "true" },
+    { source: "custom_provider", recovery: "account_settings" },
+    { extra: true },
+  ]) {
+    run.terminal.modelError = { ...detail, ...patch };
+    assert.throws(() => decodeWorkbenchSnapshot(value), /modelError/);
+  }
+  run.terminal = {
+    ...terminal("failed", "event_pipeline_failure"),
+    modelError: { ...detail, recovery: "none" },
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  run.terminal.modelError.recovery = "account_settings";
+  assert.throws(() => decodeWorkbenchSnapshot(value), /supplemental/);
+  run.terminal = terminal("failed", "provider_failure");
+  delete run.terminal.modelError;
+  assert.throws(() => decodeWorkbenchSnapshot(value), /expected keys/);
+});
 
 test("typed Bash presentation rejects contradictory or malformed detail", () => {
   const candidate = clone(fixture);

@@ -8,6 +8,8 @@
 
 ## 状态与证据纪律
 
+Product 模型错误的验证按 owner 分层：Agent/Task execution 验证 owned 捕获、释放后有效性与终态优先级；Host/SQL 验证首次与后续凭据清洗、追加迁移、冷恢复、提交不确定和旧版本拒写；共享 fixture 与严格 decoder 验证 nullable 详情、独立 diagnostic 语义、整数边界和恢复建议；Renderer 验证本地化分类、默认折叠、纯文本显示、草稿保留和显式操作。真实桌面验收必须跨 canonical AgentCore、Product、Bridge、Renderer 和 SQLite 重启，不能由各层合成 fixture 互相替代。`.store` 退役验收比较原始字节，并验证 SQL 存在时不读取、不清洗、不合并或重写旧文件。
+
 | 状态           | 含义                                                                         |
 | -------------- | ---------------------------------------------------------------------------- |
 | 已验证         | 在精确 revision、平台和 artifact 上有可定位执行证据；不自动证明后续 revision |

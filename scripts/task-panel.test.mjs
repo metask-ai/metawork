@@ -143,7 +143,7 @@ function terminal(
   cause = null,
   diagnosticDisposition = "absent",
 ) {
-  return { outcome, cause, diagnosticDisposition };
+  return { outcome, cause, diagnosticDisposition, modelError: null };
 }
 
 function run(overrides = {}) {
@@ -3163,6 +3163,106 @@ test("provider failure details open for the exact historical Run", async () => {
   await user.click(summary);
   assert.equal(screen.queryByText("historical-model"), null);
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
+});
+
+test("model error notices expose safe details and explicit settings without sending a retry", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  detail.message = "<img src=x onerror=alert(1)>";
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        terminal: {
+          ...terminal("failed", "provider_failure"),
+          modelError: detail,
+        },
+      }),
+    ],
+  });
+  const opened = [],
+    prepared = [];
+  render(
+    taskContentElement(value, "1", {
+      retryAvailable: true,
+      synchronized: true,
+      onOpenSettings: (target) => opened.push(target),
+      onPrepareRetry: (input) => prepared.push(input),
+    }),
+  );
+  assert.ok(screen.getByText("Model service rejected the credential"));
+  assert.equal(screen.queryByText(detail.message), null);
+  await user.click(
+    screen.getByRole("button", { name: "Open account settings" }),
+  );
+  assert.deepEqual(opened, ["account"]);
+  assert.equal(prepared.length, 0);
+  const summary = screen.getByText("View run details");
+  await user.click(summary);
+  assert.ok(screen.getByText(detail.message));
+  assert.equal(summary.closest("details").querySelector("img"), null);
+  assert.ok(screen.getByText("future-code"));
+  assert.ok(screen.getByText("18446744073709551615 ms"));
+  assert.ok(
+    screen.getByText("MetaWork removed sensitive content from this detail."),
+  );
+  assert.ok(
+    screen.getByText(
+      "No separate internal diagnostic accompanied this model error.",
+    ),
+  );
+  await user.click(summary);
+  assert.equal(screen.queryByText(detail.message), null);
+  await user.click(
+    screen.getByRole("button", { name: "Copy instruction to Composer" }),
+  );
+  assert.equal(prepared.length, 1);
+});
+
+test("supplemental model errors retain the primary failure and do not offer account recovery", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  detail.recovery = "none";
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        terminal: {
+          ...terminal("failed", "event_pipeline_failure"),
+          modelError: detail,
+        },
+      }),
+    ],
+  });
+  render(
+    taskContentElement(value, "1", {
+      synchronized: true,
+      onOpenSettings() {
+        throw new Error("must not recover a supplemental error");
+      },
+    }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Open account settings" }),
+    null,
+  );
+  await user.click(screen.getByText("View run details"));
+  assert.ok(
+    screen.getByText(
+      "This model error is an additional observation; the run ended for the reason shown above.",
+    ),
+  );
+  assert.ok(screen.getByText(detail.message));
 });
 
 test("inline diagnostics stay absent for other failures and preserve safe exact Run facts", async () => {

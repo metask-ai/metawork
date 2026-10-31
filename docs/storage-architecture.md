@@ -1,6 +1,6 @@
 # MetaWork Storage 架构
 
-> 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；Application 与 Product 尚未接入
+> 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；正式历史接线与业务合同见 [Product 架构](product-architecture.md#43-workbench-historystore)
 
 本文定义 MetaWork 自有的 SQLite 基础存储能力。Storage 只提供无业务语义的 SQL、事务、迁移和数据库生命周期机制；基础能力完成不等于批准迁移或接入任何现有 Product 数据。
 
@@ -11,7 +11,7 @@ Storage 的顶层边界见[高层架构](architecture.md)，源码 owner 见[工
 当前实现直接链接固定版本的 SQLite，并通过 backend-neutral contract 隔离 C API：
 
 ```text
-future Product owner
+Product owner
   └─ owns schema and migration SQL
        ↓
 MetaWork Storage SQL contract
@@ -42,7 +42,7 @@ Storage 拥有：
 
 Storage 不拥有业务表、Product health/retry/recovery policy、应用数据目录、production identity 或顶层启动顺序。`src/storage/sql.zig` 不得导入 Product、Application、Bridge、Renderer、Native SDK 或 SQLite C 类型；SQLite C 值只存在于 concrete backend 内。
 
-未来 Product owner 采用 SQL 时必须另行定义 schema、migration 内容、恢复和业务并发不变量。未来 backend adapter 必须完整满足本合同；不得以兼容层、双写或静默 fallback 弱化合同。
+Product owner 定义 schema、migration 内容、恢复和业务并发不变量，当前产品历史由 Product 架构定义。未来 backend adapter 必须完整满足本合同；不得以兼容层、双写或静默 fallback 弱化合同。
 
 模块 owner 固定为：
 

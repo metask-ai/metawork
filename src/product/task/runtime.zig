@@ -5187,7 +5187,7 @@ pub const Runtime = struct {
         writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
         if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
-        try task_view.writeRunManifest(writer, task);
+        try task_view.writeRunManifest(writer, effects.text, task);
         writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
         try task_view.writeProjection(writer, .{
             .task = task,
@@ -8214,6 +8214,7 @@ fn reserveRun(
         .initial_credentials = .{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} },
         .execution = run_execution,
         .model_error_storage = model_error_storage,
+        .model_error_source = if (std.mem.eql(u8, execution.target.provider_id, models_contract.metask_source_id)) .metask else .custom_provider,
     };
     return slot;
 }

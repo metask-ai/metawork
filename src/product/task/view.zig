@@ -257,7 +257,40 @@ pub fn writeSummary(writer: *std.Io.Writer, task: *const task_state.Task, text: 
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-pub fn writeRunManifest(writer: *std.Io.Writer, task: *const task_state.Task) Error!void {
+fn writeModelError(writer: *std.Io.Writer, text: TextProjection, observation: ?*const task_state.RunModelError, cause: ?task_state.RunCause) Error!void {
+    const detail = observation orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    const value = detail.detail.view();
+    var redacted = detail.host_redacted or text.containsSensitive(value.message);
+    writer.print("{{\"agentRunId\":\"{d}\",\"category\":\"{s}\",\"message\":", .{ value.run_id, @tagName(value.category) }) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, value.message);
+    inline for (.{ .{ "code", "code" }, .{ "type", "type" }, .{ "request_id", "requestId" } }) |field| {
+        writer.writeAll(",\"" ++ field[1] ++ "\":") catch return error.SnapshotTooLarge;
+        if (@field(value, field[0])) |content| {
+            redacted = redacted or text.containsSensitive(content);
+            try text.writeJson(writer, content);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+    writer.writeAll(",\"httpStatus\":") catch return error.SnapshotTooLarge;
+    if (value.http_status) |status| writer.print("{d}", .{status}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"retry\":\"{s}\",\"retryAfterMs\":", .{@tagName(value.retry)}) catch return error.SnapshotTooLarge;
+    if (value.retry_after_ms) |delay| writer.print("\"{d}\"", .{delay}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"attempts\":\"{d}\",\"truncated\":{},\"hostRedacted\":{},\"hostTruncated\":{},\"source\":", .{ value.attempts, value.truncated, redacted, detail.host_truncated }) catch return error.SnapshotTooLarge;
+    if (detail.source) |source| jsonValue(writer, @tagName(source)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"recovery\":\"{s}\"}}", .{@tagName(task_policy.modelErrorRecovery(detail, cause))}) catch return error.SnapshotTooLarge;
+}
+
+fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_state.RunRecord, terminal: task_state.ProductTerminalFacts) Error!void {
+    writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
+    if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"diagnosticDisposition\":\"{s}\",\"modelError\":", .{@tagName(terminal.diagnostic_disposition)}) catch return error.SnapshotTooLarge;
+    try writeModelError(writer, text, task_state.terminalPayload(run).?.model_error, terminal.cause);
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
     writer.writeByte('[') catch return error.SnapshotTooLarge;
     var count: usize = 0;
     for (task.durable.runs) |*entry| {
@@ -268,9 +301,7 @@ pub fn writeRunManifest(writer: *std.Io.Writer, task: *const task_state.Task) Er
         if (run.projection_content_version == 0) return error.SnapshotTooLarge;
         writer.print("{{\"id\":\"{d}\",\"contentVersion\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"terminal\":", .{ run.id, run.projection_content_version, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
         if (facts.terminal) |terminal| {
-            writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(terminal.outcome)}) catch return error.SnapshotTooLarge;
-            if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.print(",\"diagnosticDisposition\":\"{s}\"}}", .{@tagName(terminal.diagnostic_disposition)}) catch return error.SnapshotTooLarge;
+            try writeTerminal(writer, text, run, terminal);
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
@@ -769,14 +800,7 @@ pub fn writeRun(
     try writeRunActivity(writer, projection.activity);
     writer.writeAll(",\"terminal\":") catch return error.SnapshotTooLarge;
     if (terminal) |value| {
-        writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(value.outcome)}) catch
-            return error.SnapshotTooLarge;
-        if (value.cause) |cause|
-            jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"diagnosticDisposition\":\"{s}\"}}", .{@tagName(value.diagnostic_disposition)}) catch
-            return error.SnapshotTooLarge;
+        try writeTerminal(writer, text_projection, run, value);
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
         run.usage.input_tokens,

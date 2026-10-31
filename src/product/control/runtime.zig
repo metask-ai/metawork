@@ -18878,6 +18878,46 @@ test "published model errors are scrubbed against Account credentials before ter
     try std.testing.expectEqual(.authentication, value.category);
 }
 
+test "model error projection matches the shared Renderer fixture after Host credential cleaning" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+        .run_id = 900,
+        .category = .authentication,
+        .message = "SECRET-KEY credential rejected",
+        .code = "future-code",
+        .type = "",
+        .request_id = "req-fixture",
+        .http_status = 200,
+        .retry = .unknown,
+        .retry_after_ms = std.math.maxInt(u64),
+        .attempts = 2,
+        .truncated = true,
+    }) };
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    run.terminal_payload.model_error = storage;
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    detachTaskForTest(&control, task);
+    var bytes: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&bytes);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer actual.deinit();
+    const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("model_error.fixture"), .{});
+    defer expected.deinit();
+    const projected = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("modelError").?;
+    inline for (.{ "agentRunId", "category", "message", "code", "type", "requestId", "retry", "retryAfterMs", "attempts", "source", "recovery" }) |field|
+        try std.testing.expectEqualStrings(expected.value.object.get(field).?.string, projected.object.get(field).?.string);
+    inline for (.{ "truncated", "hostRedacted", "hostTruncated" }) |field|
+        try std.testing.expectEqual(expected.value.object.get(field).?.bool, projected.object.get(field).?.bool);
+    try std.testing.expectEqual(expected.value.object.get("httpStatus").?.integer, projected.object.get("httpStatus").?.integer);
+}
+
 test "Renderer transport failures never own Agent Run termination" {
     const cases = [_]struct {
         stage: TransportFailureStage,
@@ -21015,7 +21055,7 @@ test "projection failure after Agent terminal becomes a product failure" {
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8 }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -21081,7 +21121,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }

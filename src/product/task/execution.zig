@@ -520,6 +520,7 @@ pub fn commitRunTerminal(
             .model_error = if (model_error) |value| saved: {
                 const storage = run.model_error_storage.?;
                 storage.* = value;
+                storage.source = run.model_error_source;
                 break :saved storage;
             } else null,
         };
