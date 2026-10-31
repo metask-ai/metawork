@@ -237,6 +237,10 @@ test "Metask renewal defers when checkpoint starts after its state observation" 
     try characterizeCredentialExpiry(.checkpoint_rotation);
 }
 
+test "Metask idle renewal does not self-wake while history maintenance is not ready" {
+    try characterizeCredentialExpiry(.retirement_not_ready);
+}
+
 test "Metask waiting approval Run resumes with the renewed credential" {
     try characterizeCredentialExpiry(.waiting_ui_rotation);
 }
@@ -275,7 +279,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.finishAccountCommitNoFail();
 }
 
-const Scenario = enum { checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const rotate = scenario != .expiry;
@@ -488,8 +492,30 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         if (scenario == .update_rejected or scenario == .update_contract or scenario == .active_update_rejected) {
             fake_core.forced_update_credential_status = if (scenario == .update_contract) fixture.wire.STATUS_BUSY else fixture.wire.STATUS_INVALID_ARGUMENT;
         }
+        const previous_credentials = control.task_persistence.credentials_fn;
+        defer control.task_persistence.credentials_fn = previous_credentials;
+        if (scenario == .retirement_not_ready) control.task_persistence.credentials_fn = struct {
+            fn credentials(_: ?*anyopaque, _: []const []const u8, _: bool, _: fixture.product_task.history.CredentialScrub) fixture.product_task.history.CredentialStatus {
+                return .{ .epoch = 1, .ready = false };
+            }
+        }.credentials;
         coordinator.authorizationChanged();
         try drainCatalog(&coordinator);
+        if (scenario == .retirement_not_ready) {
+            for (0..32) |_| {
+                if (wake_loop.pending.load(.acquire) == 0) break;
+                try wake_loop.drain(&control);
+            } else return error.CredentialRetirementDidNotQuiesce;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(@as(usize, 0), old.runtime.executionConst().?.retired_credentials.items.len);
+            try std.testing.expectEqual(.write_failed, control.task_persistence_health);
+            const security_epoch = control.projectionSecurityEpoch();
+            for (0..3) |_| try control.drainAgentEvents();
+            try std.testing.expectEqual(security_epoch, control.projectionSecurityEpoch());
+            try std.testing.expectEqual(@as(usize, 0), wake_loop.pending.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
+            return;
+        }
         if (scenario == .checkpoint_rotation) {
             try std.testing.expect(!checkpoint_rotation_allocator.armed);
             try std.testing.expect(old.runtime.credential_renewal_deferred);

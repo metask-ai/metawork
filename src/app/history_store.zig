@@ -65,6 +65,39 @@ test "SQLite history credential allocation failures keep security incomplete" {
     }
 }
 
+test "SQLite history pending maintenance owns a credential after its execution copy retires" {
+    const a = std.testing.allocator;
+    const secret = "retired-execution-fixture";
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, secret);
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+    const execution_copy = try a.dupe(u8, secret);
+    defer a.free(execution_copy);
+    // Failure to prepare the SQL maintenance transaction leaves it pending.
+    store.random_fault = true;
+    try std.testing.expect(!store.syncCredentials(&.{execution_copy}, true, .{}).ready);
+    std.crypto.secureZero(u8, execution_copy);
+    try std.testing.expect(!store.syncCredentials(&.{}, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 1), store.credentials.items.len);
+    const held = store.credentials.items[0];
+    try std.testing.expect(!held.retained and held.pending);
+    try std.testing.expectEqualStrings(secret, held.bytes[0..held.length]);
+    store.random_fault = false;
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 0), store.credentials.items.len);
+    const loaded = try product.loadHistory(arena.allocator(), a, store.database.?.capability(), store.limits);
+    try std.testing.expect(!try wire.security.contains(a, loaded.value, secret));
+}
+
 pub const Store = struct {
     io: std.Io,
     allocator: std.mem.Allocator,

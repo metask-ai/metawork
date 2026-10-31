@@ -1376,7 +1376,6 @@ pub const Runtime = struct {
     view_credentials: ?[]const []const u8 = null,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
-    history_credential_maintenance_ready: bool = true,
     learned_renewal: ?control_ports.MetaskAuthorization = null,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
@@ -9901,7 +9900,6 @@ pub const Runtime = struct {
             complete = false;
         };
         const status = self.task_persistence.credentials(collected.values.items, complete, .{ .context = self, .apply_fn = scrubPreservedHistory });
-        self.history_credential_maintenance_ready = status.ready;
         self.task_persistence.security_epoch = status.epoch;
         // Maintenance is also not ready while the original transaction is
         // unresolved. Keep that stronger fact visible until token resolution.
@@ -10672,7 +10670,8 @@ pub const Runtime = struct {
             if (reviewing) continue;
             while (self.task_runtime.retiredCredential(task.durable.id)) |value| {
                 self.retireProjectionCredential(value);
-                if (!self.history_credential_maintenance_ready) break;
+                // Unfinished history maintenance owns its own secret copy.
+                // Do not reissue retirement and its wake on every drain.
                 self.task_runtime.releaseRetiredCredential(task.durable.id);
             }
         };
