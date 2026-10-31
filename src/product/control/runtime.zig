@@ -6574,7 +6574,7 @@ pub const Runtime = struct {
                 if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
                 const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
                 run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
-                if (run.terminal_payload.model_error) |*observation| {
+                if (run.terminal_payload.model_error) |observation| {
                     const message = &observation.detail.message;
                     observation.host_redacted = self.redactWithKnownCredentialsNoFail(message.bytes[0..message.len]) or observation.host_redacted;
                     inline for (.{ "code", "type", "request_id" }) |field| {
@@ -18855,7 +18855,9 @@ test "published model errors are scrubbed against Account credentials before ter
     control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
-    run.terminal_payload.model_error = .{ .detail = try lifecycle.ModelError.init(.{
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .detail = try lifecycle.ModelError.init(.{
         .run_id = 42,
         .category = .authentication,
         .message = "LATE-SECRET SECRET-KEY",
@@ -18865,8 +18867,9 @@ test "published model errors are scrubbed against Account credentials before ter
         .retry = .unknown,
         .attempts = 1,
     }) };
+    run.terminal_payload.model_error = storage;
     control.markTerminalRunsBeforeEventDrain();
-    const observation = &run.terminal_payload.model_error.?;
+    const observation = run.terminal_payload.model_error.?;
     try std.testing.expect(observation.host_redacted);
     const value = observation.detail.view();
     try std.testing.expect(std.mem.indexOf(u8, value.message, "SECRET") == null);

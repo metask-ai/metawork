@@ -517,7 +517,11 @@ pub fn commitRunTerminal(
             .diagnostic_len = projected.len,
             .diagnostic_truncated = source_diagnostic_truncated or projected.truncated,
             .diagnostic_redacted = projected.redacted,
-            .model_error = model_error,
+            .model_error = if (model_error) |value| saved: {
+                const storage = run.model_error_storage.?;
+                storage.* = value;
+                break :saved storage;
+            } else null,
         };
         run.terminal_publication.store(.published, .release);
         return true;
@@ -883,6 +887,7 @@ test "callback diagnostic enrichment preserves terminal decisions and bounded cr
 test "model error publication owns sanitized fields and preserves primary and supplemental terminal facts" {
     for ([_]bool{ false, true }) |callback_failed| {
         var storage: [32]u8 = undefined;
+        var model_error_storage: state.RunModelError = undefined;
         var run: state.RunRecord = .{
             .id = 7,
             .generation = 1,
@@ -895,6 +900,7 @@ test "model error publication owns sanitized fields and preserves primary and su
             .commentary_ends = &.{},
             .tools = &.{},
             .terminal_diagnostic = &storage,
+            .model_error_storage = &model_error_storage,
             .initial_credentials = .{ "SECRET", "SECRET-LONG" },
         };
         var result: agent.TerminalResult = .{
@@ -927,7 +933,7 @@ test "model error publication owns sanitized fields and preserves primary and su
         try std.testing.expect(commitAgentTerminal(.{ .project_fn = projectSanitized }, &run, &result));
         result.deinit();
         const terminal = state.terminalPayload(&run).?;
-        const observation = &terminal.model_error.?;
+        const observation = terminal.model_error.?;
         const detail = observation.detail.view();
         try std.testing.expectEqual(@as(u64, 900), detail.run_id);
         try std.testing.expectEqual(.authentication, detail.category);

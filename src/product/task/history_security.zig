@@ -79,6 +79,8 @@ pub fn redact(allocator: std.mem.Allocator, value: anytype, secret: []const u8) 
             inline for (info.fields) |field| if (comptime !structural(T, field.name)) {
                 @field(result, field.name) = try redact(allocator, @field(value, field.name), secret);
             };
+            if (comptime T == wire.ModelErrorWire)
+                result.host_redacted = value.host_redacted or try contains(allocator, value, secret);
             break :blk result;
         },
         .optional => if (value) |item| try redact(allocator, item, secret) else null,
@@ -156,7 +158,12 @@ fn typedJson(comptime T: type, allocator: std.mem.Allocator, value: *std.json.Va
                     result.value_ptr.* = entry.value_ptr.*;
                 }
             }
-            if (editing) value.object = replacement;
+            if (editing) {
+                value.object = replacement;
+                if (comptime T == wire.ModelErrorWire) {
+                    if (changed) try value.object.put(allocator, "host_redacted", .{ .bool = true });
+                }
+            }
             break :blk changed;
         } else try jsonStrings(allocator, value, secret, editing, depth + 1),
         else => false,

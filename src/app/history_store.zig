@@ -1186,7 +1186,7 @@ test "SQLite history newer schema cannot be replaced through recovery" {
             defer store.deinit();
             if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
         }
-        const newer = product.history_migrations[0..1].* ++ [_]storage.sql.Migration{.{ .version = 2, .name = "future_history", .sql = if (json_marker) "-- Typed JSON acceptance changed, no DDL required.\nSELECT 1;" else "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
+        const newer = product.history_migrations[0..product.history_migrations.len].* ++ [_]storage.sql.Migration{.{ .version = product.history_migrations.len + 1, .name = "future_history", .sql = if (json_marker) "-- Typed JSON acceptance changed, no DDL required.\nSELECT 1;" else "CREATE TABLE future_history(value INTEGER NOT NULL) STRICT;" }};
         const database = try storage.sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
         try database.destroy();
         var store = try Store.init(std.testing.io, a, directory);

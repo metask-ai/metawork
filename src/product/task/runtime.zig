@@ -6765,7 +6765,7 @@ fn redactTaskProjection(
                 run.terminal_diagnostic[0..mutable.diagnostic_len],
                 credential,
             ) or mutable.diagnostic_redacted;
-            if (mutable.model_error) |*observation| redactModelError(observation, credential, effects);
+            if (mutable.model_error) |observation| redactModelError(observation, credential, effects);
         }
         if (run.execution != null and run.execution.?.automatic_title.state.load(.acquire) == .ready and
             run.execution.?.automatic_title.generated)
@@ -8186,6 +8186,8 @@ fn reserveRun(
     @memset(additional, null);
     const run_execution = try self.allocator.create(task_state.RunExecution);
     errdefer self.allocator.destroy(run_execution);
+    const model_error_storage = try self.allocator.create(task_state.RunModelError);
+    errdefer self.allocator.destroy(model_error_storage);
     run_execution.* = .{};
     task.durable.next_run_generation += 1;
     var title = task_state.AutomaticTitle{};
@@ -8211,6 +8213,7 @@ fn reserveRun(
         .terminal_diagnostic = diagnostic,
         .initial_credentials = .{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} },
         .execution = run_execution,
+        .model_error_storage = model_error_storage,
     };
     return slot;
 }
@@ -9180,6 +9183,10 @@ fn deinitRun(
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
     releaseProjectedSlice(self, effects, run.terminal_diagnostic);
+    if (run.model_error_storage) |storage| {
+        std.crypto.secureZero(u8, std.mem.asBytes(storage));
+        self.allocator.destroy(storage);
+    }
     run.* = undefined;
 }
 

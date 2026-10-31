@@ -322,7 +322,7 @@ Agent 保持既有校验和执行生命周期。Product Task 保存观察、决�
 
 ### 10.3 Run 记录与终态语义
 
-Run 为可空模型错误预留固定容量，按值复制 Agent 公共 `ModelError`，复用其字段和容量定义，不复制 SDK arena、Session 存储或借用 view，也不另建可扩容错误正文。Host 清洗所需的固定缓冲和结果构造保持同样的容量边界。
+Run 在准入时为可空模型错误预留固定容量的独立 owned 存储，终态按值复制 Agent 公共 `ModelError`；冷历史仅为实际存在的错误分配该值，保持 RunRecord 本体的既有内存上限。复用 Agent 字段和容量定义，不复制 SDK arena、Session 存储或借用 view，也不另建可扩容错误正文。Host 清洗所需的固定缓冲和结果构造保持同样的容量边界。
 
 记录保留 category、code、type、message、HTTP status、request ID、retry、retry-after、attempts、上游 truncated 及 Agent Run identity，并额外表达 Host 清洗与 Host 截断事实。模型错误的 Agent Run identity 只是执行来源，不成为 Task 路由，不假设与 Product Run ID 数值相等。恢复入口使用既有的无 secret 来源事实；确需补充时只冻结最小来源身份，不保存 credential locator、凭据或第二份 ExecutionConfig。
 

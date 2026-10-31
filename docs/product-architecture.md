@@ -391,7 +391,7 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 ### 3.1 产品视图与执行推进
 
-Product 在 Agent 结果释放前，将合法 `model_error` 按值保存到 Run 的固定容量终态记录；其容量复用 Agent 公共错误值，不借用 Session 或 SDK 存储。Host 使用既有 credential projector 清洗 message、code、type 与 request ID，分别保留上游截断和 Host 清洗/截断事实；后续首次获知、替换或释放凭据时再次清洗。该观察不改变 Agent 执行结果、Session disposition 或 Product 原有终态优先级；普通 ABI/callback 或后续 pipeline/合同失败附带的合法观察仅作补充。Agent Run identity 只作执行来源，不成为 Product 路由。错误正文不进入日志或 event pump，不从 diagnostic 反推详情。
+Run 准入时预留固定容量的独立 owned 错误存储，Product 在 Agent 结果释放前按值复制合法 `model_error` 并随终态一次性发布；捕获不新增分配失败点，Run 关闭静止后唯一释放。其容量复用 Agent 公共错误值，不借用 Session 或 SDK 存储；冷历史仅为实际存在的错误分配该固定值，保持历史记录本体的既有内存上限。Host 使用既有 credential projector 清洗 message、code、type 与 request ID，分别保留上游截断和 Host 清洗/截断事实；后续首次获知、替换或释放凭据时再次清洗。该观察不改变 Agent 执行结果、Session disposition 或 Product 原有终态优先级；普通 ABI/callback 或后续 pipeline/合同失败附带的合法观察仅作补充。Agent Run identity 只作执行来源，不成为 Product 路由。错误正文不进入日志或 event pump，不从 diagnostic 反推详情。
 
 Product aggregate 独占产品事实、局部事务和执行资格。Product Control 投影只读取已经提交的事实，生成用于展示的摘要、页面上下文、当前 Task 和有界历史，不接纳 Run、不推进 lifecycle、不提交历史。Bridge 可达的版本、Workspace、Task、catalog、permission 与视图查询适用同一约束。Application 按明确 command、Agent event、worker completion 和 lifecycle wake 安排业务推进；有无 Renderer、读频率、分块和重试不得改变必要的推进路径。
 
@@ -458,6 +458,8 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 ### 4.3 `workbench-history.store`
 
 `<MetaWork data dir>/workbench/workbench-history.sqlite` 是 Workspace 与 Task 产品历史的唯一 canonical store。Application 在 restore 前取得进程级 OS writer lock，拥有具体 Storage Database 和文件生命周期；Product Control 拥有 schema、逐行增量提交、跨记录校验与健康状态。普通业务提交不得写回旧 framed store，不双写。所有借用和历史 worker 收口后才关闭 Database。
+
+Run 模型错误作为可空 typed 附属值与该 Run 的终态在同一历史事务保存；保留安全文本、执行来源、typed 分类、请求重试事实及上游/Host 清洗截断事实。旧 SQL 和首次导入的旧 Run 缺少该值时恢复为 null，不从诊断文本重建。恢复只重建观察，不执行登录、支付、请求或工具；当前操作资格不得从历史错误继承。字段继续参与 SQL、只读/保留 payload 和候选的统一 credential 检查与再清洗，实际清洗须保留 Host redacted 事实。持久化通过追加迁移扩展已发布身份，不改写既有迁移。
 
 Run 的成果元数据只能由 Agent 已验证的独立 Host 回执登记；普通工具文字、文件引用和 File Changes 不构成成果。记录归属其 Task/Run 与 Workspace，只保存非零成果身份、Workspace 相对 locator、交付时的大小和 SHA-256，不保存文件字节或组件版本。相同身份与相同内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。记录随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
 
