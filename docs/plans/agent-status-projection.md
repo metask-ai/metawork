@@ -2,7 +2,7 @@
 
 本轮修复活动提示的错误覆盖与收口规则，并保留能够帮助用户理解工作的活动信息。复用现有 RunPhase、RunActivity、正文和 Tool records：生命周期决定任务是否在运行、等待或结束；活动提示表达当前运行过程的最近已知工作；正文和工具记录承载具体证据。
 
-方案已通过两轮评审，无阻塞项；实现和验收仍待完成。本文是实施计划，不是 decision record 或已验证实现的描述。状态消费、wire、呈现和验证分别遵守 [AgentCore 集成契约](../agentcore-integration.md)、[Renderer Bridge 合同](../renderer-bridge-contract.md)、[UI 设计规范](../ui-design.md) 和 [验证规范](../validation.md)。实施时同步收口与本方案不一致的现有改动和真源章节。
+方案经两轮评审通过，无阻塞项。本文记录实施范围与验收要求，不是 decision record，也不作为实现已经通过验证的证据。状态消费、wire、呈现和验证分别遵守 [AgentCore 集成契约](../agentcore-integration.md)、[Renderer Bridge 合同](../renderer-bridge-contract.md)、[UI 设计规范](../ui-design.md) 和 [验证规范](../validation.md)。实施变更须同步收口与本方案不一致的现有改动和真源章节。
 
 ## 1 复盘结论与修复边界
 
@@ -16,7 +16,7 @@
 2. **观察不等于精确计时。** 缺少 `thinking_end` 限制精确时间划分；保留思考活动不表示期间一直在思考，不统计纯思考时长，也不用定时器换词。
 3. **正文分段与执行阶段分开。** `segment_end` 只关闭或定性内容，不触发执行阶段回退。`stream_done` 清除本流活动观察，不建立 finalizing 或 completed。
 4. **工具数量与物理并发分开。** 数量表示未闭合调用尝试，可能等待执行、被拒绝或已在预取中执行。保留有依据的单工具类别。
-5. **只消费现有 canonical SDK。** 本轮不向 AgentCore 提新需求，不修改依赖、公开协议或持久化格式，不建立平行状态平台或新增模块。
+5. **只消费现有 canonical SDK。** 本轮不向 AgentCore 提新需求，不修改依赖、公开协议或持久化格式，不建立平行状态平台或新增生产模块。
 
 ## 2 桌面竞品依据
 
@@ -164,13 +164,19 @@ SDK 已提供 `tool_call_id/name`，Product 已有 `toolRouteDigest/findTool` �
 ```sh
 npm run check
 node --test scripts/run-presentation.test.mjs scripts/task-panel.test.mjs scripts/workbench-contract.test.mjs scripts/bridge-client.test.mjs
+node --test scripts/i18n.test.mjs scripts/probe-product-state.test.mjs scripts/agentcore-vertical.test.mjs scripts/checkpoint-history.test.mjs
 zig build test-product-control -Dtarget=aarch64-macos --summary all
+zig build test-task-permission -Dtarget=aarch64-macos --summary all
 zig build test-lifecycle -Dtarget=aarch64-macos --summary all
 node scripts/test-agentcore-vertical-macos.mjs
 git diff --check
 ```
 
 缺少 canonical staged bundle 时明确失败。只有存在独立平台失败模式才扩大矩阵，当前平台通过不代表其他平台已验收。
+
+独立 Task state inline 回归由包含该 root 的现有 `test-task-permission` 入口验证，不能用 Product Control root 的结果替代。桌面探针从 Run 提交开始按当前 Task 采样；需要观察特定流式边界时，用 fixture gate 保持前提，不依赖短暂的固定延迟或放宽活动断言。
+
+checkpoint 验证读取当前正式存储，不继续维护旧格式探针。只读验证辅助函数独立测试完整 u64、字段组、UTF-8 与无写入行为；它不成为产品存储或恢复路径。
 
 真实窗口使用重新启动的 npm run dev，确保 Native 与 Renderer 配对；Native、Bridge 或 wire 语义变化不能只依赖 HMR。通过有限的极短回复、一次短 Write 和有界页面生成观察思考、正文、工具、收尾及正式终态。重试、审批、压缩与异常顺序使用确定性 fixture/vertical，不为触发它们反复付费调用模型。
 

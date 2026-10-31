@@ -101,8 +101,43 @@ test("desktop verification rejects credentials and unavailable transport instead
     /credential reached/,
   );
   await assert.rejects(
+    readProbeProductState(bridge.invoke, {
+      forbidden: ["probe-credential"],
+      taskId: state.tasks[0].id,
+      includeManagement: false,
+    }),
+    /credential reached/,
+  );
+  await assert.rejects(
     readProbeProductState(async () => null),
     (error) => error.retryableSnapshotRead === true,
+  );
+});
+
+test("live Task polling collects the selected Task without unrelated management pages", async () => {
+  const state = structuredClone(fixture);
+  const second = structuredClone(state.tasks[0]);
+  second.id = "4";
+  second.recentOrder = "2";
+  state.tasks.push(second);
+  const bridge = host(state);
+  const result = await readProbeProductState(bridge.invoke, {
+    taskId: second.id,
+    includeManagement: false,
+  });
+  assert.deepEqual(
+    result.tasks.map((task) => task.id),
+    [second.id],
+  );
+  assert.deepEqual(
+    result.taskIndex.map((task) => task.id),
+    state.tasks.map((task) => task.id),
+  );
+  assert.ok(bridge.scopes.every((scope) => scope.management === "none"));
+  assert.ok(
+    bridge.scopes.every(
+      (scope) => scope.taskId === null || scope.taskId === second.id,
+    ),
   );
 });
 

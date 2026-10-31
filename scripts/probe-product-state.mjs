@@ -12,7 +12,13 @@ function retryable(message) {
 }
 export async function readProbeProductState(
   invoke,
-  { forbidden = [], observeTaskView, taskId, mcpOnly = false } = {},
+  {
+    forbidden = [],
+    observeTaskView,
+    taskId,
+    mcpOnly = false,
+    includeManagement = true,
+  } = {},
 ) {
   async function read(scope) {
     const next = await fetchWorkbenchSnapshot(async (command, payload) => {
@@ -67,19 +73,27 @@ export async function readProbeProductState(
     }
     if (retained) tasks.push(retained);
   }
-  const skills = await read({ ...initialViewScope, management: "skills" });
-  const mcp = await read({ ...initialViewScope, management: "mcp" });
-  const schedules = await read({
-    ...initialViewScope,
-    management: "schedules",
-  });
+  // Live Run observations do not need unrelated management collections.
+  const skills = includeManagement
+    ? await read({ ...initialViewScope, management: "skills" })
+    : null;
+  const mcp = includeManagement
+    ? await read({ ...initialViewScope, management: "mcp" })
+    : null;
+  const schedules = includeManagement
+    ? await read({ ...initialViewScope, management: "schedules" })
+    : null;
   const latest = await read(initialViewScope);
   const ids = new Set(latest.taskIndex.map((task) => task.id));
   return {
     ...latest,
     tasks: tasks.filter((task) => ids.has(task.id)),
-    skillManagement: skills.skillManagement,
-    mcp: mcp.mcp,
-    scheduledTasks: schedules.scheduledTasks,
+    ...(includeManagement
+      ? {
+          skillManagement: skills.skillManagement,
+          mcp: mcp.mcp,
+          scheduledTasks: schedules.scheduledTasks,
+        }
+      : {}),
   };
 }
