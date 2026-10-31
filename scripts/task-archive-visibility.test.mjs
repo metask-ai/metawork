@@ -1029,3 +1029,129 @@ test("project heading has no dropdown button and opens its menu with right click
   fireEvent.keyDown(heading, { key: "ContextMenu" });
   await screen.findByRole("menuitem", { name: "Remove project", exact: true });
 });
+
+function mockContextMenuGeometry(ctx) {
+  const overrides = [
+    [document.documentElement, "clientWidth", () => 1024],
+    [document.documentElement, "clientHeight", () => 768],
+    [
+      HTMLElement.prototype,
+      "offsetWidth",
+      function () {
+        return this.style.position === "fixed" ||
+          this.getAttribute("role") === "menu"
+          ? 180
+          : 0;
+      },
+    ],
+    [
+      HTMLElement.prototype,
+      "offsetHeight",
+      function () {
+        return this.style.position === "fixed" ||
+          this.getAttribute("role") === "menu"
+          ? 108
+          : 0;
+      },
+    ],
+  ];
+  for (const [target, name, get] of overrides) {
+    const descriptor = Object.getOwnPropertyDescriptor(target, name);
+    Object.defineProperty(target, name, { configurable: true, get });
+    ctx.after(() =>
+      descriptor
+        ? Object.defineProperty(target, name, descriptor)
+        : delete target[name],
+    );
+  }
+}
+
+function contextMenuPosition() {
+  const positioner = screen.getByRole("menu").parentElement;
+  const match = positioner.style.transform.match(
+    /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/,
+  );
+  return match
+    ? { x: Number(match[1]), y: Number(match[2]) }
+    : {
+        x: parseFloat(positioner.style.left),
+        y: parseFloat(positioner.style.top),
+      };
+}
+
+for (const kind of ["project", "task"])
+  test(`${kind} context menu follows each right-click and stays inside window edges`, async (ctx) => {
+    mockContextMenuGeometry(ctx);
+    const { user } = await renderApp(ctx);
+    const target =
+      kind === "project"
+        ? screen.getByRole("group", {
+            name: "Project actions for metawork-test",
+          })
+        : taskRows("3")[0];
+    fireEvent.contextMenu(target, { clientX: 120, clientY: 180, button: 2 });
+    await screen.findByRole("menu");
+    await waitFor(() =>
+      assert.deepEqual(contextMenuPosition(), { x: 120, y: 180 }),
+    );
+    fireEvent.contextMenu(target, { clientX: 280, clientY: 320, button: 2 });
+    await screen.findByRole("menu");
+    await waitFor(() =>
+      assert.deepEqual(contextMenuPosition(), { x: 280, y: 320 }),
+    );
+    await user.keyboard("{Escape}");
+    fireEvent.contextMenu(target, { clientX: 1018, clientY: 762, button: 2 });
+    await screen.findByRole("menu");
+    await waitFor(() => {
+      const point = contextMenuPosition();
+      assert.ok(
+        point.x >= 8 && point.x + 180 <= 1016,
+        `horizontal collision: ${point.x}`,
+      );
+      assert.ok(
+        point.y >= 8 && point.y + 108 <= 760,
+        `vertical collision: ${point.y}`,
+      );
+    });
+  });
+
+for (const kind of ["project", "task"])
+  test(`${kind} keyboard menu uses the list item and returns focus`, async (ctx) => {
+    mockContextMenuGeometry(ctx);
+    const { user } = await renderApp(ctx);
+    await user.click(taskRows("3")[0]);
+    // Let the selected Task finish its scheduled Composer focus before testing the menu.
+    await act(
+      async () =>
+        new Promise((resolve) => window.requestAnimationFrame(resolve)),
+    );
+    const target =
+      kind === "project"
+        ? screen.getByRole("group", {
+            name: "Project actions for metawork-test",
+          })
+        : taskRows("3")[0];
+    ctx.mock.method(target, "getBoundingClientRect", () => ({
+      x: 16,
+      y: 16,
+      left: 16,
+      top: 16,
+      right: 336,
+      bottom: 52,
+      width: 320,
+      height: 36,
+    }));
+    await act(async () => target.focus());
+    await user.keyboard("{Shift>}{F10}{/Shift}");
+    await screen.findByRole("menu");
+    await waitFor(() =>
+      assert.deepEqual(contextMenuPosition(), { x: 16, y: 54 }),
+    );
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      assert.ok(
+        document.activeElement === target,
+        "context menu returns focus to its opener",
+      ),
+    );
+  });

@@ -3,6 +3,10 @@ import type { WorkspaceView } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
+import {
+  createContextMenuAnchor,
+  type ContextMenuAnchor,
+} from "../../components/ui/context-menu-anchor.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
 export function WorkspaceRemovalMenu({
@@ -18,7 +22,7 @@ export function WorkspaceRemovalMenu({
 }) {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<MessageId | null>(null);
@@ -61,7 +65,13 @@ export function WorkspaceRemovalMenu({
           if (unavailable) return;
           openingDialog.current = false;
           keyboardOpen.current = false;
-          setMenuAnchor(event.currentTarget);
+          setMenuAnchor(
+            createContextMenuAnchor(
+              event.currentTarget,
+              event.clientX,
+              event.clientY,
+            ),
+          );
           setMenuOpen(true);
         }}
         onKeyDown={(event) => {
@@ -90,9 +100,13 @@ export function WorkspaceRemovalMenu({
         <Menu.Portal>
           <Menu.Positioner
             anchor={menuAnchor}
-            side="right"
+            positionMethod="fixed"
+            sticky
+            side="bottom"
             align="start"
-            sideOffset={5}
+            sideOffset={keyboardOpen.current ? 2 : 0}
+            alignOffset={0}
+            arrowPadding={0}
             collisionPadding={8}
           >
             <Menu.Popup
