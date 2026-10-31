@@ -38,6 +38,7 @@
             .{ .name = "metawork.skills.setSourceEnabled", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.recoverSourceSettings", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.chooseImport", .origins = .{"zero://app"} },
+            .{ .name = "metawork.skills.prepareImport", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.install", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.reimport", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.uninstall", .origins = .{"zero://app"} },

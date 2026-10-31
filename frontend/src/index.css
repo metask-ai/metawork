@@ -4422,53 +4422,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-height: 34px;
 }
 
-.skill-import-choices {
-  display: grid;
-  gap: 10px;
-}
-
-.skill-import-choice {
-  display: grid;
-  min-height: 92px;
-  padding: 14px;
-  grid-template-columns: 38px minmax(0, 1fr);
-  column-gap: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
-  text-align: left;
-  cursor: pointer;
-}
-
-.skill-import-choice:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--ui-action-primary) 34%, transparent);
-  background: var(--ui-surface-canvas);
-}
-
-.skill-import-choice > span {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  grid-row: 1 / 3;
-  place-items: center;
-  border-radius: 10px;
-  color: var(--ui-content-muted);
-  background: var(--ui-surface-canvas);
-}
-
-.skill-import-choice strong {
-  align-self: end;
-  font-size: var(--text-body);
-}
-
-.skill-import-choice small {
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  line-height: 1.45;
-}
-
 .skill-import-preview {
   display: grid;
   padding: 14px;

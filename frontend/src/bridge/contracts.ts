@@ -1511,6 +1511,7 @@ export type SkillSourceSettingsResult =
       reason: SkillSourceSettingsReason;
     };
 export type SkillManagementView = {
+  importOperation: SkillImportOperation | null;
   availability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
   enablementAvailability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
   sourceSettings: SkillSourceSettings;
@@ -1964,34 +1965,89 @@ export type WorkspaceChoice =
       selected: true;
       workspaceId: string;
     };
+export type SkillImportScope =
+  | { kind: "personal"; workspaceId: null; workspaceEpoch: null }
+  | { kind: "project"; workspaceId: string; workspaceEpoch: string };
+export type SkillImportTarget =
+  | { kind: "personal" }
+  | { kind: "project"; workspaceId: string; workspaceEpoch: string }
+  | { kind: "reimport"; installId: string };
+export const skillImportEffects = [
+  "create",
+  "update",
+  "replace_directory",
+] as const;
+export type SkillImportEffect = (typeof skillImportEffects)[number];
+export const skillMutationReasons = [
+  "invalid_scope",
+  "invalid_preview",
+  "source_unavailable",
+  "definition_missing",
+  "multiple_definitions",
+  "invalid_layout",
+  "invalid_definition",
+  "invalid_path",
+  "unsupported_entry",
+  "archive_corrupt",
+  "too_large",
+  "source_changed",
+  "target_changed",
+  "asset_unavailable",
+  "state_changed",
+  "target_exists",
+  "busy",
+  "catalog_loading",
+  "workspace_changed",
+  "workspace_unavailable",
+  "capacity_reached",
+  "shutting_down",
+  "local_storage_failed",
+  "outcome_unknown",
+] as const;
+export type SkillMutationReason = (typeof skillMutationReasons)[number];
 export type SkillImportPreview =
+  | { status: "cancelled" }
+  | { status: "rejected"; reason: SkillMutationReason }
   | {
-      selected: false;
-    }
-  | {
-      selected: true;
+      status: "prepared";
       previewId: string;
+      operationId: string;
+      preparationRevision: string;
       sourceKind: "local_package" | "local_directory";
+      scope: SkillImportScope;
+      effect: SkillImportEffect;
+      installId: string | null;
       invocationName: string;
       displayName: string;
       description: string;
+      definition: string;
       fileCount: number;
       totalBytes: number;
+      blocker: SkillMutationReason | null;
     };
-export type SkillMutationReason =
-  | "invalid_scope"
-  | "invalid_preview"
-  | "source_changed"
-  | "asset_unavailable"
-  | "state_changed"
-  | "target_exists"
-  | "busy"
-  | "catalog_loading"
-  | "workspace_changed"
-  | "workspace_unavailable"
-  | "capacity_reached"
-  | "shutting_down"
-  | "local_storage_failed";
+export const skillImportPhases = [
+  "prepared",
+  "pending_verification",
+  "ready",
+  "rolled_back",
+  "recovery_required",
+  "rejected",
+  "cancelled",
+  "outcome_unknown",
+] as const;
+export type SkillImportOperation = {
+  id: string;
+  preparationRevision: string;
+  effect: SkillImportEffect;
+  phase: (typeof skillImportPhases)[number];
+  scope: SkillImportScope;
+  installId: string | null;
+  invocationName: string;
+  reason: SkillMutationReason | null;
+  canConfirm: boolean;
+  canDiscard: boolean;
+  blocker: SkillMutationReason | null;
+};
 export type SkillMutationResult =
   | {
       accepted: true;

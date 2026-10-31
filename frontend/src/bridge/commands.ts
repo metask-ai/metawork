@@ -23,6 +23,7 @@ export const commands = {
   setSkillSourceEnabled: "metawork.skills.setSourceEnabled",
   recoverSkillSourceSettings: "metawork.skills.recoverSourceSettings",
   chooseSkillImport: "metawork.skills.chooseImport",
+  prepareSkillImport: "metawork.skills.prepareImport",
   installSkill: "metawork.skills.install",
   reimportSkill: "metawork.skills.reimport",
   uninstallSkill: "metawork.skills.uninstall",

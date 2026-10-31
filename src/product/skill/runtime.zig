@@ -34,6 +34,43 @@ pub const SourceKind = management.SourceKind;
 pub const InstallId = management.InstallId;
 pub const ContentHash = management.ContentHash;
 pub const Preview = package.Preview;
+pub const ImportTarget = state.ImportTarget;
+pub const ImportEffect = state.ImportEffect;
+pub const ImportReason = state.ImportReason;
+pub const importReason = state.importReason;
+pub const ImportOperation = state.ImportOperation;
+
+pub const ImportPreparation = struct {
+    id: u64,
+    revision: u64,
+    source_kind: management.SourceKind,
+    scope: management.Scope,
+    effect: ImportEffect,
+    install_id: ?management.InstallId,
+    invocation_name: []const u8,
+    description: []const u8,
+    definition: []const u8,
+    file_count: usize,
+    total_bytes: u64,
+    blocker: ?ImportReason,
+};
+
+const PreparedImport = struct {
+    id: u64,
+    revision: u64,
+    source_kind: management.SourceKind,
+    path: []u8,
+    preview: package.Preview,
+    scope: management.Scope,
+    target: ImportTarget,
+    expectation: state.ImportExpectation,
+
+    fn deinit(self: *PreparedImport, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.preview.deinit();
+        self.* = undefined;
+    }
+};
 pub const TextProjection = view.TextProjection;
 pub const ScopedCatalog = view.ScopedCatalog;
 pub const WorkspaceCatalogs = view.WorkspaceCatalogs;
@@ -280,6 +317,8 @@ pub const Runtime = struct {
     personal_reschedule_pending: bool = false,
     reschedule_cursor: usize = 0,
     shutting_down: bool = false,
+    prepared_import: ?PreparedImport = null,
+    next_preparation_id: u64 = 1,
 
     pub fn init(
         io: std.Io,
@@ -517,6 +556,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         std.debug.assert(self.personal_job == null);
+        self.discardPreparedImport(null);
         for (self.workspaces) |*entry| if (entry.*) |*workspace|
             workspace.deinit(self.allocator, &self.ports.catalog);
         self.allocator.free(self.workspaces);
@@ -793,6 +833,7 @@ pub const Runtime = struct {
             changed = true;
         }
         changed = self.dispatchPending(budget) or changed;
+        changed = self.refreshImportOutcome() or changed;
         changed = self.takeManagementChanged() or changed;
         return changed;
     }
@@ -965,7 +1006,14 @@ pub const Runtime = struct {
         workspaces: view.WorkspaceCatalogs,
         retry: view.RetryAvailability,
     ) view.Error!void {
+        var blocker: ?ImportReason = null;
+        if (self.prepared_import) |prepared| {
+            blocker = (self.preparedImport(prepared.id, prepared.revision) catch unreachable).blocker;
+            if (retry.import_blocker_fn) |check| blocker = check(retry.context, prepared.scope) orelse blocker;
+        }
         return view.writeManagementProjection(writer, .{
+            .import_prepared = self.prepared_import != null,
+            .import_blocker = blocker,
             .state = &self.state,
             .workspaces = workspaces,
             .retry = retry,
@@ -1078,6 +1126,187 @@ pub const Runtime = struct {
         for (self.state.enablement_store.items()) |workspace_policy|
             result = @max(result, workspace_policy.workspace_id);
         return result;
+    }
+
+    pub fn discardPreparedImport(self: *Runtime, expected_id: ?u64) void {
+        const current = if (self.prepared_import) |*value| value else return;
+        if (expected_id) |id| if (current.id != id) return;
+        if (self.state.import_operation) |*operation| {
+            if (operation.id == current.id and operation.phase == .prepared) operation.phase = .cancelled;
+        }
+        current.deinit(self.allocator);
+        self.prepared_import = null;
+    }
+
+    fn importSourcePreview(self: *Runtime, path: []const u8, kind: management.SourceKind) PackageError!package.Preview {
+        return switch (kind) {
+            .local_directory => self.previewDirectory(path),
+            .local_package => self.previewArchive(path),
+            .external => error.InvalidAsset,
+        };
+    }
+
+    fn importTargetScope(self: *const Runtime, target: ImportTarget) AssetError!management.Scope {
+        return switch (target) {
+            .scope => |scope| scope,
+            .reimport => |id| self.assetScope(id),
+        };
+    }
+
+    fn importTargetExpectation(self: *Runtime, scope: management.Scope, target: ImportTarget, invocation: []const u8) AssetError!state.ImportExpectation {
+        return management_runtime.inspectImportTarget(self.managementContext(), try self.canonicalBase(scope), scope, invocation, switch (target) {
+            .scope => null,
+            .reimport => |id| id,
+        });
+    }
+
+    pub fn prepareImport(self: *Runtime, path: []const u8, kind: management.SourceKind, target: ImportTarget) AssetError!ImportPreparation {
+        try self.requireManagementReady();
+        self.discardPreparedImport(null);
+        if (self.next_preparation_id == std.math.maxInt(u64)) return error.PreparationExhausted;
+        const scope = try self.importTargetScope(target);
+        var preview = try self.importSourcePreview(path, kind);
+        errdefer preview.deinit();
+        const expectation = try self.importTargetExpectation(scope, target, preview.invocation_name);
+        const owned_path = try self.allocator.dupe(u8, path);
+        self.prepared_import = .{ .id = self.next_preparation_id, .revision = 1, .source_kind = kind, .path = owned_path, .preview = preview, .scope = scope, .target = target, .expectation = expectation };
+        self.next_preparation_id += 1;
+        self.recordPreparedImport();
+        return self.preparedImport(self.prepared_import.?.id, 1);
+    }
+
+    pub fn preparedImport(self: *const Runtime, id: u64, revision: u64) AssetError!ImportPreparation {
+        const current = self.prepared_import orelse return error.InvalidPreparation;
+        if (current.id != id or current.revision != revision) return error.InvalidPreparation;
+        var blocker: ?ImportReason = null;
+        self.requireMutationAvailable(current.scope) catch |err| {
+            blocker = state.importReason(err);
+        };
+        return .{
+            .id = current.id,
+            .revision = current.revision,
+            .source_kind = current.source_kind,
+            .scope = current.scope,
+            .effect = current.expectation.effect,
+            .install_id = current.expectation.install_id,
+            .invocation_name = current.preview.invocation_name,
+            .description = current.preview.description,
+            .definition = current.preview.definition,
+            .file_count = current.preview.file_count,
+            .total_bytes = current.preview.total_bytes,
+            .blocker = blocker,
+        };
+    }
+
+    fn verifyImportSource(self: *Runtime, current: *const PreparedImport) AssetError!void {
+        var observed = self.importSourcePreview(current.path, current.source_kind) catch |err| return if (err == error.OutOfMemory) err else error.SourceChanged;
+        defer observed.deinit();
+        if (!std.mem.eql(u8, &observed.content_hash, &current.preview.content_hash) or
+            !std.mem.eql(u8, observed.source_root orelse "", current.preview.source_root orelse "")) return error.SourceChanged;
+    }
+
+    pub fn retargetImport(self: *Runtime, id: u64, revision: u64, target: ImportTarget) AssetError!ImportPreparation {
+        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) {
+            self.discardPreparedImport(id);
+            if (self.state.import_operation) |*operation| if (operation.id == id) {
+                operation.phase = .rejected;
+                operation.reason = state.importReason(err);
+            };
+        };
+        _ = try self.preparedImport(id, revision);
+        const current = &self.prepared_import.?;
+        if (current.target == .reimport and (target != .reimport or !std.mem.eql(u8, &current.target.reimport, &target.reimport))) return error.InvalidConfirmation;
+        if (current.revision == std.math.maxInt(u64)) return error.PreparationExhausted;
+        try self.verifyImportSource(current);
+        const scope = try self.importTargetScope(target);
+        const expectation = try self.importTargetExpectation(scope, target, current.preview.invocation_name);
+        current.scope = scope;
+        current.target = target;
+        current.expectation = expectation;
+        current.revision += 1;
+        self.recordPreparedImport();
+        return self.preparedImport(id, current.revision);
+    }
+
+    /// Read-only pre-admission validation; no grant, files or transaction is consumed.
+    pub fn validatePreparedImport(self: *Runtime, id: u64, revision: u64, confirmation: ImportEffect) MutationError!management.Scope {
+        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) {
+            self.discardPreparedImport(id);
+            if (self.state.import_operation) |*operation| if (operation.id == id) {
+                operation.phase = .rejected;
+                operation.reason = state.importReason(err);
+            };
+        };
+        const preparation = try self.preparedImport(id, revision);
+        if (preparation.effect != confirmation) return error.InvalidConfirmation;
+        try self.requireMutationAvailable(preparation.scope);
+        const current = &self.prepared_import.?;
+        try self.verifyImportSource(current);
+        const observed = self.importTargetExpectation(current.scope, current.target, current.preview.invocation_name) catch |err| return if (err == error.OutOfMemory or err == error.TaskBusy) err else error.TargetChanged;
+        if (!std.meta.eql(observed, current.expectation)) return error.TargetChanged;
+        return current.scope;
+    }
+
+    pub fn commitPreparedImport(self: *Runtime, id: u64, revision: u64, confirmation: ImportEffect, now: ?u64) MutationError!state.MutationResult {
+        _ = try self.validatePreparedImport(id, revision, confirmation);
+        var current = self.prepared_import.?;
+        self.prepared_import = null;
+        defer current.deinit(self.allocator);
+        const result = switch (current.expectation.effect) {
+            .create, .replace_directory => switch (current.source_kind) {
+                .local_directory => self.installDirectory(current.path, .{ .source_kind = current.source_kind, .scope = current.scope, .expected_invocation_name = current.preview.invocation_name, .expected_content_hash = current.preview.content_hash, .allow_replace = current.expectation.effect == .replace_directory }, now),
+                .local_package => self.installArchive(current.path, .{ .source_kind = current.source_kind, .scope = current.scope, .expected_invocation_name = current.preview.invocation_name, .expected_content_hash = current.preview.content_hash, .allow_replace = current.expectation.effect == .replace_directory }, now),
+                .external => error.InvalidAsset,
+            },
+            .update => switch (current.source_kind) {
+                .local_directory => self.reimportDirectory(current.expectation.install_id.?, current.path, current.preview.invocation_name, current.preview.content_hash),
+                .local_package => self.reimportArchive(current.expectation.install_id.?, current.path, current.preview.invocation_name, current.preview.content_hash),
+                .external => error.InvalidAsset,
+            },
+        } catch |err| {
+            if (self.state.import_operation) |*operation| {
+                operation.phase = .rejected;
+                if (self.state.inventoryConst().findTarget(current.scope, current.preview.invocation_name)) |asset| {
+                    operation.install_id = asset.install_id;
+                    if (asset.recovery) |recovery| {
+                        operation.published_hash = recovery.candidate_hash;
+                        operation.phase = if (asset.requiresRecovery()) .recovery_required else .pending_verification;
+                    }
+                }
+                if (err == error.PersistenceOutcomeUnknown or self.state.management_health == .outcome_unknown) operation.phase = .outcome_unknown;
+                operation.reason = state.importReason(err);
+            }
+            return err;
+        };
+        const operation = &self.state.import_operation.?;
+        operation.install_id = result.install_id;
+        if (self.state.inventoryConst().findConst(result.install_id)) |asset| {
+            operation.published_hash = if (asset.recovery) |recovery| recovery.candidate_hash orelse asset.content_hash else asset.content_hash;
+        }
+        operation.phase = if (result.verification_pending) .pending_verification else .ready;
+        return result;
+    }
+
+    fn recordPreparedImport(self: *Runtime) void {
+        const current = &self.prepared_import.?;
+        var operation: ImportOperation = .{ .id = current.id, .revision = current.revision, .scope = current.scope, .effect = current.expectation.effect, .install_id = current.expectation.install_id, .phase = .prepared, .invocation_name = undefined, .invocation_name_len = current.preview.invocation_name.len };
+        @memcpy(operation.invocation_name[0..operation.invocation_name_len], current.preview.invocation_name);
+        self.state.import_operation = operation;
+    }
+
+    fn refreshImportOutcome(self: *Runtime) bool {
+        const operation = if (self.state.import_operation) |*value| value else return false;
+        if (operation.phase != .pending_verification and operation.phase != .recovery_required) return false;
+        const id = operation.install_id orelse return false;
+        const asset = self.state.inventoryConst().findConst(id);
+        const phase: state.ImportPhase = if (self.state.management_health == .outcome_unknown) .outcome_unknown else if (asset) |value|
+            if (value.recovery == null) (if (operation.published_hash == null or std.mem.eql(u8, &value.content_hash, &operation.published_hash.?)) .ready else .rolled_back) else if (value.requiresRecovery()) .recovery_required else .pending_verification
+        else
+            .rolled_back;
+        if (phase == operation.phase) return false;
+        operation.phase = phase;
+        operation.reason = if (phase == .outcome_unknown) .outcome_unknown else null;
+        return true;
     }
 
     pub fn previewDirectory(
@@ -3606,6 +3835,81 @@ test "builtin replacement refuses malformed exhausted or closing authority witho
     try std.testing.expectError(error.ExecutorShuttingDown, runtime.replaceBuiltinSource(.{ .root = root }, harness.budget()));
 }
 
+test "import preparation binds revision source and target while managed updates preserve identity" {
+    var harness: TestHarness = .{};
+    var home = std.testing.tmpDir(.{ .iterate = true });
+    defer home.cleanup();
+    var source = std.testing.tmpDir(.{ .iterate = true });
+    defer source.cleanup();
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var persistence: management.FileStore = .{ .io = std.testing.io, .dir = persistence_dir.dir };
+    const home_path = try home.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home_path);
+    const source_path = try source.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(source_path);
+    const staging_path = try staging.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(staging_path);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: demo\ndescription: Demo\n---\nRead note.txt.\n" });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "one" });
+    var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
+        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
+        .max_workspaces = 1,
+        .canonical_user_home = home_path,
+    }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+    defer runtime.deinit();
+    const initial = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try std.testing.expectEqual(ImportEffect.create, initial.effect);
+    try std.testing.expectError(error.FileNotFound, home.dir.statFile(std.testing.io, ".agents", .{ .follow_symlinks = false }));
+    const revised = try runtime.retargetImport(initial.id, initial.revision, .{ .scope = .personal });
+    try std.testing.expectEqual(initial.revision + 1, revised.revision);
+    try std.testing.expectError(error.InvalidPreparation, runtime.preparedImport(initial.id, initial.revision));
+    try std.testing.expectError(error.InvalidConfirmation, runtime.validatePreparedImport(revised.id, revised.revision, .update));
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "changed" });
+    try std.testing.expectError(error.SourceChanged, runtime.validatePreparedImport(revised.id, revised.revision, .create));
+    try std.testing.expectError(error.InvalidPreparation, runtime.preparedImport(revised.id, revised.revision));
+    const before_target = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try home.dir.createDirPath(std.testing.io, ".agents/skills/demo");
+    try home.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/demo/SKILL.md", .data = "external original" });
+    try std.testing.expectError(error.TargetChanged, runtime.validatePreparedImport(before_target.id, before_target.revision, .create));
+    const bound_directory = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try home.dir.rename(".agents/skills/demo", home.dir, ".agents/skills/old-demo", std.testing.io);
+    try home.dir.createDirPath(std.testing.io, ".agents/skills/demo");
+    try home.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/demo/SKILL.md", .data = "external original" });
+    try std.testing.expectError(error.TargetChanged, runtime.validatePreparedImport(bound_directory.id, bound_directory.revision, .replace_directory));
+    const replace = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try std.testing.expectEqual(ImportEffect.replace_directory, replace.effect);
+    const installed = try runtime.commitPreparedImport(replace.id, replace.revision, .replace_directory, 100);
+    try std.testing.expectError(error.InvalidPreparation, runtime.commitPreparedImport(replace.id, replace.revision, .replace_directory, 100));
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, 101);
+    const managed_path = try std.fs.path.join(std.testing.allocator, &.{ home_path, ".agents", "skills" });
+    defer std.testing.allocator.free(managed_path);
+    var root = try management.CanonicalRoot.open(std.testing.io, std.testing.allocator, .personal, managed_path);
+    defer root.deinit();
+    try runtime.state.transactions.?.commitReconciliation(&root, installed.install_id, null, 101);
+    runtime.state.reconciliation = null;
+    try std.testing.expect(runtime.refreshImportOutcome());
+    try std.testing.expectEqual(state.ImportPhase.ready, runtime.state.import_operation.?.phase);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "note.txt", .data = "new update" });
+    const update = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try std.testing.expectEqual(ImportEffect.update, update.effect);
+    try std.testing.expectEqualSlices(u8, &installed.install_id, &update.install_id.?);
+    runtime.discardPreparedImport(update.id);
+    const bound_update = try runtime.prepareImport(source_path, .local_directory, .{ .reimport = installed.install_id });
+    try std.testing.expectError(error.InvalidConfirmation, runtime.retargetImport(bound_update.id, bound_update.revision, .{ .scope = .personal }));
+    const updated = try runtime.commitPreparedImport(bound_update.id, bound_update.revision, .update, 102);
+    try std.testing.expectEqualSlices(u8, &installed.install_id, &updated.install_id);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, 103);
+    try runtime.state.transactions.?.rollbackReconciliation(&root, updated.install_id);
+    runtime.state.reconciliation = null;
+    try std.testing.expect(runtime.refreshImportOutcome());
+    try std.testing.expectEqual(state.ImportPhase.rolled_back, runtime.state.import_operation.?.phase);
+}
+
 test "managed imports bind source grants and publish effective bytes through export and reimport" {
     var harness: TestHarness = .{};
     var home = std.testing.tmpDir(.{});
@@ -3628,16 +3932,17 @@ test "managed imports bind source grants and publish effective bytes through exp
     const output_path = try output.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(output_path);
     const original = "---\nname: demo\ndescription: Demo\n---\nRead qa-reference.txt.\n";
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = original });
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "resource marker" });
-    var preview = try package.previewDirectory(std.testing.io, std.testing.allocator, source.dir, .{});
-    defer preview.deinit();
+    try source.dir.createDir(std.testing.io, "wrapper", .default_dir);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/SKILL.md", .data = original });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/qa-reference.txt", .data = "resource marker" });
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
         .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
         .max_workspaces = 1,
         .canonical_user_home = home_path,
     }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
     defer runtime.deinit();
+    var preview = try runtime.previewDirectory(source_path);
+    defer preview.deinit();
     const installed = try runtime.installDirectory(source_path, .{
         .source_kind = .local_directory,
         .scope = .personal,
@@ -3650,7 +3955,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     try std.testing.expectEqualSlices(u8, &asset.content_hash, &asset.recovery.?.candidate_hash.?);
     const expected = try package.managedDefinition(std.testing.allocator, original);
     defer std.testing.allocator.free(expected);
-    const source_bytes = try source.dir.readFileAlloc(std.testing.io, "SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
+    const source_bytes = try source.dir.readFileAlloc(std.testing.io, "wrapper/SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
     defer std.testing.allocator.free(source_bytes);
     try std.testing.expectEqualStrings(original, source_bytes);
     const managed_path = try std.fs.path.join(std.testing.allocator, &.{ home_path, ".agents", "skills" });
@@ -3679,7 +3984,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     defer exported_preview.deinit();
     try std.testing.expectEqualStrings(expected, exported_preview.definition);
     try std.testing.expectEqualSlices(u8, &actual.content_hash, &exported_preview.content_hash);
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "changed after preview" });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/qa-reference.txt", .data = "changed after preview" });
     try std.testing.expectError(error.InvalidAsset, runtime.reimportDirectory(id, source_path, preview.invocation_name, preview.content_hash));
     var unchanged = try package.previewDirectory(std.testing.io, std.testing.allocator, published, .{});
     defer unchanged.deinit();

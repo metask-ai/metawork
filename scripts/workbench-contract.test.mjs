@@ -3064,26 +3064,41 @@ test("Host notifications and lifecycle responses require their exact payload sha
   );
 });
 
-test("Skill import previews expose only bounded metadata and an opaque identity", () => {
-  assert.deepEqual(decodeSkillImportPreview({ selected: false }), {
-    selected: false,
+test("Skill preparation distinguishes cancellation, diagnostics and bound confirmation", () => {
+  assert.deepEqual(decodeSkillImportPreview({ status: "cancelled" }), {
+    status: "cancelled",
   });
-  const preview = {
-    selected: true,
-    previewId: "7",
-    sourceKind: "local_package",
-    invocationName: "release-check",
-    displayName: "release-check",
-    description: "Check a release.",
-    fileCount: 2,
-    totalBytes: 42,
-  };
-  assert.deepEqual(decodeSkillImportPreview(preview), preview);
-  assert.throws(
-    () =>
-      decodeSkillImportPreview({ ...preview, sourcePath: "/private/skill" }),
-    /expected keys/,
+  assert.deepEqual(
+    decodeSkillImportPreview({
+      status: "rejected",
+      reason: "multiple_definitions",
+    }),
+    { status: "rejected", reason: "multiple_definitions" },
   );
+  const preview = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/skill-import-preview.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeSkillImportPreview(preview), preview);
+  for (const invalid of [
+    { ...preview, sourcePath: "/private/skill" },
+    { ...preview, allowReplace: true },
+    { ...preview, preparationRevision: "0" },
+    { ...preview, effect: "create" },
+    {
+      ...preview,
+      scope: { kind: "personal", workspaceId: "1", workspaceEpoch: "3" },
+    },
+    { ...preview, blocker: "guessed_reason" },
+    { selected: false },
+    { status: "cancelled", reason: null },
+  ])
+    assert.throws(() => decodeSkillImportPreview(invalid));
 });
 
 test("Skill management responses keep mutations and file access explicit", () => {

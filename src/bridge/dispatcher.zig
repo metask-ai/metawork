@@ -324,7 +324,7 @@ pub const Dispatcher = struct {
         self.cancelPreviewConnection();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
-        self.skill_grants.invalidate();
+        self.invalidateSkillPreparation();
         self.releaseAllAttachmentGrants();
         self.window_chrome_connected = false;
         self.control = null;
@@ -374,6 +374,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.set_skill_source_enabled, .function = setSkillSourceEnabled },
             .{ .name = commands.recover_skill_source_settings, .function = recoverSkillSourceSettings },
             .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
+            .{ .name = commands.prepare_skill_import, .function = prepareSkillImport },
             .{ .name = commands.install_skill, .function = installSkill },
             .{ .name = commands.reimport_skill, .function = reimportSkill },
             .{ .name = commands.uninstall_skill, .function = uninstallSkill },
@@ -524,7 +525,7 @@ pub const Dispatcher = struct {
         if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
-        self.skill_grants.invalidate();
+        self.invalidateSkillPreparation();
         self.releaseAllAttachmentGrants();
     }
 
@@ -717,7 +718,7 @@ pub const Dispatcher = struct {
         self.preview_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
-        self.skill_grants.invalidate();
+        self.invalidateSkillPreparation();
         self.releaseAllAttachmentGrants();
         try self.platform.wake_fn(self.platform.context);
         return std.fmt.bufPrint(
@@ -736,7 +737,7 @@ pub const Dispatcher = struct {
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         defer self.grants.invalidate();
-        defer self.skill_grants.invalidate();
+        defer self.invalidateSkillPreparation();
         defer self.breakConnection();
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
@@ -3877,248 +3878,115 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"applied\":false,\"revision\":null,\"reason\":\"{s}\"}}", .{@tagName(result.reason.?)});
     }
 
-    fn chooseSkillImport(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn invalidateSkillPreparation(self: *Dispatcher) void {
+        if (self.skill_grants.invalidate()) |preparation| {
+            if (self.control) |control| control.discardSkillImport(preparation.id);
+        }
+    }
+
+    fn chooseSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        const generation = self.delivery.connectedGeneration() orelse
-            return error.NoConnection;
-        var parsed = try handlers.parsePayload(
-            handlers.SkillImportChoice,
-            invocation.request.payload,
-        );
+        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        var parsed = try handlers.parsePayload(handlers.SkillImportChoice, invocation.request.payload);
         defer parsed.deinit();
-        const source_kind: skill_grant.SourceKind =
-            if (std.mem.eql(u8, parsed.value.kind, "package"))
-                .local_package
-            else if (std.mem.eql(u8, parsed.value.kind, "directory"))
-                .local_directory
-            else
-                return error.InvalidBridgePayload;
-        self.skill_grants.invalidate();
+        const source_kind: product_control.SkillImportSourceKind = if (std.mem.eql(u8, parsed.value.kind, "package")) .local_package else if (std.mem.eql(u8, parsed.value.kind, "directory")) .local_directory else return error.InvalidBridgePayload;
+        const target = try parseSkillImportTarget(parsed.value.target);
+        self.invalidateSkillPreparation();
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const package_filters = [_]native_sdk.platform.FileFilter{.{
-            .name = "Skill packages",
-            .extensions = &.{ "skill", "zip" },
-        }};
-        const selected = try self.platform.show_open_dialog_fn(
-            self.platform.context,
-            .{
-                .title = if (source_kind == .local_package)
-                    "Choose a Skill package"
-                else
-                    "Choose a Skill folder",
-                .filters = if (source_kind == .local_package)
-                    &package_filters
-                else
-                    &.{},
-                .allow_directories = source_kind == .local_directory,
-                .allow_multiple = false,
-            },
-            &dialog_storage,
-        );
-        if (selected.count == 0) return "{\"selected\":false}";
-        if (selected.count != 1 or selected.paths.len == 0 or
-            selected.paths.len > skill_grant.max_path_bytes)
-            return error.InvalidBridgePayload;
-        var preview = switch (source_kind) {
-            .local_package => try (try self.requireProductControl()).previewSkillArchive(
-                selected.paths,
-            ),
-            .local_directory => try (try self.requireProductControl()).previewSkillDirectory(
-                selected.paths,
-            ),
+        const package_filters = [_]native_sdk.platform.FileFilter{.{ .name = "Skill packages", .extensions = &.{ "skill", "zip" } }};
+        const selected = try self.platform.show_open_dialog_fn(self.platform.context, .{
+            .title = if (source_kind == .local_package) "Choose a Skill package" else "Choose a Skill folder",
+            .filters = if (source_kind == .local_package) &package_filters else &.{},
+            .allow_directories = source_kind == .local_directory,
+            .allow_multiple = false,
+        }, &dialog_storage);
+        if (selected.count == 0) return "{\"status\":\"cancelled\"}";
+        if (selected.count != 1 or selected.paths.len == 0 or selected.paths.len > skill_grant.max_path_bytes) return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        const preparation = control.prepareSkillImport(selected.paths, source_kind, target) catch |err| {
+            self.notifyCommitted();
+            return encodeSkillImportRejection(output, product_control.skillImportReason(err));
         };
-        defer preview.deinit();
-        const issued = try self.skill_grants.issue(
-            generation,
-            invocation.source.window_id,
-            self.now(),
-            .{
-                .source_kind = source_kind,
-                .selected_path = selected.paths,
-                .invocation_name = preview.invocation_name,
-                .description = preview.description,
-                .file_count = preview.file_count,
-                .total_bytes = preview.total_bytes,
-                .content_hash = preview.content_hash,
-            },
-        );
-        var writer = std.Io.Writer.fixed(output);
-        writer.print(
-            "{{\"selected\":true,\"previewId\":\"{d}\",\"sourceKind\":\"{s}\",\"invocationName\":",
-            .{ issued.token, @tagName(source_kind) },
-        ) catch return error.NoSpaceLeft;
-        std.json.Stringify.value(issued.invocation_name, .{}, &writer) catch
-            return error.NoSpaceLeft;
-        writer.writeAll(",\"displayName\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(issued.invocation_name, .{}, &writer) catch
-            return error.NoSpaceLeft;
-        writer.writeAll(",\"description\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(issued.description, .{}, &writer) catch
-            return error.NoSpaceLeft;
-        writer.print(",\"fileCount\":{d},\"totalBytes\":{d}}}", .{
-            issued.file_count,
-            issued.total_bytes,
-        }) catch return error.NoSpaceLeft;
-        return writer.buffered();
+        const token = self.skill_grants.issue(generation, invocation.source.window_id, self.now(), .{ .id = preparation.id, .revision = preparation.revision }) catch |err| {
+            control.discardSkillImport(preparation.id);
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeSkillImportPreparation(output, token, preparation) catch {
+            self.invalidateSkillPreparation();
+            return encodeSkillImportRejection(output, .too_large);
+        };
     }
 
-    fn installSkill(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn prepareSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.SkillInstall,
-            invocation.request.payload,
-        );
+        var parsed = try handlers.parsePayload(handlers.SkillPrepareImport, invocation.request.payload);
         defer parsed.deinit();
-        const preview_id = try handlers.parseWireId(parsed.value.previewId);
-        const scope = parseSkillScope(
-            parsed.value.scope,
-            parsed.value.workspaceId,
-            parsed.value.expectedWorkspaceEpoch,
-        ) catch return encodeSkillMutationResult(
-            output,
-            false,
-            null,
-            false,
-            "invalid_scope",
-        );
-        const consumed = self.skill_grants.consume(
-            preview_id,
-            invocation.source.window_id,
-            self.delivery.connectedGeneration() orelse return error.NoConnection,
-            self.now(),
-        ) catch return encodeSkillMutationResult(
-            output,
-            false,
-            null,
-            false,
-            "invalid_preview",
-        );
-        const source_kind: skill_management.SourceKind = switch (consumed.source_kind) {
-            .local_package => .local_package,
-            .local_directory => .local_directory,
+        const token = try handlers.parseWireId(parsed.value.previewId);
+        const revision = try handlers.parseWireId(parsed.value.preparationRevision);
+        const preparation = self.skill_grants.check(token, revision, invocation.source.window_id, self.delivery.connectedGeneration() orelse return error.NoConnection, self.now()) catch return encodeSkillImportRejection(output, .invalid_preview);
+        if (parsed.value.target == null) {
+            self.invalidateSkillPreparation();
+            self.notifyCommitted();
+            return "{\"status\":\"cancelled\"}";
+        }
+        const target = try parseSkillImportTarget(parsed.value.target.?);
+        const result = (try self.requireProductControl()).retargetSkillImport(preparation.id, revision, target) catch |err| {
+            self.notifyCommitted();
+            return encodeSkillImportRejection(output, product_control.skillImportReason(err));
         };
-        const input: product_control.SkillInstallInput = .{
-            .source_kind = source_kind,
-            .scope = scope,
-            .expected_invocation_name = consumed.invocationName(),
-            .expected_content_hash = consumed.content_hash,
-            .allow_replace = parsed.value.allowReplace,
-        };
-        const result = switch (consumed.source_kind) {
-            .local_package => (try self.requireProductControl()).installSkillArchive(
-                consumed.path(),
-                input,
-            ),
-            .local_directory => (try self.requireProductControl()).installSkillDirectory(
-                consumed.path(),
-                input,
-            ),
-        } catch |err| {
-            if (skillMutationRejection(err)) |reason| {
-                if (skillMutationMayHaveCommitted(err)) self.notifyCommitted();
-                return encodeSkillMutationResult(
-                    output,
-                    false,
-                    null,
-                    false,
-                    reason,
-                );
-            }
-            return err;
-        };
+        self.skill_grants.retarget(.{ .id = result.id, .revision = result.revision });
         self.notifyCommitted();
-        return encodeSkillMutationResult(
-            output,
-            true,
-            result.install_id,
-            result.verification_pending,
-            null,
-        );
+        return encodeSkillImportPreparation(output, token, result) catch {
+            self.invalidateSkillPreparation();
+            return encodeSkillImportRejection(output, .too_large);
+        };
     }
 
-    fn reimportSkill(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
+    fn installSkill(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return commitSkillImport(context, invocation, output, false);
+    }
+
+    fn reimportSkill(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        return commitSkillImport(context, invocation, output, true);
+    }
+
+    fn commitSkillImport(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8, reimport_only: bool) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.SkillReimport,
-            invocation.request.payload,
-        );
+        var parsed = try handlers.parsePayload(handlers.SkillInstall, invocation.request.payload);
         defer parsed.deinit();
-        const install_id = parseSkillInstallId(parsed.value.installId) catch
-            return encodeSkillMutationResult(
-                output,
-                false,
-                null,
-                false,
-                "asset_unavailable",
-            );
-        const preview_id = try handlers.parseWireId(parsed.value.previewId);
-        const consumed = self.skill_grants.consume(
-            preview_id,
-            invocation.source.window_id,
-            self.delivery.connectedGeneration() orelse return error.NoConnection,
-            self.now(),
-        ) catch return encodeSkillMutationResult(
-            output,
-            false,
-            null,
-            false,
-            "invalid_preview",
-        );
-        const result = switch (consumed.source_kind) {
-            .local_package => (try self.requireProductControl()).reimportSkillArchive(
-                install_id,
-                consumed.path(),
-                consumed.invocationName(),
-                consumed.content_hash,
-            ),
-            .local_directory => (try self.requireProductControl()).reimportSkillDirectory(
-                install_id,
-                consumed.path(),
-                consumed.invocationName(),
-                consumed.content_hash,
-            ),
-        } catch |err| {
-            if (skillMutationRejection(err)) |reason| {
-                if (skillMutationMayHaveCommitted(err)) self.notifyCommitted();
-                return encodeSkillMutationResult(
-                    output,
-                    false,
-                    null,
-                    false,
-                    reason,
-                );
-            }
-            return err;
+        const token = try handlers.parseWireId(parsed.value.previewId);
+        const revision = try handlers.parseWireId(parsed.value.preparationRevision);
+        const confirmation = std.meta.stringToEnum(product_control.SkillImportEffect, parsed.value.confirmation) orelse return error.InvalidBridgePayload;
+        if (reimport_only and confirmation != .update) return error.InvalidBridgePayload;
+        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        const preparation = self.skill_grants.check(token, revision, invocation.source.window_id, generation, self.now()) catch return encodeSkillMutationResult(output, false, null, false, "invalid_preview");
+        const control = try self.requireProductControl();
+        control.preflightSkillImport(preparation.id, revision, confirmation) catch |err| {
+            self.notifyCommitted();
+            return encodeSkillMutationResult(output, false, null, false, @tagName(product_control.skillImportReason(err)));
+        };
+        _ = self.skill_grants.consume(token, revision, invocation.source.window_id, generation, self.now()) catch {
+            self.invalidateSkillPreparation();
+            control.discardSkillImport(preparation.id);
+            self.notifyCommitted();
+            return encodeSkillMutationResult(output, false, null, false, "invalid_preview");
+        };
+        const result = control.commitSkillImport(preparation.id, revision, confirmation) catch |err| {
+            self.notifyCommitted();
+            return encodeSkillMutationResult(output, false, null, false, @tagName(product_control.skillImportReason(err)));
         };
         self.notifyCommitted();
-        return encodeSkillMutationResult(
-            output,
-            true,
-            result.install_id,
-            result.verification_pending,
-            null,
-        );
+        return encodeSkillMutationResult(output, true, result.install_id, result.verification_pending, null);
     }
 
     fn uninstallSkill(
@@ -4226,7 +4094,7 @@ pub const Dispatcher = struct {
             output,
             false,
             null,
-            skillMutationRejection(err) orelse "export_failed",
+            @tagName(product_control.skillImportReason(err)),
         );
         return encodeSkillExportResult(output, true, result.fileName(), null);
     }
@@ -5557,6 +5425,45 @@ fn catalogRefreshRejection(err: anyerror) ?[]const u8 {
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
+}
+
+fn parseSkillImportTarget(value: handlers.SkillImportTarget) !product_control.SkillImportTarget {
+    if (std.mem.eql(u8, value.kind, "reimport")) {
+        if (value.workspaceId != null or value.expectedWorkspaceEpoch != null or value.installId == null) return error.InvalidBridgePayload;
+        return .{ .reimport = try parseSkillInstallId(value.installId.?) };
+    }
+    if (value.installId != null) return error.InvalidBridgePayload;
+    return .{ .scope = try parseSkillScope(value.kind, value.workspaceId, value.expectedWorkspaceEpoch) };
+}
+
+fn encodeSkillImportRejection(output: []u8, reason: skill_runtime.ImportReason) ![]const u8 {
+    return std.fmt.bufPrint(output, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{@tagName(reason)});
+}
+
+fn encodeSkillImportPreparation(output: []u8, token: u64, preparation: product_control.SkillImportPreparation) ![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"status\":\"prepared\",\"previewId\":\"{d}\",\"operationId\":\"{d}\",\"preparationRevision\":\"{d}\",\"sourceKind\":\"{s}\",\"effect\":\"{s}\",\"installId\":", .{ token, preparation.id, preparation.revision, @tagName(preparation.source_kind), @tagName(preparation.effect) }) catch return error.NoSpaceLeft;
+    if (preparation.install_id) |id| {
+        const hex = std.fmt.bytesToHex(id, .lower);
+        writer.print("\"{s}\"", .{&hex}) catch return error.NoSpaceLeft;
+    } else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"scope\":") catch return error.NoSpaceLeft;
+    try writeSkillImportScope(&writer, preparation.scope);
+    inline for (.{ .{ "invocationName", preparation.invocation_name }, .{ "displayName", preparation.invocation_name }, .{ "description", preparation.description }, .{ "definition", preparation.definition } }) |field| {
+        writer.print(",\"{s}\":", .{field[0]}) catch return error.NoSpaceLeft;
+        std.json.Stringify.value(field[1], .{}, &writer) catch return error.NoSpaceLeft;
+    }
+    writer.print(",\"fileCount\":{d},\"totalBytes\":{d},\"blocker\":", .{ preparation.file_count, preparation.total_bytes }) catch return error.NoSpaceLeft;
+    if (preparation.blocker) |reason| writer.print("\"{s}\"", .{@tagName(reason)}) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn writeSkillImportScope(writer: *std.Io.Writer, scope: skill_management.Scope) !void {
+    switch (scope) {
+        .personal => try writer.writeAll("{\"kind\":\"personal\",\"workspaceId\":null,\"workspaceEpoch\":null}"),
+        .project => |project| try writer.print("{{\"kind\":\"project\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}", .{ project.workspace_id, project.workspace_epoch }),
+    }
 }
 
 fn parseSkillScope(
@@ -8472,4 +8379,112 @@ test "notification navigation retains only a real Task and uses the shared conne
     try std.testing.expectEqual(@as(?u64, null), dispatcher.pending_notification_task);
     try dispatcher.deliverNotificationTask();
     try std.testing.expectEqual(@as(usize, 1), host.calls);
+}
+
+test "Skill import preparation matches Renderer fixture and refuses mixed targets" {
+    const id = try parseSkillInstallId("00112233445566778899aabbccddeeff");
+    var storage: [4096]u8 = undefined;
+    const encoded = try encodeSkillImportPreparation(&storage, 7, .{
+        .id = 5,
+        .revision = 2,
+        .source_kind = .local_package,
+        .scope = .{ .project = .{ .workspace_id = 1, .workspace_epoch = 3 } },
+        .effect = .update,
+        .install_id = id,
+        .invocation_name = "release-check",
+        .description = "Check a release.",
+        .definition = "---\nname: release-check\ndescription: Check a release.\n---\nCheck resources.\n",
+        .file_count = 2,
+        .total_bytes = 42,
+        .blocker = .busy,
+    });
+    // This fixture is embedded by the same contract module as snapshots.
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @import("contract_fixture").skill_import_preview, "\r\n"), encoded);
+    try std.testing.expectError(error.InvalidBridgePayload, parseSkillImportTarget(.{ .kind = "personal", .workspaceId = null, .expectedWorkspaceEpoch = null, .installId = "00112233445566778899aabbccddeeff" }));
+    try std.testing.expectError(error.InvalidBridgePayload, parseSkillImportTarget(.{ .kind = "project", .workspaceId = "1", .expectedWorkspaceEpoch = null, .installId = null }));
+}
+
+test "Skill import admission retains busy confirmation, consumes once, and revokes preparation on disconnect" {
+    const Host = struct {
+        path: []const u8,
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn now(_: ?*anyopaque) u64 {
+            return 100;
+        }
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn open(context: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, output: []u8) anyerror!native_sdk.platform.OpenDialogResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memcpy(output[0..self.path.len], self.path);
+            return .{ .paths = output[0..self.path.len], .count = 1 };
+        }
+        fn invocation(command: []const u8, payload: []const u8) native_sdk.bridge.Invocation {
+            return .{ .request = .{ .id = "skill-test", .command = command, .payload = payload }, .source = .{ .origin = "zero://app", .window_id = 3 } };
+        }
+    };
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    var source = std.testing.tmpDir(.{ .iterate = true });
+    defer source.cleanup();
+    const home_path = try home.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home_path);
+    const source_path = try source.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(source_path);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: demo\ndescription: Demo\n---\nHello.\n" });
+    var store: skill_management.FileStore = .{ .io = std.testing.io, .dir = home.dir };
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.skillImportFixture(control, home_path, &store);
+    defer control.deinit();
+    var host: Host = .{ .path = source_path };
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = &host,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = Host.open,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer boundary.deinit();
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    var output: [4096]u8 = undefined;
+    const choose = "{\"kind\":\"directory\",\"target\":{\"kind\":\"personal\",\"workspaceId\":null,\"expectedWorkspaceEpoch\":null,\"installId\":null}}";
+    const prepared = try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), &output);
+    try std.testing.expect(std.mem.indexOf(u8, prepared, "\"blocker\":\"busy\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prepared, source_path) == null);
+    const commit = "{\"previewId\":\"1\",\"preparationRevision\":\"1\",\"confirmation\":\"create\"}";
+    const busy = try Dispatcher.installSkill(&boundary, Host.invocation(commands.install_skill, commit), &output);
+    try std.testing.expect(std.mem.indexOf(u8, busy, "\"reason\":\"busy\"") != null);
+    try std.testing.expect(boundary.skill_grants.grant != null);
+    try std.testing.expectError(error.FileNotFound, home.dir.statFile(std.testing.io, ".agents", .{ .follow_symlinks = false }));
+    const retarget = "{\"previewId\":\"1\",\"preparationRevision\":\"1\",\"target\":{\"kind\":\"personal\",\"workspaceId\":null,\"expectedWorkspaceEpoch\":null,\"installId\":null}}";
+    _ = try Dispatcher.prepareSkillImport(&boundary, Host.invocation(commands.prepare_skill_import, retarget), &output);
+    const stale = try Dispatcher.installSkill(&boundary, Host.invocation(commands.install_skill, commit), &output);
+    try std.testing.expect(std.mem.indexOf(u8, stale, "\"reason\":\"invalid_preview\"") != null);
+    product_control.TestSupport.finishSkillImportFixture(control);
+    const fresh_commit = "{\"previewId\":\"1\",\"preparationRevision\":\"2\",\"confirmation\":\"create\"}";
+    const accepted = try Dispatcher.installSkill(&boundary, Host.invocation(commands.install_skill, fresh_commit), &output);
+    if (std.mem.indexOf(u8, accepted, "\"accepted\":true") == null) std.debug.print("Skill admission result: {s}\n", .{accepted});
+    try std.testing.expect(std.mem.indexOf(u8, accepted, "\"accepted\":true") != null);
+    try std.testing.expect(boundary.skill_grants.grant == null);
+    const replay = try Dispatcher.installSkill(&boundary, Host.invocation(commands.install_skill, fresh_commit), &output);
+    try std.testing.expect(std.mem.indexOf(u8, replay, "\"reason\":\"invalid_preview\"") != null);
+    // A later preparation cannot revoke the already published transaction.
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: another\ndescription: Another\n---\nHello.\n" });
+    _ = try Dispatcher.chooseSkillImport(&boundary, Host.invocation(commands.choose_skill_import, choose), &output);
+    const grant = boundary.skill_grants.grant.?;
+    boundary.breakConnection();
+    try std.testing.expect(boundary.skill_grants.grant == null);
+    try std.testing.expectError(error.InvalidPreparation, control.preflightSkillImport(grant.preparation.id, grant.preparation.revision, .create));
+    _ = try home.dir.statFile(std.testing.io, ".agents/skills/demo/SKILL.md", .{ .follow_symlinks = false });
 }

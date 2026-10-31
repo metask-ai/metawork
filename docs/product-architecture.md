@@ -225,6 +225,10 @@ Schedule store 只有唯一 canonical `schema_version = 1`，definition 的完�
 
 Product Skill aggregate 拥有本地资产 inventory、management transaction、enablement policy、Workspace catalog authority 与其持久化健康。Agent 拥有 AgentCore catalog acquisition、opaque lease 与运行时 catalog identity；Application 只注入 FileStore、受限文件能力、原生 picker 和经过验证的内置 Skill 根。Product Control 负责 Workspace/Task authority、shared Executor admission、全局 revision 与完整 snapshot，不读取 Skill 内部 state 或拼装物理路径。
 
+本地导入准备由 Skill aggregate 有界持有一份：来源 locator、解析后的唯一 root、源摘要、元数据、目标 scope/epoch、目标 inventory identity 与实际内容摘要，以及单调 revision。准备、改选目标和放弃均不修改 canonical 文件或 durable inventory；准备允许已有 Task 运行，只投影正式提交的当前 blocker。改选 scope 必须复核来源并重新观察目标，产生新 revision；提交仅接受该 revision 与明确的 create、managed update 或未登记目录替换确认。managed update 保留 install identity，不能通过同名重新安装建立第二条记录。
+
+正式提交由 Product Control 先同步生命周期并验证 scope、Task 静止与 Skill mutation admission，再由 Bridge 消费连接授权，在同一 owner 调用中交给 Skill 原有 transaction。Skill 重新核对来源 root/摘要和目标 identity/内容；变化必须重新准备，不能把旧确认应用到新字节或新目标。准备的连接撤销、替换或进程结束释放其临时资源；已经发布的 transaction 继续沿现有精确 catalog reconciliation 和恢复规则收口。当前/最近导入结果是进程内有界事实，读取只投影，不推进验证、恢复或重放导入，也不改变持久化 schema。
+
 内置来源根与可选的组件 source lifetime 在 owner 线程作为一对输入捕获到 catalog job，排队前复制路径并保留引用。之后替换来源只影响后续捕获，不能让旧 job 使用新版本的 lifetime。查询期间由 job 保留资源，成功后由 [Agent catalog lease](agentcore-integration.md#skill-catalog-ownership) 接续；排队拒绝、取消、检查失败、stale completion 和 shutdown 都必须释放各自拥有的引用。旧组件的文件删除不能依据 Task 历史或绝对路径文本推断引用；只有进程内引用静止后才能回收。 来源切换由 Product owner 线程接收已验证的根与同一个 lifetime；切换前检查 shutdown、相关 request generation 容量及未完成的资产 reconciliation，拒绝时保留旧输入。成功时同时推进 personal 和已授权 Workspace 的查询 generation，使旧 completion 失去提交资格，并合并后续发现 intent；不修改已有 Task 的 pinned authority，不重放工具。Application 保留旧 current 引用到该 handoff 成功后再退休。
 
 Skill 持久记录只按 Workspace id 归属；`skill-enablement.json` 与 `skill-management.json` 保持唯一 canonical `schema_version = 1`，格式原地硬切，不持久化 Workspace epoch，严格解码当前格式，不存在旧格式 fallback、折叠、迁移、quarantine 或恢复动作。能读取但无法按当前格式解码的数据直接失去 authority，store 从空状态继续，并在同次启动中以 atomic replace 写入空的当前格式；替换成功才是 `ready`，任何替换失败均为 `corrupt`，文件读取失败为 `read_failed`。Workspace epoch 只做 command、job 与 completion 的 freshness 校验，移除开始时推进、不回退；任何路径都不得用 epoch 推断记录归属。身份连续性由 Workspace identity allocator 保证：启动时 allocator 必须高于有效 Skill 记录引用的最大 id；两个 Skill store 只要有一个是 `read_failed`、`corrupt` 或 `outcome_unknown`，就不能证明 canonical 中哪些 id 仍有 authority，此时禁止分配任何新的 Workspace id（Manual 与 Automatic），`newTaskAdmission` 与 `automaticWorkspaces` capability 同步发布不可用，只允许重新授权已存在的 record，直到后续启动严格读取或替换成功。普通 mutation 的 `write_failed` 仍保留已知的内存与 canonical id authority，不阻止分配新 id。记录只在隐藏 record 被 slot 复用、id 永久退出 registry 时退休：复用前 Control 先确认两个 Skill store 均为 `ready` 或 `unavailable` 且该 id 没有 durable transaction，否则保留隐藏 record 并按既有容量规则拒绝新增。退休只删 policy/inventory 记录，不触碰目录；各 store 独立提交，失败按各自 health 规则冻结。没有已注册 owner 的记录不可管理，也不做任何启动时的归属推断或清理。
@@ -560,7 +564,7 @@ Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须
 
 ## 5. `.skill` 交换 artifact
 
-`.skill` 是 MetaWork 对外可交换的 ZIP envelope。规范 archive root 必须直接包含精确大小写的 `SKILL.md` 及同一 Skill 的相对资源；导入普通 `.zip` 时，只允许 archive root 本身或唯一 wrapper directory 成为候选 Skill root。多个 `SKILL.md`、多个候选根或缺少 root 均失败。
+`.skill` 是 MetaWork 对外可交换的 ZIP envelope。规范 archive root 必须直接包含精确大小写的 `SKILL.md` 及同一 Skill 的相对资源；本地目录和 ZIP-compatible 安装包导入只允许所选根本身或唯一的一层 wrapper directory 成为候选 Skill root。排除平台 metadata 后，整个候选只允许一个精确 `SKILL.md`；多个定义（包括嵌套示例）、多个候选根、更深 wrapper 或缺少 root 均失败。预览与提交共用根解析规则，提交仍重新检查源摘要，不把预览当作可绕过源变化检查的安装快照。
 
 导入必须在目标 root 之外 materialize 为 staged tree，并拒绝 absolute、drive/UNC、空、`.`、`..`、NUL、非 UTF-8、重复归一化、Windows 保留名和尾随点/空格路径；symlink、hardlink、device、socket、FIFO 与其他特殊 entry 一律拒绝。Importer 只读取或复制 regular bytes，不执行脚本、不解析远程链接、不访问网络。
 
@@ -573,4 +577,6 @@ Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须
 - 单 path component 最多 128 UTF-8 bytes；
 - `.skill` 压缩输入最多 32 MiB。
 
-export 服从同一文件与路径边界，使用稳定相对路径顺序，不包含绝对路径、provenance store、credential、`.git` 或平台 metadata。具体 ZIP library、staging 目录、hash 实现和文件事务 helper 由代码与测试拥有；上述 envelope、拒绝规则和容量属于稳定 artifact 合同。
+目录与归档从候选中排除 `.git`、`__MACOSX`、`.DS_Store`、`Thumbs.db` 和 AppleDouble `._*` metadata。排除不豁免原始归档的路径、entry 类型、重复路径、压缩方式和输入/展开容量校验，不授予 metadata 中的链接或特殊文件任何访问能力。
+
+export 服从同一文件、定义唯一性和路径边界，使用稳定相对路径顺序，不包含绝对路径、provenance store、credential 或上述 metadata。成功导出的 `.skill` 必须能通过同一 importer 的机械检查，输出大小包含 ZIP header 和目录开销，超过压缩输入上限明确失败，不能只按展开总量判断。具体 ZIP library、staging 目录、hash 实现和文件事务 helper 由代码与测试拥有；上述 envelope、拒绝规则和容量属于稳定 artifact 合同。

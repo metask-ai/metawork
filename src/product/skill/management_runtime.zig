@@ -19,6 +19,12 @@ pub const Error = package.Error || management.Error || error{
     TargetAlreadyExists,
     WriteFailed,
     RecoveryUnavailable,
+    InvalidPreparation,
+    InvalidConfirmation,
+    PreparationExhausted,
+    SourceChanged,
+    TargetChanged,
+    TaskBusy,
 };
 
 pub const Context = struct {
@@ -31,16 +37,27 @@ pub fn previewDirectory(
     context: Context,
     absolute_path: []const u8,
 ) Error!package.Preview {
+    const source = try openDirectorySource(context, absolute_path);
+    defer source.close(context.io);
+    var preview = try package.previewDirectory(context.io, context.allocator, source, .{});
+    errdefer preview.deinit();
+    const canonical = source.realPathFileAlloc(context.io, ".", context.allocator) catch return error.SourceUnavailable;
+    defer context.allocator.free(canonical);
+    preview.source_root = try context.allocator.dupe(u8, canonical);
+    return preview;
+}
+
+fn openDirectorySource(context: Context, absolute_path: []const u8) Error!std.Io.Dir {
     if (!std.fs.path.isAbsolute(absolute_path) or
         !std.unicode.utf8ValidateSlice(absolute_path))
         return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(
+    const selected = std.Io.Dir.openDirAbsolute(
         context.io,
         absolute_path,
         .{ .follow_symlinks = false, .iterate = true },
-    ) catch return error.InvalidAsset;
-    defer source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{});
+    ) catch return error.SourceUnavailable;
+    defer selected.close(context.io);
+    return package.openDirectorySource(context.io, context.allocator, selected, .{});
 }
 
 pub fn previewArchive(
@@ -55,14 +72,14 @@ pub fn previewArchive(
         context.io,
         absolute_path,
         .{ .follow_symlinks = false },
-    ) catch return error.InvalidAsset;
+    ) catch return error.SourceUnavailable;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -78,7 +95,7 @@ pub fn previewArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
@@ -86,8 +103,42 @@ pub fn previewArchive(
     else
         scratch;
     defer if (inspection.wrapperName() != null) source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{}) catch
-        return error.InvalidAsset;
+    var preview = try package.previewDirectory(context.io, context.allocator, source, .{});
+    errdefer preview.deinit();
+    preview.source_root = try context.allocator.dupe(u8, inspection.wrapperName() orelse "");
+    return preview;
+}
+
+/// Observe a target without creating .agents/skills or changing inventory.
+pub fn inspectImportTarget(context: Context, canonical_base: []const u8, scope: management.Scope, invocation: []const u8, reimport_id: ?management.InstallId) Error!state.ImportExpectation {
+    const asset = context.state.inventoryConst().findTarget(scope, invocation);
+    if (reimport_id) |id| {
+        if (asset == null or !std.mem.eql(u8, &id, &asset.?.install_id)) return error.TargetChanged;
+    }
+    if (asset) |current| if (current.state != .ready or current.recovery != null) return error.TaskBusy;
+    const base = std.Io.Dir.openDirAbsolute(context.io, canonical_base, .{ .follow_symlinks = false }) catch return error.RootUnavailable;
+    defer base.close(context.io);
+    const base_stat = base.stat(context.io) catch return error.RootUnavailable;
+    var absent: state.ImportExpectation = .{ .effect = .create, .base_inode = base_stat.inode };
+    const agents = base.openDir(context.io, ".agents", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer agents.close(context.io);
+    const skills = agents.openDir(context.io, "skills", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer skills.close(context.io);
+    const root_stat = skills.stat(context.io) catch return error.TargetUnavailable;
+    absent.root_inode = root_stat.inode;
+    const target = skills.openDir(context.io, invocation, .{ .follow_symlinks = false, .iterate = true }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer target.close(context.io);
+    var manifest = try package.inspectResourceTree(context.io, context.allocator, target, .{});
+    defer manifest.deinit();
+    return .{
+        .effect = if (asset != null) .update else .replace_directory,
+        .install_id = if (asset) |current| current.install_id else null,
+        .record_hash = if (asset) |current| current.content_hash else null,
+        .content_hash = manifest.content_hash,
+        .base_inode = base_stat.inode,
+        .root_inode = root_stat.inode,
+        .target_inode = (target.stat(context.io) catch return error.TargetUnavailable).inode,
+    };
 }
 
 pub fn readDefinition(
@@ -165,8 +216,7 @@ pub fn exportPackage(
         if (output_open) output.close(context.io);
         if (output_exists) destination.deleteFile(context.io, result.fileName()) catch {};
     }
-    package.exportArchive(context.io, source, output, &manifest) catch
-        return error.WriteFailed;
+    try package.exportArchive(context.io, source, output, &manifest);
     output.sync(context.io) catch return error.WriteFailed;
     output.close(context.io);
     output_open = false;
@@ -181,14 +231,8 @@ pub fn installDirectory(
     input: state.InstallInput,
     now_unix_seconds: ?u64,
 ) Error!state.MutationResult {
-    if (input.source_kind != .local_directory or
-        !std.fs.path.isAbsolute(absolute_path) or
-        !std.unicode.utf8ValidateSlice(absolute_path))
-        return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(context.io, absolute_path, .{
-        .follow_symlinks = false,
-        .iterate = true,
-    }) catch return error.InvalidAsset;
+    if (input.source_kind != .local_directory) return error.InvalidAsset;
+    const source = try openDirectorySource(context, absolute_path);
     defer source.close(context.io);
     return installSource(context, canonical_base, source, input, now_unix_seconds);
 }
@@ -209,12 +253,12 @@ pub fn installArchive(
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -230,7 +274,7 @@ pub fn installArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
@@ -250,13 +294,7 @@ pub fn reimportDirectory(
     expected_invocation_name: []const u8,
     expected_content_hash: management.ContentHash,
 ) Error!state.MutationResult {
-    if (!std.fs.path.isAbsolute(absolute_path) or
-        !std.unicode.utf8ValidateSlice(absolute_path))
-        return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(context.io, absolute_path, .{
-        .follow_symlinks = false,
-        .iterate = true,
-    }) catch return error.InvalidAsset;
+    const source = try openDirectorySource(context, absolute_path);
     defer source.close(context.io);
     return reimportSource(
         context,
@@ -286,12 +324,12 @@ pub fn reimportArchive(
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -307,7 +345,7 @@ pub fn reimportArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,

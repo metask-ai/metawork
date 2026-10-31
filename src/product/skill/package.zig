@@ -83,9 +83,12 @@ pub const Preview = struct {
     file_count: usize,
     total_bytes: u64,
     content_hash: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    /// Host-only identity of the selected root; never projected to Renderer.
+    source_root: ?[]u8 = null,
 
     pub fn deinit(self: *Preview) void {
         self.allocator.free(self.definition);
+        if (self.source_root) |root| self.allocator.free(root);
         self.* = undefined;
     }
 };
@@ -134,23 +137,77 @@ pub fn inspectDirectory(
     source: std.Io.Dir,
     limits: Limits,
 ) Error!Manifest {
+    var manifest = try inspectResourceTree(io, allocator, source, limits);
+    errdefer manifest.deinit();
+    const root = try directoryRoot(&manifest);
+    if (root.wrapperName() != null) return error.InvalidArchiveRoot;
+    return manifest;
+}
+
+/// Opens the exact root of a selected directory after inspecting the whole
+/// selection. The returned directory is owned by the caller, even for `.`.
+pub fn openDirectorySource(io: std.Io, allocator: std.mem.Allocator, selected: std.Io.Dir, limits: Limits) Error!std.Io.Dir {
+    var manifest = try inspectResourceTree(io, allocator, selected, limits);
+    defer manifest.deinit();
+    const root = try directoryRoot(&manifest);
+    if (root.wrapperName()) |wrapper| {
+        var iterator = selected.iterate();
+        while (iterator.next(io) catch return error.SourceUnavailable) |entry| {
+            if (!ignoredPath(entry.name, entry.kind == .directory) and !std.mem.eql(u8, entry.name, wrapper))
+                return error.InvalidArchiveRoot;
+        }
+    }
+    return selected.openDir(io, root.wrapperName() orelse ".", .{ .follow_symlinks = false, .iterate = true }) catch error.SourceUnavailable;
+}
+
+fn directoryRoot(manifest: *const Manifest) Error!ArchiveInspection {
+    var definition: ?[]const u8 = null;
+    for (manifest.files) |entry| {
+        if (!std.mem.eql(u8, std.fs.path.basename(entry.path), "SKILL.md")) continue;
+        if (definition != null) return error.MultipleSkillDefinitions;
+        definition = entry.path;
+    }
+    const root = try definitionRoot(definition orelse return error.SkillDefinitionMissing);
+    if (root.wrapperName()) |wrapper| {
+        for (manifest.files) |entry| if (!pathInsideWrapper(entry.path, wrapper)) return error.InvalidArchiveRoot;
+    }
+    return root;
+}
+
+fn definitionRoot(definition: []const u8) Error!ArchiveInspection {
+    var root: ArchiveInspection = .{ .file_count = 0, .total_bytes = 0 };
+    if (std.mem.eql(u8, definition, "SKILL.md")) return root;
+    const slash = std.mem.findScalar(u8, definition, '/') orelse return error.InvalidArchiveRoot;
+    if (slash == 0 or slash > default_max_component_bytes or !std.mem.eql(u8, definition[slash + 1 ..], "SKILL.md"))
+        return error.InvalidArchiveRoot;
+    var storage: [default_max_component_bytes]u8 = undefined;
+    @memcpy(storage[0..slash], definition[0..slash]);
+    root.wrapper = storage;
+    root.wrapper_len = slash;
+    return root;
+}
+
+pub fn inspectResourceTree(io: std.Io, allocator: std.mem.Allocator, source: std.Io.Dir, limits: Limits) Error!Manifest {
     var files: std.ArrayList(FileEntry) = .empty;
     errdefer {
         for (files.items) |*entry| entry.deinit(allocator);
         files.deinit(allocator);
     }
     var total: u64 = 0;
-    var saw_definition = false;
     var walker = source.walk(allocator) catch return error.SourceUnavailable;
     defer walker.deinit();
     while (walker.next(io) catch return error.SourceUnavailable) |entry| {
         const normalized = try normalizeNativePath(allocator, entry.path);
         defer allocator.free(normalized);
+        try validateRelativePath(normalized, limits);
+        switch (entry.kind) {
+            .directory, .file => {},
+            else => return error.UnsupportedEntry,
+        }
         if (ignoredPath(normalized, entry.kind == .directory)) {
             if (entry.kind == .directory) walker.leave(io);
             continue;
         }
-        try validateRelativePath(normalized, limits);
         switch (entry.kind) {
             .directory => continue,
             .file => {},
@@ -165,13 +222,11 @@ pub fn inspectDirectory(
         total = std.math.add(u64, total, stat.size) catch
             return error.TotalSizeExceeded;
         if (total > limits.max_total_bytes) return error.TotalSizeExceeded;
-        if (std.mem.eql(u8, normalized, "SKILL.md")) saw_definition = true;
         try files.append(allocator, .{
             .path = try allocator.dupe(u8, normalized),
             .size = stat.size,
         });
     }
-    if (!saw_definition) return error.SkillDefinitionMissing;
     std.mem.sort(FileEntry, files.items, {}, lessThanFileEntry);
     const hash = try hashFiles(io, source, files.items);
     return .{
@@ -257,7 +312,7 @@ pub fn inspectArchive(
     var buffer: [4096]u8 = undefined;
     var reader = archive.reader(io, &buffer);
     var iterator = std.zip.Iterator.init(&reader) catch return error.ArchiveCorrupt;
-    var names: std.StringHashMapUnmanaged(void) = .empty;
+    var names: std.StringHashMapUnmanaged(bool) = .empty;
     defer {
         var it = names.keyIterator();
         while (it.next()) |key| allocator.free(key.*);
@@ -292,6 +347,7 @@ pub fn inspectArchive(
             allocator.free(owned_name);
             return error.DuplicatePath;
         }
+        result.value_ptr.* = is_directory;
         if (is_directory) {
             if (entry.uncompressed_size != 0) return error.ArchiveCorrupt;
             continue;
@@ -302,31 +358,20 @@ pub fn inspectArchive(
             return error.TotalSizeExceeded;
         if (total > limits.max_total_bytes) return error.TotalSizeExceeded;
         file_count += 1;
-        if (std.mem.eql(u8, std.fs.path.basename(normalized), "SKILL.md")) {
+        if (!ignoredPath(normalized, false) and std.mem.eql(u8, std.fs.path.basename(normalized), "SKILL.md")) {
             if (definition_path != null) return error.MultipleSkillDefinitions;
             definition_path = result.key_ptr.*;
         }
     }
     const definition = definition_path orelse return error.SkillDefinitionMissing;
-    var inspection: ArchiveInspection = .{
-        .file_count = file_count,
-        .total_bytes = total,
-    };
-    if (!std.mem.eql(u8, definition, "SKILL.md")) {
-        const slash = std.mem.findScalar(u8, definition, '/') orelse
-            return error.InvalidArchiveRoot;
-        if (!std.mem.eql(u8, definition[slash + 1 ..], "SKILL.md") or slash == 0)
-            return error.InvalidArchiveRoot;
-        const wrapper = definition[0..slash];
-        if (wrapper.len > default_max_component_bytes) return error.InvalidArchiveRoot;
-        var it = names.keyIterator();
-        while (it.next()) |name| {
-            if (!pathInsideWrapper(name.*, wrapper)) return error.InvalidArchiveRoot;
+    var inspection = try definitionRoot(definition);
+    inspection.file_count = file_count;
+    inspection.total_bytes = total;
+    if (inspection.wrapperName()) |wrapper| {
+        var it = names.iterator();
+        while (it.next()) |entry| {
+            if (!ignoredPath(entry.key_ptr.*, entry.value_ptr.*) and !pathInsideWrapper(entry.key_ptr.*, wrapper)) return error.InvalidArchiveRoot;
         }
-        var storage: [default_max_component_bytes]u8 = undefined;
-        @memcpy(storage[0..wrapper.len], wrapper);
-        inspection.wrapper = storage;
-        inspection.wrapper_len = wrapper.len;
     } else {
         var it = names.keyIterator();
         while (it.next()) |name| {
@@ -359,6 +404,15 @@ pub fn exportArchive(
     destination: std.Io.File,
     manifest: *const Manifest,
 ) Error!void {
+    const root = try directoryRoot(manifest);
+    if (root.wrapperName() != null) return error.InvalidArchiveRoot;
+    var archive_size: u64 = @sizeOf(std.zip.EndRecord);
+    for (manifest.files) |entry| {
+        const overhead = @sizeOf(std.zip.LocalFileHeader) + @sizeOf(std.zip.CentralDirectoryFileHeader) + 2 * entry.path.len;
+        archive_size = std.math.add(u64, archive_size, entry.size) catch return error.ArchiveTooLarge;
+        archive_size = std.math.add(u64, archive_size, overhead) catch return error.ArchiveTooLarge;
+    }
+    if (archive_size > (Limits{}).max_archive_bytes) return error.ArchiveTooLarge;
     if (manifest.files.len > std.math.maxInt(u16)) return error.FileLimitExceeded;
     var output_buffer: [8192]u8 = undefined;
     var writer = destination.writer(io, &output_buffer);
@@ -498,7 +552,7 @@ fn normalizeNativePath(allocator: std.mem.Allocator, path: []const u8) Error![]u
 fn ignoredPath(path: []const u8, is_directory: bool) bool {
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
-        if (std.mem.eql(u8, part, ".git") or std.mem.eql(u8, part, "__MACOSX"))
+        if (std.mem.eql(u8, part, ".git") or std.mem.eql(u8, part, "__MACOSX") or std.mem.startsWith(u8, part, "._"))
             return true;
     }
     const base = std.fs.path.basename(path);
@@ -686,6 +740,112 @@ test "canonical archive round trips through bounded preflight" {
     try std.testing.expectEqual(@as(usize, 2), inspection.file_count);
     try std.testing.expectEqual(@as(u64, 11), inspection.total_bytes);
     try std.testing.expectEqual(@as(?[]const u8, null), inspection.wrapperName());
+}
+
+test "selected directories unwrap one exact root and reject ambiguous definitions" {
+    var selected = std.testing.tmpDir(.{ .iterate = true });
+    defer selected.cleanup();
+    try selected.dir.createDir(std.testing.io, "demo", .default_dir);
+    try selected.dir.writeFile(std.testing.io, .{ .sub_path = "demo/SKILL.md", .data = "---\nname: demo\n---\n" });
+    try selected.dir.createDir(std.testing.io, "__MACOSX", .default_dir);
+    try selected.dir.writeFile(std.testing.io, .{ .sub_path = "__MACOSX/SKILL.md", .data = "ignored" });
+    try selected.dir.writeFile(std.testing.io, .{ .sub_path = "._demo", .data = "ignored" });
+    const root = try openDirectorySource(std.testing.io, std.testing.allocator, selected.dir, .{});
+    defer root.close(std.testing.io);
+    var preview = try previewDirectory(std.testing.io, std.testing.allocator, root, .{});
+    defer preview.deinit();
+    try std.testing.expectEqualStrings("demo", preview.invocation_name);
+    try std.testing.expectEqual(@as(usize, 1), preview.file_count);
+    try root.createDir(std.testing.io, "examples", .default_dir);
+    try root.writeFile(std.testing.io, .{ .sub_path = "examples/SKILL.md", .data = "second" });
+    try std.testing.expectError(error.MultipleSkillDefinitions, inspectDirectory(std.testing.io, std.testing.allocator, root, .{}));
+    try std.testing.expectError(error.MultipleSkillDefinitions, openDirectorySource(std.testing.io, std.testing.allocator, selected.dir, .{}));
+}
+
+test "selected directory roots reject deeper wrappers and unrelated entries" {
+    var selected = std.testing.tmpDir(.{ .iterate = true });
+    defer selected.cleanup();
+    try selected.dir.createDirPath(std.testing.io, "outer/inner");
+    try selected.dir.writeFile(std.testing.io, .{ .sub_path = "outer/inner/SKILL.md", .data = "demo" });
+    try std.testing.expectError(error.InvalidArchiveRoot, openDirectorySource(std.testing.io, std.testing.allocator, selected.dir, .{}));
+    try selected.dir.rename("outer/inner/SKILL.md", selected.dir, "outer/SKILL.md", std.testing.io);
+    try selected.dir.createDir(std.testing.io, "unrelated", .default_dir);
+    try std.testing.expectError(error.InvalidArchiveRoot, openDirectorySource(std.testing.io, std.testing.allocator, selected.dir, .{}));
+}
+
+const ArchiveFixtureEntry = struct { path: []const u8, data: []const u8 };
+
+fn writeArchiveFixture(file: std.Io.File, entries: []const ArchiveFixtureEntry) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writer(std.testing.io, &buffer);
+    var records: [8]CentralRecord = undefined;
+    std.debug.assert(entries.len <= records.len);
+    var offset: u32 = 0;
+    for (entries, 0..) |entry, index| {
+        const size: u32 = @intCast(entry.data.len);
+        const crc = std.hash.Crc32.hash(entry.data);
+        records[index] = .{ .path = entry.path, .size = size, .crc32 = crc, .local_offset = offset };
+        try writeLocalHeader(&writer.interface, entry.path, size, crc);
+        try writer.interface.writeAll(entry.data);
+        offset += @intCast(@sizeOf(std.zip.LocalFileHeader) + entry.path.len + size);
+    }
+    const central_offset = offset;
+    for (records[0..entries.len]) |record| {
+        try writeCentralHeader(&writer.interface, record);
+        offset += @intCast(@sizeOf(std.zip.CentralDirectoryFileHeader) + record.path.len);
+    }
+    try writeEndRecord(&writer.interface, @intCast(entries.len), offset - central_offset, central_offset);
+    try writer.interface.flush();
+}
+
+test "archive metadata does not change the root or bypass raw budgets and path checks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const archive = try tmp.dir.createFile(std.testing.io, "metadata.zip", .{ .read = true });
+    defer archive.close(std.testing.io);
+    try writeArchiveFixture(archive, &.{
+        .{ .path = "demo/SKILL.md", .data = "demo" },
+        .{ .path = "__MACOSX/SKILL.md", .data = "metadata" },
+        .{ .path = "._demo", .data = "metadata" },
+    });
+    const root = try inspectArchive(std.testing.io, std.testing.allocator, archive, .{});
+    try std.testing.expectEqualStrings("demo", root.wrapperName().?);
+    try std.testing.expectEqual(@as(usize, 3), root.file_count);
+    try std.testing.expectError(error.FileLimitExceeded, inspectArchive(std.testing.io, std.testing.allocator, archive, .{ .max_files = 2 }));
+    const unsafe = try tmp.dir.createFile(std.testing.io, "unsafe.zip", .{ .read = true });
+    defer unsafe.close(std.testing.io);
+    try writeArchiveFixture(unsafe, &.{
+        .{ .path = "SKILL.md", .data = "demo" },
+        .{ .path = "__MACOSX/../escape", .data = "metadata" },
+    });
+    try std.testing.expectError(error.InvalidPath, inspectArchive(std.testing.io, std.testing.allocator, unsafe, .{}));
+}
+
+test "archive and directory imports reject a nested second definition" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const archive = try tmp.dir.createFile(std.testing.io, "multiple.zip", .{ .read = true });
+    defer archive.close(std.testing.io);
+    try writeArchiveFixture(archive, &.{
+        .{ .path = "demo/SKILL.md", .data = "demo" },
+        .{ .path = "demo/examples/SKILL.md", .data = "second" },
+    });
+    try std.testing.expectError(error.MultipleSkillDefinitions, inspectArchive(std.testing.io, std.testing.allocator, archive, .{}));
+}
+
+test "store-only export rejects importer size overflow before writing bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const archive = try tmp.dir.createFile(std.testing.io, "too-large.skill", .{ .read = true });
+    defer archive.close(std.testing.io);
+    var files = [_]FileEntry{
+        .{ .path = @constCast("SKILL.md"), .size = 4 },
+        .{ .path = @constCast("first.bin"), .size = (Limits{}).max_file_bytes },
+        .{ .path = @constCast("second.bin"), .size = (Limits{}).max_file_bytes },
+    };
+    const manifest: Manifest = .{ .allocator = std.testing.allocator, .files = &files, .total_bytes = 32 * 1024 * 1024 + 4, .content_hash = @splat(0) };
+    try std.testing.expectError(error.ArchiveTooLarge, exportArchive(std.testing.io, tmp.dir, archive, &manifest));
+    try std.testing.expectEqual(@as(u64, 0), try archive.length(std.testing.io));
 }
 
 test "directory preview derives bounded metadata without owning runtime health" {

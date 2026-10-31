@@ -1,5 +1,10 @@
 import type { SearchCursor } from "./contracts.ts";
-import { outputActionStates } from "./contracts.ts";
+import {
+  skillMutationReasons,
+  skillImportEffects,
+  skillImportPhases,
+  outputActionStates,
+} from "./contracts.ts";
 import {
   decodeTaskApprovalResultWire,
   decodeUpdateViewWire,
@@ -105,6 +110,8 @@ import {
   mcpAuthorizationStatusValues,
   mcpAuthorizationPhaseValues,
   type SkillImportPreview,
+  type SkillImportScope,
+  type SkillImportOperation,
   type SkillMutationResult,
   type SkillExportResult,
   type SkillDetailResult,
@@ -767,6 +774,7 @@ function decodeSkillManagement(
     "enablementAvailability",
     "sourceSettings",
     "personalSourceDiscovery",
+    "importOperation",
     "assets",
   ]);
   const availability = enumValue(item.availability, `${path}.availability`, [
@@ -971,6 +979,13 @@ function decodeSkillManagement(
       `${path}.personalSourceDiscovery`,
       "personal",
     ),
+    importOperation:
+      item.importOperation === null
+        ? null
+        : decodeSkillImportOperation(
+            item.importOperation,
+            `${path}.importOperation`,
+          ),
     assets,
   } as SkillManagementView;
 }
@@ -6168,36 +6183,148 @@ export function decodeWorkspaceChoice(value: unknown): WorkspaceChoice {
     workspaceId: positiveWireId(item.workspaceId, "$.workspaceId"),
   };
 }
+function decodeSkillImportScope(
+  value: unknown,
+  path: string,
+): SkillImportScope {
+  const item = object(value, path, ["kind", "workspaceId", "workspaceEpoch"]);
+  const kind = enumValue(item.kind, `${path}.kind`, [
+    "personal",
+    "project",
+  ] as const);
+  if (kind === "personal") {
+    if (item.workspaceId !== null || item.workspaceEpoch !== null)
+      fail(path, "personal scope cannot carry Workspace authority");
+    return { kind, workspaceId: null, workspaceEpoch: null };
+  }
+  return {
+    kind,
+    workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    workspaceEpoch: positiveWireId(
+      item.workspaceEpoch,
+      `${path}.workspaceEpoch`,
+    ),
+  };
+}
+function decodeSkillImportOperation(
+  value: unknown,
+  path: string,
+): SkillImportOperation {
+  const item = object(value, path, [
+    "id",
+    "preparationRevision",
+    "effect",
+    "phase",
+    "scope",
+    "installId",
+    "invocationName",
+    "reason",
+    "canConfirm",
+    "canDiscard",
+    "blocker",
+  ]);
+  const operation: SkillImportOperation = {
+    id: positiveWireId(item.id, `${path}.id`),
+    preparationRevision: positiveWireId(
+      item.preparationRevision,
+      `${path}.preparationRevision`,
+    ),
+    effect: enumValue(item.effect, `${path}.effect`, skillImportEffects),
+    phase: enumValue(item.phase, `${path}.phase`, skillImportPhases),
+    scope: decodeSkillImportScope(item.scope, `${path}.scope`),
+    installId:
+      item.installId === null
+        ? null
+        : nonEmptyString(item.installId, `${path}.installId`),
+    invocationName: stringValue(item.invocationName, `${path}.invocationName`),
+    reason:
+      item.reason === null
+        ? null
+        : enumValue(item.reason, `${path}.reason`, skillMutationReasons),
+    canConfirm: booleanValue(item.canConfirm, `${path}.canConfirm`),
+    canDiscard: booleanValue(item.canDiscard, `${path}.canDiscard`),
+    blocker:
+      item.blocker === null
+        ? null
+        : enumValue(item.blocker, `${path}.blocker`, skillMutationReasons),
+  };
+  if (
+    operation.canConfirm &&
+    (!operation.canDiscard ||
+      operation.phase !== "prepared" ||
+      operation.blocker !== null)
+  )
+    fail(path, "confirmation requires an unblocked preparation");
+  if (operation.canDiscard && operation.phase !== "prepared")
+    fail(path, "only preparation can be discarded");
+  return operation;
+}
 export function decodeSkillImportPreview(value: unknown): SkillImportPreview {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    fail("$", "expected Skill import preview object");
-  const selected = booleanValue((value as JsonObject).selected, "$.selected");
-  if (!selected) {
-    object(value, "$", ["selected"]);
-    return { selected: false };
+  const status = enumValue(record(value, "$").status, "$.status", [
+    "cancelled",
+    "rejected",
+    "prepared",
+  ] as const);
+  if (status === "cancelled") {
+    object(value, "$", ["status"]);
+    return { status };
+  }
+  if (status === "rejected") {
+    const item = object(value, "$", ["status", "reason"]);
+    return {
+      status,
+      reason: enumValue(item.reason, "$.reason", skillMutationReasons),
+    };
   }
   const item = object(value, "$", [
-    "selected",
+    "status",
     "previewId",
+    "operationId",
+    "preparationRevision",
     "sourceKind",
+    "scope",
+    "effect",
+    "installId",
     "invocationName",
     "displayName",
     "description",
+    "definition",
     "fileCount",
     "totalBytes",
+    "blocker",
   ]);
+  const effect = enumValue(item.effect, "$.effect", skillImportEffects);
+  const installId =
+    item.installId === null
+      ? null
+      : nonEmptyString(item.installId, "$.installId");
+  if ((effect === "update") !== (installId !== null))
+    fail("$.installId", "only managed update binds an install identity");
   return {
-    selected: true,
+    status,
     previewId: positiveWireId(item.previewId, "$.previewId"),
+    operationId: positiveWireId(item.operationId, "$.operationId"),
+    preparationRevision: positiveWireId(
+      item.preparationRevision,
+      "$.preparationRevision",
+    ),
     sourceKind: enumValue(item.sourceKind, "$.sourceKind", [
       "local_package",
       "local_directory",
     ] as const),
+    scope: decodeSkillImportScope(item.scope, "$.scope"),
+    effect,
+    installId,
     invocationName: stringValue(item.invocationName, "$.invocationName"),
     displayName: stringValue(item.displayName, "$.displayName"),
     description: stringValue(item.description, "$.description"),
+    definition: stringValue(item.definition, "$.definition"),
     fileCount: positiveNumber(item.fileCount, "$.fileCount"),
     totalBytes: positiveNumber(item.totalBytes, "$.totalBytes"),
+    blocker:
+      item.blocker === null
+        ? null
+        : enumValue(item.blocker, "$.blocker", skillMutationReasons),
   };
 }
 export function decodeMcpMutationResult(value: unknown): McpMutationResult {
@@ -6335,21 +6462,7 @@ export function decodeSkillMutationResult(value: unknown): SkillMutationResult {
     accepted: false,
     installId: null,
     verificationPending: false,
-    reason: enumValue(item.reason, "$.reason", [
-      "invalid_scope",
-      "invalid_preview",
-      "source_changed",
-      "asset_unavailable",
-      "state_changed",
-      "target_exists",
-      "busy",
-      "catalog_loading",
-      "workspace_changed",
-      "workspace_unavailable",
-      "capacity_reached",
-      "shutting_down",
-      "local_storage_failed",
-    ] as const),
+    reason: enumValue(item.reason, "$.reason", skillMutationReasons),
   };
 }
 export function decodeSkillEnablementResult(
@@ -6373,21 +6486,7 @@ export function decodeSkillEnablementResult(
   return {
     applied: false,
     selectionRevision: null,
-    reason: enumValue(item.reason, "$.reason", [
-      "invalid_scope",
-      "invalid_preview",
-      "source_changed",
-      "asset_unavailable",
-      "state_changed",
-      "target_exists",
-      "busy",
-      "catalog_loading",
-      "workspace_changed",
-      "workspace_unavailable",
-      "capacity_reached",
-      "shutting_down",
-      "local_storage_failed",
-    ] as const),
+    reason: enumValue(item.reason, "$.reason", skillMutationReasons),
   };
 }
 export function decodeSkillSourceSettingsResult(

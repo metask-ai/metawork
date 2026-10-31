@@ -1471,7 +1471,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(projection, /fn syncSkillCatalogsNoFail/);
   assert.match(
     projection,
-    /pub fn previewSkillDirectory[\s\S]*?return self\.skill\.previewDirectory\(absolute_path\);[\s\S]*?pub fn previewSkillArchive[\s\S]*?return self\.skill\.previewArchive\(absolute_path\);/,
+    /pub fn prepareSkillImport[\s\S]*?self\.skill\.prepareImport\(path, kind, target\)[\s\S]*?pub fn retargetSkillImport[\s\S]*?self\.skill\.retargetImport\(id, revision, target\)/,
   );
   assert.match(
     projection,
@@ -1485,6 +1485,18 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.doesNotMatch(
     projection,
     /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|fn installSkillSource|fn reimportSkillSource|fn scheduleSkillReconciliation|fn noteSkillPersistenceFailure|fn reconcileSkillCatalogResultNoFail|skill_package_impl\.(?:previewDirectory|inspectDirectory|inspectArchive|extractArchive|exportArchive)|\.skill\.state\.(?:transactions|staging_root)|\.skill\.state\.enablement_(?:store|health|file_store)/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /pub fn (?:previewSkillDirectory|previewSkillArchive|installSkillDirectory|installSkillArchive|reimportSkillDirectory|reimportSkillArchive)/,
+  );
+  assert.match(
+    projection,
+    /pub fn preflightSkillImport[\s\S]*?requireSkillMutationAuthority[\s\S]*?self\.skill\.validatePreparedImport/,
+  );
+  assert.match(
+    projection,
+    /pub fn commitSkillImport[\s\S]*?checkSkillMutationAuthority[\s\S]*?self\.skill\.commitPreparedImport/,
   );
   assert.match(projection, /fn requireSkillMutationAuthority/);
   assert.match(view, /@import\("product_skill_catalog"\)/);

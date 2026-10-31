@@ -487,8 +487,79 @@ export const enUS = {
   "skills.choose_package_body":
     "Import a portable Skill package from this computer.",
   "skills.choose_folder": "Choose folder",
-  "skills.choose_folder_body": "Import a folder whose root contains SKILL.md.",
+  "skills.choose_folder_body":
+    "Choose a folder with SKILL.md at its root or in one wrapper folder.",
   "skills.choose_again": "Choose again",
+  "skills.import_error.invalid_scope":
+    "Choose an available personal or project scope.",
+  "skills.import_error.invalid_preview":
+    "This confirmation has expired or is no longer valid. Choose the source again.",
+  "skills.import_error.source_unavailable":
+    "The selected source cannot be read. Check that it exists and is accessible, then choose it again.",
+  "skills.import_error.definition_missing":
+    "No SKILL.md was found. Choose a Skill root or a folder containing one Skill.",
+  "skills.import_error.multiple_definitions":
+    "More than one SKILL.md was found. Place the Skill you want to import in its own folder.",
+  "skills.import_error.invalid_layout":
+    "Unsupported folder layout. SKILL.md must be at the selected root or in its only child folder.",
+  "skills.import_error.invalid_definition":
+    "The name or description in SKILL.md is invalid. Correct it and choose the source again.",
+  "skills.import_error.invalid_path":
+    "The package contains an unsafe or duplicate path. Correct it before importing.",
+  "skills.import_error.unsupported_entry":
+    "The package contains an unsupported file type or compression method. Use regular files and ZIP.",
+  "skills.import_error.archive_corrupt":
+    "The package is damaged or is not a valid ZIP. Export or obtain it again.",
+  "skills.import_error.too_large":
+    "The file count or size exceeds the import limit. Reduce the package and choose it again.",
+  "skills.import_error.source_changed":
+    "The source has changed. Choose it again and confirm the latest content.",
+  "skills.import_error.target_changed":
+    "The target has changed. Choose the source again and review the updated effect before confirming.",
+  "skills.import_error.asset_unavailable":
+    "This Skill can no longer be managed. Refresh the list and try again.",
+  "skills.import_error.state_changed":
+    "The Skill state has changed. Refresh and confirm again.",
+  "skills.import_error.target_exists":
+    "The target already exists. Prepare again to review its replacement.",
+  "skills.import_error.busy":
+    "A related task or Skill operation is still active. Confirm again when it finishes.",
+  "skills.import_error.catalog_loading":
+    "Skills are still being checked or verified. Wait, then confirm again.",
+  "skills.import_error.workspace_changed":
+    "Project authorization has changed. Choose the project and confirm again.",
+  "skills.import_error.workspace_unavailable":
+    "The project is unavailable. Restore folder authorization and try again.",
+  "skills.import_error.capacity_reached":
+    "There is not enough processing capacity right now. Try again later.",
+  "skills.import_error.shutting_down":
+    "The app is shutting down. This operation was not accepted.",
+  "skills.import_error.local_storage_failed":
+    "The local file operation failed. Check folder access or files in use, and review recovery status in the list.",
+  "skills.import_error.outcome_unknown":
+    "The outcome has not been confirmed. Check the latest list and recovery guidance before importing again.",
+  "skills.effect.create": "Install Skill",
+  "skills.effect.update": "Update Skill",
+  "skills.effect.replace_directory": "Replace folder",
+  "skills.effect_body.create": "Add a new Skill in this scope.",
+  "skills.effect_body.update":
+    "Update the managed Skill in this scope and keep its enablement settings.",
+  "skills.effect_body.replace_directory":
+    "Replace the existing unmanaged folder in this scope. Its original copy is retained until verification finishes.",
+  "skills.operation.prepared": "{skill} is prepared for confirmation.",
+  "skills.operation.pending_verification":
+    "{skill} has been published and is awaiting verification.",
+  "skills.operation.ready": "{skill} has been verified and is ready.",
+  "skills.operation.rolled_back":
+    "{skill} failed verification. The file changes have been rolled back.",
+  "skills.operation.recovery_required":
+    "{skill} needs recovery. Review the available actions on the asset.",
+  "skills.operation.rejected":
+    "The operation for {skill} did not complete. Review the reason.",
+  "skills.operation.cancelled":
+    "The unsubmitted preparation for {skill} was discarded.",
+  "skills.operation.outcome_unknown":
+    "The outcome for {skill} is not confirmed. Review recovery guidance.",
   "skills.install_scope": "Install for",
   "skills.preview_size": "{files} files · {size} bytes",
   "skills.resource_context_notice":
@@ -515,6 +586,8 @@ export const enUS = {
   "skills.error.preview": "This source could not be validated as a Skill.",
   "skills.error.mutation": "The Skill change could not be completed.",
   "skills.error.detail": "The local definition could not be loaded.",
+  "skills.error.export_too_large":
+    "The exported package would exceed the reimport limit. Reduce its resources and export again.",
   "skills.error.export": "The Skill could not be exported.",
   "skills.error.enablement":
     "The Skill could not be updated. Refresh and try again.",

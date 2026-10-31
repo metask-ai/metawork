@@ -1155,3 +1155,85 @@ test("Workbench security notifications are strict and bound to the connected doc
     listener(malformed);
   assert.equal(rejected.length, 3);
 });
+
+test("Skill import commands bind targets and revisions without source authority in Renderer", async () => {
+  const calls = [];
+  const preview = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/skill-import-preview.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      if (command.endsWith("chooseImport") || command.endsWith("prepareImport"))
+        return payload.target === null ? { status: "cancelled" } : preview;
+      return {
+        accepted: true,
+        installId: preview.installId,
+        verificationPending: true,
+        reason: null,
+      };
+    }),
+  });
+  await client.chooseSkillImport("package", {
+    kind: "project",
+    workspaceId: "1",
+    workspaceEpoch: "3",
+  });
+  await client.prepareSkillImport("7", "2", { kind: "personal" });
+  await client.installSkill("7", "3", "replace_directory");
+  await client.reimportSkill("8", "1", "update");
+  await client.prepareSkillImport("9", "4", null);
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.skills.chooseImport",
+      payload: {
+        kind: "package",
+        target: {
+          kind: "project",
+          workspaceId: "1",
+          expectedWorkspaceEpoch: "3",
+          installId: null,
+        },
+      },
+    },
+    {
+      command: "metawork.skills.prepareImport",
+      payload: {
+        previewId: "7",
+        preparationRevision: "2",
+        target: {
+          kind: "personal",
+          workspaceId: null,
+          expectedWorkspaceEpoch: null,
+          installId: null,
+        },
+      },
+    },
+    {
+      command: "metawork.skills.install",
+      payload: {
+        previewId: "7",
+        preparationRevision: "3",
+        confirmation: "replace_directory",
+      },
+    },
+    {
+      command: "metawork.skills.reimport",
+      payload: {
+        previewId: "8",
+        preparationRevision: "1",
+        confirmation: "update",
+      },
+    },
+    {
+      command: "metawork.skills.prepareImport",
+      payload: { previewId: "9", preparationRevision: "4", target: null },
+    },
+  ]);
+});
