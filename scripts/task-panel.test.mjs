@@ -7368,6 +7368,47 @@ test("long manual approval requests keep literal previews and disclose the compl
   }
 });
 
+test("multiline approval previews keep literal request content despite blank boundary lines", () => {
+  const source = task({
+    approvalMode: "manual",
+    permissionReviewState: "idle",
+    runs: [run()],
+    currentRunId: "7",
+  });
+  setRepeatedPermissionSource(source);
+  const command = "\n\npython verify.py\nrm report.tmp\n\n";
+  source.pendingUi.presentation = {
+    kind: "command",
+    command,
+    description: null,
+  };
+  const view = render(
+    localizedView(
+      createElement(ApprovalPanel, {
+        pending: source.pendingUi,
+        task: source,
+        busy: false,
+        responsePhase: "idle",
+        respond() {},
+      }),
+    ),
+  );
+  const preview = view.container.querySelector(".approval-operation-preview");
+  assert.ok(preview.textContent.startsWith("python verify.py"));
+  assert.ok(preview.textContent.endsWith("rm report.tmp"));
+  assert.ok(screen.getByText(translate("en-US", "approval.partial_preview")));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "approval.full_request"),
+    }),
+  );
+  assert.equal(
+    view.container.querySelector(".approval-request-details pre").textContent,
+    command,
+  );
+  cleanup();
+});
+
 test("compact file approval titles keep the name and full location visible", () => {
   for (const [kind, tool, target] of [
     ["read", "Read", "C:\\outside\\项目说明.docx"],

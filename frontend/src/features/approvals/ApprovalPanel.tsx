@@ -18,8 +18,11 @@ function requestPreview(value: string) {
   const characters = Array.from(value);
   const lines = value.split(/\r?\n/);
   if (characters.length <= 240 && lines.length <= 3) return value;
-  const head = Array.from(lines[0]).slice(0, 160).join("");
-  const tail = Array.from(lines.at(-1) ?? "")
+  const nonemptyLines = lines.filter((line) => line.trim().length > 0);
+  const head = Array.from(nonemptyLines[0] ?? lines[0])
+    .slice(0, 160)
+    .join("");
+  const tail = Array.from(nonemptyLines.at(-1) ?? lines.at(-1) ?? "")
     .slice(-80)
     .join("");
   return `${head}\n…\n${tail}`;
