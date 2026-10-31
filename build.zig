@@ -361,6 +361,11 @@ pub fn build(b: *std.Build) void {
     const skill_import_measurement_tests = b.addTest(.{ .root_module = skill_import_measurement_module, .filters = &.{"Skill file lifecycle isolated measurements"} });
     artifacts.tests.step.dependOn(&skill_import_measurement_tests.step);
     b.step("test-skill-import-performance", "Measure Skill file lifecycle apart from presentation and Run execution").dependOn(&b.addRunArtifact(skill_import_measurement_tests).step);
+    const attachments_step = b.step("test-attachments", "Run attachment resources, staging and Bridge admission tests");
+    for ([_]*std.Build.Module{ test_modules.product_attachment, test_modules.product_control_attachment_staging }) |module|
+        attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    for ([_]*std.Build.Module{ test_modules.bridge, test_modules.product_control_runtime }) |module|
+        attachments_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{ "attachment", "Attachment", "unified add", "add debt" } })).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
     const file_preview_step = b.step("test-file-preview", "Run image container, preview lane and Product resource tests");
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
