@@ -2305,6 +2305,10 @@ fn wireAgentCore(
     });
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
+    mcp_platform.addImport("app_select_start", app_select_start);
+    const mcp_platform_test_options = b.addOptions();
+    mcp_platform_test_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for MCP process fixtures"));
+    mcp_platform.addOptions("mcp_platform_test_options", mcp_platform_test_options);
     mcp_platform.addImport("metawork_product_mcp", product_mcp);
     mcp_platform.addImport("metawork_product_identity", product_identity);
     const mcp_oauth = b.createModule(.{

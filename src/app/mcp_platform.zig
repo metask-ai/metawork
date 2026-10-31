@@ -3,6 +3,7 @@
 //! preauthorized HTTP transport owners. It does not interpret MCP payloads.
 
 const std = @import("std");
+const select_start = @import("app_select_start");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
@@ -1121,12 +1122,11 @@ const StdioContext = struct {
         if (write.cancellation.isCancelled()) return .{ .failure = .cancelled };
         var events: [3]ExchangeEvent = undefined;
         var select = std.Io.Select(ExchangeEvent).init(connection.context.io, &events);
-        select.async(.exchange, pumpExchange, .{ connection, write.fragments, sink });
-        select.async(.timeout, waitTimeout, .{ connection.context.io, write.timeout_ms });
-        select.async(.cancellation, waitCancellation, .{
-            connection.context.io,
-            write.cancellation,
-        });
+        select_start.startWithCleanup(&select, .{
+            .{ .exchange, pumpExchange, .{ connection, write.fragments, sink } },
+            .{ .timeout, waitTimeout, .{ connection.context.io, write.timeout_ms } },
+            .{ .cancellation, waitCancellation, .{ connection.context.io, write.cancellation } },
+        }, terminateAndCancel, .{ connection, &select }) catch return .{ .failure = .fatal };
         const first = select.await() catch {
             connection.terminate();
             select.cancelDiscard();
@@ -1194,12 +1194,11 @@ const StdioContext = struct {
         if (write.cancellation.isCancelled()) return .cancelled;
         var events: [3]NotifyEvent = undefined;
         var select = std.Io.Select(NotifyEvent).init(connection.context.io, &events);
-        select.async(.write, writeNotification, .{ connection, write.fragments });
-        select.async(.timeout, waitTimeout, .{ connection.context.io, write.timeout_ms });
-        select.async(.cancellation, waitCancellation, .{
-            connection.context.io,
-            write.cancellation,
-        });
+        select_start.startWithCleanup(&select, .{
+            .{ .write, writeNotification, .{ connection, write.fragments } },
+            .{ .timeout, waitTimeout, .{ connection.context.io, write.timeout_ms } },
+            .{ .cancellation, waitCancellation, .{ connection.context.io, write.cancellation } },
+        }, terminateAndCancel, .{ connection, &select }) catch return .fatal;
         const first = select.await() catch {
             connection.terminate();
             select.cancelDiscard();
@@ -1231,6 +1230,11 @@ const StdioContext = struct {
                 fragment,
             ) catch return .child_exit;
         return null;
+    }
+
+    fn terminateAndCancel(connection: *Connection, selection: anytype) void {
+        connection.terminate();
+        selection.cancelDiscard();
     }
 
     fn close(_: *anyopaque, raw_connection: *anyopaque) void {
@@ -1502,13 +1506,11 @@ const HttpContext = struct {
     ) FetchFailure!void {
         var events: [3]Event = undefined;
         var select = std.Io.Select(Event).init(self.io, &events);
-        select.async(.response, fetchOne, .{
-            self,
-            request,
-            sink,
-        });
-        select.async(.timeout, waitTimeout, .{ self.io, request.timeout_ms });
-        select.async(.cancelled, waitCancellation, .{ self.io, request.cancellation });
+        select_start.start(&select, .{
+            .{ .response, fetchOne, .{ self, request, sink } },
+            .{ .timeout, waitTimeout, .{ self.io, request.timeout_ms } },
+            .{ .cancelled, waitCancellation, .{ self.io, request.cancellation } },
+        }) catch return error.Network;
         const first = select.await() catch {
             select.cancelDiscard();
             return error.Cancelled;
@@ -2071,6 +2073,8 @@ test "MCP platform closes stdio after a normal child exit" {
 }
 
 test "MCP platform returns a loopback SSE response before the stream closes" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     const TestServer = struct {
         io: std.Io,
         listener: *std.Io.net.Server,
@@ -2150,7 +2154,7 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
     defer authorization.release();
     var context: HttpContext = .{
         .allocator = std.testing.allocator,
-        .io = std.testing.io,
+        .io = threaded.io(),
         .arena = arena,
         .url = url,
         .custom_headers = &.{},
@@ -2193,6 +2197,231 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 200), response.http_status);
     try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response.body);
+}
+
+const ProcessFixture = if (builtin.is_test) struct {
+    const echo = "require('node:readline').createInterface({input:process.stdin}).on('line',line=>process.stdout.write(line+'\\n'));";
+    const hold = "process.stdin.resume();process.stdin.on('data',()=>process.stdout.write('waiting\\n'));";
+    var cancellation: std.atomic.Value(bool) = .init(false);
+
+    fn context(io: std.Io, argv: []const []const u8) !StdioContext {
+        var environment = std.process.Environ.Map.init(std.testing.allocator);
+        errdefer environment.deinit();
+        try installStdioHostEnvironment(&environment, std.testing.allocator, testHostEnvironment(), argv[0]);
+        return .{ .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .environment = environment, .argv = argv, .cwd = .inherit, .backend = undefined };
+    }
+
+    fn cancelled(_: ?*const anyopaque) bool {
+        return cancellation.load(.acquire);
+    }
+
+    fn feed(_: *anyopaque, bytes: []const u8) agent.McpStdioFeedOutcome {
+        return .{ .consumed = bytes.len, .flow = .stop };
+    }
+
+    fn cancelOnResponse(_: *anyopaque, bytes: []const u8) agent.McpStdioFeedOutcome {
+        cancellation.store(true, .release);
+        return .{ .consumed = bytes.len, .flow = .continue_reading };
+    }
+
+    fn finish(_: *anyopaque) agent.McpStdioSinkFlow {
+        return .stop;
+    }
+} else struct {};
+
+test "MCP real process exchange and notify progress without async capacity" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.echo };
+    var context = try ProcessFixture.context(threaded.io(), &argv);
+    defer context.arena.deinit();
+    defer context.environment.deinit();
+    const connection = try context.openConnection();
+    defer connection.deinit();
+    var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
+    const write: agent.McpStdioWrite = .{ .fragments = &.{"{}\n"}, .timeout_ms = 5000, .cancellation = .{} };
+    try std.testing.expect(StdioContext.exchange(&context, connection, write, &sink) == .completed);
+    try std.testing.expectEqual(@as(?agent.McpStdioPortFailure, null), StdioContext.notify(&context, connection, write));
+    try std.testing.expect(!connection.dead.load(.acquire));
+}
+
+test "MCP real process cancellation and deadline terminate blocked exchange" {
+    for ([_]bool{ false, true }) |cancel| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        ProcessFixture.cancellation.store(false, .release);
+        const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.hold };
+        var context = try ProcessFixture.context(threaded.io(), &argv);
+        defer context.arena.deinit();
+        defer context.environment.deinit();
+        const connection = try context.openConnection();
+        defer connection.deinit();
+        var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = if (cancel) ProcessFixture.cancelOnResponse else ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
+        // A deadline case sends no input, so the child keeps stdout open silently.
+        const write: agent.McpStdioWrite = .{ .fragments = if (cancel) &.{"{}\n"} else &.{}, .timeout_ms = if (cancel) 5000 else 100, .cancellation = .{ .is_cancelled_fn = ProcessFixture.cancelled } };
+        const result = StdioContext.exchange(&context, connection, write, &sink);
+        try std.testing.expectEqual(@as(agent.McpStdioPortFailure, if (cancel) .cancelled else .timeout), result.failure);
+        try std.testing.expect(connection.dead.load(.acquire));
+    }
+}
+
+test "MCP real process partial registration failure terminates exchange and notify" {
+    const Probe = struct {
+        var io: std.Io = undefined;
+        var registered: usize = 0;
+        var fail_at: usize = 0;
+
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, bytes: []const u8, alignment: std.mem.Alignment, start_fn: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            const index = registered;
+            registered += 1;
+            if (index == fail_at) return error.ConcurrencyUnavailable;
+            return io.vtable.groupConcurrent(userdata, group, bytes, alignment, start_fn);
+        }
+    };
+    for ([_]bool{ false, true }) |notify| {
+        for (0..3) |fail_at| {
+            var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+            defer threaded.deinit();
+            Probe.io = threaded.io();
+            Probe.registered = 0;
+            Probe.fail_at = fail_at;
+            var vtable = Probe.io.vtable.*;
+            vtable.groupConcurrent = Probe.concurrent;
+            const io: std.Io = .{ .userdata = Probe.io.userdata, .vtable = &vtable };
+            const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", ProcessFixture.hold };
+            var context = try ProcessFixture.context(io, &argv);
+            defer context.arena.deinit();
+            defer context.environment.deinit();
+            const connection = try context.openConnection();
+            defer connection.deinit();
+            var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
+            const write: agent.McpStdioWrite = .{ .fragments = &.{"{}\n"}, .timeout_ms = 5000, .cancellation = .{} };
+            if (notify)
+                try std.testing.expectEqual(@as(?agent.McpStdioPortFailure, .fatal), StdioContext.notify(&context, connection, write))
+            else
+                try std.testing.expectEqual(agent.McpStdioPortFailure.fatal, StdioContext.exchange(&context, connection, write, &sink).failure);
+            try std.testing.expectEqual(fail_at + 1, Probe.registered);
+            try std.testing.expect(connection.dead.load(.acquire));
+        }
+    }
+}
+
+test "MCP real process cancellation and deadline interrupt a blocked notification write" {
+    const Probe = struct {
+        var checks: std.atomic.Value(usize) = .init(0);
+        fn cancelled(_: ?*const anyopaque) bool {
+            return checks.fetchAdd(1, .monotonic) > 0;
+        }
+    };
+    for ([_]bool{ false, true }) |cancel| {
+        Probe.checks.store(0, .monotonic);
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        const argv = [_][]const u8{ @import("mcp_platform_test_options").node_path, "-e", "setInterval(()=>{},1000);" };
+        var context = try ProcessFixture.context(threaded.io(), &argv);
+        defer context.arena.deinit();
+        defer context.environment.deinit();
+        const connection = try context.openConnection();
+        defer connection.deinit();
+        const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(payload);
+        @memset(payload, 'x');
+        const write: agent.McpStdioWrite = .{ .fragments = &.{payload}, .timeout_ms = if (cancel) 5000 else 100, .cancellation = if (cancel) .{ .is_cancelled_fn = Probe.cancelled } else .{} };
+        try std.testing.expectEqual(@as(?agent.McpStdioPortFailure, if (cancel) .cancelled else .timeout), StdioContext.notify(&context, connection, write));
+        try std.testing.expect(connection.dead.load(.acquire));
+    }
+}
+
+test "MCP HTTP cancellation deadline and partial startup failure close the request" {
+    const Fixture = struct {
+        var io: std.Io = undefined;
+        var registered: usize = 0;
+        var fail_at: ?usize = null;
+        var received: std.Io.Event = .unset;
+        var cancellation: std.atomic.Value(bool) = .init(false);
+        listener: *std.Io.net.Server,
+        cancel: bool,
+        failure: ?anyerror = null,
+
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, bytes: []const u8, alignment: std.mem.Alignment, start_fn: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            const index = registered;
+            registered += 1;
+            if (fail_at == index) {
+                received.waitUncancelable(std.testing.io);
+                return error.ConcurrencyUnavailable;
+            }
+            return io.vtable.groupConcurrent(userdata, group, bytes, alignment, start_fn);
+        }
+
+        fn cancelled(_: ?*const anyopaque) bool {
+            return cancellation.load(.acquire);
+        }
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn serve(self: *@This()) !void {
+            var connection = try self.listener.accept(std.testing.io);
+            defer connection.close(std.testing.io);
+            var reads: [4096]u8 = undefined;
+            var writes: [256]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var server = std.http.Server.init(&reader.interface, &writer.interface);
+            var request = try server.receiveHead();
+            const body = request.readerExpectNone(&.{});
+            var data: [2]u8 = undefined;
+            try body.readSliceAll(&data);
+            received.set(std.testing.io);
+            if (self.cancel) cancellation.store(true, .release);
+            // EOF proves the failed/cancelled fetch has released its socket.
+            _ = reader.interface.takeByte() catch |err| switch (err) {
+                error.EndOfStream => return,
+                else => return err,
+            };
+            return error.UnexpectedExtraRequest;
+        }
+    };
+    for (0..4) |mode| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        Fixture.io = threaded.io();
+        Fixture.registered = 0;
+        Fixture.fail_at = if (mode >= 2) mode - 1 else null;
+        Fixture.received = .unset;
+        Fixture.cancellation.store(false, .release);
+        var vtable = Fixture.io.vtable.*;
+        vtable.groupConcurrent = Fixture.concurrent;
+        const io: std.Io = .{ .userdata = Fixture.io.userdata, .vtable = &vtable };
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+        defer listener.deinit(std.testing.io);
+        var fixture: Fixture = .{ .listener = &listener, .cancel = mode == 0 };
+        const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/mcp", .{listener.socket.address.getPort()});
+        defer std.testing.allocator.free(url);
+        var context: HttpContext = .{ .allocator = std.testing.allocator, .io = io, .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .url = url, .custom_headers = &.{}, .secret_values = &.{}, .backend = undefined };
+        defer context.arena.deinit();
+        context.backend = try agent.McpHttpBackend.init(.{ .io = io, .allocator = std.testing.allocator, .endpoint = context.endpoint() });
+        defer context.backend.deinit() catch unreachable;
+        const transport = context.backend.transport();
+        const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 5000)) {
+            .connection => |value| value,
+            .failure => return error.TestUnexpectedResult,
+        };
+        defer transport.close_fn(connection);
+        const thread = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
+        const result = transport.request_fn(connection, std.testing.allocator, "{}", if (mode == 1) 500 else 5000, .{ .is_cancelled_fn = Fixture.cancelled });
+        thread.join();
+        try std.testing.expectEqual(@as(?anyerror, null), fixture.failure);
+        try std.testing.expectEqual(@as(agent.McpTransportFailure, switch (mode) {
+            0 => .cancelled,
+            1 => .timeout,
+            else => .network,
+        }), result.failure);
+    }
 }
 
 test "MCP platform publishes only a valid HTTP Bearer challenge" {
