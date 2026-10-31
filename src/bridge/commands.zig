@@ -16,6 +16,7 @@ pub const updates_check = "metawork.updates.check";
 pub const updates_open_download = "metawork.updates.openDownload";
 pub const updates_open_website = "metawork.updates.openWebsite";
 pub const choose_workspace = "metawork.workspaces.choose";
+pub const remove_workspace = "metawork.workspaces.remove";
 pub const choose_automatic_workspace_root = "metawork.workspaces.chooseAutomaticRoot";
 pub const reset_automatic_workspace_root = "metawork.workspaces.resetAutomaticRoot";
 pub const retry_automatic_workspace_root = "metawork.workspaces.retryAutomaticRoot";
@@ -126,6 +127,7 @@ pub const product = [_][]const u8{
     updates_open_download,
     updates_open_website,
     choose_workspace,
+    remove_workspace,
     choose_automatic_workspace_root,
     reset_automatic_workspace_root,
     retry_automatic_workspace_root,

@@ -365,6 +365,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
+            .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
             .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
@@ -3134,6 +3135,33 @@ pub const Dispatcher = struct {
             "{{\"selected\":true,\"workspaceId\":\"{d}\"}}",
             .{workspace_id},
         );
+    }
+
+    fn removeWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.WorkspaceIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const workspace_id = try handlers.parseWireId(parsed.value.workspaceId);
+        const expected_epoch = try handlers.parseWireId(parsed.value.expectedWorkspaceEpoch);
+        if (workspace_id == 0 or expected_epoch == 0) return error.InvalidBridgeId;
+        const workbench = try self.requireProductControl();
+        // Session close can fail after the Product has already changed state.
+        defer self.notifyCommitted();
+        workbench.removeWorkspaceAtEpoch(workspace_id, expected_epoch) catch |err| {
+            const reason: []const u8 = switch (err) {
+                error.UnknownWorkspace => "workspace_unavailable",
+                error.WorkspaceEpochMismatch => "workspace_changed",
+                error.WorkspaceRemovalInProgress => "workspace_removing",
+                error.TaskClosing => "task_close_failed",
+                error.WorkspaceEpochExhausted, error.ProjectionCapacity => "capacity_reached",
+                else => return err,
+            };
+            return std.fmt.bufPrint(output, "{{\"accepted\":false,\"workspaceId\":\"{d}\",\"reason\":\"{s}\"}}", .{ workspace_id, reason });
+        };
+        return std.fmt.bufPrint(output, "{{\"accepted\":true,\"workspaceId\":\"{d}\",\"reason\":null}}", .{workspace_id});
     }
 
     fn chooseAutomaticWorkspaceRoot(
@@ -8487,4 +8515,85 @@ test "Skill import admission retains busy confirmation, consumes once, and revok
     try std.testing.expect(boundary.skill_grants.grant == null);
     try std.testing.expectError(error.InvalidPreparation, control.preflightSkillImport(grant.preparation.id, grant.preparation.revision, .create));
     _ = try home.dir.statFile(std.testing.io, ".agents/skills/demo/SKILL.md", .{ .follow_symlinks = false });
+}
+
+test "Workspace removal Bridge validates authority and preserves files with shared Renderer results" {
+    const fixture = @import("lifecycle_fixture");
+    const Host = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "project", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "project/keep.txt", .data = "keep" });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPathFile(std.testing.io, "project", &root_buffer);
+    const root = root_buffer[0..root_len];
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    try std.testing.expectEqual(@as(u64, 1), try workbench.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [4096]u8 = undefined;
+    const request = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), "handler_failed") != null);
+    _ = native.dispatch("{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, .{ .origin = "zero://app", .window_id = 4 }, &output), "handler_failed") != null);
+    const invalid = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"1\",\"path\":\"/tmp/project\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(invalid, source, &output), "handler_failed") != null);
+    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("workspace_removal.fixture"), .{});
+    defer wire.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const accepted = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("accepted").?, .{});
+    const changed = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("changed").?, .{});
+    const unavailable = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("unavailable").?, .{});
+    const stale = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"2\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(stale, source, &output), changed) != null);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), accepted) != null);
+    _ = try tmp.dir.statFile(std.testing.io, "project/keep.txt", .{});
+    var projections: [1]product_control.WorkspaceProjection = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try workbench.copyWorkspaceProjections(&projections)).len);
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(request, source, &output), unavailable) != null);
+    try std.testing.expectEqual(@as(u64, 1), try workbench.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
+    // Removing an already missing directory does not require opening it again.
+    try tmp.dir.deleteTree(std.testing.io, "project");
+    const missing = "{\"id\":\"remove\",\"command\":\"metawork.workspaces.remove\",\"payload\":{\"workspaceId\":\"1\",\"expectedWorkspaceEpoch\":\"3\"}}";
+    try std.testing.expect(std.mem.indexOf(u8, native.dispatch(missing, source, &output), accepted) != null);
 }

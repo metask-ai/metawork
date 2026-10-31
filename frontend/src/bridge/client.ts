@@ -49,6 +49,7 @@ import {
   decodeUpdateWebsiteResult,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
+  decodeWorkspaceRemovalResult,
   decodeSkillCatalogRefreshResult,
   decodeHostSignalEvent,
   decodeTaskOpenEvent,
@@ -433,6 +434,15 @@ export class BridgeClient {
     // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+  async removeWorkspace(workspaceId: string, expectedWorkspaceEpoch: string) {
+    return decodeWorkspaceRemovalResult(
+      await this.invoke(commands.removeWorkspace, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+      }),
+      workspaceId,
     );
   }
   async chooseAutomaticWorkspaceRoot(expectedGeneration: string) {

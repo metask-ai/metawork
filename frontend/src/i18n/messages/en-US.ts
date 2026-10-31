@@ -229,6 +229,17 @@ export const enUS = {
     "This workspace is unavailable. Select the folder again.",
   "workspace.access_required_short": "Directory unavailable",
   "workspace.confirm_access": "Select folder again",
+  "workspace.actions": "Project actions for {title}",
+  "workspace.remove": "Remove project",
+  "workspace.remove_title": "Remove “{title}”?",
+  "workspace.remove_body":
+    "This project and its tasks will be hidden from the list. Running tasks will stop. Local files and task history will be kept. Add the same folder again to reopen the project.",
+  "workspace.remove_failed":
+    "Could not remove this project. Check its current status and try again.",
+  "workspace.remove_close_failed":
+    "Could not stop all tasks in this project. Try removing it again.",
+  "workspace.remove_unconfirmed":
+    "The result could not be confirmed. Check the project list before trying again.",
   "workspace.removing_short": "Removing",
   "task.list": "Tasks",
   "task.recent": "Recent",

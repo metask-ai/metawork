@@ -1,4 +1,4 @@
-import { useRef, useState, type MouseEvent } from "react";
+import { useRef, useState, type MouseEvent, type ReactNode } from "react";
 
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -16,6 +16,7 @@ export function TaskList({
   suppressedCompletionTaskId = null,
   onSelectTask,
   onTaskAction,
+  renderWorkspaceHeading,
   taskMutationDisabled,
   synchronized = true,
   retainedTaskCount = 0,
@@ -26,6 +27,10 @@ export function TaskList({
   suppressedCompletionTaskId?: string | null;
   onSelectTask: (id: string) => void;
   onTaskAction: (task: TaskSummary, action: TaskMenuAction) => void;
+  renderWorkspaceHeading?: (
+    workspace: WorkspaceView,
+    heading: ReactNode,
+  ) => ReactNode;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
   retainedTaskCount?: number;
@@ -88,6 +93,19 @@ export function TaskList({
             const projectTasks = visibleTasks.filter(
               (task) => task.workspaceId === workspace.id,
             );
+            const heading = (
+              <h3
+                className="task-project-heading"
+                title={
+                  workspace.redacted
+                    ? workspace.displayName
+                    : workspace.canonicalRoot
+                }
+              >
+                <Icon name="workspace" />
+                <span>{workspace.displayName}</span>
+              </h3>
+            );
             return (
               <section
                 key={workspace.id}
@@ -95,17 +113,17 @@ export function TaskList({
                 data-workspace-id={workspace.id}
                 aria-label={workspace.displayName}
               >
-                <h3
-                  className="task-project-heading"
-                  title={
-                    workspace.redacted
-                      ? workspace.displayName
-                      : workspace.canonicalRoot
-                  }
-                >
-                  <Icon name="workspace" />
-                  <span>{workspace.displayName}</span>
-                </h3>
+                {renderWorkspaceHeading?.(workspace, heading) ?? heading}
+                {workspace.authorization === "removing" && (
+                  <p className="task-list-empty" role="status">
+                    {t("workspace.removing_short")}
+                  </p>
+                )}
+                {workspace.lastRemovalFailure && (
+                  <p className="task-list-empty" role="alert">
+                    {t("workspace.remove_close_failed")}
+                  </p>
+                )}
                 <div className="task-project-items">
                   {projectTasks.map(renderTask)}
                   {projectTasks.length === 0 && (

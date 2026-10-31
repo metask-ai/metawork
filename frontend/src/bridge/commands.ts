@@ -14,6 +14,7 @@ export const commands = {
   updatesOpenDownload: "metawork.updates.openDownload",
   updatesOpenWebsite: "metawork.updates.openWebsite",
   chooseWorkspace: "metawork.workspaces.choose",
+  removeWorkspace: "metawork.workspaces.remove",
   chooseAutomaticWorkspaceRoot: "metawork.workspaces.chooseAutomaticRoot",
   resetAutomaticWorkspaceRoot: "metawork.workspaces.resetAutomaticRoot",
   retryAutomaticWorkspaceRoot: "metawork.workspaces.retryAutomaticRoot",
