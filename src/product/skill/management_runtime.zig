@@ -68,12 +68,13 @@ pub fn previewArchive(
         !std.unicode.utf8ValidateSlice(absolute_path) or
         !hasArchiveExtension(absolute_path))
         return error.InvalidAsset;
-    const archive = std.Io.Dir.openFileAbsolute(
+    var archive = std.Io.Dir.openFileAbsolute(
         context.io,
         absolute_path,
         .{ .follow_symlinks = false },
     ) catch return error.SourceUnavailable;
     defer archive.close(context.io);
+    if (builtin.os.tag == .windows) archive.flags.nonblocking = true;
     const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
@@ -93,12 +94,14 @@ pub fn previewArchive(
     defer staging.deleteTree(context.io, &scratch_name) catch {};
     const scratch = staging.openDir(context.io, &scratch_name, .{
         .follow_symlinks = false,
+        .iterate = true,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
     try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
+            .iterate = true,
         }) catch return error.InvalidAsset
     else
         scratch;
@@ -249,10 +252,11 @@ pub fn installArchive(
         !std.unicode.utf8ValidateSlice(absolute_path) or
         !hasArchiveExtension(absolute_path))
         return error.InvalidAsset;
-    const archive = std.Io.Dir.openFileAbsolute(context.io, absolute_path, .{
+    var archive = std.Io.Dir.openFileAbsolute(context.io, absolute_path, .{
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
+    if (builtin.os.tag == .windows) archive.flags.nonblocking = true;
     const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
@@ -272,12 +276,14 @@ pub fn installArchive(
     defer staging.deleteTree(context.io, &scratch_name) catch {};
     const scratch = staging.openDir(context.io, &scratch_name, .{
         .follow_symlinks = false,
+        .iterate = true,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
     try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
+            .iterate = true,
         }) catch return error.InvalidAsset
     else
         scratch;
@@ -320,10 +326,11 @@ pub fn reimportArchive(
         !std.unicode.utf8ValidateSlice(absolute_path) or
         !hasArchiveExtension(absolute_path))
         return error.InvalidAsset;
-    const archive = std.Io.Dir.openFileAbsolute(context.io, absolute_path, .{
+    var archive = std.Io.Dir.openFileAbsolute(context.io, absolute_path, .{
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
+    if (builtin.os.tag == .windows) archive.flags.nonblocking = true;
     const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
@@ -343,12 +350,14 @@ pub fn reimportArchive(
     defer staging.deleteTree(context.io, &scratch_name) catch {};
     const scratch = staging.openDir(context.io, &scratch_name, .{
         .follow_symlinks = false,
+        .iterate = true,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
     try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
+            .iterate = true,
         }) catch return error.InvalidAsset
     else
         scratch;

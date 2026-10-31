@@ -137,6 +137,14 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
                 try std.testing.expect(run.event_stream_finalized);
                 return;
             }
+            if (std.mem.eql(u8, mode, "fixture-error")) {
+                try std.testing.expectEqual(task_api.RunOutcome.failed, terminal.outcome);
+                try std.testing.expect(terminal.cause == .provider_failure);
+                try std.testing.expect(run.event_stream_finalized);
+                try std.testing.expect(run.first_event_rejection == null);
+                try std.testing.expect(run.terminal_drain_rejection == null);
+                return;
+            }
             if (run.first_event_rejection != null or run.terminal_drain_rejection != null) {
                 std.debug.print("Office pipeline mode={s} first={any} drain={any} terminal={any}\n", .{ mode, run.first_event_rejection, run.terminal_drain_rejection, terminal });
             }
@@ -234,7 +242,16 @@ fn qualify(mode: []const u8) !void {
             try std.testing.expect(ready);
             try std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
         }
-        try finish(&control, task_id, id, mode);
+        finish(&control, task_id, id, mode) catch |err| {
+            const trace = temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024)) catch return err;
+            defer std.testing.allocator.free(trace);
+            var lines = std.mem.splitScalar(u8, trace, '\n');
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "{\"kind\":\"fixture_error\""))
+                    std.debug.print("Office fixture mode={s}: {s}\n", .{ mode, line });
+            }
+            return err;
+        };
     }
     if (std.mem.eql(u8, mode, "callback-budget")) {
         // The first actual Core event exceeds the deliberately tiny fixture
@@ -247,8 +264,15 @@ fn qualify(mode: []const u8) !void {
     } else {
         const trace = try temporary.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(2 * 1024 * 1024));
         defer std.testing.allocator.free(trace);
-        try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
-        if (std.mem.eql(u8, mode, "missing-environment")) try std.testing.expect(std.mem.indexOf(u8, trace, "Office environment missing or unavailable") != null);
+        if (std.mem.eql(u8, mode, "fixture-error")) {
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\"kind\":\"request\""));
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "\"kind\":\"fixture_error\""));
+            try std.testing.expect(std.mem.indexOf(u8, trace, "Controlled fixture assertion") != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, trace, "fixture_error") == null);
+        if (std.mem.eql(u8, mode, "missing-environment")) {
+            const message = if (builtin.os.tag == .windows) "Office environment missing." else "Office environment missing or unavailable";
+            try std.testing.expect(std.mem.indexOf(u8, trace, message) != null);
+        }
         if (std.mem.eql(u8, mode, "unreachable-preparation")) try std.testing.expect(std.mem.indexOf(u8, trace, "preparation-cleanup") != null);
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
@@ -275,6 +299,10 @@ test "Office macOS original preparation errors remain ordinary tool results" {
 
 test "Office canonical Product pipeline retries and closes streaming cancellation" {
     for ([_][]const u8{ "retry", "stream-interruption", "cancel" }) |mode| try qualify(mode);
+}
+
+test "Office fixture assertions fail without Provider retries" {
+    try qualify("fixture-error");
 }
 
 test "Office canonical Product executor retains real callback rejection identity in terminal history" {

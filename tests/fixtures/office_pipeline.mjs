@@ -45,8 +45,13 @@ function start() {
 }
 function command() {
   if (mode === "nonzero")
-    return "printf 'controlled-exit-7' > operation.txt; cat operation.txt; exit 7";
-  if (mode === "deny") return "printf 'must-not-execute' > denied.txt";
+    return process.platform === "win32"
+      ? "[IO.File]::WriteAllText('operation.txt', 'controlled-exit-7'); [Console]::Write([IO.File]::ReadAllText('operation.txt')); exit 7"
+      : "printf 'controlled-exit-7' > operation.txt; cat operation.txt; exit 7";
+  if (mode === "deny")
+    return process.platform === "win32"
+      ? "[IO.File]::WriteAllText('denied.txt', 'must-not-execute')"
+      : "printf 'must-not-execute' > denied.txt";
   if (mode === "stale-entry" || mode === "unreachable-preparation") {
     if (process.platform !== "darwin") throw Error("macOS preparation-path fixture required");
     const quote = (text) => "'" + text.replaceAll("'", "'\\''") + "'";
@@ -69,15 +74,12 @@ function command() {
     );
     if (process.platform === "win32") {
       const quote = (text) => "'" + text.replaceAll("'", "''") + "'";
-      const script =
+      return (
         "$env:LOCALAPPDATA=" +
         quote(workspace) +
         "; & " +
         quote(entry) +
-        " python missing.py; exit $LASTEXITCODE";
-      return (
-        "powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
-        Buffer.from(script, "utf16le").toString("base64")
+        " python missing.py; exit $LASTEXITCODE"
       );
     }
     const quote = (text) => "'" + text.replaceAll("'", "'\\''") + "'";
@@ -89,7 +91,9 @@ function command() {
       " python missing.py"
     );
   }
-  return "printf 'controlled-office-tool' > operation.txt; cat operation.txt";
+  return process.platform === "win32"
+    ? "[IO.File]::WriteAllText('operation.txt', 'controlled-office-tool'); [Console]::Write([IO.File]::ReadAllText('operation.txt'))"
+    : "printf 'controlled-office-tool' > operation.txt; cat operation.txt";
 }
 function strings(value) {
   if (typeof value === "string") return [value];
@@ -177,9 +181,11 @@ const server = createServer(async (request, response) => {
       ? last.content.filter((part) => part.type === "tool_result")
       : [];
     trace({ kind: "request", requests, results });
+    if (mode === "fixture-error") throw Error("Controlled fixture assertion");
     if (skillResources) {
+      const body = skillResponse(payload, results);
       response.writeHead(200, { "content-type": "text/event-stream" });
-      return response.end(skillResponse(payload, results));
+      return response.end(body);
     }
     if (mode === "retry" && requests === 1) {
       response.writeHead(503, { "content-type": "application/json" });
@@ -236,10 +242,19 @@ const server = createServer(async (request, response) => {
         const expectedExit = ({ nonzero: 7, "missing-environment": 3,
           "stale-entry": 127, "unreachable-preparation": 7 })[mode] ?? 0;
         if (
+          result.is_error ||
           bash.schema_version !== "metacodes.bash-result.v2" ||
           bash.exit_code !== expectedExit
         )
-          throw Error("unexpected process exit classification");
+          throw Error(`unexpected process exit classification: expected ${expectedExit}, got ${bash.exit_code}, is_error=${!!result.is_error}, stderr=${bash.stderr?.slice(0, 1024)}`);
+        if (["success", "nonzero", "retry", "multi-run"].includes(mode)) {
+          const expectedOutput = mode === "nonzero"
+            ? "controlled-exit-7"
+            : "controlled-office-tool";
+          if (bash.stdout !== expectedOutput || bash.stderr !== "" ||
+              readFileSync(join(workspace, "operation.txt"), "utf8") !== expectedOutput)
+            throw Error("unexpected controlled process output");
+        }
         if (mode === "unreachable-preparation") {
           if (!bash.stderr.includes("curl: (7)") || !bash.stderr.includes("127.0.0.1"))
             throw Error("Official preparation did not fail at the loopback proxy");
@@ -296,8 +311,14 @@ const server = createServer(async (request, response) => {
     response.end(events.map(send).join(""));
   } catch (error) {
     trace({ kind: "fixture_error", type: error.name, reason: error.message });
-    if (!response.headersSent) response.writeHead(500);
-    response.end();
+    // A broken fixture must fail the test, rather than trigger Provider retries.
+    if (!response.headersSent) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        type: "error",
+        error: { type: "invalid_request_error", message: "Office fixture assertion failed" },
+      }));
+    } else response.end();
   }
 });
 // A test panic must not leave an orphan holding the Zig runner's stderr pipe.
