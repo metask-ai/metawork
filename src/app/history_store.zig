@@ -17,6 +17,87 @@ const Credential = struct {
     memory_pending: bool = false,
 };
 
+test "SQLite history retains more than 128 credentials without truncating security checks" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "renewal-fixture-139");
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+    var buffers: [140][32]u8 = undefined;
+    var values: [140][]const u8 = undefined;
+    for (&buffers, &values, 0..) |*buffer, *value, index| {
+        value.* = try std.fmt.bufPrint(buffer, "renewal-fixture-{d}", .{index});
+    }
+    try std.testing.expect(store.syncCredentials(&values, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 140), store.credentials.items.len);
+    try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, bytes, true));
+    const loaded = try product.loadHistory(arena.allocator(), a, store.database.?.capability(), store.limits);
+    try std.testing.expect(!try wire.security.contains(a, loaded.value, values[139]));
+    try std.testing.expect(!store.syncCredentials(values[0..1], false, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 140), store.credentials.items.len);
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 0), store.credentials.items.len);
+}
+
+test "SQLite history credential allocation failures keep security incomplete" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    for (0..2) |fail_index| {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        store.allocator = failing.allocator();
+        store.registerCredential("renewal-fixture", true);
+        store.allocator = a;
+        try std.testing.expect(store.credential_capacity_failed);
+        try std.testing.expectEqual(@as(usize, 0), store.credentials.items.len);
+    }
+}
+
+test "SQLite history pending maintenance owns a credential after its execution copy retires" {
+    const a = std.testing.allocator;
+    const secret = "retired-execution-fixture";
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, secret);
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+    const execution_copy = try a.dupe(u8, secret);
+    defer a.free(execution_copy);
+    // Failure to prepare the SQL maintenance transaction leaves it pending.
+    store.random_fault = true;
+    try std.testing.expect(!store.syncCredentials(&.{execution_copy}, true, .{}).ready);
+    std.crypto.secureZero(u8, execution_copy);
+    try std.testing.expect(!store.syncCredentials(&.{}, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 1), store.credentials.items.len);
+    const held = store.credentials.items[0];
+    try std.testing.expect(!held.retained and held.pending);
+    try std.testing.expectEqualStrings(secret, held.bytes[0..held.length]);
+    store.random_fault = false;
+    try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
+    try std.testing.expectEqual(@as(usize, 0), store.credentials.items.len);
+    const loaded = try product.loadHistory(arena.allocator(), a, store.database.?.capability(), store.limits);
+    try std.testing.expect(!try wire.security.contains(a, loaded.value, secret));
+}
+
 pub const Store = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -30,7 +111,9 @@ pub const Store = struct {
     pending_publication: ?[32]u8 = null,
     incompatible: bool = false,
     restore_failed: bool = true,
-    credentials: *[128]Credential,
+    // Pointees stay stable and are securely cleared before freeing. Growing
+    // the pointer index never reallocates a buffer containing secret bytes.
+    credentials: std.ArrayList(*Credential) = .empty,
     credential_capacity_failed: bool = false,
     legacy_maintenance_failed: bool = false,
     publish_sync_fault: bool = false,
@@ -46,9 +129,7 @@ pub const Store = struct {
         errdefer legacy.deinit();
         const path = try std.fs.path.join(allocator, &.{ directory, file_name });
         errdefer allocator.free(path);
-        const credentials = try allocator.create([128]Credential);
-        credentials.* = @splat(.{});
-        return .{ .io = io, .allocator = allocator, .legacy = legacy, .path = path, .limits = product.persistenceLimits(.{}, (product.Limits{}).max_workspaces), .credentials = credentials };
+        return .{ .io = io, .allocator = allocator, .legacy = legacy, .path = path, .limits = product.persistenceLimits(.{}, (product.Limits{}).max_workspaces) };
     }
 
     pub fn deinit(self: *Store) void {
@@ -57,8 +138,11 @@ pub const Store = struct {
         self.close();
         self.legacy.deinit();
         self.allocator.free(self.path);
-        std.crypto.secureZero(u8, std.mem.asBytes(self.credentials));
-        self.allocator.destroy(self.credentials);
+        for (self.credentials.items) |slot| {
+            self.clearCredential(slot);
+            self.allocator.destroy(slot);
+        }
+        self.credentials.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -266,7 +350,7 @@ pub const Store = struct {
         if (self.pending != null and self.resolvePending() == .outcome_unknown) return .outcome_unknown;
         if ((self.database == null or self.requires_reopen) and !self.refreshConfirmed()) return .failed;
         if (self.credential_capacity_failed) return .failed;
-        for (self.credentials) |slot| if (slot.length != 0) {
+        for (self.credentials.items) |slot| if (slot.length != 0) {
             if ((wire.security.contains(self.allocator, candidate.value, slot.bytes[0..slot.length]) catch true) or
                 (wire.security.contains(self.allocator, candidate.preserved, slot.bytes[0..slot.length]) catch true)) return .failed;
         };
@@ -373,7 +457,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         self.credential_capacity_failed = !complete;
         if (!complete) return .{ .epoch = self.security_epoch, .ready = false };
-        for (self.credentials) |*slot| {
+        for (self.credentials.items) |slot| {
             if (slot.length == 0) continue;
             slot.retained = for (values) |value| {
                 if (std.mem.eql(u8, value, slot.bytes[0..slot.length])) break true;
@@ -381,14 +465,14 @@ pub const Store = struct {
             if (!slot.retained and !slot.pending and !slot.legacy_pending and !slot.memory_pending) self.clearCredential(slot);
         }
         for (values) |value| if (value.len != 0) self.registerCredential(value, true);
-        for (self.credentials) |*slot| if (slot.length != 0) {
+        for (self.credentials.items) |slot| if (slot.length != 0) {
             slot.memory_pending = !scrub.apply(slot.bytes[0..slot.length]);
         };
         return .{ .epoch = self.security_epoch, .ready = !self.incompatible and self.pending == null and self.pending_publication == null and self.database != null and self.sanitizePending() };
     }
 
     fn registerCredential(self: *Store, value: []const u8, retained: bool) void {
-        for (self.credentials) |*slot| {
+        for (self.credentials.items) |slot| {
             if (slot.length != value.len or !std.mem.eql(u8, slot.bytes[0..slot.length], value)) continue;
             slot.retained = retained;
             if (!slot.pending and !slot.legacy_pending and !slot.memory_pending and !retained) self.clearCredential(slot);
@@ -398,19 +482,24 @@ pub const Store = struct {
             self.credential_capacity_failed = true;
             return;
         }
-        for (self.credentials) |*slot| {
-            if (slot.length != 0) continue;
-            @memcpy(slot.bytes[0..value.len], value);
-            slot.length = value.len;
-            slot.retained = retained;
-            slot.pending = true;
-            slot.legacy_pending = true;
-            if (self.security_epoch != 0) self.security_epoch = std.math.add(u64, self.security_epoch, 1) catch 0;
-            // Only first discovery performs disk maintenance. Repeated bearer
-            // acquisition/release above is constant bounded in-memory work.
+        const slot = self.allocator.create(Credential) catch {
+            self.credential_capacity_failed = true;
             return;
-        }
-        self.credential_capacity_failed = true;
+        };
+        slot.* = .{};
+        self.credentials.append(self.allocator, slot) catch {
+            self.allocator.destroy(slot);
+            self.credential_capacity_failed = true;
+            return;
+        };
+        @memcpy(slot.bytes[0..value.len], value);
+        slot.length = value.len;
+        slot.retained = retained;
+        slot.pending = true;
+        slot.legacy_pending = true;
+        if (self.security_epoch != 0) self.security_epoch = std.math.add(u64, self.security_epoch, 1) catch 0;
+        // Only first discovery performs disk maintenance. Repeated bearer
+        // acquisition/release above does not register another owned copy.
     }
 
     fn clearCredential(_: *Store, slot: *Credential) void {
@@ -422,7 +511,7 @@ pub const Store = struct {
         if (self.incompatible or self.pending_publication != null or self.credential_capacity_failed or self.security_epoch == 0) return false;
         if (self.requires_reopen and !self.refreshConfirmed()) return false;
         self.legacy_maintenance_failed = false;
-        for (self.credentials) |*slot| {
+        for (self.credentials.items) |slot| {
             if (slot.length == 0) continue;
             const value = slot.bytes[0..slot.length];
             if (slot.pending) {
@@ -445,7 +534,16 @@ pub const Store = struct {
             }
             if (!slot.retained and !slot.memory_pending) self.clearCredential(slot);
         }
-        for (self.credentials) |slot| if (slot.memory_pending) return false;
+        var index: usize = 0;
+        while (index < self.credentials.items.len) {
+            const slot = self.credentials.items[index];
+            if (slot.length != 0) {
+                if (slot.memory_pending) return false;
+                index += 1;
+            } else {
+                self.allocator.destroy(self.credentials.swapRemove(index));
+            }
+        }
         return true;
     }
 
@@ -980,7 +1078,7 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     try std.testing.expect(std.mem.indexOf(u8, raw, "newly-discovered-value") == null);
     try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, bytes, true));
     store.credential("newly-discovered-value", false);
-    for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    for (store.credentials.items) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
     try std.testing.expectEqual(wire.Commit.failed, commitFixtureGeneration(&store, bytes, 1, true));
 }
 
@@ -1032,7 +1130,7 @@ test "SQLite history credential cleanup covers readonly retained memory SQL and 
             try std.testing.expect(!store.syncCredentials(&.{secret}, true, observer).ready);
             try std.testing.expect(!store.syncCredentials(&.{}, true, observer).ready);
             var held = false;
-            for (store.credentials) |slot| if (slot.memory_pending) {
+            for (store.credentials.items) |slot| if (slot.memory_pending) {
                 held = true;
                 try std.testing.expect(slot.length != 0);
             };
@@ -1204,13 +1302,13 @@ test "SQLite history credential rotation releases retired owned copies" {
         const value = try std.fmt.bufPrint(&buffer, "rotating-owned-credential-{d}", .{generation});
         try std.testing.expect(store.syncCredentials(&.{value}, true, .{}).ready);
         var retained: usize = 0;
-        for (store.credentials) |slot| if (slot.length != 0) {
+        for (store.credentials.items) |slot| if (slot.length != 0) {
             retained += 1;
         };
         try std.testing.expectEqual(@as(usize, 1), retained);
     }
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
-    for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    for (store.credentials.items) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
 }
 
 test "SQLite history partial quarantine prevents reimport and preserves the old WAL" {
@@ -1438,7 +1536,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     try std.testing.expect(store.legacy_maintenance_failed);
     var retained: usize = 0;
-    for (store.credentials) |slot| if (slot.length != 0 and slot.legacy_pending) {
+    for (store.credentials.items) |slot| if (slot.length != 0 and slot.legacy_pending) {
         retained += 1;
     };
     try std.testing.expectEqual(@as(usize, 1), retained);
@@ -1449,7 +1547,7 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     try store.legacy.commit(bytes);
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
     try std.testing.expect(!store.legacy_maintenance_failed);
-    for (store.credentials) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    for (store.credentials.items) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
     const loaded = try product.loadHistory(aa, std.testing.allocator, store.database.?.capability(), store.limits);
     try std.testing.expectEqualStrings("confirmed despite legacy failure", loaded.value.tasks[0].title);
 }

@@ -1900,6 +1900,7 @@ fn wireAgentCore(
     task_state.addImport("product_task_deletion", task_deletion);
     task_state.addImport("product_task_recovery", task_recovery);
     task_state.addImport("product_task_worker_lease", task_worker_lease);
+    task_state.addImport("product_task_execution_binding", owned_task_execution);
     task_persistence.addImport("metawork_agent", agent);
     task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
     task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);

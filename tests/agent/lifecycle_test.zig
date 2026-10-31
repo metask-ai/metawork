@@ -21,6 +21,228 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "checkpoint waits for a credential update and close can cancel that wait" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        finished: std.atomic.Value(bool) = .init(false),
+        outcome: ?lifecycle.CheckpointOutcome = null,
+        failure: ?anyerror = null,
+
+        fn update(self: *@This()) void {
+            self.session.updateCredential("held-checkpoint-update") catch unreachable;
+        }
+
+        fn exportCheckpoint(self: *@This()) void {
+            defer self.finished.store(true, .release);
+            var collector = CheckpointCollector{};
+            self.outcome = self.session.exportCheckpoint(checkpoint_test_limits, collector.sink(), 0, 0, "fixture-model") catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+
+        fn releaseUpdate() void {
+            fake_core.lock();
+            fake_core.allow_credential_update = true;
+            fake_core.credential_update_condition.broadcast(std.testing.io);
+            fake_core.unlock();
+        }
+    };
+    for ([_]bool{ false, true }) |close_while_waiting| {
+        fake_core.reset();
+        fake_core.hold_credential_update = true;
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var work: Work = .{ .session = session };
+        {
+            const updating = try std.Thread.spawn(.{}, Work.update, .{&work});
+            defer updating.join();
+            defer Work.releaseUpdate();
+            fake_core.lock();
+            while (!fake_core.credential_update_entered) fake_core.credential_update_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+            fake_core.unlock();
+            const exporting = try std.Thread.spawn(.{}, Work.exportCheckpoint, .{&work});
+            defer exporting.join();
+            var closing: ?std.Thread = null;
+            defer if (closing) |thread| thread.join();
+            defer Work.releaseUpdate();
+            for (0..5000) |_| {
+                session.lock();
+                const references = session.active_refs;
+                session.unlock();
+                if (references == 2 or work.finished.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CheckpointDidNotWait;
+            try std.testing.expect(!work.finished.load(.acquire));
+            if (close_while_waiting) {
+                closing = try std.Thread.spawn(.{}, closeOnThread, .{session});
+                try session.waitForState(.closing);
+            }
+            Work.releaseUpdate();
+        }
+        if (close_while_waiting) {
+            try std.testing.expectEqual(error.SessionClosing, work.failure.?);
+            try std.testing.expect(work.outcome == null);
+        } else {
+            try std.testing.expect(work.failure == null);
+            var outcome = work.outcome.?;
+            defer outcome.deinit();
+            try std.testing.expect(outcome == .success);
+        }
+    }
+}
+
+test "credential update keeps Session identity and rejects invalid input before Core" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+    try session.updateCredential("updated-fixture-credential");
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("updated-fixture-credential", &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, &raw.credential_digest);
+    const oversized = [_]u8{'x'} ** 4097;
+    for ([_][]const u8{ "", "contains space", "bad\r\nheader", &.{0xff}, &oversized }) |value|
+        try std.testing.expectError(error.InvalidCredential, session.updateCredential(value));
+    try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
+test "credential update refusals keep the previous credential and busy violates the contract" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+    const original = raw.credential_digest;
+    for ([_]u32{ wire.STATUS_INVALID_ARGUMENT, wire.STATUS_OUT_OF_MEMORY, wire.STATUS_RESOURCE_LIMIT }) |status| {
+        fake_core.forced_update_credential_status = status;
+        if (status == wire.STATUS_RESOURCE_LIMIT)
+            try std.testing.expectError(error.CredentialUpdateResourceLimit, session.updateCredential("new-fixture"))
+        else
+            try std.testing.expectError(error.CredentialUpdateFailed, session.updateCredential("new-fixture"));
+        try std.testing.expectEqualSlices(u8, &original, &raw.credential_digest);
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    }
+    fake_core.forced_update_credential_status = wire.STATUS_BUSY;
+    try std.testing.expectError(error.CredentialUpdateContract, session.updateCredential("new-fixture"));
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
+test "credential update is available during a Run waiting for permission" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "wait across credential rotation");
+    try session.waitForState(.waiting_ui);
+    try session.updateCredential("rotated-while-waiting");
+    try std.testing.expectEqual(lifecycle.SessionState.waiting_ui, session.snapshot().state);
+    try cancelSession(session, run_id, .user_cancel);
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, null), terminal.failure);
+    try closeSession(session, .session_close);
+}
+
+test "credential update retains the raw Session while close waits" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.session.updateCredential("held-update-fixture") catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    fake_core.reset();
+    fake_core.hold_credential_update = true;
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    var work: Work = .{ .session = session };
+    const updating = try std.Thread.spawn(.{}, Work.run, .{&work});
+    fake_core.lock();
+    while (!fake_core.credential_update_entered) fake_core.credential_update_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+    fake_core.unlock();
+    const closing = try std.Thread.spawn(.{}, closeOnThread, .{session});
+    try session.waitForState(.closing);
+    fake_core.lock();
+    const destroyed_early = fake_core.session_destroyed;
+    fake_core.allow_credential_update = true;
+    fake_core.credential_update_condition.broadcast(std.testing.io);
+    fake_core.unlock();
+    updating.join();
+    closing.join();
+    try std.testing.expectEqual(@as(usize, 0), destroyed_early);
+    try std.testing.expect(work.failure == null);
+}
+
+test "credential update contract failure stops the active Run and poisons its Session" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "refuse unexpected busy");
+    try session.waitForState(.waiting_ui);
+    fake_core.forced_update_credential_status = wire.STATUS_BUSY;
+    try std.testing.expectError(error.CredentialUpdateContract, session.updateCredential("fixture-replacement"));
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, .dependency_contract), terminal.failure);
+    try std.testing.expectEqual(lifecycle.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
+    try std.testing.expectEqual(lifecycle.TerminationSignal{ .credential_update_failure = .dependency_contract }, terminal.termination_signal.?);
+    try closeSession(session, .session_close);
+}
+
+test "credential update contract failure before execution never enters Core" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try session.prepareRun(.{ .text = "fail before Core" });
+    fake_core.forced_update_credential_status = 0xffffffff;
+    try std.testing.expectError(error.CredentialUpdateContract, session.updateCredential("fixture-replacement"));
+    var run = try session.beginRun(run_id);
+    var terminal = run.execute();
+    defer terminal.deinit();
+    run.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, .dependency_contract), terminal.failure);
+    try std.testing.expectEqual(lifecycle.SessionDisposition.poisoned, terminal.session_disposition_at_completion);
+    try closeSession(session, .session_close);
+}
+
 const CatalogSourceTracker = struct {
     references: std.atomic.Value(usize) = .init(1),
     deny: bool = false,

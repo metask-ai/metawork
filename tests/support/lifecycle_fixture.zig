@@ -332,6 +332,12 @@ pub const FakeCore = struct {
     adopt_input_before_receipt: bool = false,
     omit_input_adopted_event: bool = false,
     forced_input_status: ?u32 = null,
+    forced_update_credential_status: ?u32 = null,
+    credential_updates: usize = 0,
+    hold_credential_update: bool = false,
+    credential_update_entered: bool = false,
+    allow_credential_update: bool = false,
+    credential_update_condition: std.Io.Condition = .init,
     forced_input_run_status: ?u32 = null,
     expected_run_text: ?[]const u8 = null,
     run_text_matches: bool = false,
@@ -2569,8 +2575,25 @@ const fake_session_api = wire.SessionApiV1{
     .update_credential = sessionUpdateCredential,
 };
 
-fn sessionUpdateCredential(_: ?*wire.SessionHandle, _: wire.BytesViewV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-    @panic("MetaWork does not call Session.updateCredential");
+fn sessionUpdateCredential(handle: ?*wire.SessionHandle, value: wire.BytesViewV1, out_error: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    fake_core.lock();
+    fake_core.credential_updates += 1;
+    fake_core.credential_update_entered = true;
+    fake_core.credential_update_condition.broadcast(std.testing.io);
+    while (fake_core.hold_credential_update and !fake_core.allow_credential_update)
+        fake_core.credential_update_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+    const forced = fake_core.forced_update_credential_status;
+    fake_core.forced_update_credential_status = null;
+    fake_core.unlock();
+    if (forced) |code| return code;
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse return wire.STATUS_INVALID_ARGUMENT));
+    const credential = sdk.borrowedBytes(value) catch return wire.STATUS_INVALID_ARGUMENT;
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) return wire.STATUS_INVALID_STATE;
+    std.crypto.hash.sha2.Sha256.hash(credential, &session.credential_digest, .{});
+    return wire.STATUS_OK;
 }
 
 fn sessionSubmitInput(handle: ?*wire.SessionHandle, run_id: u64, input: ?*const wire.SubmittedInputV1, receipt: ?*wire.InputReceiptV1, diagnostic_out: ?*wire.OwnedBytesV1) callconv(.c) u32 {

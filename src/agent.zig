@@ -201,4 +201,5 @@ pub const ImageGenerationFormat = session_impl.ImageGenerationFormat;
 pub const ImageGenerationLimits = session_impl.ImageGenerationLimits;
 pub const image_generation_limits = session_impl.image_generation_limits;
 pub const ImageGenerationRunInput = session_impl.ImageGenerationRunInput;
+pub const ImageGenerationCredentialReader = session_impl.ImageGenerationCredentialReader;
 pub const Session = session_impl.Session;

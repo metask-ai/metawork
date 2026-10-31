@@ -200,6 +200,8 @@ PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 
 
 普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
+图片 binding 可携带 Host 提供的独立凭据读取 capability，其 context 与 output 一样由 Host 持有到 Run quiescence。Agent 每次图片请求准备时复制到有界请求缓冲区，读取失败不使用初始 key；Agent 不查询 Account、Models 或 Product aggregate。授权 scope、续期资格与旧副本退役由 [Product 架构](product-architecture.md)拥有。
+
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配一次即消费，下一 Run 清空。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
 `DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
@@ -586,11 +588,15 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 - Provider key 从 Host process environment 或受控配置读取；
 - composition 将 execution defaults 复制进 Product Control-owned process-local storage；该 storage 不进入 Task/Run canonical state，并在 Executor 与全部 workers quiesce 后清零；
-- `session_create` 只借用 Product Control 在 Session 生命周期所需期间保持稳定的 credential view；
+- Session fresh/restore 只在同步调用期借用输入，Host 临时副本在返回后清零；Core 内部副本按锁定 bundle 合同持有；
 - 不从 Renderer command 接收 key；
 - 不写日志、event、snapshot、crash diagnostic 或持久化 view；
 - Host 临时 buffer 在不再需要时及时清理；
 - AgentCore 是否复制并如何清理 Session credential 以锁定 bundle contract 为准。
+
+Agent 的 `updateCredential` 是官方 Session credential replacement 的唯一包装。只接受共享模型输入上限内、符合 Core 可打印 ASCII 要求的非空凭据；输入只借用到同步调用返回，diagnostic 不进入产品投影。它允许与 queued/active Run 及权限等待重叠，成功后 Core 后续发送及重试使用新凭据，已发送请求保留原副本。手动 Compact 的排队和执行阶段及独立 checkpoint 操作推迟更新，不能将 Run 并发许可扩大到未登记的 Core 操作。
+
+更新使用 retained Session reference，状态锁只保护接纳和收口，不持锁跨 Core 调用；关闭等待更新和所有 retained access 静止后才销毁 raw handle。更新与非 Run mutation 的接纳必须串行。明确拒绝保留原 Core 凭据；未知 status、不允许的 BUSY 或状态违约形成 dependency contract failure，活动 Run 通过内部 typed 凭据失败信号终止并保留真实 terminal，不能伪造用户取消或 provider failure。更新不改变模型、对话、权限、operation identity 或已有工具执行。续期资格、Host 新旧副本及其安全退役归 [Product](product-architecture.md)，不由 Agent 推断 Account 或目录 authority。
 
 ### Workspace
 

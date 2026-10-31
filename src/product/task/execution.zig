@@ -171,6 +171,7 @@ pub const RunJob = struct {
     completion_factory: CompletionFactory,
     checkpoint: CheckpointResources,
     title_execution: ?execution_binding.OwnedTaskExecution = null,
+    title_credential: ?*execution_binding.credential.Source = null,
     access: ?agent_session.Access = null,
 
     pub fn sessionAccess(self: *RunJob) *agent_session.Access {
@@ -193,6 +194,8 @@ pub const RunJob = struct {
         self.releaseSessionAccess();
         if (self.title_execution) |*execution| execution.deinit();
         self.title_execution = null;
+        if (self.title_credential) |reader| reader.release();
+        self.title_credential = null;
         if (self.checkpoint_lease) |*lease| lease.deinit();
         self.checkpoint_lease = null;
         self.lease.deinit();
@@ -411,6 +414,8 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const source = automaticTitleCompletionInput(&run.input) orelse return;
     const execution = &(job.title_execution orelse return);
     const config = execution.input();
+    var credential = (job.title_credential orelse return).copy(std.heap.c_allocator) catch return;
+    defer credential.deinit();
     const owner = job.completion_factory.create(std.heap.c_allocator, .{
         .target = .{
             .provider_id = config.target.provider_id,
@@ -418,7 +423,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
             .base_url = config.target.base_url,
             .model = config.target.model,
         },
-        .credential = config.api_key,
+        .credential = credential.bytes,
     }) catch return;
     defer owner.deinit();
     const messages = [_]agent.CompletionMessage{.{ .role = .user, .text = source }};
@@ -456,10 +461,11 @@ fn generateAutomaticTitle(job: *RunJob) void {
     if (result.stop_reason != .end_turn or
         result.text.len > automatic_title_result_capacity)
         return;
+    const initial = run.initialRedactionSecrets();
     const projected = job.projector.project(
         &run.execution.?.automatic_title.result,
         result.text,
-        &run.redactionSecrets(),
+        &.{ initial[0], initial[1], credential.bytes },
     );
     run.execution.?.automatic_title.result_len = projected.len;
     run.execution.?.automatic_title.generated_redacted = projected.redacted;
@@ -499,7 +505,7 @@ pub fn commitRunTerminal(
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
-        const projected = projector.project(run.terminal_diagnostic, diagnostic, &run.redactionSecrets());
+        const projected = projector.project(run.terminal_diagnostic, diagnostic, &run.initialRedactionSecrets());
         run.terminal_payload = .{
             .exclude_on_product_terminal = exclude_on_product_terminal,
             .phase = phase,

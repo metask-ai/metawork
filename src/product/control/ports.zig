@@ -126,6 +126,22 @@ pub const MetaskAuthorizationCheck = struct {
     }
 };
 
+/// Account-only handoff for an already admitted execution. A null credential
+/// reports lease allocation failure, never logout or a catalog rejection.
+pub const MetaskCredentialRenewal = struct {
+    context: *anyopaque,
+    renew_fn: *const fn (*anyopaque, MetaskAuthorization, ?[]const u8) void,
+    needs_fn: *const fn (*anyopaque, MetaskAuthorization) bool,
+
+    pub fn renew(self: MetaskCredentialRenewal, authority: MetaskAuthorization, credential: ?[]const u8) void {
+        self.renew_fn(self.context, authority, credential);
+    }
+
+    pub fn needs(self: MetaskCredentialRenewal, authority: MetaskAuthorization) bool {
+        return self.needs_fn(self.context, authority);
+    }
+};
+
 /// Main-thread admission call only. The returned owned value contains no
 /// mutable aggregate pointer; only the scoped effect owner is retained.
 pub const ImageRunPreparation = struct {

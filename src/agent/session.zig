@@ -47,6 +47,7 @@ pub const ImageGenerationRunInput = struct {
     binding: image_generation.BindingInput,
     transport: image_http.Transport,
 };
+pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
 
 const RunImage = struct {
     binding: image_generation.OwnedBinding,
@@ -604,6 +605,10 @@ pub const Error = error{
     SessionPoisoned,
     SessionClosing,
     InvalidRunInput,
+    InvalidCredential,
+    CredentialUpdateFailed,
+    CredentialUpdateResourceLimit,
+    CredentialUpdateContract,
     RunInputTooLarge,
     RunInputBudgetExceeded,
     RunIdExhausted,
@@ -681,6 +686,7 @@ pub const Session = struct {
     run_started: bool = false,
     core_call_in_progress: bool = false,
     abort_calls_in_progress: usize = 0,
+    credential_updates_in_progress: usize = 0,
     input_calls_in_progress: usize = 0,
     input_ready: bool = false,
     input_window_started: bool = false,
@@ -938,6 +944,7 @@ pub const Session = struct {
         defer self.unlock();
         if (self.agent_runtime.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
+        if (self.credential_updates_in_progress != 0) return error.SessionNotIdle;
         switch (self.state) {
             .idle => {},
             .poisoned => return error.SessionPoisoned,
@@ -1122,6 +1129,7 @@ pub const Session = struct {
         self.lock();
         var locked = true;
         defer if (locked) self.unlock();
+        if (self.credential_updates_in_progress != 0) return error.SessionNotIdle;
         if (self.agent_runtime.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
         switch (self.state) {
@@ -1211,6 +1219,7 @@ pub const Session = struct {
             return error.CoreCallFailed;
         self.lock();
         defer self.unlock();
+        if (self.credential_updates_in_progress != 0) return error.SessionNotIdle;
         if (self.agent_runtime.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
         switch (self.state) {
@@ -1237,6 +1246,57 @@ pub const Session = struct {
         };
     }
 
+    /// Core reads the current credential when sending a request. Retaining
+    /// this Session protects the raw handle without serializing with a Run.
+    pub fn updateCredential(self: *Session, credential: []const u8) Error!void {
+        if (credential.len == 0 or credential.len > model_binding.max_credential_bytes)
+            return error.InvalidCredential;
+        for (credential) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredential;
+        if (!self.retainReference()) return error.SessionClosing;
+        defer self.releaseReference();
+        self.lock();
+        const refusal: ?Error = if (self.agent_runtime.shutting_down.load(.acquire))
+            error.RuntimeShuttingDown
+        else switch (self.state) {
+            .idle, .queued, .running, .waiting_ui => null,
+            .compact_queued, .compacting, .checkpointing => error.SessionNotIdle,
+            .poisoned => error.SessionPoisoned,
+            .closing, .closed => error.SessionClosing,
+        };
+        if (refusal == null) self.credential_updates_in_progress += 1;
+        self.unlock();
+        if (refusal) |err| return err;
+        defer {
+            self.lock();
+            self.credential_updates_in_progress -= 1;
+            self.broadcast();
+            self.unlock();
+        }
+        var diagnostic = emptyOwnedBytes();
+        const code = self.agent_runtime.api.session().updateCredential()(self.raw, sdk.bytesView(credential), &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(code) catch return self.failCredentialUpdateContract();
+        return switch (status) {
+            .ok => {},
+            .invalid_argument, .out_of_memory => error.CredentialUpdateFailed,
+            .resource_limit => error.CredentialUpdateResourceLimit,
+            else => self.failCredentialUpdateContract(),
+        };
+    }
+
+    fn failCredentialUpdateContract(self: *Session) Error {
+        self.lock();
+        self.dependency_contract_failure = true;
+        const active = !self.run_done;
+        const run_id = self.active_run_id;
+        const generation = self.active_run_generation;
+        if (!active and self.state != .closing and self.state != .closed) self.state = .poisoned;
+        self.broadcast();
+        self.unlock();
+        if (active) _ = self.requestControlledTermination(run_id, generation, .{ .credential_update_failure = .dependency_contract });
+        return error.CredentialUpdateContract;
+    }
+
     /// Product owns persistence; this changes only idle Core authority.
     pub fn updatePermissionMode(self: *Session, expected: PermissionMode, target: PermissionMode) Error!PermissionModeUpdate {
         self.lock();
@@ -1248,7 +1308,7 @@ pub const Session = struct {
             .closing, .closed => return error.SessionClosing,
             else => return error.SessionNotIdle,
         }
-        if (self.core_call_in_progress or self.active_callback_refs != 0 or self.abort_calls_in_progress != 0)
+        if (self.core_call_in_progress or self.active_callback_refs != 0 or self.abort_calls_in_progress != 0 or self.credential_updates_in_progress != 0)
             return error.SessionNotIdle;
         const before = try self.permissionObservationLocked();
         if (before.mode != expected) return self.failPermissionModeContract();
@@ -1353,6 +1413,7 @@ pub const Session = struct {
     pub fn captureRestoreInputs(self: *Session) (Error || std.mem.Allocator.Error)!SessionRestoreInputs {
         self.lock();
         defer self.unlock();
+        if (self.credential_updates_in_progress != 0) return error.SessionNotIdle;
         if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
         switch (self.state) {
             .idle => {},
@@ -1762,7 +1823,13 @@ pub const Session = struct {
         model_binding.validateModel(expected_model) catch
             return error.InvalidLimits;
 
+        if (!self.retainReference()) return error.SessionClosing;
+        defer self.releaseReference();
         self.lock();
+        // A Run can finish while its credential update is still returning.
+        // Keep its checkpoint work pending until that update leaves the lane.
+        while (self.credential_updates_in_progress != 0 and self.state == .idle and
+            !self.agent_runtime.shutting_down.load(.acquire)) self.wait();
         if (self.agent_runtime.shutting_down.load(.acquire)) {
             self.unlock();
             return error.RuntimeShuttingDown;
@@ -1793,7 +1860,6 @@ pub const Session = struct {
             return error.SessionClosing;
         };
         self.state = .checkpointing;
-        self.active_refs += 1;
         self.unlock();
 
         var outcome = checkpoint.create(
@@ -1837,8 +1903,6 @@ pub const Session = struct {
                 } };
             }
         }
-        std.debug.assert(self.active_refs > 0);
-        self.active_refs -= 1;
         switch (outcome) {
             .success => {},
             .failure => |failure| if (failure.disposition == .poisoned) {
@@ -1849,7 +1913,6 @@ pub const Session = struct {
             },
         }
         if (self.state == .checkpointing) self.state = .idle;
-        if (self.active_refs == 0) self.broadcast();
         self.unlock();
         return outcome;
     }
@@ -2190,7 +2253,8 @@ pub const Session = struct {
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
-        const terminal = self.takeTerminalResultLocked(null, null, null, null, null, null);
+        if (self.dependency_contract_failure and self.state != .closing) self.state = .poisoned;
+        const terminal = self.takeTerminalResultLocked(null, null, null, null, if (self.dependency_contract_failure) .dependency_contract else null, null);
         self.broadcast();
         return terminal;
     }
@@ -3463,6 +3527,7 @@ fn abortReason(signal: TerminationSignal) u32 {
         .callback_failure,
         .event_pump_failure,
         .event_consumer_notification_failure,
+        .credential_update_failure,
         => wire.ABORT_USER_REQUEST,
     };
 }
