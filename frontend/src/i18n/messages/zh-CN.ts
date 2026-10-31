@@ -955,6 +955,8 @@ export const zhCN: Record<MessageId, string> = {
   "approval.reviewer_note": "审核意见：",
   "approval.agent_purpose": "Agent 说明：",
   "approval.command": "将执行的命令",
+  "approval.partial_preview":
+    "仅显示部分操作内容，展开“查看具体操作”可查看全文。",
   "approval.command_effects": "系统未验证这条命令的完整影响。",
   "approval.command_unavailable": "暂时无法显示命令，请查看具体操作。",
   "approval.full_request": "查看具体操作",

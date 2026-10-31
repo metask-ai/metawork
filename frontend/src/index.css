@@ -7360,6 +7360,26 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 4px;
 }
 
+.approval-operation {
+  min-width: 0;
+}
+
+.approval-panel .approval-operation-preview {
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-primary);
+  font-size: var(--text-micro);
+}
+
+.approval-preview-note {
+  margin: 4px 0 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
 .approval-details-toggle {
   min-height: 44px;
   padding: 0;
