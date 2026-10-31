@@ -21,6 +21,82 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+test "checkpoint waits for a credential update and close can cancel that wait" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        finished: std.atomic.Value(bool) = .init(false),
+        outcome: ?lifecycle.CheckpointOutcome = null,
+        failure: ?anyerror = null,
+
+        fn update(self: *@This()) void {
+            self.session.updateCredential("held-checkpoint-update") catch unreachable;
+        }
+
+        fn exportCheckpoint(self: *@This()) void {
+            defer self.finished.store(true, .release);
+            var collector = CheckpointCollector{};
+            self.outcome = self.session.exportCheckpoint(checkpoint_test_limits, collector.sink(), 0, 0, "fixture-model") catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+
+        fn releaseUpdate() void {
+            fake_core.lock();
+            fake_core.allow_credential_update = true;
+            fake_core.credential_update_condition.broadcast(std.testing.io);
+            fake_core.unlock();
+        }
+    };
+    for ([_]bool{ false, true }) |close_while_waiting| {
+        fake_core.reset();
+        fake_core.hold_credential_update = true;
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        defer closeSession(session, .session_close) catch unreachable;
+        var work: Work = .{ .session = session };
+        {
+            const updating = try std.Thread.spawn(.{}, Work.update, .{&work});
+            defer updating.join();
+            defer Work.releaseUpdate();
+            fake_core.lock();
+            while (!fake_core.credential_update_entered) fake_core.credential_update_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+            fake_core.unlock();
+            const exporting = try std.Thread.spawn(.{}, Work.exportCheckpoint, .{&work});
+            defer exporting.join();
+            var closing: ?std.Thread = null;
+            defer if (closing) |thread| thread.join();
+            defer Work.releaseUpdate();
+            for (0..5000) |_| {
+                session.lock();
+                const references = session.active_refs;
+                session.unlock();
+                if (references == 2 or work.finished.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.CheckpointDidNotWait;
+            try std.testing.expect(!work.finished.load(.acquire));
+            if (close_while_waiting) {
+                closing = try std.Thread.spawn(.{}, closeOnThread, .{session});
+                try session.waitForState(.closing);
+            }
+            Work.releaseUpdate();
+        }
+        if (close_while_waiting) {
+            try std.testing.expectEqual(error.SessionClosing, work.failure.?);
+            try std.testing.expect(work.outcome == null);
+        } else {
+            try std.testing.expect(work.failure == null);
+            var outcome = work.outcome.?;
+            defer outcome.deinit();
+            try std.testing.expect(outcome == .success);
+        }
+    }
+}
+
 test "credential update keeps Session identity and rejects invalid input before Core" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });

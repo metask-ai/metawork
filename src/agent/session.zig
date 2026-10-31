@@ -1816,7 +1816,13 @@ pub const Session = struct {
         model_binding.validateModel(expected_model) catch
             return error.InvalidLimits;
 
+        if (!self.retainReference()) return error.SessionClosing;
+        defer self.releaseReference();
         self.lock();
+        // A Run can finish while its credential update is still returning.
+        // Keep its checkpoint work pending until that update leaves the lane.
+        while (self.credential_updates_in_progress != 0 and self.state == .idle and
+            !self.agent_runtime.shutting_down.load(.acquire)) self.wait();
         if (self.agent_runtime.shutting_down.load(.acquire)) {
             self.unlock();
             return error.RuntimeShuttingDown;
@@ -1842,16 +1848,11 @@ pub const Session = struct {
                 return error.SessionNotIdle;
             },
         }
-        if (self.credential_updates_in_progress != 0) {
-            self.unlock();
-            return error.SessionNotIdle;
-        }
         const raw_session = self.raw orelse {
             self.unlock();
             return error.SessionClosing;
         };
         self.state = .checkpointing;
-        self.active_refs += 1;
         self.unlock();
 
         var outcome = checkpoint.create(
@@ -1895,8 +1896,6 @@ pub const Session = struct {
                 } };
             }
         }
-        std.debug.assert(self.active_refs > 0);
-        self.active_refs -= 1;
         switch (outcome) {
             .success => {},
             .failure => |failure| if (failure.disposition == .poisoned) {
@@ -1907,7 +1906,6 @@ pub const Session = struct {
             },
         }
         if (self.state == .checkpointing) self.state = .idle;
-        if (self.active_refs == 0) self.broadcast();
         self.unlock();
         return outcome;
     }

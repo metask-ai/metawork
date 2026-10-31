@@ -3274,17 +3274,27 @@ pub const Runtime = struct {
             return .unchanged;
         }
         const replacement = try execution.prepareCredential(value);
-        errdefer {
+        var installed = false;
+        defer if (!installed) {
             std.crypto.secureZero(u8, replacement);
             execution.allocator.free(replacement);
-        }
+        };
         const run = if (task.runtime.active_operation == .run)
             task_state.findRun(task.durable.runs, task.runtime.active_run_id)
         else
             null;
         if (run) |record| try record.credential_views.ensureUnusedCapacity(self.allocator, if (record.credential_views.items.len == 0) 3 else 1);
-        try access.updateCredential(replacement);
+        access.updateCredential(replacement) catch |err| switch (err) {
+            // The worker may enter checkpoint export after sessionState.
+            error.SessionNotIdle => {
+                task.runtime.credential_renewal_deferred = true;
+                return .deferred;
+            },
+            error.SessionClosing => return .unrelated,
+            else => return err,
+        };
         execution.installCredential(replacement, generation);
+        installed = true;
         if (run) |record| {
             if (record.credential_views.items.len == 0) record.credential_views.appendSliceAssumeCapacity(&record.initial_credentials);
             record.credential_views.appendAssumeCapacity(replacement);

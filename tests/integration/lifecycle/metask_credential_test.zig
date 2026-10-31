@@ -71,6 +71,37 @@ fn drainCatalog(coordinator: *coordinator_api.Coordinator) !void {
     return error.CatalogDidNotSettle;
 }
 
+/// Force the worker into checkpoint export after renewal's state observation.
+const CheckpointRotationAllocator = struct {
+    parent: std.mem.Allocator = std.testing.allocator,
+    armed: bool = true,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed) {
+            self.armed = false;
+            fake_core.releaseControlled();
+            fake_core.waitCheckpointExportEntered();
+        }
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+    fn resize(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.rawFree(bytes, alignment, ra);
+    }
+};
+
 fn createTask(control: *control_api.Runtime, workspace: u64) !u64 {
     return createTaskWithMode(control, workspace, .manual);
 }
@@ -202,6 +233,10 @@ test "Metask automatic title reads the current credential after the main Run fin
     try characterizeCredentialExpiry(.title_rotation);
 }
 
+test "Metask renewal defers when checkpoint starts after its state observation" {
+    try characterizeCredentialExpiry(.checkpoint_rotation);
+}
+
 test "Metask waiting approval Run resumes with the renewed credential" {
     try characterizeCredentialExpiry(.waiting_ui_rotation);
 }
@@ -240,7 +275,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.finishAccountCommitNoFail();
 }
 
-const Scenario = enum { title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
+const Scenario = enum { checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
     const rotate = scenario != .expiry;
@@ -418,7 +453,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.RestoreDidNotStart;
     }
-    const held_run = scenario == .queued_rotation or continuation or scenario == .many_rotations or scenario == .waiting_ui_rotation or scenario == .active_update_rejected or scenario == .active_update_oom;
+    const held_run = scenario == .queued_rotation or continuation or scenario == .many_rotations or scenario == .waiting_ui_rotation or scenario == .active_update_rejected or scenario == .active_update_oom or scenario == .checkpoint_rotation;
     if (held_run) {
         fake_core.input_enabled = continuation;
         fake_core.setCheckpointGeneration(2);
@@ -433,6 +468,15 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         fake_core.setRestoreHistory(2, 0);
     }
     defer fake_core.releaseControlled();
+    var checkpoint_rotation_allocator: CheckpointRotationAllocator = .{};
+    if (scenario == .checkpoint_rotation) {
+        fake_core.controlNextCheckpointExport();
+        old.runtime.execution().?.allocator = checkpoint_rotation_allocator.allocator();
+    }
+    defer if (scenario == .checkpoint_rotation) {
+        old.runtime.execution().?.allocator = std.testing.allocator;
+        fake_core.releaseCheckpointExport();
+    };
     var renewal_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     if (scenario == .active_update_oom) old.runtime.execution().?.allocator = renewal_allocator.allocator();
     if (rotate) {
@@ -446,6 +490,28 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         }
         coordinator.authorizationChanged();
         try drainCatalog(&coordinator);
+        if (scenario == .checkpoint_rotation) {
+            try std.testing.expect(!checkpoint_rotation_allocator.armed);
+            try std.testing.expect(old.runtime.credential_renewal_deferred);
+            try std.testing.expect(!old.runtime.credential_update_failed);
+            try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(@as(usize, 0), fake_core.credential_updates);
+            old.runtime.execution().?.allocator = std.testing.allocator;
+            fake_core.releaseCheckpointExport();
+            for (0..5000) |_| {
+                coordinator.drain();
+                try wake_loop.drain(&control);
+                if (!old.runtime.credential_renewal_deferred and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.DeferredCredentialDidNotSettle;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
+            try std.testing.expectEqual(@as(u64, 2), old.durable.checkpoint.?.session.last_run_id);
+            try std.testing.expectEqual(.none, old.durable.checkpoint_attempt);
+            try std.testing.expectEqual(@as(usize, 2), runCalls());
+            try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+            return;
+        }
         if (restoring_candidate) {
             if (scenario == .candidate_relogin or scenario == .candidate_same_token_relogin) {
                 try relogin(&account_runtime);
