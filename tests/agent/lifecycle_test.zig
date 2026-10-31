@@ -233,6 +233,55 @@ test "model error remains a fact when a later cancellation is too late" {
     try session.close(.session_close);
 }
 
+test "model error survives close after capture until the Run and callbacks quiesce" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.model_error_controlled);
+    fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+    var signal = fixture.CallbackSignal{};
+    signal.arm();
+    fake_core.setCallbackSignal(&signal);
+    defer fake_core.setCallbackSignal(null);
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "close after model error capture" });
+    var work = Work{ .session = session, .id = id };
+    {
+        const worker = try std.Thread.spawn(.{}, Work.execute, .{&work});
+        defer worker.join();
+        defer fake_core.releaseControlled();
+        signal.waitUntilEntered();
+        const closing = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+        defer closing.join();
+        defer fake_core.releaseControlled();
+        try session.waitForState(.closing);
+        fake_core.releaseControlled();
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expectEqual(.abi_status, terminal.failure.?);
+    try std.testing.expectEqual(.callback_failed, terminal.abi_status.?);
+    try std.testing.expect(terminal.stop_reason == null);
+    try std.testing.expect(terminal.session_disposition_at_completion != .reusable);
+    try std.testing.expectEqual(.closed, session.snapshot().state);
+    try runtime.releaseClosedSession(session);
+    try expectModelError(&terminal, id);
+    try drainWithoutModelError(runtime);
+}
+
 test "model error results survive the next Run and Runtime destruction" {
     fake_core.reset();
     fake_core.setNextPlan(.model_error);

@@ -14,6 +14,7 @@ const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("session/control.zig");
+const session_model_error = @import("session/model_error.zig");
 const core_identity = @import("agentcore_identity");
 const session_wire = @import("session/wire.zig");
 const capabilities = @import("capabilities.zig");
@@ -3611,7 +3612,7 @@ test {
     _ = multimodal;
     _ = session_wire;
     _ = session_control;
-    _ = @import("session/model_error.zig");
+    _ = session_model_error;
     _ = session_binding;
     _ = session_runtime;
 }
