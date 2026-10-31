@@ -554,7 +554,7 @@ Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须
 
 ## 5. `.skill` 交换 artifact
 
-`.skill` 是 MetaWork 对外可交换的 ZIP envelope。规范 archive root 必须直接包含精确大小写的 `SKILL.md` 及同一 Skill 的相对资源；导入普通 `.zip` 时，只允许 archive root 本身或唯一 wrapper directory 成为候选 Skill root。多个 `SKILL.md`、多个候选根或缺少 root 均失败。
+`.skill` 是 MetaWork 对外可交换的 ZIP envelope。规范 archive root 必须直接包含精确大小写的 `SKILL.md` 及同一 Skill 的相对资源；本地目录和 ZIP-compatible 安装包导入只允许所选根本身或唯一的一层 wrapper directory 成为候选 Skill root。排除平台 metadata 后，整个候选只允许一个精确 `SKILL.md`；多个定义（包括嵌套示例）、多个候选根、更深 wrapper 或缺少 root 均失败。预览与提交共用根解析规则，提交仍重新检查源摘要，不把预览当作可绕过源变化检查的安装快照。
 
 导入必须在目标 root 之外 materialize 为 staged tree，并拒绝 absolute、drive/UNC、空、`.`、`..`、NUL、非 UTF-8、重复归一化、Windows 保留名和尾随点/空格路径；symlink、hardlink、device、socket、FIFO 与其他特殊 entry 一律拒绝。Importer 只读取或复制 regular bytes，不执行脚本、不解析远程链接、不访问网络。
 
@@ -567,4 +567,6 @@ Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须
 - 单 path component 最多 128 UTF-8 bytes；
 - `.skill` 压缩输入最多 32 MiB。
 
-export 服从同一文件与路径边界，使用稳定相对路径顺序，不包含绝对路径、provenance store、credential、`.git` 或平台 metadata。具体 ZIP library、staging 目录、hash 实现和文件事务 helper 由代码与测试拥有；上述 envelope、拒绝规则和容量属于稳定 artifact 合同。
+目录与归档从候选中排除 `.git`、`__MACOSX`、`.DS_Store`、`Thumbs.db` 和 AppleDouble `._*` metadata。排除不豁免原始归档的路径、entry 类型、重复路径、压缩方式和输入/展开容量校验，不授予 metadata 中的链接或特殊文件任何访问能力。
+
+export 服从同一文件、定义唯一性和路径边界，使用稳定相对路径顺序，不包含绝对路径、provenance store、credential 或上述 metadata。成功导出的 `.skill` 必须能通过同一 importer 的机械检查，输出大小包含 ZIP header 和目录开销，超过压缩输入上限明确失败，不能只按展开总量判断。具体 ZIP library、staging 目录、hash 实现和文件事务 helper 由代码与测试拥有；上述 envelope、拒绝规则和容量属于稳定 artifact 合同。

@@ -3628,16 +3628,17 @@ test "managed imports bind source grants and publish effective bytes through exp
     const output_path = try output.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(output_path);
     const original = "---\nname: demo\ndescription: Demo\n---\nRead qa-reference.txt.\n";
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = original });
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "resource marker" });
-    var preview = try package.previewDirectory(std.testing.io, std.testing.allocator, source.dir, .{});
-    defer preview.deinit();
+    try source.dir.createDir(std.testing.io, "wrapper", .default_dir);
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/SKILL.md", .data = original });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/qa-reference.txt", .data = "resource marker" });
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
         .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &persistence, .staging_root = staging_path } },
         .max_workspaces = 1,
         .canonical_user_home = home_path,
     }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
     defer runtime.deinit();
+    var preview = try runtime.previewDirectory(source_path);
+    defer preview.deinit();
     const installed = try runtime.installDirectory(source_path, .{
         .source_kind = .local_directory,
         .scope = .personal,
@@ -3650,7 +3651,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     try std.testing.expectEqualSlices(u8, &asset.content_hash, &asset.recovery.?.candidate_hash.?);
     const expected = try package.managedDefinition(std.testing.allocator, original);
     defer std.testing.allocator.free(expected);
-    const source_bytes = try source.dir.readFileAlloc(std.testing.io, "SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
+    const source_bytes = try source.dir.readFileAlloc(std.testing.io, "wrapper/SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
     defer std.testing.allocator.free(source_bytes);
     try std.testing.expectEqualStrings(original, source_bytes);
     const managed_path = try std.fs.path.join(std.testing.allocator, &.{ home_path, ".agents", "skills" });
@@ -3679,7 +3680,7 @@ test "managed imports bind source grants and publish effective bytes through exp
     defer exported_preview.deinit();
     try std.testing.expectEqualStrings(expected, exported_preview.definition);
     try std.testing.expectEqualSlices(u8, &actual.content_hash, &exported_preview.content_hash);
-    try source.dir.writeFile(std.testing.io, .{ .sub_path = "qa-reference.txt", .data = "changed after preview" });
+    try source.dir.writeFile(std.testing.io, .{ .sub_path = "wrapper/qa-reference.txt", .data = "changed after preview" });
     try std.testing.expectError(error.InvalidAsset, runtime.reimportDirectory(id, source_path, preview.invocation_name, preview.content_hash));
     var unchanged = try package.previewDirectory(std.testing.io, std.testing.allocator, published, .{});
     defer unchanged.deinit();

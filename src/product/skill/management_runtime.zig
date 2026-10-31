@@ -31,16 +31,22 @@ pub fn previewDirectory(
     context: Context,
     absolute_path: []const u8,
 ) Error!package.Preview {
+    const source = try openDirectorySource(context, absolute_path);
+    defer source.close(context.io);
+    return package.previewDirectory(context.io, context.allocator, source, .{});
+}
+
+fn openDirectorySource(context: Context, absolute_path: []const u8) Error!std.Io.Dir {
     if (!std.fs.path.isAbsolute(absolute_path) or
         !std.unicode.utf8ValidateSlice(absolute_path))
         return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(
+    const selected = std.Io.Dir.openDirAbsolute(
         context.io,
         absolute_path,
         .{ .follow_symlinks = false, .iterate = true },
     ) catch return error.InvalidAsset;
-    defer source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{});
+    defer selected.close(context.io);
+    return package.openDirectorySource(context.io, context.allocator, selected, .{});
 }
 
 pub fn previewArchive(
@@ -57,12 +63,12 @@ pub fn previewArchive(
         .{ .follow_symlinks = false },
     ) catch return error.InvalidAsset;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -78,7 +84,7 @@ pub fn previewArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
@@ -86,8 +92,7 @@ pub fn previewArchive(
     else
         scratch;
     defer if (inspection.wrapperName() != null) source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{}) catch
-        return error.InvalidAsset;
+    return package.previewDirectory(context.io, context.allocator, source, .{});
 }
 
 pub fn readDefinition(
@@ -165,8 +170,7 @@ pub fn exportPackage(
         if (output_open) output.close(context.io);
         if (output_exists) destination.deleteFile(context.io, result.fileName()) catch {};
     }
-    package.exportArchive(context.io, source, output, &manifest) catch
-        return error.WriteFailed;
+    try package.exportArchive(context.io, source, output, &manifest);
     output.sync(context.io) catch return error.WriteFailed;
     output.close(context.io);
     output_open = false;
@@ -181,14 +185,8 @@ pub fn installDirectory(
     input: state.InstallInput,
     now_unix_seconds: ?u64,
 ) Error!state.MutationResult {
-    if (input.source_kind != .local_directory or
-        !std.fs.path.isAbsolute(absolute_path) or
-        !std.unicode.utf8ValidateSlice(absolute_path))
-        return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(context.io, absolute_path, .{
-        .follow_symlinks = false,
-        .iterate = true,
-    }) catch return error.InvalidAsset;
+    if (input.source_kind != .local_directory) return error.InvalidAsset;
+    const source = try openDirectorySource(context, absolute_path);
     defer source.close(context.io);
     return installSource(context, canonical_base, source, input, now_unix_seconds);
 }
@@ -209,12 +207,12 @@ pub fn installArchive(
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -230,7 +228,7 @@ pub fn installArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
@@ -250,13 +248,7 @@ pub fn reimportDirectory(
     expected_invocation_name: []const u8,
     expected_content_hash: management.ContentHash,
 ) Error!state.MutationResult {
-    if (!std.fs.path.isAbsolute(absolute_path) or
-        !std.unicode.utf8ValidateSlice(absolute_path))
-        return error.InvalidAsset;
-    const source = std.Io.Dir.openDirAbsolute(context.io, absolute_path, .{
-        .follow_symlinks = false,
-        .iterate = true,
-    }) catch return error.InvalidAsset;
+    const source = try openDirectorySource(context, absolute_path);
     defer source.close(context.io);
     return reimportSource(
         context,
@@ -286,12 +278,12 @@ pub fn reimportArchive(
         .follow_symlinks = false,
     }) catch return error.InvalidAsset;
     defer archive.close(context.io);
-    const inspection = package.inspectArchive(
+    const inspection = try package.inspectArchive(
         context.io,
         context.allocator,
         archive,
         .{},
-    ) catch return error.InvalidAsset;
+    );
     const staging = try openStagingRoot(context);
     defer staging.close(context.io);
     var random: [16]u8 = undefined;
@@ -307,7 +299,7 @@ pub fn reimportArchive(
         .follow_symlinks = false,
     }) catch return error.PersistenceFailed;
     defer scratch.close(context.io);
-    package.extractArchive(context.io, archive, scratch) catch return error.InvalidAsset;
+    try package.extractArchive(context.io, archive, scratch);
     const source = if (inspection.wrapperName()) |wrapper|
         scratch.openDir(context.io, wrapper, .{
             .follow_symlinks = false,
