@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "date": "2026-10-31",
+  "scope": "Exploratory macOS desktop Skill import and matched four-Run experiment; not final isolation acceptance",
+  "implementationCommit": "6a32e30b",
+  "experimentBaseCommit": "142e3f5a",
+  "artifact": {
+    "target": "aarch64-macos",
+    "optimize": "Debug",
+    "automation": true,
+    "binarySha256": "aee7b945eeb96d2b270468ed0b9ed9bb6552f276b54a9a94a45c0ce83b687ce9",
+    "coreLock": "build_support/agentcore-bundle.macos-aarch64.lock.json",
+    "coreLockSha256": "3b0f0bd5b3f187b4f8ea04ef6b6da65c95874af69333b8bf31928af2801b1604"
+  },
+  "experimentIdentity": {
+    "uncommittedTrackedPatchSha256": "c2c467a4e3a7e6e03db11b1c67cf4881ce93c3d839f15802a765a999eb7adf33",
+    "companionSha256": "fac123b66c1d9d3a1f38badb65d5248919a2b6da8cdb33f67a868cb86ba6abd1",
+    "mainHarnessSha256": "279fcda3974b974cd4d78ccb8f73898a963d76062f57ad8c32e5c9f9566ce038",
+    "retainedAsStandardEntry": false
+  },
+  "setup": {
+    "provider": "Controlled local streaming Provider through canonical desktop/Core",
+    "scope": "Project import; personal home disjoint from project root",
+    "tasks": 4,
+    "roundOrder": [
+      "streaming-baseline",
+      "file-pressure"
+    ],
+    "response": "streaming file pressure repeated 3000 times per Run; 64-byte SSE chunks, 8-ms frame delay",
+    "pressureSource": "SKILL.md plus 511 files of 128 KiB"
+  },
+  "observations": [
+    {
+      "label": "directory",
+      "stage": "prepare-command",
+      "ms": 57.34420900000259
+    },
+    {
+      "label": "stale-revision",
+      "stage": "commit-command",
+      "ms": 58.61945900000137,
+      "accepted": false,
+      "reason": "invalid_preview"
+    },
+    {
+      "label": "small-directory",
+      "stage": "commit-command",
+      "ms": 57.212791999998444,
+      "accepted": true,
+      "reason": null
+    },
+    {
+      "label": "directory",
+      "stage": "prepare-command",
+      "ms": 56.75908300000083
+    },
+    {
+      "label": "changed-source",
+      "stage": "commit-command",
+      "ms": 55.82754200000272,
+      "accepted": false,
+      "reason": "source_changed"
+    },
+    {
+      "label": "directory",
+      "stage": "prepare-command",
+      "ms": 58.968166999999085
+    },
+    {
+      "label": "managed-update",
+      "stage": "commit-command",
+      "ms": 59.48829200000182,
+      "accepted": true,
+      "reason": null
+    },
+    {
+      "label": "directory",
+      "stage": "prepare-command",
+      "ms": 60.66754199999923
+    },
+    {
+      "label": "bad-candidate",
+      "stage": "commit-command",
+      "ms": 58.55979099999968,
+      "accepted": true,
+      "reason": null
+    },
+    {
+      "label": "package",
+      "stage": "prepare-command",
+      "ms": 58.313874999999825
+    },
+    {
+      "label": "wrapped-zip",
+      "stage": "commit-command",
+      "ms": 54.37279200000194,
+      "accepted": true,
+      "reason": null
+    },
+    {
+      "label": "four-real-runs-directory",
+      "stage": "prepare-command",
+      "ms": 774.3803750000079
+    },
+    {
+      "label": "four-real-runs-directory",
+      "stage": "commit-command",
+      "ms": 3169.487083,
+      "accepted": true,
+      "reason": null
+    }
+  ],
+  "runOutcomes": [
+    {
+      "scope": "resource",
+      "kind": "text",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "resource",
+      "kind": "skill",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "streaming-baseline",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "streaming-baseline",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "streaming-baseline",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "streaming-baseline",
+      "terminal": {
+        "outcome": "completed",
+        "cause": null,
+        "diagnosticDisposition": "absent"
+      }
+    },
+    {
+      "scope": "file-pressure",
+      "terminal": {
+        "outcome": "dependency_contract_failure",
+        "cause": "dependency_contract_failure",
+        "diagnosticDisposition": "withheld"
+      }
+    },
+    {
+      "scope": "file-pressure",
+      "terminal": {
+        "outcome": "dependency_contract_failure",
+        "cause": "dependency_contract_failure",
+        "diagnosticDisposition": "withheld"
+      }
+    },
+    {
+      "scope": "file-pressure",
+      "terminal": {
+        "outcome": "dependency_contract_failure",
+        "cause": "dependency_contract_failure",
+        "diagnosticDisposition": "withheld"
+      }
+    },
+    {
+      "scope": "file-pressure",
+      "terminal": {
+        "outcome": "dependency_contract_failure",
+        "cause": "dependency_contract_failure",
+        "diagnosticDisposition": "withheld"
+      }
+    }
+  ],
+  "pressureAcceptancePassed": false,
+  "finalImportPhase": "rolled_back",
+  "finalAssetStates": [
+    {
+      "invocationName": "import-measure",
+      "managementState": "ready",
+      "issueCodes": []
+    }
+  ],
+  "interpretation": "The matched baseline completed all four Runs; the file-pressure round failed all four with dependency_contract_failure and a synchronous commit command of 3169.487083 ms. This is an unresolved isolation observation, not a passing acceptance result or proof of a sole root cause.",
+  "scopeDecision": "User requested no further expansion. Delivery two remains unimplemented; exploratory automation integration was withdrawn. Preserve observations for a separately scoped follow-up.",
+  "limits": [
+    "One macOS Debug artifact and one matched pair, without counterbalancing; the second round has existing task history.",
+    "Automation supplies the source capability; native picker UI, screenshots and accessibility are not covered.",
+    "The companion and its automation hooks were exploratory working-tree changes, not a committed standard regression producer. Recorded hashes identify the measured artifact, but this report alone is not a reproducible final acceptance gate.",
+    "No claim about Windows, real Metask service, all package sources, or P99.",
+    "A Core-rejected large candidate rolled back; failure does not prove that every valid large mechanical package is accepted by Core."
+  ]
+}
