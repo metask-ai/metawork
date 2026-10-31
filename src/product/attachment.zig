@@ -113,7 +113,6 @@ pub const Runtime = struct {
     fn reserve(self: *Runtime, files: []const ReceiveFile, initialize: bool, prepared_id: ?u64) Error!u64 {
         const fs = self.file_store orelse return error.StagingCapacity;
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
-        if (prepared_id == null) _ = self.retryCleanup();
         if (files.len == 0) return error.EmptyBatch;
         if (files.len > self.limits.max_files) return error.TooManyFiles;
         if (prepared_id == null and self.next_receive_id == 0) return error.IdentityExhausted;
@@ -124,6 +123,7 @@ pub const Runtime = struct {
             if (file.size_bytes > self.limits.max_file_bytes) return error.FileTooLarge;
             total = std.math.add(usize, total, file.size_bytes) catch return error.StagingCapacity;
         }
+        _ = self.retryCleanup();
         if (self.freeSlotCount() < files.len or total > self.limits.max_staged_bytes - self.used_bytes) {
             const debt = self.cleanupDebt();
             if (self.freeSlotCount() + debt.count >= files.len and total <= self.limits.max_staged_bytes - (self.used_bytes - debt.bytes)) return error.CleanupFailed;
@@ -169,11 +169,6 @@ pub const Runtime = struct {
     }
     pub fn beginPreparing(self: *Runtime) Error!u64 {
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
-        _ = self.retryCleanup();
-        if (self.freeSlotCount() == 0 or self.used_bytes == self.limits.max_staged_bytes) {
-            if (self.cleanupDebt().count != 0) return error.CleanupFailed;
-            return error.StagingCapacity;
-        }
         if (self.next_receive_id == 0) return error.IdentityExhausted;
         const id = self.next_receive_id;
         self.next_receive_id +%= 1;
@@ -1030,4 +1025,27 @@ test "more than one message of failed deletions remains charged until physical c
     try std.testing.expect(runtime.retryCleanup());
     try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
     try std.testing.expectEqual(@as(usize, 12), runtime.freeSlotCount());
+}
+
+test "preparing does not reject full resources or retry cleanup before selection" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var limits = testLimits();
+    limits.max_staged_bytes = 1;
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    const ready = try runtime.stageBatch(&.{.{ .display_name = "a", .bytes = "x" }}, &output);
+    const old_id = ready[0].id;
+    const id = try runtime.beginPreparing();
+    try std.testing.expectEqual(@as(usize, 1), runtime.used_bytes);
+    try std.testing.expectError(error.InputBusy, runtime.beginPreparing());
+    try std.testing.expect(runtime.cancelPreparing(id));
+    const next = try runtime.beginPreparing();
+    try std.testing.expectError(error.StagingCapacity, runtime.reservePrepared(next, &.{.{ .display_name = "b", .size_bytes = 1 }}));
+    try std.testing.expect(runtime.preparing == null);
+    try std.testing.expect(runtime.release(old_id));
+    const retry = try runtime.beginPreparing();
+    try runtime.reservePrepared(retry, &.{.{ .display_name = "b", .size_bytes = 1 }});
+    try std.testing.expect(try runtime.cancelReceiveChecked(retry));
 }

@@ -1687,10 +1687,15 @@ pub const Dispatcher = struct {
             respondAddError(responder, invocation.request.id, error.InputBusy);
             return;
         }
+        const max_files = @min(attachment_grant.max_batch_files, value.remainingFiles.value);
+        if (max_files == 0 or (source.kind == .native_paths and source.paths.?.len > max_files)) {
+            respondAddError(responder, invocation.request.id, error.TooManyFiles);
+            return;
+        }
         const workbench = try self.requireProductControl();
         if (source.kind == .file_bytes) {
             const files = source.files.?;
-            if (files.len == 0 or files.len > attachment_grant.max_batch_files) {
+            if (files.len == 0 or files.len > max_files) {
                 respondAddError(responder, invocation.request.id, error.TooManyFiles);
                 return;
             }
@@ -1761,6 +1766,11 @@ pub const Dispatcher = struct {
         if (selected.count == 0) {
             _ = workbench.cancelAttachmentPreparation(product_id);
             self.completeAttachmentStaging(completion, .cancelled);
+            return;
+        }
+        if (selected.count > max_files) {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            self.completeAttachmentStaging(completion, .{ .rejected = .too_many_files });
             return;
         }
         workbench.beginPreparedAttachmentStaging(completion, product_id, selected.count, selected.paths) catch |err| {
@@ -7781,8 +7791,11 @@ test "unified add async jobs join cancellation and freeze their protocol produce
             std.Io.randomSecure(std.testing.io, out) catch return false;
             return true;
         }
+        var selection_count: usize = attachment_grant.max_batch_files + 1;
+        var picker_calls: usize = 0;
         fn picker(_: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, _: []u8) anyerror!native_sdk.platform.OpenDialogResult {
-            return .{ .count = attachment_grant.max_batch_files + 1, .paths = "/ignored" };
+            picker_calls += 1;
+            return .{ .count = selection_count, .paths = "/ignored" };
         }
     };
     fixture.fake_core.reset();
@@ -7848,7 +7861,10 @@ test "unified add async jobs join cancellation and freeze their protocol produce
             try std.testing.expectEqual(count, self.calls);
         }
         fn expect(self: *@This(), text: []const u8) !void {
-            try std.testing.expect(std.mem.indexOf(u8, self.response.?, text) != null);
+            if (std.mem.indexOf(u8, self.response.?, text) == null) {
+                std.debug.print("expected {s} in fixture response {s}\n", .{ text, self.response.? });
+                return error.TestUnexpectedResult;
+            }
         }
     };
     var capture = Capture{ .control = &workbench };
@@ -7868,7 +7884,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
     var add_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_add.fixture"), .{});
     defer add_wire.deinit();
-    const add_begin = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), add_wire.value.object.get("begin").?, .{});
+    const add_begin = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), add_wire.value.object.get("beginWithRemainingFiles").?, .{});
     const key3 = "{\"generation\":\"1\",\"batchId\":\"3\"}";
     try capture.invoke(native, source, commands.begin_attachment_add, add_begin);
     try capture.wait(&workbench, &dispatcher, 5);
@@ -8012,6 +8028,38 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.wait(&workbench, &dispatcher, before_new + 2);
     try capture.expect("\"status\":\"cleaned\"");
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    // Quantity errors win even when the shared original byte budget is full.
+    const old_bytes = workbench.attachments.limits.max_staged_bytes;
+    workbench.attachments.limits.max_staged_bytes = 1;
+    var stock: [1]product_control.AttachmentDescriptor = undefined;
+    _ = try workbench.attachments.stageBatch(&.{.{ .display_name = "held", .bytes = "x" }}, &stock);
+    Host.selection_count = 2;
+    const one_remaining = [_][]const u8{
+        "{\"generation\":\"2\",\"batchId\":\"20\",\"remainingFiles\":1,\"source\":{\"kind\":\"picker\"}}",
+        "{\"generation\":\"2\",\"batchId\":\"21\",\"remainingFiles\":1,\"source\":{\"kind\":\"native_paths\",\"paths\":[\"/ignored\",\"/ignored\"]}}",
+        "{\"generation\":\"2\",\"batchId\":\"22\",\"remainingFiles\":1,\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a\",\"sizeBytes\":\"1\"},{\"name\":\"b\",\"sizeBytes\":\"1\"}]}}",
+    };
+    dispatcher.platform.attachment_input = .native_paths;
+    for (one_remaining, 20..) |input, batch| {
+        try capture.invoke(native, source, commands.begin_attachment_add, input);
+        try capture.expect("\"reason\":\"too_many_files\"");
+        try std.testing.expect(workbench.attachment_io == null);
+        try std.testing.expect(workbench.attachments.preparing == null);
+        try std.testing.expectEqual(@as(usize, 1), workbench.attachments.used_bytes);
+        var cancel_key: [80]u8 = undefined;
+        const key = try std.fmt.bufPrint(&cancel_key, "{{\"generation\":\"2\",\"batchId\":\"{d}\"}}", .{batch});
+        try capture.invoke(native, source, commands.cancel_attachment_add, key);
+        try capture.expect("\"status\":\"cleaned\"");
+    }
+    const picker_calls = Host.picker_calls;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"23\",\"remainingFiles\":0,\"source\":{\"kind\":\"picker\"}}");
+    try capture.expect("too_many_files");
+    try std.testing.expectEqual(picker_calls, Host.picker_calls);
+    Host.selection_count = 0;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"24\",\"remainingFiles\":1,\"source\":{\"kind\":\"picker\"}}");
+    try capture.expect("\"status\":\"cancelled\"");
+    try std.testing.expect(try workbench.attachments.releaseChecked(stock[0].id));
+    workbench.attachments.limits.max_staged_bytes = old_bytes;
     workbench.attachment_lane.stopAdmission();
     try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
     try capture.expect("shutting_down");

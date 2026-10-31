@@ -309,7 +309,7 @@ Product Control 为该共享刷新作业持有独立于 Run 池的有界控制�
 
 Attachment staging 是 Product Control 内部候选资源 owner，原件存储属于 Product 附件能力，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 组装 store、持有独占 writer lock，并注入公开 Native SDK 图片预览能力；Product 决定分类、配额、接纳与清理。输入可以是系统 picker/Native SDK 拖放提供的本地路径，或 Renderer 从本次 DOM File 提取的有界字节块。Bridge 只拥有 source/window/connection authority、批次关联及 Renderer opaque token 到 Product identity 的 grant，不缓存正文、原路径或 Product 指针。
 
-路径输入在 Product 登记唯一 preparing 批次后，使用独立 bounded attachment lane 探测普通非空文件。每个源文件只 no-follow 打开一次；主线程按探测元数据预留整批配额后，把冻结的 store identity 与已打开源句柄交给有界复制 job，并在同一源句柄上确认前后 stat 不变；用户源路径只活到候选建立，不进入日志、Snapshot、持久化或发送时重读。DOM 字节输入只接收本次 File 的连续块，不宣称具备路径身份或 stat 保证；每个主窗口连接至多一个接收批次，在开始时预留完整数量和原件字节配额，逐块写入 store，不分配文件总大小的接收 buffer。预留和 ready/borrowed 附件共用总配额，不能被 picker 绕过；它不等于进程总内存上限。
+路径输入在 Product 登记唯一 preparing 批次后，使用独立 bounded attachment lane 探测普通非空文件。preparing 只登记身份和互斥，不以资源额度拒绝；来源数量确定后先校验数量，再进行清理重试和资源准入。每个源文件只 no-follow 打开一次；主线程按探测元数据预留整批配额后，把冻结的 store identity 与已打开源句柄交给有界复制 job，并在同一源句柄上确认前后 stat 不变；用户源路径只活到候选建立，不进入日志、Snapshot、持久化或发送时重读。DOM 字节输入只接收本次 File 的连续块，不宣称具备路径身份或 stat 保证；每个主窗口连接至多一个接收批次，在开始时预留完整数量和原件字节配额，逐块写入 store，不分配文件总大小的接收 buffer。预留和 ready/borrowed 附件共用总配额，不能被 picker 绕过；它不等于进程总内存上限。
 
 单条消息/单批数量与全局存活记录容量分别约束。全局记录池在初始化时固定分配，草稿、待执行原件与删除债务共用；Bridge grant、清理关联及完整断连释放必须覆盖该存量上界，不能复用单批数量作为存量限制。删除债务关联去重后须对应不同的存活 Product 记录；关联容量不足明确失败并保留现有 batch/grant 追踪，不能 panic、丢失关联或误报已经清理。
 
