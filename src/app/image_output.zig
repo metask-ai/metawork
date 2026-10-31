@@ -1,6 +1,7 @@
 //! Application file effect bound to frozen Product Workspace authority.
 //! Agent callbacks consume only the bounded output port on their worker thread.
 const std = @import("std");
+const select_start = @import("app_select_start");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workspace = @import("metawork_product_workspace");
@@ -57,8 +58,10 @@ pub const Output = struct {
         var attempt: Attempt = .{ .output = self, .bytes = bytes, .format = format, .cancellation = cancellation };
         var events: [2]Event = undefined;
         var selection = std.Io.Select(Event).init(self.io, &events);
-        selection.async(.operation, Attempt.run, .{&attempt});
-        selection.async(.cancelled, waitCancellation, .{ cancellation, self.io });
+        select_start.start(&selection, .{
+            .{ .operation, Attempt.run, .{&attempt} },
+            .{ .cancelled, waitCancellation, .{ cancellation, self.io } },
+        }) catch return attempt.result;
         _ = selection.await() catch {
             selection.cancelDiscard();
             return attempt.result;
@@ -82,7 +85,7 @@ pub const Output = struct {
         bytes: []const u8,
         format: Format,
         cancellation: *const Cancellation,
-        result: Result = failed(.cancelled),
+        result: Result = failed(.unavailable),
 
         fn run(self: *Attempt) void {
             self.result = self.output.write(self.bytes, self.format, self.cancellation);
@@ -260,11 +263,13 @@ const TestWork = struct {
 };
 
 test "Workspace image output captures authority without effects and commits unique bytes on workers" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    var output = try Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+    var output = try Output.init(std.testing.allocator, threaded.io(), std.Thread.getCurrentId(), .{
         .id = 1,
         .epoch = 2,
         .kind = .manual,
@@ -360,11 +365,13 @@ test "Workspace image output conflicts partial writes replacement and late cance
         }
     };
     inline for (std.enums.values(Faults.Mode)) |mode| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
         defer std.testing.allocator.free(root);
-        var output = try Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+        var output = try Output.init(std.testing.allocator, threaded.io(), std.Thread.getCurrentId(), .{
             .id = 1,
             .epoch = 1,
             .kind = .automatic,
@@ -451,11 +458,13 @@ test "Workspace image output conflicts partial writes replacement and late cance
 }
 
 test "Workspace file I/O cancellation joins and cleans its own uncommitted image" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    var output = try Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+    var output = try Output.init(std.testing.allocator, threaded.io(), std.Thread.getCurrentId(), .{
         .id = 1,
         .epoch = 1,
         .kind = .manual,
@@ -487,4 +496,60 @@ test "Workspace file I/O cancellation joins and cleans its own uncommitted image
     defer directory.close(std.testing.io);
     var entries = directory.iterate();
     try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try entries.next(std.testing.io));
+}
+
+test "image output registration failure preserves an already committed receipt" {
+    const Probe = struct {
+        var registered: usize = 0;
+        var committed: std.Io.Event = .unset;
+
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, run: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            registered += 1;
+            if (registered == 2) {
+                committed.waitUncancelable(std.testing.io);
+                return error.ConcurrencyUnavailable;
+            }
+            return std.testing.io.vtable.groupConcurrent(userdata, group, context, alignment, run);
+        }
+
+        fn observe(_: *anyopaque, stage: Stage, _: std.Io.Dir, _: ?std.Io.File, _: []const u8, _: *const Cancellation) !void {
+            if (stage == .committed) committed.set(std.testing.io);
+        }
+    };
+    Probe.registered = 0;
+    Probe.committed = .unset;
+    var vtable = std.testing.io.vtable.*;
+    vtable.groupConcurrent = Probe.concurrent;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var output = try Output.init(std.testing.allocator, .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, std.Thread.getCurrentId(), .{ .id = 1, .epoch = 1, .kind = .manual, .canonical_root = root, .trust = .explicitly_trusted });
+    defer output.deinit();
+    var context: u8 = 0;
+    output.test_hook = .{ .context = &context, .run_fn = Probe.observe };
+    var cancellation: Cancellation = .{};
+    var work: TestWork = .{ .output = &output, .cancellation = &cancellation };
+    try work.execute();
+    try std.testing.expectEqual(@as(usize, 2), Probe.registered);
+    const saved = work.result.saved;
+    const bytes = try tmp.dir.readFileAlloc(std.testing.io, saved.pathView(), std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings(work.bytes, bytes);
+}
+
+test "image output unavailable concurrency does not start a file effect" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var output = try Output.init(std.testing.allocator, threaded.io(), std.Thread.getCurrentId(), .{ .id = 1, .epoch = 1, .kind = .manual, .canonical_root = root, .trust = .explicitly_trusted });
+    defer output.deinit();
+    var cancellation: Cancellation = .{};
+    var work: TestWork = .{ .output = &output, .cancellation = &cancellation };
+    try work.execute();
+    try std.testing.expectEqual(Failure.Code.unavailable, work.result.failed.code);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, directory_name, .{}));
 }

@@ -47,22 +47,24 @@ fn invoke(owner: *agent.Completion, trace: *@import("permission_review_network_t
 }
 
 test "review HTTP deadline joins the old request and isolates later 503 invalid JSON and success" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     var fixture = try Fixture.start();
     defer fixture.deinit();
     const endpoint = try std.fmt.allocPrint(std.testing.allocator, "{s}/v1/messages", .{fixture.base});
     defer std.testing.allocator.free(endpoint);
     var trace: @import("permission_review_network_trace").Trace = undefined;
-    try trace.init(std.testing.io);
+    try trace.init(threaded.io());
     defer trace.deinit();
-    try std.testing.expect(trace.io().userdata == std.testing.io.userdata);
-    try std.testing.expect(trace.io().vtable != std.testing.io.vtable);
+    try std.testing.expect(trace.io().userdata == threaded.io().userdata);
+    try std.testing.expect(trace.io().vtable != threaded.io().vtable);
     inline for (@typeInfo(std.Io.VTable).@"struct".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "netLookup") and !std.mem.eql(u8, field.name, "netConnectIp") and !std.mem.eql(u8, field.name, "netRead") and !std.mem.eql(u8, field.name, "netWrite")) {
-            try std.testing.expect(@field(trace.table, field.name) == @field(std.testing.io.vtable.*, field.name));
+            try std.testing.expect(@field(trace.table, field.name) == @field(threaded.io().vtable.*, field.name));
         }
     }
     var duplicate_trace: @import("permission_review_network_trace").Trace = undefined;
-    try std.testing.expectError(error.DiagnosticTraceAlreadyActive, duplicate_trace.init(std.testing.io));
+    try std.testing.expectError(error.DiagnosticTraceAlreadyActive, duplicate_trace.init(threaded.io()));
     var backend = http.Backend{ .allocator = std.testing.allocator, .io = trace.io() };
     var observed = evaluation.ObservedTransport{ .inner = trace.wrap(backend.transport()), .trace = &trace };
     const owner = try agent.Completion.init(std.testing.allocator, observed.transport(), .{

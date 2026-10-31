@@ -818,7 +818,7 @@ test "callback diagnostic enrichment preserves terminal decisions and bounded cr
                 .commentary_ends = &.{},
                 .tools = &.{},
                 .terminal_diagnostic = storage[0..capacity],
-                .redaction_secret = "SECRET-KEY",
+                .initial_credentials = .{ "SECRET-KEY", &.{} },
             };
             const run = &record;
             var result: agent.TerminalResult = .{

@@ -3,6 +3,7 @@
 //! Workbench remains the owner of durable product state and operation markers.
 
 const std = @import("std");
+const select_start = @import("app_select_start");
 const oauth_mechanics = @import("oauth_mechanics");
 const oauth_loopback = @import("oauth_loopback");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
@@ -141,14 +142,11 @@ pub const StdHttpTransport = struct {
         };
         var events: [3]Event = undefined;
         var selection = std.Io.Select(Event).init(self.io, &events);
-        selection.async(.response, fetchOne, .{
-            self,
-            request,
-            body_buffer,
-            header_buffer,
-        });
-        selection.async(.deadline, waitDeadline, .{ self.io, self.deadline });
-        selection.async(.cancelled, waitCancellation, .{self.cancellation});
+        select_start.start(&selection, .{
+            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer } },
+            .{ .deadline, waitDeadline, .{ self.io, self.deadline } },
+            .{ .cancelled, waitCancellation, .{self.cancellation} },
+        }) catch return error.Network;
         const outcome = selection.await() catch {
             selection.cancelDiscard();
             return error.Network;
@@ -2916,6 +2914,56 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
             "http://127.0.0.1:49152/auth/callback",
         ),
     );
+}
+
+test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
+    const Dns = struct {
+        var io: std.Io = undefined;
+        var cancellation: *Cancellation = undefined;
+        var mode: enum { complete, cancel, deadline } = .complete;
+        var exited: std.atomic.Value(bool) = .init(false);
+
+        fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+            defer resolved.close(io);
+            defer exited.store(true, .release);
+            if (mode == .cancel) cancellation.cancel();
+            if (mode != .complete) try std.Io.sleep(io, .fromSeconds(60), .awake);
+            return error.UnknownHostName;
+        }
+    };
+    inline for (std.enums.values(@TypeOf(Dns.mode))) |mode| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        Dns.io = threaded.io();
+        Dns.mode = mode;
+        Dns.exited.store(false, .release);
+        var vtable = Dns.io.vtable.*;
+        vtable.netLookup = Dns.lookup;
+        const io: std.Io = .{ .userdata = Dns.io.userdata, .vtable = &vtable };
+        var cancellation: Cancellation = .{ .io = io };
+        Dns.cancellation = &cancellation;
+        var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
+        var body: [32]u8 = undefined;
+        var headers: [32]u8 = undefined;
+        const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
+        try std.testing.expectError(switch (mode) {
+            .complete => error.Network,
+            .cancel => error.Cancelled,
+            .deadline => error.DeadlineExceeded,
+        }, result);
+        try std.testing.expect(Dns.exited.load(.acquire));
+    }
+}
+
+test "MCP OAuth registration failure remains an uncertain POST outcome" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var cancellation: Cancellation = .{ .io = io };
+    var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
+    var body: [32]u8 = undefined;
+    var headers: [32]u8 = undefined;
+    try std.testing.expectError(error.Network, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));
 }
 
 test "MCP OAuth well-known derivation omits resource query but preserves identity" {

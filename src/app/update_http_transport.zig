@@ -1,6 +1,7 @@
 //! Application-owned, unauthenticated update HTTP. Production endpoints are
 //! selected by Product policy; this adapter never follows redirects or saves a package.
 const std = @import("std");
+const select_start = @import("app_select_start");
 const update = @import("metawork_product_update");
 
 pub const Cancellation = struct {
@@ -52,9 +53,11 @@ pub const Adapter = struct {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = timeout, .clock = .boot });
         var storage: [3]Outcome = undefined;
         var selection = std.Io.Select(Outcome).init(self.io, &storage);
-        selection.async(.fetched, fetch, .{ self, url, head, output });
-        selection.async(.deadline, waitDeadline, .{ self.io, deadline });
-        selection.async(.cancelled, Cancellation.wait, .{cancellation});
+        select_start.start(&selection, .{
+            .{ .fetched, fetch, .{ self, url, head, output } },
+            .{ .deadline, waitDeadline, .{ self.io, deadline } },
+            .{ .cancelled, Cancellation.wait, .{cancellation} },
+        }) catch return error.Network;
         const outcome = selection.await() catch {
             selection.cancelDiscard();
             return error.Cancelled;
@@ -162,6 +165,8 @@ test "updates HTTP real GET and HEAD enforce byte bounds and never follow redire
         }
     };
     for ([_]@FieldType(Server, "mode"){ .get, .head, .oversized, .redirect, .invalid_encoding }) |mode| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
         const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
         var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
         defer listener.deinit(std.testing.io);
@@ -169,24 +174,24 @@ test "updates HTTP real GET and HEAD enforce byte bounds and never follow redire
         const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/manifest.json", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
-        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-        defer client.deinit();
+        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+        var cancellation: Cancellation = .{ .io = threaded.io() };
         var buffer: [2]u8 = undefined;
-        const result = Adapter.fetchHttp(&client, url, mode == .head, &buffer);
+        const result = adapter.performAt(url, mode == .head, &buffer, &cancellation, .fromSeconds(5));
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         switch (mode) {
             .get => {
-                try std.testing.expectEqual(@as(u16, 200), result.response.status);
-                try std.testing.expectEqual(@as(usize, 2), result.response.body_len);
+                try std.testing.expectEqual(@as(u16, 200), (try result).status);
+                try std.testing.expectEqual(@as(usize, 2), (try result).body_len);
                 try std.testing.expectEqualStrings("{}", &buffer);
             },
             .head => {
-                try std.testing.expectEqual(@as(u16, 200), result.response.status);
-                try std.testing.expectEqual(@as(usize, 0), result.response.body_len);
+                try std.testing.expectEqual(@as(u16, 200), (try result).status);
+                try std.testing.expectEqual(@as(usize, 0), (try result).body_len);
             },
-            .redirect => try std.testing.expectEqual(@as(u16, 302), result.response.status),
-            .oversized, .invalid_encoding => try std.testing.expect(result == .invalid),
+            .redirect => try std.testing.expectEqual(@as(u16, 302), (try result).status),
+            .oversized, .invalid_encoding => try std.testing.expectError(error.InvalidResponse, result),
         }
     }
 }
@@ -221,7 +226,9 @@ test "updates HTTP deadline and cancellation join a real blocked response before
         }
     };
     for ([_]bool{ false, true }) |cancel| {
-        var cancellation: Cancellation = .{ .io = std.testing.io };
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        var cancellation: Cancellation = .{ .io = threaded.io() };
         const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
         var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
         defer listener.deinit(std.testing.io);
@@ -229,11 +236,20 @@ test "updates HTTP deadline and cancellation join a real blocked response before
         const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
         const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/manifest.json", .{listener.socket.address.getPort()});
         defer std.testing.allocator.free(url);
-        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
         var buffer: [8]u8 = undefined;
         const result = adapter.performAt(url, false, &buffer, &cancellation, .fromMilliseconds(500));
         thread.join();
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         if (cancel) try std.testing.expectError(error.Cancelled, result) else try std.testing.expectError(error.Timeout, result);
     }
+}
+
+test "updates HTTP registration failure is a network failure rather than cancellation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer threaded.deinit();
+    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = threaded.io() };
+    var cancellation: Cancellation = .{ .io = threaded.io() };
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectError(error.Network, adapter.performAt("http://127.0.0.1:1/fixture", false, &buffer, &cancellation, .fromSeconds(30)));
 }
