@@ -166,7 +166,7 @@ SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional ca
 
 ### 6.4 旧版本、normalization 和 artifact
 
-普通导入发布前旧文件保持原样；成功后它只是受管迁移证据，不再是 active authority，也不是永久未脱敏备份。凭据维护覆盖它；确认全部事实导入后才允许受控退休，未分类的 quarantine 不自动删除。仅消费 framed store 的旧构建看不到新历史，但不能覆盖新 SQL；已接入 SQLite 的旧构建遇到较新 schema 时，必须按 §6.2 禁写，不能借显式恢复把新库移入 quarantine。新版本返回仍读可信正式 SQL，不承诺合并降级期间的旧历史。
+旧来源的运行路径退役与留存以 [Product 模型错误交付方案](agent-model-error-delivery.md#108-旧-store-的一次性导入和退役)及实施后的 Product 合同为准：一次性导入确认后只使用 SQLite，旧文件原样保留，不再读取、清洗或写回；删除以后单独决定。未分类的 quarantine 不自动删除。仅消费 framed store 的旧构建看不到新历史，但不能覆盖新 SQL；已接入 SQLite 的旧构建遇到较新 schema 时，必须按 §6.2 禁写，不能借显式恢复把新库移入 quarantine。新版本返回仍读可信正式 SQL，不承诺合并降级期间的旧历史。
 
 正常启动 normalization 继续保存 pending→excluded、interrupted、未完成 File Change 的 incomplete 与消息降级，再取得后续恢复/清理所需的确认，不重放模型输入。checkpoint、附件和 artifact 目录/身份保持；只有完整可信历史及引用集合成立才清理 orphan，unknown、degraded 或未分类证据仍在时禁止冒险清理。
 
@@ -174,11 +174,11 @@ SQL loader 在启动门禁内 keyset 分页读取，row 先构建 provisional ca
 
 继续在写入前按全部当前已知凭据检查**所有字符串/JSON/BLOB 业务内容**，不只检查 SQL 文本。实际被清洗的单位进 dirty；候选冻结后新获知凭据时，关闭新的历史写入入口，等在途写入明确收敛，再完成当前状态清洗，不提前报告安全完成。
 
-普通 bearer 借用/释放不触发全库重写。首次未知→已知按 owner 安装前的观察判断；扫描包括已载入内容以外的保留 payload、迁移材料及历史存储。不能凭内存没命中或裸字节扫描没命中，证明 SQLite 旧页和 WAL 不含残留。启动时，所有当前已知凭据也必须参与这次进程的初始存储校验；不能因 Account owner 已先持有该值就跳过历史检查。
+普通 bearer 借用/释放不触发全库重写。首次未知→已知按 owner 安装前的观察判断；扫描包括已载入内容以外的保留 payload 及当前受管历史存储；已退出运行路径的旧 `.store` 不再扫描，留存风险见 §6.4。不能凭内存没命中或裸字节扫描没命中，证明 SQLite 旧页和 WAL 不含残留。启动时，所有当前已知凭据也必须参与这次进程的初始存储校验；不能因 Account owner 已先持有该值就跳过历史检查。
 
 首版提议：从新数据库第一次写入前启用并回读 `secure_delete=ON`；Product 完成匹配行的安全更新后，由 Storage 的窄维护能力完成并验证 WAL TRUNCATE checkpoint，确保退役页版本不继续由受管 WAL 保留。首次获知没有当前匹配时仍需结算可能的旧 WAL；这是必要的 WAL 清理，不是整库重写。普通重复借用/释放不做这一项。不使用虚拟表/FTS，避免其额外保留边界。
 
-这两项是**当前 backend 尚无的窄增量**，先作为接入前验证项，不宣称已满足：公开 SQL 仍不能执行任意 PRAGMA/VACUUM；只加固定 profile 和可验证的维护结果，具体 C API 留在 Storage。这项固定 WAL 维护/同步屏障同时承担 §3.3 的提交读回持久确认；两种调用仍分别由保存 owner 和安全 owner 判定，不新增两个维护框架。BUSY/IO/unknown 不当作清理成功；保留该次必要 credential lease，阻止把未清理的候选作为安全保存结果。对不可理解且无法安全改写的 retained payload 明确报维护未完成，不丢数据或伪造无命中。迁移原件/受管临时文件必须同样清理，不能 SQL 干净而旁边原文件仍含凭据。
+这两项是**当前 backend 尚无的窄增量**，先作为接入前验证项，不宣称已满足：公开 SQL 仍不能执行任意 PRAGMA/VACUUM；只加固定 profile 和可验证的维护结果，具体 C API 留在 Storage。这项固定 WAL 维护/同步屏障同时承担 §3.3 的提交读回持久确认；两种调用仍分别由保存 owner 和安全 owner 判定，不新增两个维护框架。BUSY/IO/unknown 不当作清理成功；保留该次必要 credential lease，阻止把未清理的候选作为安全保存结果。对不可理解且无法安全改写的 retained payload 明确报维护未完成，不丢数据或伪造无命中。当前受管临时文件继续遵守安全生命周期；旧 `.store` 的原样留存不再通过这条路径清洗或写回，不将其描述为已经清除。
 
 安全任务必须能取得现有有界 owned credential lease 和预留登记空间；no-fail 获知/释放回调只登记/清洗，不新增可能失败的临时分配或无限 secret 缓存。若现有 owner 无法保证这项生命周期，A/B 的安全验证不能通过，不能先接生产再补。
 

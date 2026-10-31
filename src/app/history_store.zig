@@ -13,7 +13,6 @@ const Credential = struct {
     length: usize = 0,
     retained: bool = false,
     pending: bool = false,
-    legacy_pending: bool = false,
     memory_pending: bool = false,
 };
 
@@ -115,7 +114,6 @@ pub const Store = struct {
     // the pointer index never reallocates a buffer containing secret bytes.
     credentials: std.ArrayList(*Credential) = .empty,
     credential_capacity_failed: bool = false,
-    legacy_maintenance_failed: bool = false,
     publish_sync_fault: bool = false,
     random_fault: bool = false,
     security_epoch: u64 = 1,
@@ -462,7 +460,7 @@ pub const Store = struct {
             slot.retained = for (values) |value| {
                 if (std.mem.eql(u8, value, slot.bytes[0..slot.length])) break true;
             } else false;
-            if (!slot.retained and !slot.pending and !slot.legacy_pending and !slot.memory_pending) self.clearCredential(slot);
+            if (!slot.retained and !slot.pending and !slot.memory_pending) self.clearCredential(slot);
         }
         for (values) |value| if (value.len != 0) self.registerCredential(value, true);
         for (self.credentials.items) |slot| if (slot.length != 0) {
@@ -475,7 +473,7 @@ pub const Store = struct {
         for (self.credentials.items) |slot| {
             if (slot.length != value.len or !std.mem.eql(u8, slot.bytes[0..slot.length], value)) continue;
             slot.retained = retained;
-            if (!slot.pending and !slot.legacy_pending and !slot.memory_pending and !retained) self.clearCredential(slot);
+            if (!slot.pending and !slot.memory_pending and !retained) self.clearCredential(slot);
             return;
         }
         if (value.len > 4096) {
@@ -496,7 +494,6 @@ pub const Store = struct {
         slot.length = value.len;
         slot.retained = retained;
         slot.pending = true;
-        slot.legacy_pending = true;
         if (self.security_epoch != 0) self.security_epoch = std.math.add(u64, self.security_epoch, 1) catch 0;
         // Only first discovery performs disk maintenance. Repeated bearer
         // acquisition/release above does not register another owned copy.
@@ -510,7 +507,6 @@ pub const Store = struct {
     fn sanitizePending(self: *Store) bool {
         if (self.incompatible or self.pending_publication != null or self.credential_capacity_failed or self.security_epoch == 0) return false;
         if (self.requires_reopen and !self.refreshConfirmed()) return false;
-        self.legacy_maintenance_failed = false;
         for (self.credentials.items) |slot| {
             if (slot.length == 0) continue;
             const value = slot.bytes[0..slot.length];
@@ -521,16 +517,6 @@ pub const Store = struct {
                     return false;
                 };
                 slot.pending = false;
-            }
-            if (slot.legacy_pending) {
-                self.sanitizeLegacy(value) catch {
-                    // SQL authority is already confirmed. Keep the bounded
-                    // secret lease and retry import-source maintenance later;
-                    // this is not an unknown business transaction.
-                    self.legacy_maintenance_failed = true;
-                    continue;
-                };
-                slot.legacy_pending = false;
             }
             if (!slot.retained and !slot.memory_pending) self.clearCredential(slot);
         }
@@ -558,24 +544,6 @@ pub const Store = struct {
         self.repository.?.seed(loaded.value, loaded.preserved) catch return false;
         self.requires_reopen = false;
         return true;
-    }
-
-    fn sanitizeLegacy(self: *Store, credential_value: []const u8) !void {
-        if (!try self.exists(wire.file_name)) return;
-        const original = try self.legacy.loadAlloc(self.allocator);
-        defer if (original) |bytes| self.allocator.free(bytes);
-        const bytes = original orelse return;
-        var recovered = try wire.decodeRecovering(self.allocator, bytes, self.limits);
-        defer recovered.deinit();
-        const a = recovered.arena.allocator();
-        if (!try wire.security.contains(a, recovered.value, credential_value) and !try wire.security.contains(a, recovered.preserved, credential_value)) return;
-        const state = try product.redactHistory(a, recovered.value, credential_value);
-        const preserved = try product.redactHistory(a, recovered.preserved, credential_value);
-        const output = try a.alloc(u8, wire.max_store_bytes);
-        const cleaned = try wire.encodePreserving(output, state, preserved, self.limits);
-        // Security maintenance of the retired import source, never a second
-        // business writer. Ordinary commits exclusively target SQLite.
-        try self.legacy.commit(cleaned);
     }
 };
 
@@ -1082,7 +1050,7 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     try std.testing.expectEqual(wire.Commit.failed, commitFixtureGeneration(&store, bytes, 1, true));
 }
 
-test "SQLite history credential cleanup covers readonly retained memory SQL and legacy across repeated saves" {
+test "SQLite history credential cleanup covers readonly retained memory and SQL while preserving the import source" {
     const Memory = struct {
         arena: std.heap.ArenaAllocator,
         value: wire.StateWire,
@@ -1143,10 +1111,7 @@ test "SQLite history credential cleanup covers readonly retained memory SQL and 
             }
             const legacy_bytes = (try store.legacy.loadAlloc(a)).?;
             defer a.free(legacy_bytes);
-            var legacy = try wire.decodeRecovering(a, legacy_bytes, store.limits);
-            defer legacy.deinit();
-            try std.testing.expect(!try wire.security.contains(a, legacy.value, secret));
-            try std.testing.expect(!try wire.security.contains(a, legacy.preserved, secret));
+            try std.testing.expectEqualSlices(u8, source, legacy_bytes);
         }
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();
@@ -1159,6 +1124,9 @@ test "SQLite history credential cleanup covers readonly retained memory SQL and 
         try std.testing.expect(!try wire.security.contains(a, loaded.value, secret));
         try std.testing.expect(!try wire.security.contains(a, loaded.preserved, secret));
         try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, loaded.value, loaded.preserved, store.limits), true));
+        const unchanged = (try store.legacy.loadAlloc(a)).?;
+        defer a.free(unchanged);
+        try std.testing.expectEqualSlices(u8, source, unchanged);
     }
 }
 
@@ -1508,7 +1476,7 @@ test "SQLite large single Task backfills beyond batch bytes and recovers above 3
     try std.testing.expectEqualSlices(u8, body, loaded.value.tasks[0].runs[135].assistant);
 }
 
-test "failed retired-store cleaning retains its secret lease without blocking SQL commits" {
+test "SQLite history ignores a changed or corrupt retired source and releases SQL credential leases" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1522,32 +1490,56 @@ test "failed retired-store cleaning retains its secret lease without blocking SQ
     defer store.deinit();
     if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
     try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, try wire.encodeAlloc(aa, state, .{}, store.limits), true));
-    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = wire.file_name, .data = "corrupted import source: late-known-value" });
+    const retired_source = "corrupted import source: late-known-value";
+    try store.legacy.dir.writeFile(std.testing.io, .{ .sub_path = wire.file_name, .data = retired_source });
     try std.testing.expect(store.syncCredentials(&.{"late-known-value"}, true, .{}).ready);
-    try std.testing.expect(store.legacy_maintenance_failed);
     const clean = try product.loadHistory(aa, std.testing.allocator, store.database.?.capability(), store.limits);
     try std.testing.expect(std.mem.indexOf(u8, clean.value.tasks[0].runs[0].assistant, "late-known-value") == null);
     state.tasks[0].runs[0].input.text = "safe input";
     state.tasks[0].runs[0].assistant = "safe answer";
-    state.tasks[0].title = "confirmed despite legacy failure";
+    state.tasks[0].title = "SQL remains authoritative";
     const bytes = try wire.encodeAlloc(aa, state, .{}, store.limits);
     for (0..3) |_| try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
     try std.testing.expect(store.pending == null);
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
-    try std.testing.expect(store.legacy_maintenance_failed);
-    var retained: usize = 0;
-    for (store.credentials.items) |slot| if (slot.length != 0 and slot.legacy_pending) {
-        retained += 1;
-    };
-    try std.testing.expectEqual(@as(usize, 1), retained);
+    try std.testing.expectEqual(@as(usize, 0), store.credentials.items.len);
     try std.testing.expectEqual(wire.Commit.committed, recoverFixture(&store, bytes));
     try std.testing.expect(try store.exists(wire.file_name));
-    // Once the source becomes writable/decodable again, maintenance can
-    // finish and retire its owned credential without replaying business work.
-    try store.legacy.commit(bytes);
+    if (try store.loadFixtureAlloc(a)) |reloaded| a.free(reloaded);
     try std.testing.expect(store.syncCredentials(&.{}, true, .{}).ready);
-    try std.testing.expect(!store.legacy_maintenance_failed);
-    for (store.credentials.items) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
+    const unchanged = (try store.legacy.loadAlloc(a)).?;
+    defer a.free(unchanged);
+    try std.testing.expectEqualSlices(u8, retired_source, unchanged);
     const loaded = try product.loadHistory(aa, std.testing.allocator, store.database.?.capability(), store.limits);
-    try std.testing.expectEqualStrings("confirmed despite legacy failure", loaded.value.tasks[0].title);
+    try std.testing.expectEqualStrings("SQL remains authoritative", loaded.value.tasks[0].title);
+}
+
+test "SQLite history restarts without opening an unreadable retired source" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "SQL survives retired source");
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, product.persistenceLimits(.{}, 16));
+    {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadFixtureAlloc(a)) |loaded| a.free(loaded);
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+        // Opening this name as the former canonical file must fail. SQL
+        // startup and credential maintenance must not attempt to open it.
+        try store.legacy.dir.createDir(std.testing.io, wire.file_name, .default_dir);
+    }
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const loaded = (try store.loadFixtureAlloc(a)).?;
+    defer a.free(loaded);
+    var restored = try wire.decodeRecovering(a, loaded, store.limits);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("SQL survives retired source", restored.value.tasks[0].runs[0].assistant);
+    try std.testing.expect(store.syncCredentials(&.{"new-credential"}, true, .{}).ready);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, loaded, true));
 }
