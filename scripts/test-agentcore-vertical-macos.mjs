@@ -1,4 +1,5 @@
 import { readProbeProductState } from "./probe-product-state.mjs";
+import { readFixtureCheckpoint } from "./test-support/checkpoint-history.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createReadStream } from "node:fs";
@@ -13,6 +14,7 @@ import {
   rename,
   rm,
   symlink,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -294,6 +296,15 @@ await writeFile(
 await rm(automationDir, { recursive: true, force: true });
 
 const writtenPath = join(canonicalWorkspace, "agentcore-vertical-write.txt");
+const readCommentaryObserved = observationGate();
+const editCommentaryObserved = observationGate();
+// Outside the Workspace so the verification handshake cannot become an
+// apparent Agent-owned File Change.
+const bashObservedPath = join(fixtureRoot, "bash-observed");
+const bashObservationCommand =
+  process.platform === "win32"
+    ? `powershell -NoProfile -Command "while (-not (Test-Path -LiteralPath '${bashObservedPath.replaceAll("'", "''")}')) { Start-Sleep -Milliseconds 20 }; Write-Output agentcore-vertical-bash-ok"`
+    : `while [ ! -f '${bashObservedPath.replaceAll("'", "'\\''")}' ]; do sleep 0.02; done; echo agentcore-vertical-bash-ok`;
 const responses = [
   streamedSse(
     toolSse(
@@ -311,15 +322,14 @@ const responses = [
       "bash-1",
       "Bash",
       {
-        command:
-          process.platform === "win32"
-            ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-            : "sleep 0.4; echo agentcore-vertical-bash-ok",
+        command: bashObservationCommand,
         description: "Check the command output",
       },
       "I’ve checked the input; now I’m running a focused verification.",
     ),
     80,
+    undefined,
+    readCommentaryObserved.beforeFrame,
   ),
   streamedSse(
     toolSse(
@@ -365,6 +375,8 @@ const responses = [
       "metawork agentcore vertical complete",
     ),
     350,
+    undefined,
+    editCommentaryObserved.beforeFrame,
   ),
   async (payload) => {
     const logPath = await assertMultimodalProviderRequest(
@@ -1236,9 +1248,40 @@ desktopVertical: try {
     );
   }
   const acceptedRunId = runResult?.runId ?? null;
+  const observedRunRevisions = new Map();
+  let bashReleased = false;
+  const readObservedRun = async () => {
+    const current = await snapshot({
+      taskId,
+      includeManagement: false,
+      observeTaskView({ revision, task }) {
+        if (task?.id !== taskId) return;
+        const run = task.runs.find((item) =>
+          acceptedRunId ? item.id === acceptedRunId : true,
+        );
+        if (run) observeRunRevision(observedRunRevisions, revision, run);
+        if (run?.output.commentary.length >= 1)
+          readCommentaryObserved.release();
+        if (run?.output.commentary.length >= 3)
+          editCommentaryObserved.release();
+      },
+    });
+    const run = current.tasks
+      .find((task) => task.id === taskId)
+      ?.runs.find((run) => (acceptedRunId ? run.id === acceptedRunId : true));
+    if (
+      !bashReleased &&
+      run?.activity?.kind === "executing_tools" &&
+      run.tools.some((tool) => tool.name === "Bash" && tool.state === "running")
+    ) {
+      await writeFile(bashObservedPath, "observed");
+      bashReleased = true;
+    }
+    return current;
+  };
   const submittedRun = await poll(
     async () => {
-      const current = await snapshot();
+      const current = await readObservedRun();
       return (
         current.tasks
           .find((item) => item.id === taskId)
@@ -1259,7 +1302,7 @@ desktopVertical: try {
   assert.equal(sourceOff.applied, true);
   await poll(
     async () => {
-      const current = await snapshot();
+      const current = await readObservedRun();
       const workspaceCatalog = current.workspaces.find(
         (item) => item.id === workspaceId,
       )?.skillCatalog;
@@ -1300,7 +1343,6 @@ desktopVertical: try {
   await captureVisual("running-narrow", 390, 812);
   let visualAttentionCaptured = false;
   const answered = new Set();
-  const observedRunRevisions = new Map();
   const terminal = new Set([
     "completed",
     "stopped",
@@ -1311,13 +1353,7 @@ desktopVertical: try {
   let finalSnapshot = await poll(
     async () => {
       if (provider.error) throw provider.error;
-      const current = await snapshot({
-        observeTaskView({ revision, task }) {
-          if (task?.id !== taskId) return;
-          const run = task.runs.find((item) => item.id === runId);
-          if (run) observeRunRevision(observedRunRevisions, revision, run);
-        },
-      });
+      const current = await readObservedRun();
       const task = current.tasks.find((item) => item.id === taskId);
       const run = task?.runs.find((item) => item.id === runId);
       if (!task || !run) return null;
@@ -1479,7 +1515,7 @@ desktopVertical: try {
       byteSize: checkpointEvidence.byteSize,
       generation: checkpointEvidence.generation,
       descriptorLatencyMs: checkpointEvidence.descriptorLatencyMs,
-      historyByteSize: checkpointEvidence.historyByteSize,
+      historyMainByteSize: checkpointEvidence.historyMainByteSize,
     })}\n`,
   );
   const activityOrders = [];
@@ -1807,7 +1843,7 @@ desktopVertical: try {
       byteSize: multimodalCheckpoint.byteSize,
       generation: multimodalCheckpoint.generation,
       descriptorLatencyMs: multimodalCheckpoint.descriptorLatencyMs,
-      historyByteSize: multimodalCheckpoint.historyByteSize,
+      historyMainByteSize: multimodalCheckpoint.historyMainByteSize,
     })}\n`,
   );
 
@@ -1906,7 +1942,7 @@ desktopVertical: try {
       byteSize: textCheckpoint.byteSize,
       generation: textCheckpoint.generation,
       descriptorLatencyMs: textCheckpoint.descriptorLatencyMs,
-      historyByteSize: textCheckpoint.historyByteSize,
+      historyMainByteSize: textCheckpoint.historyMainByteSize,
     })}\n`,
   );
 
@@ -1969,7 +2005,7 @@ desktopVertical: try {
       byteSize: compactCheckpoint.byteSize,
       generation: compactCheckpoint.generation,
       descriptorLatencyMs: compactCheckpoint.descriptorLatencyMs,
-      historyByteSize: compactCheckpoint.historyByteSize,
+      historyMainByteSize: compactCheckpoint.historyMainByteSize,
     })}\n`,
   );
   const expectedProviderResponses =
@@ -2094,6 +2130,9 @@ desktopVertical: try {
   process.stderr.write(`${output}\n`);
   throw error;
 } finally {
+  readCommentaryObserved.release();
+  editCommentaryObserved.release();
+  await writeFile(bashObservedPath, "cleanup");
   if (exitState === null) {
     app.kill("SIGTERM");
     await withTimeout(exited, 5_000, "forced app stop").catch(async () => {
@@ -2160,51 +2199,6 @@ async function stopApplication(label) {
     .length;
   if (stopEventsAfter !== stopEventsBefore + 1)
     throw new Error("normal runtime stop was not observed");
-}
-
-function decodeTaskStore(bytes) {
-  const magic = Buffer.from("MWTF");
-  const headerBytes = 36;
-  const records = { workspaces: [], tasks: [] };
-  let offset = 0;
-  while (offset < bytes.length) {
-    if (
-      offset + headerBytes > bytes.length ||
-      !bytes.subarray(offset, offset + 4).equals(magic)
-    )
-      throw new Error("invalid hard-cut Task store frame");
-    if (bytes[offset + 4] !== 0)
-      throw new Error("invalid Task store frame flags");
-    const kind = bytes[offset + 5];
-    const payloadLength = bytes.readUInt32LE(offset + 24);
-    const payloadStart = offset + headerBytes;
-    const payloadEnd = payloadStart + payloadLength;
-    if (payloadEnd > bytes.length)
-      throw new Error("truncated Task store frame");
-    const headerChecksum = bytes.readUInt32LE(offset + 28);
-    const payloadChecksum = bytes.readUInt32LE(offset + 32);
-    if (crc32(bytes.subarray(offset, offset + 28)) !== headerChecksum)
-      throw new Error("invalid Task store header checksum");
-    if (crc32(bytes.subarray(payloadStart, payloadEnd)) !== payloadChecksum)
-      throw new Error("invalid Task store payload checksum");
-    const value = JSON.parse(
-      bytes.subarray(payloadStart, payloadEnd).toString("utf8"),
-    );
-    if (kind === 2) records.workspaces.push(value);
-    if (kind === 3) records.tasks.push(value);
-    offset = payloadEnd;
-  }
-  return records;
-}
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++)
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 async function probeUnifiedAttachmentInputs() {
@@ -2583,22 +2577,10 @@ function largePngFixture(width, height, size) {
 }
 
 async function readCheckpointHealth(taskId) {
-  const historyPath = join(dataRoot, "workbench", "workbench-history.store");
-  let bytes;
-  try {
-    bytes = await readFile(historyPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-  const history = decodeTaskStore(bytes);
-  const task = history.tasks?.find((item) => String(item.id) === taskId);
-  return task
-    ? {
-        checkpoint: task.checkpoint,
-        checkpointAnchor: task.checkpoint_anchor,
-      }
-    : null;
+  return readFixtureCheckpoint(
+    join(dataRoot, "workbench", "workbench-history.sqlite"),
+    taskId,
+  );
 }
 
 async function readCheckpointEvidence(
@@ -2607,23 +2589,12 @@ async function readCheckpointEvidence(
   terminalId,
   bindingEpoch,
 ) {
-  const historyPath = join(dataRoot, "workbench", "workbench-history.store");
-  let historyBytes;
-  try {
-    historyBytes = await readFile(historyPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-  const history = decodeTaskStore(historyBytes);
-  const task = history.tasks?.find((item) => String(item.id) === taskId);
+  const historyPath = join(dataRoot, "workbench", "workbench-history.sqlite");
+  const task = await readFixtureCheckpoint(historyPath, taskId);
   lastCheckpointObservation = task
-    ? {
-        anchor: task.checkpoint_anchor,
-        hasDescriptor: task.checkpoint !== null,
-      }
+    ? { anchor: task.checkpointAnchor, hasDescriptor: task.checkpoint !== null }
     : { task: "missing" };
-  if (!task || task.checkpoint_anchor !== "available" || !task.checkpoint)
+  if (!task || task.checkpointAnchor !== "available" || !task.checkpoint)
     return null;
   const descriptor = task.checkpoint;
   const blobDescriptor = descriptor.blob;
@@ -2635,10 +2606,7 @@ async function readCheckpointEvidence(
     terminal?.kind !== terminalKind ||
     String(terminal.id) !== terminalId ||
     String(descriptor.anchor.binding_epoch) !== bindingEpoch ||
-    !Number.isSafeInteger(blobDescriptor.generation) ||
-    blobDescriptor.generation < 0 ||
-    !Number.isSafeInteger(blobDescriptor.byte_size) ||
-    blobDescriptor.byte_size <= 0 ||
+    BigInt(blobDescriptor.byte_size) <= 0n ||
     !/^[0-9a-f]{64}$/.test(blobDescriptor.digest)
   )
     throw new Error(
@@ -2660,7 +2628,7 @@ async function readCheckpointEvidence(
   }
   const digest = createHash("sha256").update(blob).digest("hex");
   if (
-    blob.length !== blobDescriptor.byte_size ||
+    BigInt(blob.length) !== BigInt(blobDescriptor.byte_size) ||
     digest !== blobDescriptor.digest
   )
     throw new Error("checkpoint blob did not match its durable descriptor");
@@ -2668,7 +2636,7 @@ async function readCheckpointEvidence(
     blobPath,
     byteSize: blobDescriptor.byte_size,
     generation: blobDescriptor.generation,
-    historyByteSize: historyBytes.length,
+    historyMainByteSize: (await stat(historyPath)).size,
     sessionId: descriptor.session.logical_session_id,
   };
 }
@@ -2902,7 +2870,7 @@ async function snapshot(options) {
         throw error;
       // A rejected read handle must be replaced, never reused. Give the real
       // Renderer a turn between this probe's fresh reads of the shared slot.
-      if (stale && approvalOnly)
+      if (stale)
         await new Promise((resolve) =>
           setTimeout(resolve, Math.min(50 * (attempt + 1), 250)),
         );
@@ -4085,6 +4053,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           body,
           fixture?.initialDelayMs ?? initialDelayMs,
           fixture?.frameDelayMs ?? frameDelayMs,
+          fixture?.beforeFrame,
         );
       } catch (error) {
         providerError ??= error;
@@ -4160,6 +4129,7 @@ async function streamProviderResponse(
   body,
   initialDelayMs,
   frameDelayMs,
+  beforeFrame,
 ) {
   if (initialDelayMs > 0)
     await new Promise((resolve) => setTimeout(resolve, initialDelayMs));
@@ -4167,6 +4137,7 @@ async function streamProviderResponse(
   if (frames.join("") !== body)
     throw new Error("provider fixture produced an invalid SSE body");
   for (const frame of frames) {
+    await beforeFrame?.(frame);
     response.write(frame);
     if (frameDelayMs > 0)
       await new Promise((resolve) => setTimeout(resolve, frameDelayMs));
@@ -4397,8 +4368,22 @@ function sse(events) {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
 }
 
-function streamedSse(body, frameDelayMs, initialDelayMs) {
-  return { body, frameDelayMs, initialDelayMs };
+function streamedSse(body, frameDelayMs, initialDelayMs, beforeFrame) {
+  return { body, frameDelayMs, initialDelayMs, beforeFrame };
+}
+
+function observationGate() {
+  let release;
+  const observed = new Promise((resolve) => {
+    release = resolve;
+  });
+  return {
+    release,
+    async beforeFrame(frame) {
+      const event = JSON.parse(frame.slice("data: ".length));
+      if (event.type === "message_start") await observed;
+    },
+  };
 }
 
 function assertTransport(snapshot) {

@@ -193,7 +193,9 @@ pub const RetryObservation = struct {
 pub const RunActivity = union(enum) {
     queued,
     starting,
+    /// Stable wire name for the coarse model-processing phase.
     waiting_model,
+    /// Recent model activity within the current generating scope.
     thinking,
     writing_response,
     executing_tools: struct { in_flight: ?u32 = null },
@@ -203,6 +205,8 @@ pub const RunActivity = union(enum) {
     finalizing,
     stopping,
 };
+
+const ModelActivity = enum { none, thinking, writing };
 
 const OpenOutputSegment = struct {
     index: u32,
@@ -938,9 +942,8 @@ pub const RunRecord = struct {
     active_phase: ActiveRunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
-    /// Latest safe Product activity observation. Product Run phase and formal
-    /// terminal facts still override this runtime-only hint.
-    observed_activity: RunActivity = .waiting_model,
+    /// Details enrich the Core retry phase; notices never establish a phase.
+    retry_observation: RetryObservation = .{},
     /// Latest monotonic Agent execution observation. These fields are
     /// runtime-only: an interrupted process never persists in-flight state.
     agent_phase: ?agent.RunStatePhase = null,
@@ -949,6 +952,9 @@ pub const RunRecord = struct {
     agent_tool_calls: u32 = 0,
     agent_in_flight_tools: u32 = 0,
     agent_observation_degraded: bool = false,
+    /// Distinct from diagnostics about optional context/retry details.
+    core_activity_degraded: bool = false,
+    model_activity: ModelActivity = .none,
     permission_provenance: ?PermissionSummary = null,
     /// Null is reserved for history written before typed File Changes existed.
     file_change_observation: ?FileChangeObservation = null,
@@ -1330,7 +1336,7 @@ pub fn runProjectionFacts(run: *const RunRecord) RunProjectionFacts {
     };
     return switch (run.active_phase) {
         .queued => .{ .phase = .queued, .activity = .queued, .terminal = null },
-        .running => .{ .phase = .running, .activity = run.observed_activity, .terminal = null },
+        .running => .{ .phase = .running, .activity = runningActivity(run), .terminal = null },
         .waiting_ui => .{ .phase = .waiting_ui, .activity = .waiting_user, .terminal = null },
         .stopping => .{ .phase = .stopping, .activity = .stopping, .terminal = null },
     };
@@ -1344,9 +1350,69 @@ pub fn currentActivity(run: *const RunRecord) ?RunActivity {
     return runProjectionFacts(run).activity;
 }
 
+fn runningActivity(run: *const RunRecord) RunActivity {
+    // Check confidence before consulting retained validation history.
+    if (run.core_activity_degraded) return modelActivity(run);
+    const phase = run.agent_phase orelse
+        return if (run.assistant_output_kind != null) .finalizing else .starting;
+    return switch (phase) {
+        .starting => .starting,
+        .generating => if (run.assistant_output_kind != null) .finalizing else modelActivity(run),
+        .executing_tools => .{ .executing_tools = .{
+            .in_flight = if (run.agent_in_flight_tools == 0) null else run.agent_in_flight_tools,
+        } },
+        .waiting_ui => .waiting_user,
+        .retrying => .{ .retrying_provider = run.retry_observation },
+        .compacting => .compacting_context,
+        .finalizing, .completed, .failed, .aborted, .poisoned => .finalizing,
+    };
+}
+
+fn modelActivity(run: *const RunRecord) RunActivity {
+    return switch (run.model_activity) {
+        .none => .waiting_model,
+        .thinking => .thinking,
+        .writing => .writing_response,
+    };
+}
+
+fn observeModelActivity(run: *RunRecord, observation: ModelActivity) EventApplication {
+    if (run.active_phase != .running or terminalPayload(run) != null or
+        (!run.core_activity_degraded and run.agent_phase != .generating)) return .unchanged;
+    const previous = currentActivity(run);
+    run.model_activity = observation;
+    return activityChange(run, previous);
+}
+
+fn activityChange(run: *const RunRecord, previous: ?RunActivity) EventApplication {
+    return if (std.meta.eql(previous, currentActivity(run))) .unchanged else .{ .applied = .{ .durable_boundary = false } };
+}
+
+fn degradeCoreActivity(run: *RunRecord) EventApplication {
+    const previous = currentActivity(run);
+    run.agent_observation_degraded = true;
+    run.core_activity_degraded = true;
+    run.model_activity = .none;
+    run.retry_observation = .{};
+    // Keep the accepted identity/sequence/phase for all subsequent validation.
+    return activityChange(run, previous);
+}
+
+fn checkCoreToolCount(run: *RunRecord) void {
+    if (run.agent_phase == null or run.core_activity_degraded) return;
+    var running: usize = 0;
+    for (run.tools) |entry| if (entry) |tool| {
+        if (tool.state == .running) running += 1;
+    };
+    // Core emits the snapshot first. Compare only after the matching raw
+    // start/result has updated its record, never at snapshot arrival.
+    if (running != run.agent_in_flight_tools) _ = degradeCoreActivity(run);
+}
+
 pub fn setActivePhase(run: *RunRecord, phase: ActiveRunPhase) bool {
     if (run.terminal_publication.load(.acquire) != .open) return false;
     if (run.active_phase != phase) run.noteProjectionChange();
+    if (phase != .running) run.model_activity = .none;
     run.active_phase = phase;
     return run.terminal_publication.load(.acquire) == .open;
 }
@@ -1426,6 +1492,7 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
         const run = &(entry.* orelse continue);
         if (run.event_stream_finalized or run.terminal_event_drain_marked) continue;
         if (terminalPayload(run) == null) continue;
+        run.model_activity = .none;
         run.terminal_event_drain_marked = true;
         changed = true;
     }
@@ -1680,12 +1747,6 @@ pub const EventApplication = union(enum) {
     },
 };
 
-fn setObservedActivity(run: *RunRecord, activity: RunActivity) bool {
-    if (std.meta.eql(run.observed_activity, activity)) return false;
-    run.observed_activity = activity;
-    return true;
-}
-
 fn outputBytes(run: *const RunRecord) EventProjectionError!usize {
     var total = std.math.add(
         usize,
@@ -1817,9 +1878,7 @@ pub fn applyEvent(
             if (!found) return error.InvalidInputAdoption;
             durable_boundary = true;
         },
-        .thinking_chunk => {
-            if (!setObservedActivity(run, .thinking)) return .unchanged;
-        },
+        .thinking_chunk => |text| return if (text.len == 0) .unchanged else observeModelActivity(run, .thinking),
         .text_chunk => |text| {
             if (run.output_segment_protocol_seen) {
                 const open = &(run.open_output_segment orelse
@@ -1857,7 +1916,7 @@ pub fn applyEvent(
                     run.commentary_ends[0] = @intCast(run.assistant.committed_len);
                 }
             } else return error.InvalidOutputSegment;
-            _ = setObservedActivity(run, .writing_response);
+            if (text.len != 0) _ = observeModelActivity(run, .writing);
         },
         .tool_start => |tool_event| {
             const tool = try projection.findOrCreateTool(
@@ -1867,9 +1926,7 @@ pub fn applyEvent(
                 tool_event.input,
             );
             tool.state = .running;
-            _ = setObservedActivity(run, .{ .executing_tools = .{
-                .in_flight = runningToolCount(run.tools),
-            } });
+            checkCoreToolCount(run);
         },
         .tool_progress => |progress| {
             const tool = findTool(run.tools, progress.id) orelse
@@ -1881,14 +1938,10 @@ pub fn applyEvent(
             );
             tool.progress_truncated = projected.truncated;
             tool.redacted = tool.redacted or projected.redacted;
-            if (tool.state == .running)
-                _ = setObservedActivity(run, .{ .executing_tools = .{
-                    .in_flight = runningToolCount(run.tools),
-                } });
         },
-        .progress => {
-            _ = setObservedActivity(run, .{ .executing_tools = .{} });
-        },
+        // Core also emits progress before model requests. Generic notices must
+        // not replace typed activity or in-flight counts.
+        .progress => return .unchanged,
         .tool_result => |result| {
             if (envelope.delivered_file != null and
                 (result.is_error or !std.mem.eql(u8, result.name, agent.FileDeliveryReceipt.tool_name)))
@@ -1926,14 +1979,7 @@ pub fn applyEvent(
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
-            const running = runningToolCount(run.tools);
-            _ = setObservedActivity(
-                run,
-                if (running == 0)
-                    .waiting_model
-                else
-                    .{ .executing_tools = .{ .in_flight = running } },
-            );
+            checkCoreToolCount(run);
             durable_boundary = true;
         },
         .file_changes => {
@@ -1987,60 +2033,46 @@ pub fn applyEvent(
                 .before_tokens = compact.before_tokens,
                 .after_tokens = compact.after_tokens,
             };
-            if (std.meta.activeTag(run.observed_activity) == .compacting_context)
-                _ = setObservedActivity(run, .waiting_model);
         },
         .retry_notice => |retry| {
-            if (terminalPayload(run) != null or
-                std.meta.activeTag(run.observed_activity) == .finalizing)
-            {
+            if (terminalPayload(run) != null or run.core_activity_degraded or run.agent_phase != .retrying) {
                 run.agent_observation_degraded = true;
                 return .unchanged;
             }
             const details_valid = retry.attempt != 0 and retry.max != 0 and
                 retry.attempt <= retry.max;
             if (!details_valid) run.agent_observation_degraded = true;
-            _ = setObservedActivity(run, .{ .retrying_provider = if (details_valid) .{
+            const details: RetryObservation = if (details_valid) .{
                 .attempt = retry.attempt,
                 .max = retry.max,
                 .delay_ms = retry.delay_ms,
-            } else .{} });
+            } else .{};
+            if (std.meta.eql(run.retry_observation, details)) return .unchanged;
+            run.retry_observation = details;
         },
         .run_state => |state| {
             if (state.run_id != run.id) {
-                run.agent_observation_degraded = true;
-                return .unchanged;
+                return degradeCoreActivity(run);
             }
             if (run.agent_transition_seq) |last|
                 if (state.transition_seq <= last) return .unchanged;
             if (!validRunStateTransition(run.agent_phase, state.phase)) {
-                run.agent_observation_degraded = true;
-                return .unchanged;
+                return degradeCoreActivity(run);
             }
             const in_flight = std.math.cast(u32, state.in_flight_tools.len) orelse {
-                run.agent_observation_degraded = true;
-                return .unchanged;
+                return degradeCoreActivity(run);
             };
+            if (run.core_activity_degraded or state.phase != .generating or
+                run.agent_phase != .generating or run.agent_turn != state.turn)
+                run.model_activity = .none;
+            if (state.phase != .retrying or run.agent_phase != .retrying or run.agent_turn != state.turn)
+                run.retry_observation = .{};
             run.agent_transition_seq = state.transition_seq;
             run.agent_phase = state.phase;
             run.agent_turn = state.turn;
             run.agent_tool_calls = state.tool_calls;
             run.agent_in_flight_tools = in_flight;
-            const activity: RunActivity = switch (state.phase) {
-                .starting => .starting,
-                .generating => .waiting_model,
-                .executing_tools => .{ .executing_tools = .{
-                    .in_flight = if (in_flight == 0) null else in_flight,
-                } },
-                .waiting_ui => .waiting_user,
-                .retrying => if (std.meta.activeTag(run.observed_activity) == .retrying_provider)
-                    run.observed_activity
-                else
-                    .{ .retrying_provider = .{} },
-                .compacting => .compacting_context,
-                .finalizing, .completed, .failed, .aborted, .poisoned => .finalizing,
-            };
-            _ = setObservedActivity(run, activity);
+            run.core_activity_degraded = false;
         },
         .permission_provenance => |provenance| {
             const summary = try permissionSummary(provenance);
@@ -2079,6 +2111,7 @@ pub fn applyEvent(
                 .turn = segment.turn,
                 .group = segment.group,
             };
+            run.model_activity = .none;
         },
         .output_segment_end => |segment| {
             const open = run.open_output_segment orelse
@@ -2093,7 +2126,6 @@ pub fn applyEvent(
                     clearTrackedText(&run.output_segment);
                     run.output_segment_redacted = false;
                     run.output_retry_group = segment.group;
-                    _ = setObservedActivity(run, .waiting_model);
                 },
                 .continued => {
                     if (run.output_continued_group) |group|
@@ -2112,7 +2144,6 @@ pub fn applyEvent(
                     run.output_segment_redacted = false;
                     run.output_continued_group = segment.group;
                     run.output_retry_group = null;
-                    _ = setObservedActivity(run, .writing_response);
                 },
                 .commentary, .final, .partial => {
                     const output_start = run.assistant.committed_len;
@@ -2143,17 +2174,14 @@ pub fn applyEvent(
                                     @intCast(run.assistant.committed_len);
                                 run.commentary_count += 1;
                             }
-                            _ = setObservedActivity(run, .waiting_model);
                         },
                         .final => {
                             run.assistant_output_kind = .final;
                             run.assistant_output_start = output_start;
-                            _ = setObservedActivity(run, .finalizing);
                         },
                         .partial => {
                             run.assistant_output_kind = .partial;
                             run.assistant_output_start = output_start;
-                            _ = setObservedActivity(run, .finalizing);
                         },
                         .continued, .discarded => unreachable,
                     }
@@ -2164,7 +2192,9 @@ pub fn applyEvent(
             run.next_output_segment_index = @as(u64, segment.index) + 1;
         },
         .stream_done => {
-            _ = setObservedActivity(run, .finalizing);
+            const previous = currentActivity(run);
+            run.model_activity = .none;
+            return activityChange(run, previous);
         },
     }
     return .{ .applied = .{ .durable_boundary = durable_boundary } };
@@ -2242,16 +2272,6 @@ fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
 
 fn addU64(left: u64, right: u64) EventProjectionError!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
-}
-
-fn runningToolCount(entries: []?ToolView) u32 {
-    var count: u32 = 0;
-    for (entries) |entry| {
-        if (entry) |tool| {
-            if (tool.state == .running) count +|= 1;
-        }
-    }
-    return count;
 }
 
 fn validContextWarning(warning: anytype) bool {
@@ -2399,6 +2419,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     };
     run.terminal_publication.store(.published, .release);
 
+    run.model_activity = .thinking;
     for ([_]ActiveRunPhase{ .running, .queued, .waiting_ui, .stopping }) |phase| {
         run.active_phase = phase;
         const projection = runProjectionFacts(run);
@@ -2407,6 +2428,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         try std.testing.expect(projection.terminal == null);
     }
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+    try std.testing.expectEqual(ModelActivity.none, run.model_activity);
     try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
         &task,
         900,

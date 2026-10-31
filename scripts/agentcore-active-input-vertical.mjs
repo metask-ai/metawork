@@ -20,7 +20,9 @@ export async function runActiveInputVertical({
   observeTransferred,
 }) {
   const read = async (id) =>
-    (await snapshot()).tasks.find((task) => task.id === id);
+    (await snapshot({ taskId: id, includeManagement: false })).tasks.find(
+      (task) => task.id === id,
+    );
   async function create(title, approvalMode = "manual", rename = true) {
     const admission = (await snapshot()).newTaskAdmission;
     const result = await invoke("metawork.tasks.create", {
@@ -318,6 +320,7 @@ export async function runActiveInputVertical({
   const transferredHistory = [];
   for (const mode of ["final", "stop", "failure"]) {
     const task = await create(`Input ${mode} audit`);
+    const afterText = gate("");
     const response = gate(
       mode === "failure"
         ? {
@@ -338,7 +341,17 @@ export async function runActiveInputVertical({
               ),
             ),
             initialDelayMs: 0,
-            frameDelayMs: mode === "final" ? 500 : 0,
+            frameDelayMs: 0,
+            beforeFrame:
+              mode === "final"
+                ? async (frame) => {
+                    const event = JSON.parse(frame.slice("data: ".length));
+                    // Keep real provisional output open until both follow-ups
+                    // are submitted, independent of snapshot collection time.
+                    if (event.type === "content_block_stop")
+                      await afterText.fixture();
+                  }
+                : undefined,
           },
     );
     const next = gate(
@@ -369,6 +382,7 @@ export async function runActiveInputVertical({
       await waitGate(response);
       if (mode === "final") {
         response.release();
+        await waitGate(afterText);
         await poll(
           async () => {
             const run = (await read(task.id)).runs[0];
@@ -400,6 +414,7 @@ export async function runActiveInputVertical({
       if (mode === "stop")
         await invoke("metawork.tasks.cancel", { taskId: task.id, runId: id });
     } finally {
+      afterText.release();
       response.release();
     }
     if (mode === "final") {

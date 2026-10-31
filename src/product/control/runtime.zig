@@ -17435,7 +17435,7 @@ test "Run elapsed projection samples an injected clock without publishing revisi
     try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
 }
 
-test "thinking and assistant chunks update distinct safe projections" {
+test "thinking is private and content chunks do not establish an activity phase" {
     var control = try testRuntime();
     defer control.deinit();
     const task = control.task_runtime.tasks[0].?;
@@ -17451,8 +17451,8 @@ test "thinking and assistant chunks update distinct safe projections" {
     defer thinking.deinit();
     try control.applyEvent(&thinking);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
-    try std.testing.expectEqual(task_test_state.RunActivity.thinking, run.observed_activity);
-    try std.testing.expectEqual(revision_before_thinking + 1, control.revision);
+    try std.testing.expectEqual(task_test_state.RunActivity.starting, task_test_state.currentActivity(run).?);
+    try std.testing.expectEqual(revision_before_thinking, control.revision);
 
     const revision_before_duplicate = control.revision;
     var duplicate = try testEnvelope(
@@ -17473,8 +17473,8 @@ test "thinking and assistant chunks update distinct safe projections" {
     try control.applyEvent(&assistant);
     try std.testing.expectEqualStrings("public response", run.assistant.list.items);
     try std.testing.expectEqual(
-        task_test_state.RunActivity.writing_response,
-        run.observed_activity,
+        task_test_state.RunActivity.starting,
+        task_test_state.currentActivity(run).?,
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
@@ -17888,7 +17888,7 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
     try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
-    try std.testing.expectEqual(task_test_state.RunActivity.starting, run.observed_activity);
+    try std.testing.expectEqual(task_test_state.RunActivity.queued, task_test_state.currentActivity(run).?);
 
     var executing = try testEnvelope(
         route,
@@ -17902,8 +17902,8 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try std.testing.expectEqual(@as(u32, 2), run.agent_tool_calls);
     try std.testing.expectEqual(@as(u32, 2), run.agent_in_flight_tools);
     try std.testing.expectEqual(
-        @as(?u32, 2),
-        run.observed_activity.executing_tools.in_flight,
+        @as(u32, 2),
+        run.agent_in_flight_tools,
     );
 
     var stale = try testEnvelope(
@@ -17915,8 +17915,8 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try control.applyEvent(&stale);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(
-        @as(?u32, 2),
-        run.observed_activity.executing_tools.in_flight,
+        @as(u32, 2),
+        run.agent_in_flight_tools,
     );
 
     var cross_run = try testEnvelope(
@@ -17929,6 +17929,368 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try std.testing.expect(run.agent_observation_degraded);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
+    try std.testing.expectEqual(task_test_state.RunActivity.queued, task_test_state.currentActivity(run).?);
+    _ = task_test_state.setActivePhase(run, .running);
+    try std.testing.expect(run.core_activity_degraded);
+    try std.testing.expectEqual(task_test_state.RunActivity.waiting_model, task_test_state.currentActivity(run).?);
+}
+
+test "generic Core progress preserves typed activity across model and parallel tool turns" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    // Core emits progress after generating and executing_tools observations,
+    // including an empty tool name before each model request.
+    const Step = struct {
+        event: []const u8,
+        activity: task_test_state.RunActivity,
+    };
+    const steps = [_]Step{
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":1,\"tool_name\":\"\",\"tool_input\":\"\",\"tool_calls\":0}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"thinking_chunk\":\"private reasoning\"}",
+            .activity = .thinking,
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":1,\"tool_name\":\"\",\"tool_input\":\"\",\"tool_calls\":0}}",
+            .activity = .thinking,
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[{\"tool_call_id\":\"read\",\"name\":\"Read\"}]}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 1 } },
+        },
+        .{
+            .event = "{\"tool_start\":{\"id\":\"read\",\"name\":\"Read\",\"input\":\"{}\"}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 1 } },
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":1,\"tool_name\":\"Read\",\"tool_input\":\"{}\",\"tool_calls\":1}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 1 } },
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[{\"tool_call_id\":\"read\",\"name\":\"Read\"},{\"tool_call_id\":\"bash\",\"name\":\"Bash\"}]}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 2 } },
+        },
+        .{
+            .event = "{\"tool_start\":{\"id\":\"bash\",\"name\":\"Bash\",\"input\":\"{}\"}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 2 } },
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":1,\"tool_name\":\"Read\",\"tool_input\":\"{}\",\"tool_calls\":2}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 2 } },
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":2,\"in_flight_tools\":[{\"tool_call_id\":\"bash\",\"name\":\"Bash\"}]}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 1 } },
+        },
+        .{
+            .event = "{\"tool_result\":{\"id\":\"read\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}",
+            .activity = .{ .executing_tools = .{ .in_flight = 1 } },
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":5,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":2,\"in_flight_tools\":[]}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"tool_result\":{\"id\":\"bash\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":2}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":6,\"phase\":\"generating\",\"turn\":2,\"tool_calls\":2,\"in_flight_tools\":[]}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":2,\"tool_name\":\"\",\"tool_input\":\"\",\"tool_calls\":2}}",
+            .activity = .waiting_model,
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":7,\"phase\":\"retrying\",\"turn\":2,\"tool_calls\":2,\"in_flight_tools\":[]}}",
+            .activity = .{ .retrying_provider = .{} },
+        },
+        .{
+            .event = "{\"retry_notice\":{\"attempt\":1,\"max\":3,\"delay_ms\":100}}",
+            .activity = .{ .retrying_provider = .{ .attempt = 1, .max = 3, .delay_ms = 100 } },
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":2,\"tool_name\":\"\",\"tool_input\":\"\",\"tool_calls\":2}}",
+            .activity = .{ .retrying_provider = .{ .attempt = 1, .max = 3, .delay_ms = 100 } },
+        },
+        .{
+            .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":8,\"phase\":\"finalizing\",\"turn\":2,\"tool_calls\":2,\"in_flight_tools\":[]}}",
+            .activity = .finalizing,
+        },
+        .{
+            .event = "{\"progress\":{\"turn\":2,\"tool_name\":\"Bash\",\"tool_input\":\"{}\",\"tool_calls\":2}}",
+            .activity = .finalizing,
+        },
+    };
+    for (steps) |step| {
+        var envelope = try testEnvelope(route, run.id, step.event);
+        defer envelope.deinit();
+        const revision = control.revision;
+        try control.applyEvent(&envelope);
+        try std.testing.expectEqualDeep(step.activity, task_test_state.currentActivity(run).?);
+        if (envelope.event.value.known == .progress)
+            try std.testing.expectEqual(revision, control.revision);
+
+        var storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeAggregateFixture(&storage);
+        var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer decoded.deinit();
+        const activity = decoded.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("activity").?;
+        try std.testing.expectEqualStrings(@tagName(step.activity), activity.object.get("kind").?.string);
+        if (step.activity == .executing_tools)
+            try std.testing.expectEqual(step.activity.executing_tools.in_flight.?, try std.fmt.parseInt(u32, activity.object.get("inFlight").?.string, 10));
+    }
+}
+
+test "Core hard phases override nested model content without leaking reasoning" {
+    const cases = [_]struct { phase: lifecycle.RunStatePhase, activity: task_test_state.RunActivity }{
+        .{ .phase = .executing_tools, .activity = .{ .executing_tools = .{ .in_flight = 2 } } },
+        .{ .phase = .waiting_ui, .activity = .waiting_user },
+        .{ .phase = .retrying, .activity = .{ .retrying_provider = .{} } },
+        .{ .phase = .compacting, .activity = .compacting_context },
+        .{ .phase = .finalizing, .activity = .finalizing },
+    };
+    for (cases) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.task_runtime.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        const route = task.runtime.routeId();
+        var storage: [1024]u8 = undefined;
+        const encoded = try std.fmt.bufPrint(&storage, "{{\"run_state\":{{\"run_id\":7,\"transition_seq\":1,\"phase\":\"{s}\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":{s}}}}}", .{ @tagName(case.phase), if (case.phase == .executing_tools)
+            "[{\"tool_call_id\":\"one\",\"name\":\"Read\"},{\"tool_call_id\":\"two\",\"name\":\"Bash\"}]"
+        else
+            "[]" });
+        var phase = try testEnvelope(route, run.id, encoded);
+        defer phase.deinit();
+        try control.applyEvent(&phase);
+        const events = [_][]const u8{
+            "{\"thinking_chunk\":\"private-observation-must-not-leak\"}",
+            "{\"progress\":{\"turn\":1,\"tool_name\":\"Read\",\"tool_input\":\"{}\",\"tool_calls\":2}}",
+            "{\"stream_done\":{}}",
+            "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+            "{\"text_chunk\":\"note\"}",
+            "{\"stream_done\":{}}",
+            "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":4}}",
+        };
+        for (events) |value| {
+            var envelope = try testEnvelope(route, run.id, value);
+            defer envelope.deinit();
+            const revision = control.revision;
+            try control.applyEvent(&envelope);
+            try std.testing.expectEqualDeep(case.activity, task_test_state.currentActivity(run).?);
+            switch (envelope.event.value.known) {
+                .thinking_chunk, .progress, .stream_done => try std.testing.expectEqual(revision, control.revision),
+                else => {},
+            }
+        }
+        try std.testing.expectEqualStrings("note", run.assistant.list.items);
+        try std.testing.expectEqual(@as(u32, 1), run.commentary_count);
+        var snapshot_storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeAggregateFixture(&snapshot_storage);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-observation-must-not-leak") == null);
+        for ([_]struct { phase: task_test_state.ActiveRunPhase, activity: task_test_state.RunActivity }{
+            .{ .phase = .queued, .activity = .queued },
+            .{ .phase = .waiting_ui, .activity = .waiting_user },
+            .{ .phase = .stopping, .activity = .stopping },
+        }) |override| {
+            _ = task_test_state.setActivePhase(run, override.phase);
+            try std.testing.expectEqualDeep(override.activity, task_test_state.currentActivity(run).?);
+        }
+    }
+}
+
+test "provider stream and output boundaries do not prematurely finish a multi-turn Run" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const steps = [_]struct { event: []const u8, activity: task_test_state.RunActivity }{
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}", .activity = .waiting_model },
+        .{ .event = "{\"text_chunk\":\"note\"}", .activity = .writing_response },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":4}}", .activity = .waiting_model },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[{\"tool_call_id\":\"denied\",\"name\":\"Read\"}]}}", .activity = .{ .executing_tools = .{ .in_flight = 1 } } },
+        .{ .event = "{\"tool_start\":{\"id\":\"denied\",\"name\":\"Read\",\"input\":\"{}\"}}", .activity = .{ .executing_tools = .{ .in_flight = 1 } } },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"tool_result\":{\"id\":\"denied\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"denied\",\"is_error\":true,\"elapsed_ms\":0}}", .activity = .waiting_model },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"generating\",\"turn\":2,\"tool_calls\":1,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}", .activity = .waiting_model },
+        .{ .event = "{\"text_chunk\":\"half\"}", .activity = .writing_response },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"continued\",\"bytes\":4}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_begin\":{\"index\":2,\"turn\":2,\"group\":1}}", .activity = .waiting_model },
+        .{ .event = "{\"text_chunk\":\"bad\"}", .activity = .writing_response },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_end\":{\"index\":2,\"turn\":2,\"group\":1,\"disposition\":\"discarded\",\"bytes\":3}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":1}}", .activity = .waiting_model },
+        .{ .event = "{\"text_chunk\":\"done\"}", .activity = .writing_response },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model },
+        .{ .event = "{\"output_segment_end\":{\"index\":3,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":4}}", .activity = .finalizing },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":5,\"phase\":\"finalizing\",\"turn\":2,\"tool_calls\":1,\"in_flight_tools\":[]}}", .activity = .finalizing },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":6,\"phase\":\"completed\",\"turn\":2,\"tool_calls\":1,\"in_flight_tools\":[]}}", .activity = .finalizing },
+    };
+    for (steps) |step| {
+        var envelope = try testEnvelope(route, run.id, step.event);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+        try std.testing.expectEqualDeep(step.activity, task_test_state.currentActivity(run).?);
+        try std.testing.expectEqual(task_test_state.RunPhase.running, task_test_state.runPhase(run));
+        try std.testing.expect(task_test_state.productTerminalFacts(run) == null);
+    }
+    try std.testing.expectEqualStrings("notehalfdone", run.assistant.list.items);
+    try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, run.assistant_output_kind.?);
+}
+
+test "model activity is scoped by turn phase and stream rather than content classification" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const steps = [_]struct {
+        event: []const u8,
+        activity: task_test_state.RunActivity,
+        degraded: bool = false,
+        unchanged: bool = false,
+    }{
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"private-scope-marker\"}", .activity = .thinking },
+        .{ .event = "{\"thinking_chunk\":\"more\"}", .activity = .thinking, .unchanged = true },
+        .{ .event = "{\"thinking_chunk\":\"\"}", .activity = .thinking, .unchanged = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .thinking },
+        .{ .event = "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}", .activity = .waiting_model },
+        .{ .event = "{\"text_chunk\":\"note\"}", .activity = .writing_response },
+        .{ .event = "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"bytes\":4,\"disposition\":\"commentary\"}}", .activity = .writing_response },
+        .{ .event = "{\"progress\":{\"turn\":1,\"tool_name\":\"\",\"tool_input\":\"\",\"tool_calls\":0}}", .activity = .writing_response, .unchanged = true },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"next\"}", .activity = .thinking },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"generating\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"next turn\"}", .activity = .thinking },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"waiting_ui\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_user },
+        .{ .event = "{\"thinking_chunk\":\"nested\"}", .activity = .waiting_user, .unchanged = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":5,\"phase\":\"generating\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"resumed\"}", .activity = .thinking },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":6,\"phase\":\"compacting\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .compacting_context },
+        .{ .event = "{\"thinking_chunk\":\"nested\"}", .activity = .compacting_context, .unchanged = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":7,\"phase\":\"generating\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"context_warning\":{\"current_tokens\":1,\"warning_threshold\":80,\"auto_compact_threshold\":100,\"blocking_limit\":120,\"level\":\"warning\"}}", .activity = .waiting_model, .unchanged = true },
+        .{ .event = "{\"thinking_chunk\":\"still trusted\"}", .activity = .thinking },
+    };
+    for (steps) |step| {
+        var envelope = try testEnvelope(route, run.id, step.event);
+        defer envelope.deinit();
+        const revision = control.revision;
+        try control.applyEvent(&envelope);
+        try std.testing.expectEqualDeep(step.activity, task_test_state.currentActivity(run).?);
+        try std.testing.expectEqual(step.degraded, run.core_activity_degraded);
+        if (step.unchanged) try std.testing.expectEqual(revision, control.revision);
+    }
+
+    try std.testing.expect(run.agent_observation_degraded);
+    try std.testing.expect(!run.core_activity_degraded);
+    for ([_]task_test_state.ActiveRunPhase{ .waiting_ui, .stopping, .queued }) |phase| {
+        _ = task_test_state.setActivePhase(run, phase);
+        _ = task_test_state.setActivePhase(run, .running);
+        try std.testing.expectEqual(task_test_state.RunActivity.waiting_model, task_test_state.currentActivity(run).?);
+    }
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-scope-marker") == null);
+}
+
+test "Core activity degrades on rejected snapshots or tool count evidence and recovers without replay" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const steps = [_]struct {
+        event: []const u8,
+        activity: task_test_state.RunActivity,
+        degraded: bool = false,
+        unchanged: bool = false,
+    }{
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"old\"}", .activity = .thinking },
+        .{ .event = "{\"run_state\":{\"run_id\":99,\"transition_seq\":2,\"phase\":\"retrying\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"thinking_chunk\":\"fresh fallback\"}", .activity = .thinking, .degraded = true },
+        .{ .event = "{\"retry_notice\":{\"attempt\":1,\"max\":2,\"delay_ms\":0}}", .activity = .thinking, .degraded = true, .unchanged = true },
+        .{ .event = "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"text_chunk\":\"note\"}", .activity = .writing_response, .degraded = true },
+        .{ .event = "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"bytes\":4,\"disposition\":\"commentary\"}}", .activity = .writing_response, .degraded = true },
+        .{ .event = "{\"stream_done\":{}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[{\"tool_call_id\":\"one\",\"name\":\"Read\"}]}}", .activity = .{ .executing_tools = .{ .in_flight = 1 } } },
+        .{ .event = "{\"tool_start\":{\"id\":\"one\",\"name\":\"Read\",\"input\":\"{}\"}}", .activity = .{ .executing_tools = .{ .in_flight = 1 } } },
+        .{ .event = "{\"tool_start\":{\"id\":\"two\",\"name\":\"Read\",\"input\":\"{}\"}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"thinking_chunk\":\"fresh after missing snapshot\"}", .activity = .thinking, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":1,\"in_flight_tools\":[{\"tool_call_id\":\"one\",\"name\":\"Read\"}]}}", .activity = .thinking, .degraded = true, .unchanged = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":2,\"in_flight_tools\":[{\"tool_call_id\":\"one\",\"name\":\"Read\"},{\"tool_call_id\":\"two\",\"name\":\"Read\"}]}}", .activity = .{ .executing_tools = .{ .in_flight = 2 } } },
+        .{ .event = "{\"tool_result\":{\"id\":\"two\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"denied\",\"is_error\":true,\"elapsed_ms\":0}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+        .{ .event = "{\"tool_result\":{\"id\":\"one\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"denied\",\"is_error\":true,\"elapsed_ms\":0}}", .activity = .waiting_model },
+        .{ .event = "{\"thinking_chunk\":\"recovered\"}", .activity = .thinking },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":5,\"phase\":\"starting\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model, .degraded = true, .unchanged = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":5,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model },
+    };
+    for (steps) |step| {
+        var envelope = try testEnvelope(route, run.id, step.event);
+        defer envelope.deinit();
+        const revision = control.revision;
+        try control.applyEvent(&envelope);
+        try std.testing.expectEqualDeep(step.activity, task_test_state.currentActivity(run).?);
+        try std.testing.expectEqual(step.degraded, run.core_activity_degraded);
+        if (step.unchanged) try std.testing.expectEqual(revision, control.revision);
+    }
+
+    try std.testing.expectEqual(@as(u64, 5), run.agent_transition_seq.?);
+    try std.testing.expectEqual(lifecycle.RunStatePhase.generating, run.agent_phase.?);
+}
+
+test "activity recovery never bypasses a finalizing transition guard" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const steps = [_]struct {
+        event: []const u8,
+        activity: task_test_state.RunActivity,
+        degraded: bool = false,
+        unchanged: bool = false,
+    }{
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"finalizing\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .finalizing },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"thinking_chunk\":\"fallback\"}", .activity = .thinking, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .waiting_model, .degraded = true },
+        .{ .event = "{\"run_state\":{\"run_id\":7,\"transition_seq\":4,\"phase\":\"completed\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}", .activity = .finalizing },
+    };
+    for (steps) |step| {
+        var envelope = try testEnvelope(route, run.id, step.event);
+        defer envelope.deinit();
+        const revision = control.revision;
+        try control.applyEvent(&envelope);
+        try std.testing.expectEqualDeep(step.activity, task_test_state.currentActivity(run).?);
+        try std.testing.expectEqual(step.degraded, run.core_activity_degraded);
+        if (step.unchanged) try std.testing.expectEqual(revision, control.revision);
+    }
+
+    try std.testing.expectEqual(@as(u64, 4), run.agent_transition_seq.?);
+    try std.testing.expect(task_test_state.productTerminalFacts(run) == null);
 }
 
 test "protocol retry is replaced by the next forward activity" {
@@ -17938,6 +18300,9 @@ test "protocol retry is replaced by the next forward activity" {
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
+    var retry_phase = try testEnvelope(route, run.id, "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"retrying\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}");
+    defer retry_phase.deinit();
+    try control.applyEvent(&retry_phase);
     var retry = try testEnvelope(
         route,
         run.id,
@@ -17947,24 +18312,34 @@ test "protocol retry is replaced by the next forward activity" {
     try control.applyEvent(&retry);
     try std.testing.expectEqual(
         @as(?u32, 2),
-        run.observed_activity.retrying_provider.attempt,
+        task_test_state.currentActivity(run).?.retrying_provider.attempt,
     );
     try std.testing.expectEqual(
         @as(?u64, 250),
-        run.observed_activity.retrying_provider.delay_ms,
+        task_test_state.currentActivity(run).?.retrying_provider.delay_ms,
     );
 
     var generating = try testEnvelope(
         route,
         run.id,
-        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
     );
     defer generating.deinit();
     try control.applyEvent(&generating);
     try std.testing.expectEqual(
         task_test_state.RunActivity.waiting_model,
-        run.observed_activity,
+        task_test_state.currentActivity(run).?,
     );
+    try std.testing.expectEqualDeep(task_test_state.RetryObservation{}, run.retry_observation);
+    // A delayed notice cannot establish a phase or restore old retry details.
+    const revision = control.revision;
+    try control.applyEvent(&retry);
+    try std.testing.expectEqual(revision, control.revision);
+    try std.testing.expectEqual(task_test_state.RunActivity.waiting_model, task_test_state.currentActivity(run).?);
+    var next_retry = try testEnvelope(route, run.id, "{\"run_state\":{\"run_id\":7,\"transition_seq\":3,\"phase\":\"retrying\",\"turn\":2,\"tool_calls\":0,\"in_flight_tools\":[]}}");
+    defer next_retry.deinit();
+    try control.applyEvent(&next_retry);
+    try std.testing.expectEqualDeep(task_test_state.RetryObservation{}, task_test_state.currentActivity(run).?.retrying_provider);
 }
 
 test "Conversation context observation survives Runs and clears with attachment" {
@@ -18010,8 +18385,8 @@ test "Conversation context observation survives Runs and clears with attachment"
         task.conversation_observation.last_auto_compact.?.after_tokens,
     );
     try std.testing.expectEqual(
-        task_test_state.RunActivity.waiting_model,
-        run.observed_activity,
+        task_test_state.RunActivity.compacting_context,
+        task_test_state.currentActivity(run).?,
     );
     var context_storage: [96 * 1024]u8 = undefined;
     const context_snapshot = try control.writeAggregateFixture(&context_storage);
@@ -18020,6 +18395,10 @@ test "Conversation context observation survives Runs and clears with attachment"
         context_snapshot,
         "\"context\":{\"pressure\":null,\"lastAutoCompact\":{\"sourceRunId\":\"7\",\"dropped\":\"4\",\"kept\":\"8\",\"beforeTokens\":\"110\",\"afterTokens\":\"70\"}}",
     ) != null);
+    var resumed = try testEnvelope(route, run.id, "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}");
+    defer resumed.deinit();
+    try control.applyEvent(&resumed);
+    try std.testing.expectEqual(task_test_state.RunActivity.waiting_model, task_test_state.currentActivity(run).?);
 
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     try std.testing.expect(task.conversation_observation.pressure == null);
