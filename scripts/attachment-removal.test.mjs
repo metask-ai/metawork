@@ -382,7 +382,7 @@ for (const recoveryFails of [false, true]) {
   });
 }
 
-async function fixture(ctx) {
+async function fixture(ctx, { batches, cancelResult } = {}) {
   window.sessionStorage.clear();
   const snapshot = JSON.parse(
     await readFile(
@@ -390,6 +390,7 @@ async function fixture(ctx) {
       "utf8",
     ),
   );
+  snapshot.capabilities.automaticWorkspaces = true;
   const first = snapshot.tasks[0];
   Object.assign(first, {
     title: "First attachment task",
@@ -424,15 +425,21 @@ async function fixture(ctx) {
       releases.push({ token, ...gate });
       return gate.promise;
     },
-    createAttachmentAdd: () => {
-      adds.push(true);
+    createAttachmentAdd: (_recover, remainingFiles) => {
+      const add = { remainingFiles, cancelled: false };
+      adds.push(add);
       return {
         run: async () => ({
           status: "ready",
-          attachments: [attachment("a"), attachment("b")],
+          attachments: batches
+            ? batches.shift()
+            : [attachment("a"), attachment("b")],
         }),
         handoff: (commit) => commit(),
-        cancel: async () => ({ status: "cleaned", released: true }),
+        cancel: async () => {
+          add.cancelled = true;
+          return cancelResult ?? { status: "cleaned", released: true };
+        },
       };
     },
     run: async (...args) => {
@@ -458,9 +465,12 @@ async function fixture(ctx) {
     const buttons = await screen.findAllByRole("button", {
       name: new RegExp(title),
     });
-    fireEvent.click(
-      buttons.find((button) => button.closest(".task-list-item")) ?? buttons[0],
-    );
+    await act(async () => {
+      fireEvent.click(
+        buttons.find((button) => button.closest(".task-list-item")) ??
+          buttons[0],
+      );
+    });
   };
   await select("First attachment task");
   await screen.findByRole("button", { name: "Add files" });
@@ -554,3 +564,108 @@ test("App waits for release before restoring adjacent focus and never interrupts
   assert.equal(document.querySelector("textarea").value, "still typing");
   assert.equal(f.releases.length, 1);
 });
+
+const attachmentBatch = (start, count) =>
+  Array.from({ length: count }, (_, index) => ({
+    token: (start + index).toString(16).padStart(48, "0"),
+    kind: "image",
+    format: "jpeg",
+    displayName: `shot-${start + index}.jpg`,
+    sizeBytes: "120000",
+  }));
+const visibleAttachments = () =>
+  screen.queryAllByRole("button", { name: /^Remove shot-/ });
+
+test("App allows 5+3 in one message and full drafts coexist with other Task and New task drafts", async (ctx) => {
+  const f = await fixture(ctx, {
+    batches: [
+      attachmentBatch(0, 5),
+      attachmentBatch(5, 3),
+      attachmentBatch(8, 1),
+      attachmentBatch(9, 1),
+    ],
+  });
+  fireEvent.change(document.querySelector("textarea"), {
+    target: { value: "keep original text" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => assert.equal(visibleAttachments().length, 5));
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => assert.equal(visibleAttachments().length, 8));
+  assert.deepEqual(
+    f.adds.map((add) => add.remainingFiles),
+    [8, 3],
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await screen.findByText("You can attach up to 8 files per message.");
+  assert.equal(f.adds.length, 2);
+  assert.equal(visibleAttachments().length, 8);
+  await f.select("Second attachment task");
+  await waitFor(() => assert.equal(visibleAttachments().length, 0));
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => assert.equal(visibleAttachments().length, 1));
+  assert.equal(f.adds[2].remainingFiles, 8);
+  fireEvent.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await waitFor(() => assert.equal(visibleAttachments().length, 0));
+  fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+  await waitFor(() => assert.equal(visibleAttachments().length, 1));
+  assert.equal(f.adds[3].remainingFiles, 8);
+  await f.select("First attachment task");
+  assert.equal(visibleAttachments().length, 8);
+  assert.equal(document.querySelector("textarea").value, "keep original text");
+});
+
+for (const source of ["drop", "paste"]) {
+  test(`App rejects 7+2 ${source} before creating an operation or reading files`, async (ctx) => {
+    const f = await fixture(ctx, { batches: [attachmentBatch(0, 7)] });
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => assert.equal(visibleAttachments().length, 7));
+    const textbox = document.querySelector("textarea");
+    fireEvent.change(textbox, { target: { value: "still editable" } });
+    if (source === "drop") act(() => f.drop(["/tmp/one.jpg", "/tmp/two.jpg"]));
+    else {
+      const files = [
+        new File(["one"], "one.png", { type: "image/png" }),
+        new File(["two"], "two.png", { type: "image/png" }),
+      ];
+      for (const file of files)
+        file.slice = () =>
+          assert.fail("oversized selection must not read files");
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          items: files.map((file) => ({
+            kind: "file",
+            type: file.type,
+            getAsFile: () => file,
+          })),
+        },
+      });
+    }
+    await screen.findByText("You can attach up to 8 files per message.");
+    assert.equal(f.adds.length, 1);
+    assert.equal(visibleAttachments().length, 7);
+    assert.equal(textbox.value, "still editable");
+  });
+}
+
+for (const cleanupFailed of [false, true]) {
+  test(`App cancels an oversized ready batch without handing it into the draft (cleanup failed ${cleanupFailed})`, async (ctx) => {
+    const f = await fixture(ctx, {
+      batches: [attachmentBatch(0, 7), attachmentBatch(7, 2)],
+      cancelResult: cleanupFailed ? { status: "cleanup_failed" } : undefined,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => assert.equal(visibleAttachments().length, 7));
+    fireEvent.click(screen.getByRole("button", { name: "Add files" }));
+    await waitFor(() => assert.equal(f.adds[1]?.cancelled, true));
+    await screen.findByText(
+      cleanupFailed
+        ? "Attachment cleanup is incomplete and some resources are still in use. Try again later."
+        : "You can attach up to 8 files per message.",
+    );
+    assert.equal(f.adds[1].remainingFiles, 1);
+    assert.equal(visibleAttachments().length, 7);
+  });
+}

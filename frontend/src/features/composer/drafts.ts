@@ -21,6 +21,18 @@ const maxPersistedDraftBytes = 8 * 1024 * 1024;
 const maxPersistedDraftSemanticBytes =
   maxSkillRunInputBytes + maxSkillRunInputBytes;
 
+/** Per-message allowance; other drafts and shared resource usage do not enter it. */
+export function remainingAttachmentFiles(
+  draft: ComposerDraft,
+  maxFiles: string,
+): number {
+  if (draft.kind === "skill") return 0;
+  const count = draft.kind === "multimodal" ? draft.attachments.length : 0;
+  const remaining = BigInt(maxFiles) - BigInt(count);
+  if (remaining <= 0n) return 0;
+  return Number(remaining > 0xffff_ffffn ? 0xffff_ffffn : remaining);
+}
+
 export function newTaskDraftStorageId(
   active: boolean,
   workspaceId: string | null,

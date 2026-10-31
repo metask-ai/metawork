@@ -159,35 +159,41 @@ test("legacy revision 1 receive fixture remains an exact wire contract", () => {
   assert.throws(() => decodeAttachmentReceiveResult({ status: "cancelled" }));
 });
 for (const connect of [oldWire.connect, wire.nativePathsConnect])
-  test(`client emits the unified Native-tested byte fixture with ${connect.attachmentInput.mode} drops`, async () => {
-    const calls = [];
-    const client = new BridgeClient({
-      bridge: {
-        on: () => () => {},
-        invoke: async (command, payload) => {
-          if (command === "metawork.events.connect") return connect;
-          calls.push([command, payload]);
-          if (command.endsWith("cancelAdd")) return cleaned;
-          return command.endsWith("finishAdd") ? ready : accepted;
+  for (const remainingFiles of [undefined, 1])
+    test(`client emits the unified Native-tested byte fixture with ${connect.attachmentInput.mode} drops and allowance ${remainingFiles}`, async () => {
+      const calls = [];
+      const client = new BridgeClient({
+        bridge: {
+          on: () => () => {},
+          invoke: async (command, payload) => {
+            if (command === "metawork.events.connect") return connect;
+            calls.push([command, payload]);
+            if (command.endsWith("cancelAdd")) return cleaned;
+            return command.endsWith("finishAdd") ? ready : accepted;
+          },
         },
-      },
+      });
+      await client.connect();
+      await client.createAttachmentAdd(async () => {}).cancel();
+      await client.createAttachmentAdd(async () => {}).cancel();
+      calls.length = 0;
+      const op = client.createAttachmentAdd(async () => {}, remainingFiles);
+      assert.deepEqual(await op.run(byteSource()), ready);
+      assert.deepEqual(calls, [
+        [
+          "metawork.attachments.beginAdd",
+          remainingFiles === undefined
+            ? wire.begin
+            : wire.beginWithRemainingFiles,
+        ],
+        ["metawork.attachments.appendAdd", wire.append],
+        ["metawork.attachments.finishAdd", wire.key],
+      ]);
+      assert.equal(
+        op.handoff(() => true),
+        true,
+      );
     });
-    await client.connect();
-    await client.createAttachmentAdd(async () => {}).cancel();
-    await client.createAttachmentAdd(async () => {}).cancel();
-    calls.length = 0;
-    const op = client.createAttachmentAdd(async () => {});
-    assert.deepEqual(await op.run(byteSource()), ready);
-    assert.deepEqual(calls, [
-      ["metawork.attachments.beginAdd", wire.begin],
-      ["metawork.attachments.appendAdd", wire.append],
-      ["metawork.attachments.finishAdd", wire.key],
-    ]);
-    assert.equal(
-      op.handoff(() => true),
-      true,
-    );
-  });
 test("DOM reads start after reservation and each write acknowledgement bounds the next chunk", async () => {
   const begin = deferred(),
     write = deferred(),

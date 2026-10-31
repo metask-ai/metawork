@@ -869,7 +869,7 @@ export const enUS = {
     "Files are still being processed. Try adding again shortly.",
   "attachment.error.input_unavailable": "Files cannot be added here right now.",
   "attachment.error.cleanup_failed":
-    "Some unsent files could not be cleaned up. Try adding again later; your existing draft is retained.",
+    "Attachment cleanup is incomplete and some resources are still in use. Try again later.",
   "attachment.cancel": "Cancel adding files",
   "attachment.error.invalid_transfer":
     "File transfer did not complete. Add the files again.",
@@ -890,9 +890,10 @@ export const enUS = {
     "A selected file is empty, invalid, or an image that cannot be decoded.",
   "attachment.error.file_too_large":
     "A selected file exceeds the per-file limit ({limit} MB).",
-  "attachment.error.too_many_files": "You can attach up to 8 files.",
+  "attachment.error.too_many_files":
+    "You can attach up to 8 files per message.",
   "attachment.error.staging_capacity":
-    "There is not enough attachment space. Remove a file and try again.",
+    "Attachment resources are temporarily unavailable. No files were added. Try again later.",
   "attachment.error.read_failed":
     "One of the selected files could not be read.",
   "attachment.error.file_changed":

@@ -987,7 +987,7 @@ export class BridgeClient {
         "Invalid task stop result",
       );
   }
-  createAttachmentAdd(recover: () => Promise<void>) {
+  createAttachmentAdd(recover: () => Promise<void>, remainingFiles?: number) {
     const connection = this.attachmentConnection;
     if (!connection) throw new Error("Attachment input is unavailable");
     if (this.nextReceiveBatch > 18446744073709551615n)
@@ -1007,6 +1007,7 @@ export class BridgeClient {
           return decodeAttachmentAddBegin(
             await this.bridge().invoke(commands.beginAttachmentAdd, {
               ...key,
+              ...(remainingFiles === undefined ? {} : { remainingFiles }),
               source,
             }),
           );
