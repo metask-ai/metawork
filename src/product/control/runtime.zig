@@ -13,7 +13,6 @@ const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const output_check = @import("output_check.zig");
 const permission_job = @import("permission_job.zig");
-const permission_review = @import("product_permission_review");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_control_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
@@ -6123,7 +6122,6 @@ pub const Runtime = struct {
     fn startPermissionReview(self: *Runtime, value: task_runtime.PreparedPermissionReview, deadline: std.Io.Clock.Timestamp, slot: *?*permission_job.Job) !void {
         var prepared = value;
         errdefer prepared.deinit();
-        self.filterPermissionReviewTools(&prepared.input);
         for ([_][]const u8{ prepared.input.user_intent, prepared.input.context, prepared.input.request.tool_name, prepared.input.request.working_directory }) |field|
             _ = self.redactWithKnownCredentialsNoFail(@constCast(field));
         var scanner = std.json.Scanner.initCompleteInput(self.allocator, prepared.input.request.arguments_json);
@@ -6134,7 +6132,7 @@ pub const Runtime = struct {
             clearPermissionArguments(&parsed.value);
             parsed.deinit();
         }
-        _ = try self.scrubPermissionArguments(&parsed.value);
+        try self.scrubPermissionArguments(&parsed.value);
         const arguments = try self.allocator.alloc(u8, 32 * 1024);
         errdefer {
             std.crypto.secureZero(u8, arguments);
@@ -6149,7 +6147,7 @@ pub const Runtime = struct {
                 clearPermissionArguments(&history.value);
                 history.deinit();
             }
-            _ = try self.scrubPermissionArguments(&history.value);
+            try self.scrubPermissionArguments(&history.value);
             var history_writer = std.Io.Writer.fixed(arguments[writer.end..]);
             try std.json.Stringify.value(history.value, .{}, &history_writer);
             prepared.input.user_history_json = history_writer.buffered();
@@ -6168,59 +6166,22 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    fn filterPermissionReviewTools(self: *Runtime, input: *permission_review.Input) void {
-        var start = input.tool_history.len;
-        while (start > 0) {
-            const tool = input.tool_history[start - 1];
-            if (self.containsKnownCredential(tool.tool) or
-                !self.permissionToolFieldSafe(tool.input, true) or
-                !self.permissionToolFieldSafe(tool.output, false)) break;
-            start -= 1;
-        }
-        input.omitted_tool_calls += start;
-        input.tool_history = input.tool_history[start..];
-    }
-
-    fn permissionToolFieldSafe(self: *Runtime, bytes: []const u8, require_json: bool) bool {
-        if (self.containsKnownCredential(bytes)) return false;
-        const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-        if (!require_json and (trimmed.len == 0 or std.mem.indexOfScalar(u8, "{[\"", trimmed[0]) == null)) return true;
-        var scanner = std.json.Scanner.initCompleteInput(self.allocator, bytes);
-        defer scanner.deinit();
-        while (true) {
-            const token = scanner.next() catch return false;
-            if (scanner.stackHeight() > 64) return false;
-            if (token == .end_of_document) break;
-        }
-        // Clear only separately owned decoded values, never the frozen record.
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error", .parse_numbers = false }) catch return false;
-        defer {
-            clearPermissionArguments(&parsed.value);
-            parsed.deinit();
-        }
-        return !(self.scrubPermissionArguments(&parsed.value) catch return false);
-    }
-
-    fn scrubPermissionArguments(self: *Runtime, value: *std.json.Value) !bool {
-        var changed = false;
+    fn scrubPermissionArguments(self: *Runtime, value: *std.json.Value) !void {
         switch (value.*) {
-            .string => |string| changed = self.redactWithKnownCredentialsNoFail(@constCast(string)),
+            .string => |string| _ = self.redactWithKnownCredentialsNoFail(@constCast(string)),
             .number_string => |number| if (self.containsKnownCredential(number)) {
                 return error.SensitiveArgumentNumber;
             },
-            .array => |*array| for (array.items) |*item| {
-                changed = (try self.scrubPermissionArguments(item)) or changed;
-            },
+            .array => |*array| for (array.items) |*item| try self.scrubPermissionArguments(item),
             .object => |*object| {
                 var iterator = object.iterator();
                 while (iterator.next()) |entry| {
                     if (self.containsKnownCredential(entry.key_ptr.*)) return error.SensitiveArgumentKey;
-                    changed = (try self.scrubPermissionArguments(entry.value_ptr)) or changed;
+                    try self.scrubPermissionArguments(entry.value_ptr);
                 }
             },
             else => {},
         }
-        return changed;
     }
 
     fn clearPermissionArguments(value: *std.json.Value) void {
@@ -12360,35 +12321,6 @@ fn installTestExecution(control: *Runtime) !void {
 
 fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
-}
-
-test "review tool context drops an escaped credential boundary without rewriting retained records" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var buffer: [1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writer.writeAll("{\"value\":\"");
-    for (control.execution_state.credential()) |character| try writer.print("\\u{x:0>4}", .{@as(u16, character)});
-    try writer.writeAll("\"}");
-    const escaped = writer.buffered();
-    const original = try std.testing.allocator.dupe(u8, escaped);
-    defer std.testing.allocator.free(original);
-    const tools = [_]permission_review.ToolContext{
-        .{ .order = 1, .tool = "Write", .input = "{}", .output = "older result", .is_error = false },
-        .{ .order = 2, .tool = "Edit", .input = escaped, .output = "changed result", .is_error = false },
-        .{ .order = 3, .tool = "Read", .input = "{\"file_path\":\"a.txt\"}", .output = "{\"text\":\"recent result\"}", .is_error = false },
-    };
-    var input: permission_review.Input = undefined;
-    input.tool_history = &tools;
-    input.omitted_tool_calls = 4;
-    control.filterPermissionReviewTools(&input);
-    try std.testing.expectEqual(@as(usize, 1), input.tool_history.len);
-    try std.testing.expectEqual(@as(usize, 6), input.omitted_tool_calls);
-    try std.testing.expectEqualStrings(tools[2].input, input.tool_history[0].input);
-    try std.testing.expectEqualStrings("{\"text\":\"recent result\"}", input.tool_history[0].output);
-    try std.testing.expectEqualStrings(original, escaped);
-    try std.testing.expect(!control.permissionToolFieldSafe(escaped, false));
-    try std.testing.expect(!control.permissionToolFieldSafe("{\"incomplete\":", false));
 }
 
 test "non-Skill executor completion wakes queued source recovery without a Skill completion" {

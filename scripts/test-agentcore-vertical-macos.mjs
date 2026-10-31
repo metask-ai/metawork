@@ -3940,22 +3940,15 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           } else if (readability) {
             readabilityReviewRequests++;
             assert.equal(readabilityReviewRequests, 1);
-            assert.deepEqual(
-              review.evidence.recent_tool_calls.map((call) => call.tool),
-              ["Write", "Edit"],
-              "canonical Core observations must reach review as a continuous current-Run suffix",
-            );
             assert.equal(
-              JSON.parse(review.evidence.recent_tool_calls[0].input).content,
-              "print('BEFORE')\n",
+              review.evidence.recent_tool_calls,
+              undefined,
+              "Write from a previous turn must not become evidence while same-turn Edit and Bash await tool_start",
             );
-            assert.equal(
-              JSON.parse(review.evidence.recent_tool_calls[1].input).new_string,
-              "AFTER",
-            );
-            assert.equal(review.evidence.omitted_tool_calls, 0);
+            assert.equal(review.evidence.omitted_tool_calls, undefined);
             assert.ok(
-              review.evidence.recent_tool_calls.every((call) => !call.is_error),
+              !payload.messages[0].content.includes("BEFORE"),
+              "benign old script content must not reach the reviewer",
             );
           } else {
             assert.equal(
@@ -4186,7 +4179,14 @@ function describeAuthorizationHeader(value) {
   return `authorization=present,length=${value.length},bearer=${value.startsWith("Bearer ")}`;
 }
 
-function toolSse(messageId, toolId, name, input, commentary = null) {
+function toolSse(
+  messageId,
+  toolId,
+  name,
+  input,
+  commentary = null,
+  precedingTools = [],
+) {
   const events = [
     {
       type: "message_start",
@@ -4215,18 +4215,31 @@ function toolSse(messageId, toolId, name, input, commentary = null) {
     );
     toolIndex = 1;
   }
+  for (const tool of [...precedingTools, { id: toolId, name, input }]) {
+    events.push(
+      {
+        type: "content_block_start",
+        index: toolIndex,
+        content_block: {
+          type: "tool_use",
+          id: tool.id,
+          name: tool.name,
+          input: {},
+        },
+      },
+      {
+        type: "content_block_delta",
+        index: toolIndex,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify(tool.input),
+        },
+      },
+      { type: "content_block_stop", index: toolIndex },
+    );
+    toolIndex++;
+  }
   events.push(
-    {
-      type: "content_block_start",
-      index: toolIndex,
-      content_block: { type: "tool_use", id: toolId, name, input: {} },
-    },
-    {
-      type: "content_block_delta",
-      index: toolIndex,
-      delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
-    },
-    { type: "content_block_stop", index: toolIndex },
     {
       type: "message_delta",
       delta: { stop_reason: "tool_use" },

@@ -200,10 +200,11 @@ export async function runApprovalReadabilityVertical({
     args,
     userText = input,
     priorCalls = [],
+    siblingCalls = [],
   ) => {
     provider.enqueue(
       ...priorCalls,
-      toolSse(input, `${input}-tool`, tool, args),
+      toolSse(input, `${input}-tool`, tool, args, null, siblingCalls),
       textSse(`${input}-done`, "Readability fixture completed after denial."),
     );
     const before = await readTask();
@@ -573,11 +574,17 @@ export async function runApprovalReadabilityVertical({
             content: "print('BEFORE')\n",
           },
         ),
-        toolSse("approval-context-edit", "approval-context-edit-tool", "Edit", {
-          file_path: path.join(workspaceRoot, "approval-context.py"),
-          old_string: "BEFORE",
-          new_string: "AFTER",
-        }),
+      ],
+      [
+        {
+          id: "approval-context-edit-tool",
+          name: "Edit",
+          input: {
+            file_path: path.join(workspaceRoot, "approval-context.py"),
+            old_string: "BEFORE",
+            new_string: "AFTER",
+          },
+        },
       ],
     );
     if (provider.error) {

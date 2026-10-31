@@ -371,11 +371,6 @@ pub const ToolView = struct {
     input_truncated: bool = false,
     progress_truncated: bool = false,
     content_truncated: bool = false,
-    /// An image result may be replaced with a display summary. Such text is
-    /// not an unchanged Tool observation for permission review.
-    content_rewritten: bool = false,
-    /// Only canonical Permission provenance can identify a builtin call.
-    permission_namespace: ?agent.PermissionToolNamespace = null,
     redacted: bool = false,
     file_refs: ?[]?FileReferenceView = null,
 };
@@ -955,9 +950,6 @@ pub const RunRecord = struct {
     agent_in_flight_tools: u32 = 0,
     agent_observation_degraded: bool = false,
     permission_provenance: ?PermissionSummary = null,
-    /// Associates the latest provenance with a subsequently observed tool_start.
-    /// Interleaving may leave older calls unknown; they remain review barriers.
-    permission_tool_route_digest: ?[tool_route_digest_bytes]u8 = null,
     /// Null is reserved for history written before typed File Changes existed.
     file_change_observation: ?FileChangeObservation = null,
     file_changes: []?FileChangeView = &.{},
@@ -1874,7 +1866,6 @@ pub fn applyEvent(
                 tool_event.name,
                 tool_event.input,
             );
-            bindToolPermission(run, tool);
             tool.state = .running;
             _ = setObservedActivity(run, .{ .executing_tools = .{
                 .in_flight = runningToolCount(run.tools),
@@ -1908,21 +1899,18 @@ pub fn applyEvent(
                 result.name,
                 result.input,
             );
-            bindToolPermission(run, tool);
             const input = try projection.replaceText(
                 &tool.input,
                 result.input,
                 run.initial_credentials[0],
             );
-            const image_summary = imageReadSummary(result.name, result.is_error, result.content);
             const content = try projection.replaceText(
                 &tool.content,
-                image_summary orelse result.content,
+                imageReadSummary(result.name, result.is_error, result.content) orelse result.content,
                 run.initial_credentials[0],
             );
             tool.input_truncated = input.truncated;
             tool.content_truncated = content.truncated;
-            tool.content_rewritten = image_summary != null;
             tool.redacted = tool.redacted or input.redacted or content.redacted;
             tool.is_error = result.is_error;
             tool.elapsed_ms = result.elapsed_ms;
@@ -2057,9 +2045,6 @@ pub fn applyEvent(
         .permission_provenance => |provenance| {
             const summary = try permissionSummary(provenance);
             run.permission_provenance = summary;
-            run.permission_tool_route_digest = toolRouteDigest(provenance.tool_call_id);
-            if (findTool(run.tools, provenance.tool_call_id)) |tool|
-                tool.permission_namespace = provenance.tool.namespace;
             if (provenance.request_id) |request_id|
                 if (findUiRecordByAgentRequestId(
                     task.durable.ui_history,
@@ -2240,12 +2225,6 @@ fn findUiRecordByAgentRequestId(
             )) return record;
     }
     return null;
-}
-
-fn bindToolPermission(run: *const RunRecord, tool: *ToolView) void {
-    const digest = run.permission_tool_route_digest orelse return;
-    const provenance = run.permission_provenance orelse return;
-    if (std.mem.eql(u8, &digest, &tool.route_digest)) tool.permission_namespace = provenance.tool_namespace;
 }
 
 fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {

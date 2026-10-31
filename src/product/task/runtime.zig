@@ -258,7 +258,6 @@ pub const PreparedPermissionReview = struct {
     identity: PermissionReviewIdentity,
     input: permission_review.Input,
     bytes: []u8,
-    tool_context_storage: []permission_review.ToolContext = &.{},
     execution: owned_task_execution.OwnedTaskExecution,
     tool_namespace: agent.PermissionToolNamespace,
 
@@ -266,7 +265,6 @@ pub const PreparedPermissionReview = struct {
         self.execution.deinit();
         std.crypto.secureZero(u8, self.bytes);
         self.allocator.free(self.bytes);
-        self.allocator.free(self.tool_context_storage);
         self.* = undefined;
     }
 };
@@ -2845,12 +2843,12 @@ pub const Runtime = struct {
         config.target.model = run.execution_model;
         var owned_execution = try owned_task_execution.OwnedTaskExecution.clone(self.allocator, config);
         errdefer owned_execution.deinit();
-        const bytes = try self.allocator.alloc(u8, permission_review.max_input_bytes + permission_review.max_tool_context_bytes);
+        const bytes = try self.allocator.alloc(u8, permission_review.max_input_bytes);
         errdefer {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);
         }
-        var writer = std.Io.Writer.fixed(bytes[0..permission_review.max_input_bytes]);
+        var writer = std.Io.Writer.fixed(bytes);
         var intent_buffer: [8 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &intent_buffer);
         const intent = try currentReviewIntent(run, pending.input_adopted_count, &intent_buffer);
@@ -2872,13 +2870,7 @@ pub const Runtime = struct {
             .context = try copyReviewField(&writer, text, context, 4 * 1024, run.redactionSecrets()),
         };
         try appendReviewHistory(task.durable.runs, run.id, text, run.redactionSecrets(), &writer, &input);
-        // Optional context has a separate byte bound. Allocation failures keep
-        // the existing capacity failure semantics; no partial input is sent.
-        const tool_storage = try self.allocator.alloc(permission_review.ToolContext, run.tools.len);
-        errdefer self.allocator.free(tool_storage);
-        var tool_writer = std.Io.Writer.fixed(bytes[permission_review.max_input_bytes..]);
-        try appendReviewTools(run, request.tool_call_id, task.runtime.pending_ui_order, text, run.redactionSecrets(), &tool_writer, tool_storage, &input);
-        return .{ .allocator = self.allocator, .identity = identity, .input = input, .bytes = bytes, .tool_context_storage = tool_storage, .execution = owned_execution, .tool_namespace = request.tool.namespace };
+        return .{ .allocator = self.allocator, .identity = identity, .input = input, .bytes = bytes, .execution = owned_execution, .tool_namespace = request.tool.namespace };
     }
 
     pub fn prepareNextPermissionReview(self: *Runtime, text: TextProjection) ?PreparedPermissionReview {
@@ -8728,56 +8720,6 @@ fn hasWaitingInputs(task: *const task_state.Task) bool {
     return false;
 }
 
-fn appendReviewTools(run: *const task_state.RunRecord, pending_tool_id: []const u8, pending_order: u64, text: TextProjection, secrets: []const []const u8, writer: *std.Io.Writer, storage: []permission_review.ToolContext, input: *permission_review.Input) std.mem.Allocator.Error!void {
-    const pending_digest = toolRouteDigest(pending_tool_id);
-    var boundary: usize = 0;
-    for (run.tools, 0..) |entry, index| {
-        const tool = entry orelse continue;
-        if (std.mem.eql(u8, &tool.route_digest, &pending_digest) or (pending_order != 0 and tool.order >= pending_order)) {
-            boundary = index;
-            break;
-        }
-        input.omitted_tool_calls += 1;
-        boundary = index + 1;
-    }
-    // Core can ask before tool_start. The request's existing activity marker
-    // freezes the boundary without fabricating a Tool or parsing its command.
-    if (pending_order == 0) return;
-    var index = boundary;
-    var start = storage.len;
-    while (index > 0 and start > 0) {
-        index -= 1;
-        const tool = if (run.tools[index]) |*value| value else break;
-        if (tool.permission_namespace != .builtin or tool.state == .running or tool.input_truncated or tool.content_truncated or tool.redacted or tool.content_rewritten) break;
-        const frozen = copyReviewTool(tool, text, secrets, writer) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => break,
-        };
-        start -= 1;
-        storage[start] = frozen;
-        input.omitted_tool_calls -= 1;
-    }
-    input.tool_history = storage[start..];
-}
-
-fn copyReviewTool(tool: *const task_state.ToolView, text: TextProjection, secrets: []const []const u8, writer: *std.Io.Writer) !permission_review.ToolContext {
-    const start = writer.end;
-    errdefer writer.end = start;
-    var fields: [3][]const u8 = undefined;
-    for ([_][]const u8{ tool.name, tool.input, tool.content }, &fields) |value, *field| {
-        const projected = try text.project(value, permission_review.max_tool_context_bytes, secrets, 0);
-        defer {
-            std.crypto.secureZero(u8, projected.value);
-            text.discardCandidate(projected.value);
-        }
-        if (projected.truncated or projected.redacted or !std.unicode.utf8ValidateSlice(value) or !std.mem.eql(u8, value, projected.value)) return error.ReviewToolUnavailable;
-        const offset = writer.end;
-        try writer.writeAll(projected.value);
-        field.* = writer.buffer[offset..writer.end];
-    }
-    return .{ .order = tool.order, .tool = fields[0], .input = fields[1], .output = fields[2], .is_error = tool.is_error };
-}
-
 fn latestReviewContext(run: *const task_state.RunRecord) []const u8 {
     if (run.commentary_count == 0) return "No closed Agent commentary is available; prior Tool output is omitted.";
     const end: usize = @intCast(run.commentary_ends[run.commentary_count - 1]);
@@ -9641,92 +9583,6 @@ test "UI history distinguishes idempotent settlement from cross-Run collision" {
 
 fn reviewHistoryTestRun(id: u64, message: []const u8) task_state.RunRecord {
     return .{ .id = id, .generation = 1, .execution_generation = 1, .execution_protocol = .anthropic_messages, .execution_model = "m", .permission_profile = .approval_required, .permission_interaction = .interactive, .input = .{ .text = .{ .value = @constCast(message) } }, .commentary_ends = &.{}, .tools = &.{}, .terminal_diagnostic = &.{} };
-}
-
-fn reviewToolTestView(id: []const u8, order: u64, name: []const u8) task_state.ToolView {
-    return .{ .route_digest = toolRouteDigest(id), .id = @constCast(id), .order = order, .name = @constCast(name), .input = @constCast("{\"content\":\"complete input\"}"), .content = @constCast("complete result"), .progress = &.{}, .state = .completed, .permission_namespace = .builtin };
-}
-
-test "permission review tool window freezes complete calls before the exact pending request" {
-    var tools = [_]?task_state.ToolView{ reviewToolTestView("write", 1, "Write"), reviewToolTestView("edit", 2, "Edit"), reviewToolTestView("pending", 3, "Bash"), reviewToolTestView("later", 4, "Write") };
-    tools[1].?.is_error = true;
-    tools[1].?.state = .failed;
-    var run = reviewHistoryTestRun(1, "Check the file");
-    run.tools = &tools;
-    var projection = InputTestProjection{ .allocator = std.testing.allocator };
-    var buffer: [permission_review.max_tool_context_bytes]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    var storage: [tools.len]permission_review.ToolContext = undefined;
-    var input: permission_review.Input = undefined;
-    input.tool_history = &.{};
-    input.omitted_tool_calls = 0;
-    try appendReviewTools(&run, "pending", 3, projection.effects().text, &.{}, &writer, &storage, &input);
-    try std.testing.expectEqual(@as(usize, 2), input.tool_history.len);
-    try std.testing.expectEqualStrings("Write", input.tool_history[0].tool);
-    try std.testing.expectEqualStrings("Edit", input.tool_history[1].tool);
-    try std.testing.expect(input.tool_history[1].is_error);
-    try std.testing.expectEqual(@as(usize, 0), input.omitted_tool_calls);
-    // Real Core asks for permission before publishing the pending tool_start.
-    run.tools = tools[0..2];
-    writer = std.Io.Writer.fixed(&buffer);
-    input.tool_history = &.{};
-    input.omitted_tool_calls = 0;
-    try appendReviewTools(&run, "not-started-yet", 3, projection.effects().text, &.{}, &writer, &storage, &input);
-    try std.testing.expectEqual(@as(usize, 2), input.tool_history.len);
-    tools[0].?.input = @constCast("changed after preparation");
-    try std.testing.expectEqualStrings("{\"content\":\"complete input\"}", input.tool_history[0].input);
-    try std.testing.expectEqual(@as(usize, 0), projection.charged);
-}
-
-test "permission review tool suffix stops at gaps incomplete redacted rewritten and running calls" {
-    const RedactingProjection = struct {
-        fn project(context: *anyopaque, value: []const u8, max: usize, secrets: []const []const u8, previous: usize) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
-            var projected = try InputTestProjection.project(context, value, max, secrets, previous);
-            if (std.mem.eql(u8, value, "secret-value")) {
-                @memset(projected.value, '*');
-                projected.redacted = true;
-            }
-            return projected;
-        }
-    };
-    const Barrier = enum { gap, input_truncated, output_truncated, redacted, rewritten, running, oversized, changed_by_projection, missing_request, mcp, unknown_namespace };
-    for (std.enums.values(Barrier)) |barrier| {
-        var tools = [_]?task_state.ToolView{ reviewToolTestView("write", 1, "Write"), reviewToolTestView("barrier", 2, "Edit"), reviewToolTestView("read", 3, "Read"), reviewToolTestView("pending", 4, "Bash") };
-        const large = [_]u8{'a'} ** (permission_review.max_tool_context_bytes + 1);
-        switch (barrier) {
-            .gap => tools[1] = null,
-            .input_truncated => tools[1].?.input_truncated = true,
-            .output_truncated => tools[1].?.content_truncated = true,
-            .redacted => tools[1].?.redacted = true,
-            .rewritten => tools[1].?.content_rewritten = true,
-            .running => tools[1].?.state = .running,
-            .oversized => tools[1].?.input = @constCast(&large),
-            .changed_by_projection => tools[1].?.input = @constCast("secret-value"),
-            .missing_request => {},
-            .mcp => tools[1].?.permission_namespace = .mcp,
-            .unknown_namespace => tools[1].?.permission_namespace = null,
-        }
-        var run = reviewHistoryTestRun(1, "Check the file");
-        run.tools = &tools;
-        var projection = InputTestProjection{ .allocator = std.testing.allocator };
-        var buffer: [permission_review.max_tool_context_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        var storage: [tools.len]permission_review.ToolContext = undefined;
-        var input: permission_review.Input = undefined;
-        input.tool_history = &.{};
-        input.omitted_tool_calls = 0;
-        var text = projection.effects().text;
-        text.project_fn = RedactingProjection.project;
-        try appendReviewTools(&run, "pending", if (barrier == .missing_request) 0 else 4, text, &.{"secret-value"}, &writer, &storage, &input);
-        if (barrier == .missing_request) {
-            try std.testing.expectEqual(@as(usize, 0), input.tool_history.len);
-        } else {
-            try std.testing.expectEqual(@as(usize, 1), input.tool_history.len);
-            try std.testing.expectEqualStrings("Read", input.tool_history[0].tool);
-            try std.testing.expectEqual(@as(usize, if (barrier == .gap) 1 else 2), input.omitted_tool_calls);
-        }
-        try std.testing.expectEqual(@as(usize, 0), projection.charged);
-    }
 }
 
 test "permission review historical groups include only adopted inputs in adoption order" {
