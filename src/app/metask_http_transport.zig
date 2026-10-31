@@ -1,4 +1,5 @@
 const std = @import("std");
+const select_start = @import("app_select_start");
 const oauth = @import("account_oauth");
 const account_metask = @import("metask_client");
 const metask_transport = @import("metask_transport");
@@ -102,23 +103,15 @@ pub const Adapter = struct {
             self.io,
             &outcome_storage,
         );
-        selection.async(
-            .fetch,
-            fetch,
-            .{ self, request, response_buffer, &send_started },
-        );
-        selection.async(
-            .deadline,
-            waitDeadline,
-            .{ self.io, deadline },
-        );
-        if (request.control) |control| {
-            selection.async(
-                .cancelled,
-                waitCancellation,
-                .{control.cancellation},
-            );
-        }
+        const http_arms = .{
+            .{ .fetch, fetch, .{ self, request, response_buffer, &send_started } },
+            .{ .deadline, waitDeadline, .{ self.io, deadline } },
+        };
+        const started = if (request.control) |control|
+            select_start.start(&selection, http_arms ++ .{.{ .cancelled, waitCancellation, .{control.cancellation} }})
+        else
+            select_start.start(&selection, http_arms);
+        started catch return if (send_started) error.NetworkFailed else error.NetworkNotSent;
         const outcome = selection.await() catch {
             selection.cancelDiscard();
             return if (send_started) error.NetworkFailed else error.NetworkNotSent;
@@ -309,6 +302,8 @@ test "Account selected complete refresh response survives late cancellation" {
 }
 
 test "Account DNS failure and connection refusal prove refresh was not sent" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     const Failures = struct {
         fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
             defer resolved.close(std.testing.io);
@@ -318,9 +313,9 @@ test "Account DNS failure and connection refusal prove refresh was not sent" {
             return error.ConnectionRefused;
         }
     };
-    var vtable = std.testing.io.vtable.*;
+    var vtable = threaded.io().vtable.*;
     vtable.netLookup = Failures.lookup;
-    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable } };
+    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable } };
     var buffer: [64]u8 = undefined;
     try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token }, &buffer));
 
@@ -335,6 +330,8 @@ test "Account DNS failure and connection refusal prove refresh was not sent" {
 }
 
 test "Account deadline and cancellation during connection prove refresh was not sent" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
     const SlowDns = struct {
         fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
             defer resolved.close(std.testing.io);
@@ -342,9 +339,9 @@ test "Account deadline and cancellation during connection prove refresh was not 
             return error.UnknownHostName;
         }
     };
-    var vtable = std.testing.io.vtable.*;
+    var vtable = threaded.io().vtable.*;
     vtable.netLookup = SlowDns.lookup;
-    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable } };
+    var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable } };
     var buffer: [64]u8 = undefined;
     var cancellation = metask_transport.Cancellation.init(std.testing.io);
     var control: metask_transport.RequestControl = .{
@@ -355,6 +352,26 @@ test "Account deadline and cancellation during connection prove refresh was not 
     cancellation.cancel();
     control.deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot });
     try std.testing.expectError(error.CancelledNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .control = control }, &buffer));
+}
+
+test "Account HTTP registration failure settles workers before reporting not sent" {
+    const Dns = struct {
+        fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+            defer resolved.close(std.testing.io);
+            try std.Io.sleep(std.testing.io, .fromSeconds(60), .awake);
+            return error.UnknownHostName;
+        }
+    };
+    for (0..3) |capacity| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .limited(capacity) });
+        defer threaded.deinit();
+        var vtable = threaded.io().vtable.*;
+        vtable.netLookup = Dns.lookup;
+        var adapter: Adapter = .{ .allocator = std.testing.allocator, .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable } };
+        var cancellation = metask_transport.Cancellation.init(adapter.io);
+        var buffer: [32]u8 = undefined;
+        try std.testing.expectError(error.NetworkNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .control = .{ .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(adapter.io, .{ .raw = .fromSeconds(60), .clock = .boot }) } }, &buffer));
+    }
 }
 
 test "Account HTTP send boundary preserves lost-response blocking and bounded responses" {

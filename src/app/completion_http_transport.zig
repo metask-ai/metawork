@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
+const select_start = @import("app_select_start");
 
 pub const Backend = struct {
     allocator: std.mem.Allocator,
@@ -38,8 +39,10 @@ pub const Backend = struct {
         };
         var outcomes: [2]Outcome = undefined;
         var selection = std.Io.Select(Outcome).init(self.io, &outcomes);
-        selection.async(.operation, fetch, .{ self, request, response_buffer });
-        selection.async(.cancelled, CancelWait.run, .{&wait});
+        select_start.start(&selection, .{
+            .{ .operation, fetch, .{ self, request, response_buffer } },
+            .{ .cancelled, CancelWait.run, .{&wait} },
+        }) catch return error.Unexpected;
         const outcome = selection.await() catch {
             wait.stop();
             selection.cancelDiscard();
@@ -153,4 +156,24 @@ fn mapFetchError(failure: anyerror) agent.CompletionTransportError {
 test "Completion HTTP adapter public surface is analyzed" {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(Backend);
+}
+
+test "Completion HTTP registration failure settles an already started request" {
+    const Dns = struct {
+        fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+            defer resolved.close(std.testing.io);
+            try std.Io.sleep(std.testing.io, .fromSeconds(60), .awake);
+            return error.UnknownHostName;
+        }
+    };
+    for (0..2) |capacity| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .limited(capacity) });
+        defer threaded.deinit();
+        var vtable = threaded.io().vtable.*;
+        vtable.netLookup = Dns.lookup;
+        var backend: Backend = .{ .allocator = std.testing.allocator, .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable } };
+        var cancellation = agent.CompletionCancellation.init(backend.transport());
+        var buffer: [32]u8 = undefined;
+        try std.testing.expectError(error.Unexpected, backend.transport().perform(.{ .url = "https://completion.invalid/messages", .headers = &.{}, .body = "fixture" }, &cancellation, &buffer));
+    }
 }

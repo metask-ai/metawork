@@ -418,6 +418,10 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
     const review_http_backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     review_http_backend.addImport("metawork_agent", modules.agent);
+    review_http_backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
+    const completion_http_tests = b.addRunArtifact(b.addTest(.{ .root_module = review_http_backend }));
+    b.step("test-completion-http-transport", "Run Completion HTTP registration and cancellation tests").dependOn(&completion_http_tests.step);
+    artifacts.tests.step.dependOn(&completion_http_tests.step);
     const review_http_options = b.addOptions();
     review_http_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for review HTTP fixture"));
     review_http_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/permission_review_http.mjs"));
@@ -2163,6 +2167,7 @@ fn wireAgentCore(
     });
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
+    image_output.addImport("app_select_start", app_select_start);
     image_output.addImport("metawork_product_workspace", product_workspace);
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
@@ -2308,6 +2313,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    mcp_oauth.addImport("app_select_start", app_select_start);
     mcp_oauth.addImport("oauth_loopback", oauth_loopback);
     mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
@@ -2368,6 +2374,7 @@ fn wireAgentCore(
     app.addImport("account_oauth", account_oauth);
     app.addImport("account_loopback", account_loopback);
     app.addImport("oauth_loopback_transport", oauth_loopback_transport);
+    app.addImport("app_select_start", app_select_start);
     app.addImport("account_ports", account_ports);
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);
