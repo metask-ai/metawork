@@ -32,6 +32,7 @@ function textContrast(foreground, background) {
 // Device metrics/theme scenarios exercise WebView content, not OS chrome/input.
 export async function runApprovalReadabilityVertical({
   invoke,
+  invokeRun,
   snapshot,
   poll,
   provider,
@@ -193,13 +194,20 @@ export async function runApprovalReadabilityVertical({
         : null;
     }, `readability mode ${targetMode}`);
   };
-  const start = async (input, tool, args, userText = input) => {
+  const start = async (
+    input,
+    tool,
+    args,
+    userText = input,
+    priorCalls = [],
+  ) => {
     provider.enqueue(
+      ...priorCalls,
       toolSse(input, `${input}-tool`, tool, args),
       textSse(`${input}-done`, "Readability fixture completed after denial."),
     );
     const before = await readTask();
-    const result = await invoke("metawork.tasks.run", {
+    const result = await invokeRun({
       taskId,
       expectedBindingEpoch: before.binding.epoch,
       input: { kind: "text", text: userText },
@@ -555,7 +563,30 @@ export async function runApprovalReadabilityVertical({
         description: purpose,
       },
       "请检查审批请求，确认这条命令的用途。",
+      [
+        toolSse(
+          "approval-context-write",
+          "approval-context-write-tool",
+          "Write",
+          {
+            file_path: path.join(workspaceRoot, "approval-context.py"),
+            content: "print('BEFORE')\n",
+          },
+        ),
+        toolSse("approval-context-edit", "approval-context-edit-tool", "Edit", {
+          file_path: path.join(workspaceRoot, "approval-context.py"),
+          old_string: "BEFORE",
+          new_string: "AFTER",
+        }),
+      ],
     );
+    if (provider.error) {
+      const run = task.runs.find((item) => item.id === task.pendingUi.runId);
+      throw new Error(
+        `review fixture failed; observed tools=${JSON.stringify(run.tools.map((item) => ({ name: item.name, state: item.state, order: item.order })))}`,
+        { cause: provider.error },
+      );
+    }
     assert.equal(task.permissionReviewExplanation.cause, "reviewer_concern");
     assert.equal(task.permissionReviewExplanation.reason, reason);
     assert.equal(provider.readabilityReviewRequests, 1);

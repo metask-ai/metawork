@@ -3132,6 +3132,7 @@ async function verifyApprovalReadability(workspaceId, workspaceEpoch) {
   try {
     await runApprovalReadabilityVertical({
       invoke: invokeBridge,
+      invokeRun: invokePreparedRun,
       snapshot,
       poll,
       provider,
@@ -3939,6 +3940,23 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           } else if (readability) {
             readabilityReviewRequests++;
             assert.equal(readabilityReviewRequests, 1);
+            assert.deepEqual(
+              review.evidence.recent_tool_calls.map((call) => call.tool),
+              ["Write", "Edit"],
+              "canonical Core observations must reach review as a continuous current-Run suffix",
+            );
+            assert.equal(
+              JSON.parse(review.evidence.recent_tool_calls[0].input).content,
+              "print('BEFORE')\n",
+            );
+            assert.equal(
+              JSON.parse(review.evidence.recent_tool_calls[1].input).new_string,
+              "AFTER",
+            );
+            assert.equal(review.evidence.omitted_tool_calls, 0);
+            assert.ok(
+              review.evidence.recent_tool_calls.every((call) => !call.is_error),
+            );
           } else {
             assert.equal(
               review.evidence.user_intent,
