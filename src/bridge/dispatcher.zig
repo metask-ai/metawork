@@ -1881,6 +1881,10 @@ pub const Dispatcher = struct {
             self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
         };
     }
+    // A failed unpublished batch owns records that have no grants. Once a
+    // batch publishes grants, cancellation tracks its distinct attachment IDs
+    // instead. These paths cannot overlap, so each live debt accounts for at
+    // least one distinct Product record. Still fail explicitly if saturated.
     fn rememberAddDebt(self: *Dispatcher, debt: AddDebt) error{CleanupFailed}!void {
         for (self.add_debt) |slot| if (slot) |existing| {
             if (std.meta.eql(existing, debt)) return;

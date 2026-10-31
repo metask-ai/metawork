@@ -207,7 +207,7 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 ## 文件 attachment commands
 
-根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制；所有已支持图片与其他文件共用 `maxFileBytes`；原件字节计入暂存配额，模型输入的预览/引用预算不投影成第二个文件大小上限。store 或图片能力不可用时 `enabled=false`。
+根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。`maxFiles` 解释单消息/单批数量，不投影全局记录容量。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制；所有已支持图片与其他文件共用 `maxFileBytes`；原件字节计入暂存配额，模型输入的预览/引用预算不投影成第二个文件大小上限。store 或图片能力不可用时 `enabled=false`。
 
 成功的 `metawork.events.connect` 响应增加 `attachmentInput = { mode, maxChunkBytes }`，拒绝响应不带该字段。Application 选择拖放入口 `mode = native_paths | file_bytes`；Windows 拖放使用 `file_bytes`，其他平台拖放使用 `native_paths`。mode 只选择拖放入口，不限制统一添加协议接收本次粘贴 File 的字节。`maxChunkBytes` 是非零 canonical decimal raw-byte 上限，不能超过单次 Bridge frame 预算；它只约束字节入口，不是 Product capability。Renderer 每个平台只消费一个拖放入口，不监听另一入口作重试或超时 fallback。
 
@@ -215,7 +215,7 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 `appendAdd` 精确接收 key、JSON u32 `fileIndex`、canonical u64 string `offset` 与 `dataBase64`，只允许连续文件、连续 offset 和单块上限；worker 实际写入完成后返回 accepted/cancelled/rejected。`finishAdd` 只接收 key，在 worker 完成原件长度校验和同步及 Native loop 图片准备后，整批原子发布 ready/cancelled/rejected；ready 沿用既有 descriptor。新拒绝原因在既有文件原因上增加 `invalid_transfer | stale_transfer | input_busy | cleanup_failed`，不新增 Snapshot 状态或轮询接口。
 
-`cancelAdd` 只接收 key。取消先撤销 writer admission，等待在途 job 关闭句柄，再撤销未消费 grants 并清理候选；只在确认静止且物理清理完成后返回 `{ status: "cleaned", released: boolean }`，删除失败返回 `{ status: "cleanup_failed" }`。未知/已清理 key 的 released=false 不得掩盖该批次的活 writer 或 cleanup debt；借用和已消费原件受 Run 所有权保护。取消先于 begin 通过有界高水位拒绝迟到请求。每个 async responder 恰好结算一次，pending 输入收到 cancelled，已完成 responder 不重复结算。begin 与 finish 无固定短超时，单块和 cancel 使用既有有界 transport budget；取消结果未知立即替换连接，Renderer 清除旧连接未发送附件并保留文字，Host ledger 不因此重置。不自动重试、重放或建立 Host TTL。
+`cancelAdd` 只接收 key。取消先撤销 writer admission，等待在途 job 关闭句柄，再撤销未消费 grants 并清理候选；只在确认静止且物理清理完成后返回 `{ status: "cleaned", released: boolean }`，删除失败返回 `{ status: "cleanup_failed" }`。未知/已清理 key 的 released=false 不得掩盖该批次的活 writer 或 cleanup debt；借用和已消费原件受 Product 的 Task 消息与 Run 所有权保护。取消先于 begin 通过有界高水位拒绝迟到请求。每个 async responder 恰好结算一次，pending 输入收到 cancelled，已完成 responder 不重复结算。begin 与 finish 无固定短超时，单块和 cancel 使用既有有界 transport budget；取消结果未知立即替换连接，Renderer 清除旧连接未发送附件并保留文字，Host ledger 不因此重置。不自动重试、重放或建立 Host TTL。
 
 既有 revision 1 命令及其 sync/async 语义保留为同一 Product 资源核心的薄适配；旧字节协议与新协议不能交叉驱动同一 writer。旧拒绝原因不增加新名字：input_busy 映射 staging_capacity，cleanup failure 作为 command failure。原件、配额及债务的 owner 与物理清理不变量见[Product 附件合同](product-architecture.md#26-文件-attachment-staging)。
 

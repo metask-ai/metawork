@@ -1,8 +1,8 @@
 # 附件限制与生命周期复盘方案
 
-日期：2026-10-31。状态：收窄方案评审通过，待实施；未修改实现、未完成运行及内存验证。关联：[Issue #76](https://github.com/shuzuan-org/metawork/issues/76)。
+日期：2026-10-31。状态：方案已实施并提交，本机验证及资源实测完成；完整 Node suite 与平台手势验收尚未闭合。关联：[Issue #76](https://github.com/shuzuan-org/metawork/issues/76)。
 
-本轮收窄方案已取得独立 APPROVE，Blocking findings 为 none；128 条记录仍是需要内存实测确认的候选参数。本文不是 decision record，不替代现行合同。本轮重新区分代码事实、设计必要性与未验证假设，先修正已经证实的限制耦合，复用现有资源保护和生命周期。
+本轮收窄方案已取得独立 APPROVE，Blocking findings 为 none；当前实现保留 128 条记录；macOS 实测与未闭合项见[验收证据](../evidence/attachment-limits-20261031.json)。本文不是 decision record，不替代现行合同。本轮重新区分代码事实、设计必要性与未验证假设，先修正已经证实的限制耦合，复用现有资源保护和生命周期。
 
 ## 1. 方案结论与范围
 
@@ -15,9 +15,9 @@
 3. 保留删除失败的追踪；add_debt 饱和返回 CleanupFailed，消除 unreachable。
 4. 按数量、资源和清理失败分别呈现准确文案。
 
-不新增阶段配额、图片总预算、资源查询命令或占用界面，不改变 Task 接收、原件存储与执行结算的 owner。评审通过的是这组机制和范围；容量参数、真实桌面与内存表现仍待验证。
+不新增阶段配额、图片总预算、资源查询命令或占用界面，不改变 Task 接收、原件存储与执行结算的 owner。评审通过的是这组机制和范围；容量当前按本机实测保留，真实系统手势和其他平台表现仍待验收。
 
-## 2. 根因与已有机制
+## 2. 实施前核对的根因与已有机制
 
 | 事实                                  | 依据与含义                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -48,7 +48,7 @@ Issue 的补充证据确认占用者是未发送草稿。Run 失败后仍保留�
 
 ### 4.1 分离消息上限与记录容量
 
-保持单消息和单批上限不变，为 Product 全部存活资源配置独立的固定记录容量，以 128 条作为待验候选。Bridge grant 表与 add_debt 使用同一存量上界；记录、grant、debt 和完整 drain 的容量来自唯一配置，不各自维护更小的限制。
+保持单消息和单批上限不变，为 Product 全部存活资源配置独立的固定记录容量，当前默认采用 128 条。Bridge grant 表与 add_debt 使用同一存量上界；记录、grant、debt 和完整 drain 的容量来自唯一配置，不各自维护更小的限制。
 
 | 按存量容量配置                                                        | 继续按单批/单消息上限配置                                                                         |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -122,11 +122,11 @@ ready 返回后仍验证当前 scope/generation 和累计数量，再同步 hand
 
 ### 6.1 编码预览的上界与实测
 
-Attachment Runtime 每个资源记录最多持有一份编码预览，单图已有 1,400,000 bytes 上限。若采用 128 条记录，单看该 owner 持有的预览，静态上界是 179,200,000 bytes，约 171 MiB。
+Attachment Runtime 每个资源记录最多持有一份编码预览，单图已有 1,400,000 bytes 上限。按当前 128 条记录，单看该 owner 持有的预览，静态上界是 179,200,000 bytes，约 171 MiB。
 
 这不是进程内存上限：Task pending payload 的 owned copy、正在处理的原件读取、codec 工作集、容器/名称、Renderer 以及 Agent 相关内存另有生命周期。retainForTask 会释放草稿侧预览，但接收提交前的复制峰值仍须测量。现有 lane/codec 并发边界不因记录池变大而扩大。
 
-至少比较三组数据：当前小池基线、常见截图多草稿、候选池接近满额的最大编码预览。记录逻辑资源、进程峰值和添加→接收→执行→取消循环后的走势。静态有界不等于可以接受，本轮尚未取得这三组可比较的峰值证据。
+已记录旧实现 8 图基线，以及本次实现的 8/32/128 图负载、Task 接收/Stop、重复循环与 8 × 100 MB 字节额度耗尽恢复。当前保留 128 条默认容量。采样只覆盖 Host，初始 RSS 差异较大，不能据此推导性能改善；观测峰值也不是内存上限。数据、artifact identity 与限制统一保存在验收证据中，Windows 和真实系统手势仍待补。
 
 若候选容量的内存表现不可接受，应带着测量结果重新选择记录容量，或评审独立预览预算/预览存储方式；不能暗中降质量、放宽 codec/Agent 限制或省略压力用例。任何新增保护仍要说明对非图片和多草稿的影响。
 
@@ -142,7 +142,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 
 ## 7. 验收与验证
 
-所有条目当前均待实施验证。表中是必须观察的结果，不是已有通过记录。
+本机已执行相关 owner、Bridge、Renderer、Native/lifecycle 和真实 macOS Host 资源验证；矩阵定义目标，逐项覆盖与平台限制以验收证据为准。未把模拟或路径注入标为真实系统手势通过。
 
 ### 7.1 验收矩阵
 
@@ -155,7 +155,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 | R05  | 超过单批上限的 grant/add_debt 存量可追踪；完整 disconnect drain；debt 重复、交叉关联、临界及人工饱和不 panic、不丢追踪、不误报 cleaned                               |
 | R06  | 接收前 allocation/move/projection 失败保留原 authority；接收后响应丢失或 Run enqueue 失败不重放、不恢复 token；提交后草稿侧预览释放                                  |
 | R07  | Stop、任务失败/删除、断连、shutdown 与异常恢复沿既有 owner 结算；Run 原件保留至 Task 删除，取消的未执行原件删除，删除失败继续占额度与记录                            |
-| R08  | 多 Task 普通文件 waiting 在 payload 未满时填满记录池；明确资源拒绝，进入 Run 或取消并物理清理后可显式重试，其他内容不损坏                                            |
+| R08  | 一个或多个 Task 的普通文件 waiting 在 payload 未满时填满记录池；明确资源拒绝，进入 Run 或取消并物理清理后可显式重试，其他内容不损坏                                  |
 | R09  | 8 × 100,000,000 bytes 原件耗尽现有默认共享字节额度后，其他添加明确拒绝，释放后恢复；记录耗尽、单图格式/大小失败和分配失败分别有明确结果，不静默跳过 guard 或假装释放 |
 | R10  | 第 6 节的内存基线、常用与极限负载、接收复制峰值及重复循环有证据；若峰值不满足要求，参数与设计不能被标为已验收                                                        |
 
@@ -163,7 +163,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 
 在正式 owner 测试、Bridge/Renderer fixture 与真实 lifecycle 分层观察；真实桌面另外验证 Windows 原报告、DOM/WebView2 与 New task 加号，macOS picker/Native 路径、两平台图片粘贴、公开 SDK codec 和 writer 取消。模拟不能替代手势和 codec，文本插话 Windows 脚本不能替代附件 vertical。
 
-执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。当前复盘仅修改文档，不运行 runtime 测试。
+执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。标准入口的完整 Native graph 通过；完整 Node suite 有 3 处失败，其中 2 处在旧基线稳定复现，另一处未复现且未归因。`npm run check`、受影响 suites 与完整 lifecycle 通过。
 
 ## 8. 复盘与取舍
 
@@ -175,7 +175,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 
 ## 9. 文档与合同边界
 
-本文是实施计划与复盘，不是 decision record，也不替代领域真源。本轮只整理方案；实施时对应真源只更新实际改变的合同：
+本文是实施计划与复盘，不是 decision record，也不替代领域真源。本次已按下表更新实际改变及本链路需澄清的合同：
 
 | 真源                                                                            | 范围                                                                                      |
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -185,6 +185,12 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 | [Renderer Bridge 合同](../renderer-bridge-contract.md#文件-attachment-commands) | remainingFiles 的可选接受/收紧和缺省兼容；不增加命令、reason 或 Snapshot 字段             |
 | [验证规范](../validation.md)                                                    | 原故障、容量与债务边界、回执/生命周期及内存证据                                           |
 
-不修改 app.zon、AGENTS.md、顶层 owner、依赖方向、store 路径、history schema、checkpoint、AgentCore ABI 或 bundle。本轮不提前改写现行真源。
+不修改 app.zon、AGENTS.md、顶层 owner、依赖方向、store 路径、history schema、checkpoint、AgentCore ABI 或 bundle。完整附件能力的既有平台与性能缺口继续保留。
 
 此前核对的[Gemini 上传说明](https://support.google.com/gemini/answer/14903178?hl=en)、[Claude 上传说明](https://support.claude.com/en/articles/8241126-upload-files-to-claude)、[ChatGPT Work 概览](https://learn.chatgpt.com/docs/enterprise/chatgpt-work-overview)与[OpenCode 附件说明](https://dev.opencode.ai/v2/docs/attachments/)仅作为公开产品行为参照，不证明本方案内部机制是竞品惯例。本方案依据本仓库的失败链路与既有合同制定；内部实现与参数的合理性由对应回归和实测检验。
+
+## 10. 实施提交与追踪
+
+实施分支为 `feat/attachment-message-limits`；TinyKG 根任务为 `1540`，子任务 `1541`–`1546` 分别跟踪基线、资源核心、Host、Renderer、验证与合同收口。每项结束时均检查是否可提交，并在 task-close 证据中记录决定。
+
+已提交方案、资源解耦、Host 准入、Renderer 和资源验收；本节随最后的合同收口提交。TinyKG 对最后一条 `1546 depends_on 1545` 返回 `CycleCheckUncertain`，未修改 guard 或替换关系绕过；实际等到 `1545` 完成后才认领收口任务。该依赖边的缺失是跟踪工具限制，不应宣称已成功写入。
