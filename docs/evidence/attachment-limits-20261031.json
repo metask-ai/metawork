@@ -1,0 +1,251 @@
+{
+  "date": "2026-10-31",
+  "issue": "https://github.com/shuzuan-org/metawork/issues/76",
+  "implementationCommit": "54d81672e6cbc56243a51dd4987c7b95f8a45dcd",
+  "baselineCommit": "fc64c489fd5d23bfc7d895304e95aaca04783033",
+  "branch": "feat/attachment-message-limits",
+  "defaultRecordCapacity": 128,
+  "artifactSha256": {
+    "candidate": "e4f947516c574b143a30c490fc30a10c158dcca0f7d468d2892426b84e5ac57a",
+    "baseline": "65ef5bbb41abe29f65424322c17e6639b281d8fa8940bc7ef9a06bcd2af78bf2"
+  },
+  "probeSha256": {
+    "scripts/attachment-capacity-vertical.mjs": "0b81a2e119778eabd6f1ab06f4aba92df94f79057955cb0b06e53851a28d8d44",
+    "scripts/test-agentcore-vertical-macos.mjs": "a934322f40105488d8ba98badc65a8b663e2098723b5bdc975c81fd11292c974",
+    "tests/product/control_lifecycle_test.zig": "ad4ab22940ae9313f181526cb1eb36c541a5c5c6c9872093b59729724b9d8ba9"
+  },
+  "canonicalCore": "0.13.0-dev+723af0baee8d ABI 1 revision 26",
+  "checks": [
+    {
+      "command": "npm run check",
+      "result": "passed"
+    },
+    {
+      "command": "npm test",
+      "result": "failed",
+      "node": {
+        "tests": 1085,
+        "passed": 1080,
+        "failed": 3,
+        "skipped": 2
+      },
+      "native": {
+        "steps": 247,
+        "passedSteps": 247,
+        "tests": 1660,
+        "passed": 1651,
+        "skipped": 9
+      },
+      "scope": "implementation commit before the additional waiting-stock lifecycle regression"
+    },
+    {
+      "command": "zig build test-attachments -Dtarget=aarch64-macos",
+      "result": "passed"
+    },
+    {
+      "command": "zig build test-lifecycle -Dtarget=aarch64-macos",
+      "result": "passed",
+      "scope": "includes waiting ordinary attachment messages exhaust stock before payload and Stop restores it"
+    },
+    {
+      "command": "node --test scripts/agentcore-vertical.test.mjs scripts/architecture-boundaries.test.mjs",
+      "result": "passed",
+      "passed": 36
+    },
+    {
+      "command": "METAWORK_ATTACHMENT_CAPACITY_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos",
+      "result": "passed",
+      "artifact": "isolated prebuilt candidate"
+    },
+    {
+      "command": "METAWORK_ATTACHMENT_BASELINE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos",
+      "result": "passed",
+      "artifact": "isolated prebuilt baseline"
+    }
+  ],
+  "repositoryFailures": [
+    {
+      "test": "Renderer modules preserve the approved dependency direction",
+      "detail": "ModelSelector.tsx reaches into feature models",
+      "baseline": "reproduced in both focused and full baseline Node runs"
+    },
+    {
+      "test": "attention explains its cause and requires confirmation while deletion stays available",
+      "detail": "Schedule text differs from default-model wording assertion",
+      "baseline": "reproduced in both focused and full baseline Node runs"
+    },
+    {
+      "test": "Text schedules use an Automatic Workspace without requiring a Manual Workspace",
+      "detail": "Permissions selection assertion failed during the full candidate Node run",
+      "baseline": "not reproduced in focused or full baseline Node runs; no root cause claimed"
+    }
+  ],
+  "memory": {
+    "baseline": {
+      "baselineOnly": true,
+      "platform": "darwin-arm64",
+      "at": "2026-10-31T10:37:59.131Z",
+      "source": "original Host native_paths, Product staging and public SDK codec",
+      "results": [
+        {
+          "scenario": "old-pool-baseline",
+          "records": 8,
+          "stagingMs": 158
+        }
+      ],
+      "stages": [
+        {
+          "stage": "baseline",
+          "samples": 1,
+          "minRssBytes": 432652288,
+          "peakRssBytes": 432652288
+        },
+        {
+          "stage": "old-pool-baseline",
+          "samples": 8,
+          "minRssBytes": 432652288,
+          "peakRssBytes": 442400768
+        },
+        {
+          "stage": "old-pool-baseline-released",
+          "samples": 4,
+          "minRssBytes": 442400768,
+          "peakRssBytes": 443121664
+        }
+      ],
+      "limitations": [
+        "RSS sampling is 20 ms best effort and covers the Host process only",
+        "8-record baseline must be run against the original executable",
+        "Synthetic PNG fixtures; no actual system picker/drop/paste gesture or Windows evidence",
+        "No total-process memory SLO is inferred from bounded records"
+      ]
+    },
+    "candidate": {
+      "baselineOnly": false,
+      "platform": "darwin-arm64",
+      "at": "2026-10-31T10:41:36.187Z",
+      "source": "real Host native_paths, Product staging, public SDK codec, Task sendInput and Stop",
+      "results": [
+        {
+          "scenario": "old-pool-baseline",
+          "records": 8,
+          "stagingMs": 163
+        },
+        {
+          "scenario": "common-multiple-drafts",
+          "records": 32,
+          "stagingMs": 663
+        },
+        {
+          "scenario": "candidate-near-preview-limit",
+          "records": 128,
+          "stagingMs": 141223
+        }
+      ],
+      "stages": [
+        {
+          "stage": "baseline",
+          "samples": 1,
+          "minRssBytes": 218382336,
+          "peakRssBytes": 218382336
+        },
+        {
+          "stage": "old-pool-baseline",
+          "samples": 9,
+          "minRssBytes": 218382336,
+          "peakRssBytes": 227639296
+        },
+        {
+          "stage": "old-pool-baseline-released",
+          "samples": 4,
+          "minRssBytes": 223395840,
+          "peakRssBytes": 228376576
+        },
+        {
+          "stage": "common-multiple-drafts",
+          "samples": 35,
+          "minRssBytes": 195903488,
+          "peakRssBytes": 223477760
+        },
+        {
+          "stage": "common-multiple-drafts-released",
+          "samples": 13,
+          "minRssBytes": 195428352,
+          "peakRssBytes": 195903488
+        },
+        {
+          "stage": "candidate-near-preview-limit",
+          "samples": 7096,
+          "minRssBytes": 195428352,
+          "peakRssBytes": 484589568
+        },
+        {
+          "stage": "task-acceptance-copy",
+          "samples": 98,
+          "minRssBytes": 479150080,
+          "peakRssBytes": 490979328
+        },
+        {
+          "stage": "after-task-cleanup",
+          "samples": 5,
+          "minRssBytes": 487997440,
+          "peakRssBytes": 490979328
+        },
+        {
+          "stage": "candidate-near-preview-limit-released",
+          "samples": 47,
+          "minRssBytes": 487981056,
+          "peakRssBytes": 488062976
+        },
+        {
+          "stage": "repeat-1",
+          "samples": 1771,
+          "minRssBytes": 467451904,
+          "peakRssBytes": 501399552
+        },
+        {
+          "stage": "repeat-2",
+          "samples": 1764,
+          "minRssBytes": 414040064,
+          "peakRssBytes": 502546432
+        },
+        {
+          "stage": "repeat-3",
+          "samples": 1770,
+          "minRssBytes": 379535360,
+          "peakRssBytes": 447102976
+        },
+        {
+          "stage": "maximum-original-byte-budget",
+          "samples": 509,
+          "minRssBytes": 427393024,
+          "peakRssBytes": 543473664
+        },
+        {
+          "stage": "byte-budget-recovered",
+          "samples": 7,
+          "minRssBytes": 481460224,
+          "peakRssBytes": 484376576
+        }
+      ],
+      "limitations": [
+        "RSS sampling is 20 ms best effort and covers the Host process only",
+        "Compare the 8-record group with the separately recorded original executable baseline",
+        "Synthetic PNG fixtures; no actual system picker/drop/paste gesture or Windows evidence",
+        "No total-process memory SLO is inferred from bounded records"
+      ]
+    },
+    "interpretation": [
+      "128 records retained after real Host capacity, Task acceptance, Stop, repeated cleanup and byte-budget recovery checks",
+      "Absolute initial RSS differs substantially between runs; do not infer improvement or regression from the two absolute baselines",
+      "Observed RSS is best-effort sampling of the Host only, not an upper bound or whole-application memory SLO",
+      "High-entropy Debug staging is slow; the probe does not qualify UI responsiveness or change the existing codec concurrency"
+    ]
+  },
+  "openAcceptance": [
+    "Windows real issue reproduction and WebView2 DOM/new-task behavior",
+    "Actual system picker, OS drag/drop and image-paste gestures on both platforms",
+    "Whole-application memory and responsiveness SLO; the current probe records Host observations only"
+  ],
+  "result": "implementation and available macOS qualification completed; full repository suite and platform gesture acceptance remain open"
+}

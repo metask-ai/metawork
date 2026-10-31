@@ -11792,3 +11792,41 @@ test "Session pressure never cancels busy work or automatically retries a failed
     try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
     try std.testing.expect(task.durable.runs[1] == null);
 }
+
+test "waiting ordinary attachment messages exhaust stock before payload and Stop restores it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
+    var configuration = productControlConfiguration();
+    configuration.attachment_store = &store;
+    // A real Product Task and Core permission wait keep multimodal messages
+    // waiting without inventing a second queue or altering execution admission.
+    const scenario = try ReviewScenario.initWithConfiguration(configuration);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const count = product_control.attachment_record_capacity / 2;
+    for (0..count) |index| {
+        var descriptors: [2]product_control.AttachmentDescriptor = undefined;
+        const ready = try scenario.control.stageAttachments(&.{ .{ .display_name = "a.pdf", .bytes = "x" }, .{ .display_name = "b.pdf", .bytes = "y" } }, &descriptors);
+        const ids = [_]u64{ ready[0].id, ready[1].id };
+        var operation: [64]u8 = undefined;
+        const operation_id = try std.fmt.bufPrint(&operation, "queued-files-{d}", .{index});
+        const result = try scenario.control.sendInput(operation_id, scenario.task_id, .{ .multimodal = .{ .text = "Inspect later", .attachment_ids = &ids } });
+        try std.testing.expectEqual(.accepted, result.outcome);
+        try std.testing.expectEqual(.waiting, task.input_submissions.items[index].state);
+    }
+    try std.testing.expectEqual(count, task.input_submissions.items.len);
+    try std.testing.expect(scenario.control.task_runtime.pending_input_bytes < lifecycle.max_submitted_input_bytes);
+    try std.testing.expectEqual(product_control.attachment_record_capacity, scenario.control.attachments.used_bytes);
+    var output: [1]product_control.AttachmentDescriptor = undefined;
+    try std.testing.expectError(error.StagingCapacity, scenario.control.stageAttachments(&.{.{ .display_name = "draft.txt", .bytes = "z" }}, &output));
+    try scenario.control.stopTask(scenario.task_id);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.attachments.used_bytes);
+    for (task.input_submissions.items) |record| try std.testing.expectEqual(.cancelled, record.state);
+    const ready = try scenario.control.stageAttachments(&.{.{ .display_name = "draft.txt", .bytes = "z" }}, &output);
+    try std.testing.expect(try scenario.control.releaseAttachmentChecked(ready[0].id));
+}
