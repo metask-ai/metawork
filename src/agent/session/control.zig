@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const sdk = @import("metask_agentcore");
+pub const ModelError = @import("model_error.zig").ModelError;
 
 pub const SessionState = enum {
     idle,
@@ -220,6 +221,9 @@ pub const TerminalResult = struct {
     durable_budget: ?DurableBudgetObservation = null,
     input_counts: ?InputCounts = null,
     first_callback_rejection: ?CallbackRejection = null,
+    /// Validated supplemental observation; only OK + api_error makes it the
+    /// explanation of the Run's model failure. Dependency failures suppress it.
+    model_error: ?ModelError = null,
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];

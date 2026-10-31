@@ -46,6 +46,7 @@ pub const BeginRunFailure = session_impl.BeginRunFailure;
 pub const BeginRunOutcome = session_impl.BeginRunOutcome;
 pub const CloseOutcome = session_impl.CloseOutcome;
 pub const TerminalResult = session_impl.TerminalResult;
+pub const ModelError = session_impl.ModelError;
 pub const CallbackRejection = session_impl.CallbackRejection;
 pub const CoreEventKind = session_impl.CoreEventKind;
 pub const core_manifest_sha256 = session_impl.core_manifest_sha256;

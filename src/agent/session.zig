@@ -129,6 +129,7 @@ pub const TerminalFailure = session_control.TerminalFailure;
 pub const SessionDisposition = session_control.SessionDisposition;
 pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
 pub const TerminalResult = session_control.TerminalResult;
+pub const ModelError = session_control.ModelError;
 pub const CallbackRejection = session_control.CallbackRejection;
 pub const CoreEventKind = session_control.CoreEventKind;
 pub const core_manifest_sha256 = core_identity.manifest_sha256;
@@ -3565,6 +3566,7 @@ test {
     _ = multimodal;
     _ = session_wire;
     _ = session_control;
+    _ = @import("session/model_error.zig");
     _ = session_binding;
     _ = session_runtime;
 }
