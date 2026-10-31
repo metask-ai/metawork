@@ -21,6 +21,276 @@ const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 
+fn expectModelError(terminal: *const lifecycle.TerminalResult, run_id: u64) !void {
+    const detail = &(terminal.model_error orelse return error.ExpectedModelError);
+    const value = detail.view();
+    try std.testing.expectEqual(run_id, value.run_id);
+    try std.testing.expectEqual(.authentication, value.category);
+    try std.testing.expectEqualStrings("fixture_auth_code", value.code.?);
+    try std.testing.expectEqualStrings("authentication_error", value.type.?);
+    try std.testing.expectEqualStrings("fixture provider rejected credential", value.message);
+    try std.testing.expectEqualStrings("fixture_request", value.request_id.?);
+    try std.testing.expectEqual(@as(?u16, 401), value.http_status);
+    try std.testing.expectEqual(.not_retryable, value.retry);
+    try std.testing.expectEqual(@as(u32, 1), value.attempts);
+    try std.testing.expect(!value.truncated);
+}
+
+fn drainWithoutModelError(runtime: *lifecycle.Runtime) !void {
+    while (runtime.takeEvent()) |event| {
+        var owned = event;
+        defer owned.deinit();
+        if (owned.event.value == .known)
+            try std.testing.expect(owned.event.value.known != .model_error);
+    }
+}
+
+test "model error is owned and delivered for Text multimodal and Skill Runs" {
+    for (0..3) |kind| {
+        fake_core.reset();
+        fake_core.setNextPlan(.model_error);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(root);
+        var catalog = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .{ .workspace = .{ .canonical_root = root, .epoch = "model-error-workspace" } } });
+        defer catalog.projection.deinit();
+        const session = try runtime.createSession(.{
+            .model_binding = fixtureModelBinding(.anthropic_messages),
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+            .canonical_user_home = root,
+            .workspace_epoch = "model-error-workspace",
+            .skill_catalog = catalog.lease,
+            .skill_policy = .{ .granted_skill_ids = &.{fixture.fixture_skill_id} },
+        });
+        try runtime.releaseSkillCatalog(catalog.lease);
+        const input: lifecycle.RunInput = switch (kind) {
+            0 => .{ .text = "model error" },
+            1 => .{ .multimodal = &.{ .{ .text = "model error" }, .{ .image = .{ .format = .png, .bytes = &.{1} } } } },
+            else => .{ .skill = .{ .skill_id = fixture.fixture_skill_id, .catalog_revision = fixture.fixture_catalog_revision, .argument_values = &.{ "src/main.zig", "correctness" } } },
+        };
+        const id = try session.prepareRun(input);
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        try std.testing.expect(terminal.failure == null);
+        try std.testing.expectEqual(.api_error, terminal.stop_reason.?);
+        try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
+        try expectModelError(&terminal, id);
+        try drainWithoutModelError(runtime);
+        try session.close(.session_close);
+        try runtime.releaseClosedSession(session);
+        // No view or SDK parse owner points back into the released Session.
+        try expectModelError(&terminal, id);
+    }
+}
+
+test "model error violations close admission and suppress public details" {
+    const cases = [_]struct { plan: Plan, reason: ?lifecycle.CallbackRejection.Reason }{
+        .{ .plan = .model_error_missing, .reason = .missing_model_error },
+        .{ .plan = .model_error_duplicate, .reason = .duplicate_model_error },
+        .{ .plan = .model_error_wrong_id, .reason = .identity_mismatch },
+        .{ .plan = .model_error_after_terminal, .reason = .model_error_after_terminal },
+        .{ .plan = .model_error_wrong_stop, .reason = .unexpected_model_error },
+        .{ .plan = .model_error_oversized, .reason = .invalid_model_error },
+        .{ .plan = .model_error_identity_failed, .reason = .identity_mismatch },
+        .{ .plan = .model_error_counts_failed, .reason = null },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        fake_core.setNextPlan(case.plan);
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "reject model error violation" });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        try std.testing.expectEqual(.dependency_contract, terminal.failure.?);
+        try std.testing.expect(terminal.model_error == null);
+        try std.testing.expect(terminal.input_counts == null);
+        try std.testing.expectEqual(.poisoned, terminal.session_disposition_at_completion);
+        try std.testing.expectEqual(.poisoned, session.snapshot().state);
+        try std.testing.expectError(error.SessionPoisoned, session.prepareRun(.{ .text = "cannot continue" }));
+        if (case.reason) |reason| try std.testing.expectEqual(reason, terminal.first_callback_rejection.?.reason);
+        try drainWithoutModelError(runtime);
+        try session.close(.session_close);
+    }
+}
+
+test "model error survives ordinary pump and ABI failures without reading non-OK StopReason" {
+    for ([_]Plan{ .model_error_callback_failed, .model_error_core_error }) |plan| {
+        fake_core.reset();
+        fake_core.setNextPlan(plan);
+        const runtime = try fixture.createTestRuntime(.{
+            .max_sessions = 1,
+            .event_capacity = 2,
+            .per_session_event_capacity = 2,
+            .control_reserved_capacity = 0,
+            .per_session_control_reserved_capacity = 0,
+            .event_enqueue_timeout = .fromMilliseconds(1),
+        });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "keep supplemental observation" });
+        var run = try session.beginRun(id);
+        var terminal = run.execute();
+        run.deinit();
+        defer terminal.deinit();
+        try std.testing.expectEqual(.abi_status, terminal.failure.?);
+        try std.testing.expect(terminal.stop_reason == null);
+        try std.testing.expect(terminal.raw_stop_reason_code == null);
+        try expectModelError(&terminal, id);
+        if (plan == .model_error_callback_failed) {
+            try std.testing.expectEqual(.callback_failed, terminal.abi_status.?);
+            try std.testing.expectEqual(lifecycle.TerminationSignal{ .event_pump_failure = .capacity }, terminal.termination_signal.?);
+        } else try std.testing.expectEqual(.core_error, terminal.abi_status.?);
+        try drainWithoutModelError(runtime);
+        try session.close(.session_close);
+    }
+}
+
+test "model error is suppressed when Core returns with an active callback" {
+    fake_core.reset();
+    var signal = fixture.CallbackSignal{};
+    fake_core.setCallbackSignal(&signal);
+    defer fake_core.setCallbackSignal(null);
+    fake_core.setNextPlan(.model_error_callback_outlives_run);
+    const runtime = try fixture.createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1, .event_ready_notifier = .{ .context = &signal, .notify_fn = fixture.CallbackSignal.notify } });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        fixture.deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const id = try fixture.submitSession(session, "quiescence violation after model error");
+    try session.waitRun(id);
+    signal.waitUntilFinished();
+    var terminal = takeTestTerminal(session, id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(.dependency_contract, terminal.failure.?);
+    try std.testing.expect(terminal.model_error == null);
+    try std.testing.expectEqual(.callbacks_in_flight, terminal.first_callback_rejection.?.reason);
+    try std.testing.expectEqual(.poisoned, terminal.session_disposition_at_completion);
+    try drainWithoutModelError(runtime);
+    try session.close(.session_close);
+}
+
+test "model error remains a fact when a later cancellation is too late" {
+    const Work = struct {
+        session: *lifecycle.Session,
+        id: u64,
+        result: ?lifecycle.TerminalResult = null,
+        fn execute(self: *@This()) void {
+            var run = self.session.beginRun(self.id) catch unreachable;
+            self.result = run.execute();
+            run.deinit();
+        }
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.model_error_controlled);
+    fake_core.forced_abort_status = wire.STATUS_TOO_LATE;
+    var signal = fixture.CallbackSignal{};
+    signal.arm();
+    fake_core.setCallbackSignal(&signal);
+    defer fake_core.setCallbackSignal(null);
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "model error precedes cancellation" });
+    var work = Work{ .session = session, .id = id };
+    {
+        const thread = try std.Thread.spawn(.{}, Work.execute, .{&work});
+        defer thread.join();
+        defer fake_core.releaseControlled();
+        signal.waitUntilEntered();
+        try session.requestTermination(id, .{ .interrupted = .user_cancel });
+        fake_core.releaseControlled();
+    }
+    var terminal = work.result.?;
+    defer terminal.deinit();
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(.api_error, terminal.stop_reason.?);
+    try std.testing.expectEqual(.too_late, terminal.abort_status.?);
+    try std.testing.expectEqual(lifecycle.TerminationSignal{ .interrupted = .user_cancel }, terminal.termination_signal.?);
+    try expectModelError(&terminal, id);
+    try drainWithoutModelError(runtime);
+    try session.close(.session_close);
+}
+
+test "model error results survive the next Run and Runtime destruction" {
+    fake_core.reset();
+    fake_core.setNextPlan(.model_error);
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    };
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "first failure" });
+    var run = try session.beginRun(id);
+    var first = run.execute();
+    run.deinit();
+    defer first.deinit();
+    try drainWithoutModelError(runtime);
+    const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+    raw.lock();
+    raw.plan = .immediate;
+    raw.unlock();
+    const second_id = try session.prepareRun(.{ .text = "later explicit Run" });
+    var second_run = try session.beginRun(second_id);
+    var second = second_run.execute();
+    second_run.deinit();
+    defer second.deinit();
+    try std.testing.expect(second.model_error == null);
+    try std.testing.expectEqual(.end_turn, second.stop_reason.?);
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    try runtime.shutdown();
+    runtime.deinit();
+    runtime_live = false;
+    try expectModelError(&first, id);
+}
+
+test "model error state is empty after prepared cancellation and before-Core interruption" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const cancelled = try session.prepareRun(.{ .text = "cancel reservation" });
+    try session.cancelPreparedRun(cancelled);
+    const id = try session.prepareRun(.{ .text = "interrupt before Core" });
+    var run = try session.beginRun(id);
+    try session.requestTermination(id, .{ .interrupted = .user_cancel });
+    var terminal = run.execute();
+    run.deinit();
+    defer terminal.deinit();
+    try std.testing.expect(terminal.model_error == null);
+    try std.testing.expect(terminal.abi_status == null);
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(@as(usize, 0), fake_core.run_calls);
+    try session.close(.session_close);
+}
+
 test "checkpoint waits for a credential update and close can cancel that wait" {
     const Work = struct {
         session: *lifecycle.Session,

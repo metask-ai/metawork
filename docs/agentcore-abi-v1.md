@@ -64,7 +64,7 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
-官方 SDK 解码的 `model_error` 是补充 observation。Agent 校验其文本和 Run identity 后即释放，不进入产品 event pump、投影或持久化，不据此重试或发布终态。Provider failure 继续由 ABI status 与 Run stop reason 决定。
+官方 SDK 解码的 `model_error` 是补充 observation。Agent 校验字段、容量、Run identity、唯一性、到达顺序与合法终态关系后，通过 `TerminalResult` 交付有界 owned 值；不进入产品 event pump、投影或持久化，不据此重试或提前发布终态。完整交付、失败优先级与所有权语义见[结构化模型错误](agentcore-integration.md#结构化模型错误)。Provider failure 继续由 ABI status 与 Run stop reason 决定。
 
 `update_credential` 是 mandatory entry，但 MetaWork 当前不调用该 entry，凭据交接继续遵循既有 Product 与 Agent 生命周期。Session create/restore 的 credential 必须符合官方 credential 长度和字符约束，不建立截断、字符替换或空凭据 fallback。Skill catalog 的 additional source priority 与默认来源 priority 通过官方字段传入；来源排序及 owner 边界见 [Skill catalog ownership](agentcore-integration.md#skill-catalog-ownership)。
 

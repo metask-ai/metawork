@@ -698,6 +698,8 @@ pub const Session = struct {
     terminal_diagnostic: ?[]u8 = null,
     terminal_diagnostic_len: usize = 0,
     terminal_diagnostic_truncated: bool = false,
+    model_error: ?ModelError = null,
+    terminal_run_state_seen: bool = false,
     termination_signal: ?TerminationSignal = null,
     first_callback_rejection: ?CallbackRejection = null,
     abort_status: ?sdk.Status = null,
@@ -849,6 +851,8 @@ pub const Session = struct {
         self.terminal_diagnostic = terminal_diagnostic;
         self.terminal_diagnostic_len = 0;
         self.terminal_diagnostic_truncated = false;
+        self.model_error = null;
+        self.terminal_run_state_seen = false;
         self.termination_signal = null;
         self.first_callback_rejection = null;
         self.abort_status = null;
@@ -2221,6 +2225,18 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         }
+        // Reconcile while this Run still owns admission, before the common
+        // dependency-failure/disposition epilogue can return the Session idle.
+        if (!self.dependency_contract_failure and typed_status == .ok and stop_reason != null and
+            ((stop_reason.? == .api_error) != (self.model_error != null)))
+        {
+            self.recordCallbackRejectionLocked(.{
+                .boundary = .core_return,
+                .reason = if (self.model_error == null) .missing_model_error else .unexpected_model_error,
+                .event = .model_error,
+            });
+            self.failCoreIdentityLocked();
+        }
         if (self.dependency_contract_failure) {
             failure = .dependency_contract;
             self.state = .poisoned;
@@ -2293,6 +2309,8 @@ pub const Session = struct {
             self.agent_runtime.allocator.free(buffer);
             self.terminal_diagnostic = null;
         }
+        self.model_error = null;
+        self.terminal_run_state_seen = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
         self.broadcast();
@@ -2417,6 +2435,10 @@ pub const Session = struct {
     ) TerminalResult {
         const storage = self.terminal_diagnostic orelse unreachable;
         self.terminal_diagnostic = null;
+        const final_failure: ?TerminalFailure = if (self.dependency_contract_failure) .dependency_contract else failure;
+        const observed_model_error = self.model_error;
+        self.model_error = null;
+        self.terminal_run_state_seen = false;
         return .{
             .allocator = self.agent_runtime.allocator,
             .diagnostic_storage = storage,
@@ -2431,10 +2453,8 @@ pub const Session = struct {
             .termination_signal = self.termination_signal,
             .first_callback_rejection = self.first_callback_rejection,
             .file_changes_lost = self.file_changes_lost.load(.acquire),
-            .failure = if (self.dependency_contract_failure)
-                .dependency_contract
-            else
-                failure,
+            .failure = final_failure,
+            .model_error = if (final_failure == .dependency_contract) null else observed_model_error,
             .session_disposition_at_completion = self.dispositionLocked(),
             .durable_budget = durable_budget,
             .input_counts = if (self.dependency_contract_failure) null else self.input_counts,
@@ -2812,6 +2832,13 @@ pub const Session = struct {
                 return wire.EVENT_CONTINUE;
             },
         }
+        if (parsed.value.known == .model_error) {
+            self.lock();
+            const accepted = self.captureModelErrorLocked(parsed.value.known.model_error, run_id, encoded.len);
+            self.unlock();
+            parsed.deinit();
+            return if (accepted) wire.EVENT_CONTINUE else wire.EVENT_FATAL;
+        }
         self.lock();
         var input_event_valid = true;
         switch (parsed.value.known) {
@@ -2827,12 +2854,15 @@ pub const Session = struct {
                             self.input_ready = self.run_input != null and self.run_input.? != .skill;
                         }
                     },
-                    .finalizing, .completed, .failed, .aborted, .poisoned => self.input_ready = false,
+                    .finalizing => self.input_ready = false,
+                    .completed, .failed, .aborted, .poisoned => {
+                        self.input_ready = false;
+                        self.terminal_run_state_seen = true;
+                    },
                     else => {},
                 }
             },
             .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
-            .model_error => |value| input_event_valid = value.run_id == run_id,
             else => {},
         }
         if (!input_event_valid) {
@@ -2841,7 +2871,6 @@ pub const Session = struct {
                 else => null,
             }, .observed_run_id = switch (parsed.value.known) {
                 .run_state => |value| value.run_id,
-                .model_error => |value| value.run_id,
                 else => null,
             } });
             self.failCoreIdentityLocked();
@@ -2850,12 +2879,6 @@ pub const Session = struct {
         if (!input_event_valid) {
             parsed.deinit();
             return wire.EVENT_FATAL;
-        }
-        // This supplementary observation does not change MetaWork's existing
-        // provider-failure handling. Do not retain or project its details.
-        if (parsed.value.known == .model_error) {
-            parsed.deinit();
-            return wire.EVENT_CONTINUE;
         }
         const is_file_changes = switch (parsed.value) {
             .unknown => false,
@@ -3083,6 +3106,28 @@ pub const Session = struct {
         };
         self.agent_runtime.allocator.free(ptr[0..len]);
         value.* = emptyOwnedBytes();
+    }
+
+    fn captureModelErrorLocked(self: *Session, value: ModelError.View, run_id: u64, encoded_bytes: usize) bool {
+        const rejection: CallbackRejection.Reason = if (value.run_id != run_id)
+            .identity_mismatch
+        else if (self.terminal_run_state_seen)
+            .model_error_after_terminal
+        else if (self.model_error != null)
+            .duplicate_model_error
+        else capture: {
+            self.model_error = ModelError.init(value) catch break :capture .invalid_model_error;
+            return true;
+        };
+        self.recordCallbackRejectionLocked(.{
+            .boundary = .model_error,
+            .reason = rejection,
+            .event = .model_error,
+            .observed_run_id = value.run_id,
+            .encoded_bytes = encoded_bytes,
+        });
+        self.failCoreIdentityLocked();
+        return false;
     }
 
     fn retainCoreCallback(

@@ -421,6 +421,18 @@ wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保�
 
 `TerminalResult.file_changes_lost` 是 monotonic、per-Session observation fact：只要任一 classifier-confirmed `file_changes` event 因单事件编码上限、decode-owned-copy 容量或 event-pump admission 容量未被完整保留，就置 true 并保持至 terminal publication。它不把成功 Run 改成失败，也不允许伪造或补采记录；Product 在固定 terminal drain 后据此把已有 `collecting` observation 收口为 `incomplete`。没有任何 typed observation 且没有已知丢失时继续投影 null；发生已知丢失时即使零记录也必须建立 incomplete observation。
 
+### 结构化模型错误
+
+`TerminalResult.model_error` 是本次 Run 的可空、有界、自包含模型错误观察，保留官方 category、code、type、message、HTTP status、request id、retry、retry-after、attempts、truncated 和 Run identity。SDK parse owner 在 callback 内释放；错误值不借用 SDK、Session 或 Runtime 存储。其固定容量由 Agent 错误值实现唯一拥有，对应 canonical lock 固定的上游 `Model failure detail` 合同，并由现有 canonical Host probe 的长字段场景验证。超出接受容量明确拒绝，不二次静默截断或自动扩容。
+
+Agent 在现有 Session mutex 内捕获至多一条详情。payload identity 必须匹配 callback Run，且详情必须先于 terminal `run_state`；terminal 仅为 `completed | failed | aborted | poisoned`，`finalizing` 只关闭输入窗口。重复、错 Run、terminal 后到达或已识别详情违反容量约束均沿 dependency contract/fatal 路径收口。SDK decode、UTF-8 和原始事件预算失败继续遵循既有 callback 失败语义。详情不进入产品 event pump，也不单独推进产品终态。
+
+Core 返回并完成既有静止与 ABI 结果校验后，Agent 必须在最终 failure/disposition 收口、输入计数发布、Run 完成和 Session 回到 idle 之前对账：合法 `OK + API_ERROR` 必须恰好对应一条详情，其他合法 OK StopReason 不得携带详情；缺失或矛盾形成 dependency contract failure 并关闭后续准入。非 OK 返回不读取未定义的 StopReason。最终 dependency contract failure 时详情必须为 null；已捕获合法详情后发生普通 callback 或非合同违约的 ABI 失败时，必须保留详情作为补充观察，实际终态仍由既有失败规则决定。既有固定格式 callback 拒绝事实解释违约，不拼接模型错误正文。
+
+`failure == null` 不表示 Run 成功，合法模型失败可为 `OK + API_ERROR`。只有该合法组合才将详情作为模型失败终态的解释。`retryable` 不证明整轮重放安全；attempts 只描述最终失败请求的实际尝试，不证明全部重试已耗尽。category 与自由文本不构成 Account 授权、余额或 Models authority 的判定，模型服务权限也不是工具 Permission。HTTP 200 的流内错误与不对应失败 HTTP 请求的 output limit 均可合法出现。
+
+错误值可按值复制，其 view 仅借用所属值；移动、修改或释放后必须重新取得 view。整个 `TerminalResult` 仍保持 owned diagnostic 的单一所有者和恰好一次 deinit 约束。捕获槽在结果转移或放弃后清空，下一轮独立初始化，不建立最近错误缓存或 checkpoint 字段。当前 Product 可不消费详情；它不进入日志、Bridge、Snapshot 或产品历史，未来开放发布须另按对应 owner 合同执行 Host credential 清洗，上游脱敏不等于任意自由文本均可发布。
+
 ### callback 内失败
 
 event validation、copy 或同步入队失败：
