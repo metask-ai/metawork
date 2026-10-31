@@ -1132,6 +1132,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     fixture_options.addOption([]const u8, "xlsx_report_path", b.pathFromRoot("tests/fixtures/office/checked-summary-report.json"));
     const backend = b.createModule(.{ .root_source_file = b.path("src/app/completion_http_transport.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize });
     backend.addImport("metawork_agent", modules.agent);
+    backend.addImport("app_select_start", existingImport(modules.oauth_loopback_transport, "app_select_start"));
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
