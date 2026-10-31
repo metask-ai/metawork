@@ -1,6 +1,6 @@
 # Agent 模型错误处理与交付方案
 
-日期：2026-10-31。状态：Agent 实现和专项验证已完成；完整 Native 验收未闭合。
+日期：2026-10-31。状态：本次 Agent 实施已按用户确认收口；专项验证通过，完整 Native 未通过记录保留。
 
 本轮在现有 `TerminalResult` 上补齐结构化模型错误，完成 Agent 内部的捕获、校验、终态对账和所有权交付。上层通过 Agent 公共结果取得模型错误、实际执行终态与 Session 可用性，再由各自 owner 制定业务处理。
 
@@ -261,7 +261,7 @@ Native 入口对应 `scripts/build.mjs` 的 `nativeCli`，参数沿用 `scripts/
 4. 扩展 canonical Host probe 与具名长字段场景。
 5. 同步两份领域真源，完成第 7 节验证并核对范围。
 
-完成标准：
+原定完整验收标准（当前 Native 项未满足，实施收口决定见第 9 节）：
 
 - 三种输入经同一生产路径交付详情；所有权、身份、顺序、容量及终态规则均有确定测试。
 - 新增违约在 Session 状态最终收口前生效；普通失败必留详情，合同失败必清详情。
@@ -271,7 +271,7 @@ Native 入口对应 `scripts/build.mjs` 的 `nativeCli`，参数沿用 `scripts/
 
 ## 9 本轮实施结果
 
-实施分支为 `feat/agent-model-error-delivery`，TinyKG 根任务为 10748。方案基线、有界值、生产接入及 canonical 验证子任务均已完成并分别评估、提交；最终验证子任务 10753 因下述完整 Native 失败保持未关闭。
+实施分支为 `feat/agent-model-error-delivery`，TinyKG 根任务为 10748。方案基线、有界值、生产接入及 canonical 验证子任务均已完成并分别评估、提交。用户在查看下述结果后明确选择“收口本次 Agent 实施，保留完整 Native 未通过记录”；最终验证子任务 10753 与根任务据此完成本次范围的收口，不表示完整 Native 验收通过或解除其失败。
 
 2026-10-31 本机 Windows x86_64 验证结果：
 
@@ -289,6 +289,6 @@ Native 入口对应 `scripts/build.mjs` 的 `nativeCli`，参数沿用 `scripts/
 
 已用任务开始前精确提交 `857e5339` 的临时 detached worktree，在同一工具链和 canonical 依赖上重新执行 `zig build test-product-skill-runtime --summary all`。基线同样为 30/31 通过、1 crashed，停在 `managed imports bind source grants and publish effective bytes through export and reimport` 的 archive preview。当前产物与基线均在 Windows Zig ZIP 读取路径触发 `.PENDING => unreachable`；此前的 `FileTransactionFailed` error-return context 不能据此解释为该 panic 的根因。该 Skill 失败不是本轮 Agent 修改引入。其余 runner 超时与 Office 停滞尚未归因，不能由这项对照一并认定为同因或已解决。
 
-本轮保留失败，不跳过测试、不调整 verifier、不修改 Product/Skill 或 SDK。基线 checkout 和依赖 junction 已清理，原依赖保持完整。完整 Native 通过仍是第 8 节未满足的验收条件。
+本轮保留失败，不跳过测试、不调整 verifier、不修改 Product/Skill 或 SDK。基线 checkout 和依赖 junction 已清理，原依赖保持完整。完整 Native 通过仍是第 8 节未满足的验收条件，既有失败的修复未纳入本次实施。
 
 本地缓存日志保留于 `.zig-cache/agent-model-error-{final-agent,final-lifecycle,architecture,p3-host,p3-sdk,final-native,baseline-skill}.log`。这些是本轮复核线索，不替代可重现测试或长期验证账本。
