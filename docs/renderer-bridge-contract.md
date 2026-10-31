@@ -31,6 +31,8 @@ Windows 窗口按钮执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 实时 context 必须包含 URL-free `updates`：`checkState = unchecked | checking | succeeded | failed | unavailable`、`checkError = none | network | timeout | invalid_manifest | unavailable`、nullable `latestVersion`、`updateAvailable`、`downloadAvailable`、`downloadState = idle | checking | opened | failed` 及 `downloadError = none | stale_version | missing_download | invalid_link | network | timeout | browser_unavailable | unavailable`。failed 必须且仅能携带非 none 的对应错误；可下载必先有新版，新版必须有 canonical 版本。失败时允许保留已确认版本。该字段参加既有 context 内容版本与原子复用，不增加第二个数据面。领域接受、调度和交接 authority 以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准。
 
+`metawork.workspaces.remove` 只接受 `{ workspaceId, expectedWorkspaceEpoch }` 两个非零 wire ID。Host 校验连接、窗口、Manual Workspace identity 与 epoch 后调用既有移除事务；不接受路径，不删除目录或任务历史。结果精确为 `{ accepted, workspaceId, reason }`，成功 reason 为 null；预期拒绝为 `workspace_unavailable | workspace_changed | workspace_removing | task_close_failed | capacity_reached`。结构、来源、窗口和连接错误仍为 Bridge error。accepted 仅表示受理，进度和关闭失败以 Workspace Snapshot 为准，命令超时先对账，不自动重发。
+
 ## 2. ProductDelivery 与 Snapshot transport
 
 ProductDelivery 只有一套产品数据面，按消费者需要读取摘要、实时上下文、当前 Task、有界历史和已挂载管理视图。范围是闭合的 typed 产品请求，不允许任意字段选择、raw CoreEvent、通用 JSON patch 或第二套 transport。工作台摘要不携带所有 Task 的 Run、Tool 和正文；读取当前 Task 不处理其他 Task 的历史。历史按稳定 Run identity 有界读取，范围和页大小不得缩小产品实际可访问容量。

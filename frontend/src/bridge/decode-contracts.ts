@@ -6877,6 +6877,30 @@ export function decodePersistenceRecoveryResult(value: unknown) {
     outcome: enumValue(item.outcome, "$.outcome", persistenceRecoveryOutcomes),
   };
 }
+export function decodeWorkspaceRemovalResult(
+  value: unknown,
+  expectedIdentity: string,
+) {
+  const item = object(value, "$", ["accepted", "workspaceId", "reason"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const workspaceId = positiveWireId(item.workspaceId, "$.workspaceId");
+  if (workspaceId !== expectedIdentity)
+    fail("$.workspaceId", "response identity mismatch");
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, "$.reason", [
+          "workspace_unavailable",
+          "workspace_changed",
+          "workspace_removing",
+          "task_close_failed",
+          "capacity_reached",
+        ] as const);
+  if (accepted !== (reason === null))
+    fail("$", "accepted and reason must agree");
+  return { accepted, workspaceId, reason };
+}
+
 export function decodeCatalogRefreshResult<
   Identity extends "workspaceId" | "taskId",
 >(

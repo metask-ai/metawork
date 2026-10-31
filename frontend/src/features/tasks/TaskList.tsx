@@ -1,8 +1,18 @@
-import { useRef, useState, type MouseEvent } from "react";
+import {
+  useRef,
+  useState,
+  type MouseEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
+import {
+  createContextMenuAnchor,
+  type ContextMenuAnchor,
+} from "../../components/ui/context-menu-anchor.ts";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { orderedTasks, taskSignals } from "../../workbench/selectors.ts";
@@ -16,6 +26,7 @@ export function TaskList({
   suppressedCompletionTaskId = null,
   onSelectTask,
   onTaskAction,
+  renderWorkspaceHeading,
   taskMutationDisabled,
   synchronized = true,
   retainedTaskCount = 0,
@@ -26,13 +37,20 @@ export function TaskList({
   suppressedCompletionTaskId?: string | null;
   onSelectTask: (id: string) => void;
   onTaskAction: (task: TaskSummary, action: TaskMenuAction) => void;
+  renderWorkspaceHeading?: (
+    workspace: WorkspaceView,
+    heading: ReactNode,
+  ) => ReactNode;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
   retainedTaskCount?: number;
 }) {
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
-  const menuAnchor = useRef<HTMLElement | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<ContextMenuAnchor | null>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const menuPopup = useRef<HTMLDivElement>(null);
+  const keyboardOpen = useRef(false);
   const openingDialog = useRef(false);
   const visibleTasks = orderedTasks(tasks);
   const visibleTaskCount = visibleTasks.length;
@@ -50,10 +68,23 @@ export function TaskList({
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
   const menuTaskReadOnly = menuTask?.historyReadOnly === true;
 
-  function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
+  function openTaskMenu(
+    event: MouseEvent<HTMLButtonElement> | KeyboardEvent<HTMLButtonElement>,
+    taskId: string,
+  ) {
     event.preventDefault();
     openingDialog.current = false;
-    menuAnchor.current = event.currentTarget;
+    menuTrigger.current = event.currentTarget;
+    keyboardOpen.current = !("clientX" in event);
+    setMenuAnchor(
+      "clientX" in event
+        ? createContextMenuAnchor(
+            event.currentTarget,
+            event.clientX,
+            event.clientY,
+          )
+        : event.currentTarget,
+    );
     setMenuTaskId(taskId);
   }
 
@@ -66,6 +97,14 @@ export function TaskList({
         aria-current={activeTaskId === task.id ? "page" : undefined}
         onClick={() => onSelectTask(task.id)}
         onContextMenu={(event) => openTaskMenu(event, task.id)}
+        aria-haspopup="menu"
+        onKeyDown={(event) => {
+          if (
+            event.key === "ContextMenu" ||
+            (event.shiftKey && event.key === "F10")
+          )
+            openTaskMenu(event, task.id);
+        }}
       >
         <span className="task-list-row">
           <span>{task.title || t("task.item", { id: task.id })}</span>
@@ -88,6 +127,19 @@ export function TaskList({
             const projectTasks = visibleTasks.filter(
               (task) => task.workspaceId === workspace.id,
             );
+            const heading = (
+              <h3
+                className="task-project-heading"
+                title={
+                  workspace.redacted
+                    ? workspace.displayName
+                    : workspace.canonicalRoot
+                }
+              >
+                <Icon name="workspace" />
+                <span>{workspace.displayName}</span>
+              </h3>
+            );
             return (
               <section
                 key={workspace.id}
@@ -95,17 +147,17 @@ export function TaskList({
                 data-workspace-id={workspace.id}
                 aria-label={workspace.displayName}
               >
-                <h3
-                  className="task-project-heading"
-                  title={
-                    workspace.redacted
-                      ? workspace.displayName
-                      : workspace.canonicalRoot
-                  }
-                >
-                  <Icon name="workspace" />
-                  <span>{workspace.displayName}</span>
-                </h3>
+                {renderWorkspaceHeading?.(workspace, heading) ?? heading}
+                {workspace.authorization === "removing" && (
+                  <p className="task-list-empty" role="status">
+                    {t("workspace.removing_short")}
+                  </p>
+                )}
+                {workspace.lastRemovalFailure && (
+                  <p className="task-list-empty" role="alert">
+                    {t("workspace.remove_close_failed")}
+                  </p>
+                )}
                 <div className="task-project-items">
                   {projectTasks.map(renderTask)}
                   {projectTasks.length === 0 && (
@@ -141,23 +193,41 @@ export function TaskList({
         </p>
       )}
       <Menu.Root
+        onOpenChangeComplete={(open) => {
+          if (open && keyboardOpen.current)
+            menuPopup.current
+              ?.querySelector<HTMLElement>(
+                '[role="menuitem"]:not([aria-disabled="true"]):not([data-disabled])',
+              )
+              ?.focus();
+        }}
         open={menuTask !== null}
         onOpenChange={(open) => {
           if (open) return;
           setMenuTaskId(null);
-          menuAnchor.current = null;
         }}
       >
         <Menu.Portal>
           <Menu.Positioner
-            anchor={menuAnchor.current}
-            side="right"
+            anchor={menuAnchor}
+            positionMethod="fixed"
+            sticky
+            side="bottom"
             align="start"
-            sideOffset={5}
+            sideOffset={keyboardOpen.current ? 2 : 0}
+            alignOffset={0}
+            arrowPadding={0}
             collisionPadding={8}
           >
             <Menu.Popup
-              finalFocus={() => !openingDialog.current}
+              ref={menuPopup}
+              finalFocus={() =>
+                openingDialog.current
+                  ? false
+                  : menuTrigger.current?.isConnected
+                    ? menuTrigger.current
+                    : false
+              }
               className="task-menu-popover"
               aria-label={t("task.actions")}
             >
