@@ -1,8 +1,8 @@
 # Agent 模型错误处理与交付方案
 
-日期：2026-10-31。状态：本次 Agent 实施已按用户确认收口；专项验证通过，完整 Native 未通过记录保留。
+日期：2026-10-31。状态：Agent 阶段已收口，当轮专项通过及完整 Native 未通过记录保留；Product 阶段方案已评审通过（APPROVE，Blocking findings: none），尚未实施。
 
-第 1–9 节记录已完成的 Agent 阶段；[第 10 节](#10-product-模型错误交付与旧文件退役最终方案)是后续 Product、Bridge、Renderer、SQLite 历史和旧文件退役的最终方案，尚未实施。本次整理只修改方案，不修改运行代码、数据库或现行合同。
+当前实施入口为[第 10 节](#10-product-模型错误交付与旧文件退役最终方案)，覆盖 Product、Bridge、Renderer、SQLite 历史和旧文件退出运行路径。第 1–9 节保留上一阶段的方案与实施结果，其中“本轮”“当前”等表述均以 Agent 阶段为时间和范围边界；后续 Native 修复状态见第 10.11 节。方案评审通过不代表实现或验收已完成，本次整理只修改方案。
 
 本轮在现有 `TerminalResult` 上补齐结构化模型错误，完成 Agent 内部的捕获、校验、终态对账和所有权交付。上层通过 Agent 公共结果取得模型错误、实际执行终态与 Session 可用性，再由各自 owner 制定业务处理。
 
@@ -335,7 +335,7 @@ Run 为可空模型错误预留固定容量，按值复制 Agent 公共 `ModelEr
 | 合法 `OK + API_ERROR`，最终 Product cause 为 `provider_failure` | 使用详情细化模型错误文案和恢复建议 |
 | 普通 ABI/callback 失败附带合法详情，或 Product 后续发现 event pipeline failure | 保留详情作为补充观察；主提示仍解释真正的最终 cause |
 | Agent dependency contract failure | Agent 不交付详情；Product 不补造模型错误 |
-| Product 最终形成 dependency contract failure | 不用已有详情解释或降低该终态；如保留详情，必须明确标为补充观察 |
+| Product 最终形成 dependency contract failure | 已合法接收的详情仅作为补充观察；不解释、覆盖或降低该终态 |
 | 成功、取消、执行前拒绝或旧历史没有详情 | 保持 null，不从 diagnostic、日志、HTTP status 或历史最近错误重建 |
 
 不把所有 category 扩成新的 `RunCause`。`provider_failure` 继续表达稳定终态原因，详情提供更具体的模型失败事实。
@@ -414,7 +414,9 @@ Host serializer、跨语言 fixture、TypeScript 类型、严格 decoder 和历�
 
 `decodeRecovering` 跳过损坏 frame 或业务恢复出现 degraded 时，保持现有降级观察，不能宣称所有源数据已经完整迁移。可恢复事实按现有规则进入 SQLite，原件保持不变以便后续找回；不为判断旧文件能否删除新增完整性追踪。如果旧版本在迁移后继续向 `.store` 写入，新版本仍只使用 SQLite，不自动合并；旧版本写入的原件继续保留。
 
-移除 `sanitizeLegacy`、`legacy_pending` 及只服务旧文件清洗的凭据保留和测试分支。SQL、当前内存、只读/保留 SQL payload 和待确认候选仍须遵守完整 credential 清洗合同；原样保留的旧文件不再属于应用自动维护范围，也不承诺其已被清洗或清除，不为维护该静态副本继续保留 credential lease。
+在新增 persistence wire 字段前移除 `sanitizeLegacy`、`legacy_pending` 及只服务旧文件清洗的凭据保留和测试分支。现有清洗路径会解码旧文件后以当前 wire 重新编码写回，新增字段可能使只接受旧 shape 的发布版拒收；因此必须先闭合“不再写回旧文件”，再扩展历史字段。
+
+SQL、当前内存、只读/保留 SQL payload 和待确认候选仍须遵守完整 credential 清洗合同；原样保留的旧文件不再属于应用自动维护范围，也不承诺其已被清洗或清除，不为维护该静态副本继续保留 credential lease。该取舍及未来删除边界见第 10.12 节。
 
 保留一次性 framed reader、导入验证、SQL codec 仍依赖的数据类型和必要的进程锁；不因为它们曾由 `FileStore` 提供就机械删除，也不保留无职责的旧 canonical writer。必要的目录或锁管理不等于读取旧历史内容。现有显式恢复继续按其授权边界保全证据，本阶段不增加自动删除或隔离旧来源的动作。
 
@@ -438,11 +440,15 @@ Host serializer、跨语言 fixture、TypeScript 类型、严格 decoder 和历�
 
 ### 10.10 实施顺序
 
-1. 接入 Product 的按值接收、Host 清洗和终态规则，先以确定测试验证结果释放后仍独立存活及无敏感内容泄漏。
-2. 追加 SQL 迁移和安全历史字段，闭合终态保存、重启恢复、旧记录 null、dirty/unknown 与 credential 再清洗。
-3. 更新 Host 投影、Bridge fixture/decoder 和 Renderer，闭合具体错误提示、详情及来源匹配的显式恢复入口。
-4. 收口一次性导入路径：成功迁移后仅使用 SQLite，原样保留 `.store`，移除后续读取、清洗和写回，覆盖失败、未知和中断恢复。
-5. 同步领域真源，运行对应测试、正式 Native graph 和当前平台的真实 Product 接线验证，按实际结果收口。
+| 顺序 | 工作包 | 完成条件 |
+| --- | --- | --- |
+| 1 | 收口旧来源维护 | 保留首次导入；已有 SQLite 后不读取、清洗或写回 `.store`；重启与凭据变更测试证明旧字节不变，SQL 安全维护正常 |
+| 2 | 接入 Run-owned 模型错误 | 固定容量按值接收，结果释放后独立存活；Host 清洗有界；主终态与补充观察优先级正确 |
+| 3 | 接入 SQLite 历史 | 只追加迁移，字段与 Run 同事务；旧记录为 null；恢复、dirty/unknown 和 credential 再清洗闭合 |
+| 4 | 接入投影和用户交互 | Host、Bridge fixture、严格 decoder、Renderer 同步更新；安全详情可见；恢复入口按当前资格校验，准备重试只填入 Composer |
+| 5 | 验收完整产品链路 | 通过相关 roots、正式 Native graph 和当前平台真实接线验证；实际覆盖保存后重开、显式恢复动作及旧文件不变 |
+
+步骤 1 是扩展 persistence wire 的前置条件。各工作包在改变外部合同时同步更新第 10.9 节对应真源与测试，不把合同和安全接线留到最后。步骤 5 统一复核差异和验证结果，不补做已经错过的安全前置条件。
 
 每一步保持已有执行和历史路径可工作；不以尚未完成的异步框架、平行历史格式或临时兼容层替换生产链路。
 
@@ -465,3 +471,23 @@ Host serializer、跨语言 fixture、TypeScript 类型、严格 decoder 和历�
 第 9 节记录的 Native Skill 归档崩溃与 Office fixture 失败已在后续修复中验证收口；runner 间歇性停滞的根因仍未定位，属于已知未闭合问题，必须与本阶段结果分别报告。单次完整 Native 通过不证明 runner 问题已消失；不跳过、不弱化 guard，也不因专项通过声称完整 Native 通过。本次仅整理方案，检查文档链接、锚点与 `git diff --check`，不执行 runtime 测试。
 
 最终验收以用户可观察闭环为准：错误不再随 Agent 结果释放而丢失；用户能看到具体分类与安全详情；重启后可查看已保存事实；恢复入口不扩大授权、不自动重放；一次性导入并确认 SQLite 接管后，后续只读写 SQLite，旧 `.store` 原样保留且不再读取、清洗或写回，删除以后单独决定。
+
+### 10.12 复盘结论与已接受风险
+
+用户提供的最新评审结论为 APPROVE，Blocking findings: none。该结论覆盖本节方案，实施后仍须逐项取得第 10.11 节的验证证据。
+
+| 复盘结论 | 对实施的约束 |
+| --- | --- |
+| Agent 交出完整错误后，必须继续闭合产品消费 | 验收观察用户提示与冷历史；仅有类型、复制或透传不算用户价值完成 |
+| SQLite 已经随 0.2.8 发布 | 从当前生产接线出发，只追加迁移；过时的阶段文档不作为改写 0001 的依据 |
+| 旧格式退役指停止运行时消费 | 成功迁移后只使用 SQLite，旧文件原样保留；删除、指纹证明和覆盖比较不进入本阶段 |
+| 清洗后写回旧格式会扩大兼容风险 | 先移除旧文件写回，再扩展 persistence wire；SQL 和当前内存的安全维护继续完整生效 |
+| 错误分类与业务 authority 分属不同 owner | 具体文案不改变终态优先级；登录、充值、设置和准备重试均经既有 owner 的显式动作 |
+
+已接受的剩余风险如下，实施中不得将其描述为已经消除：
+
+- 原样保留的 `.store` 可能含有日后才被 MetaWork 识别为 credential 的明文；SQLite 和当前内存会按现有合同清洗，旧副本保持原样。彻底清除旧副本由未来独立删除方案处理，本阶段不补回清洗写入。
+- 新 schema 与已安装 0.2.8 共用数据目录时，旧版可能因 `VersionUnknown` 无法读取历史；其禁写和不回退边界必须保持，不宣称旧版可继续消费新库。
+- degraded 导入和迁移后旧版本新增的 `.store` 记录可能不在当前 SQLite 视图中；原件保留以供后续找回，不宣称全部迁移或自动合并。
+
+runner 间歇性停滞是独立的未闭合验证问题，状态沿第 10.11 节报告；不将方案 APPROVE、专项通过或单次 Native 通过当作其根因已解决。
