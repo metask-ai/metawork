@@ -19,6 +19,12 @@ pub const Error = package.Error || management.Error || error{
     TargetAlreadyExists,
     WriteFailed,
     RecoveryUnavailable,
+    InvalidPreparation,
+    InvalidConfirmation,
+    PreparationExhausted,
+    SourceChanged,
+    TargetChanged,
+    TaskBusy,
 };
 
 pub const Context = struct {
@@ -33,7 +39,12 @@ pub fn previewDirectory(
 ) Error!package.Preview {
     const source = try openDirectorySource(context, absolute_path);
     defer source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{});
+    var preview = try package.previewDirectory(context.io, context.allocator, source, .{});
+    errdefer preview.deinit();
+    const canonical = source.realPathFileAlloc(context.io, ".", context.allocator) catch return error.SourceUnavailable;
+    defer context.allocator.free(canonical);
+    preview.source_root = try context.allocator.dupe(u8, canonical);
+    return preview;
 }
 
 fn openDirectorySource(context: Context, absolute_path: []const u8) Error!std.Io.Dir {
@@ -92,7 +103,36 @@ pub fn previewArchive(
     else
         scratch;
     defer if (inspection.wrapperName() != null) source.close(context.io);
-    return package.previewDirectory(context.io, context.allocator, source, .{});
+    var preview = try package.previewDirectory(context.io, context.allocator, source, .{});
+    errdefer preview.deinit();
+    preview.source_root = try context.allocator.dupe(u8, inspection.wrapperName() orelse "");
+    return preview;
+}
+
+/// Observe a target without creating .agents/skills or changing inventory.
+pub fn inspectImportTarget(context: Context, canonical_base: []const u8, scope: management.Scope, invocation: []const u8, reimport_id: ?management.InstallId) Error!state.ImportExpectation {
+    const asset = context.state.inventoryConst().findTarget(scope, invocation);
+    if (reimport_id) |id| {
+        if (asset == null or !std.mem.eql(u8, &id, &asset.?.install_id)) return error.TargetChanged;
+    }
+    if (asset) |current| if (current.state != .ready or current.recovery != null) return error.TaskBusy;
+    const absent: state.ImportExpectation = .{ .effect = .create };
+    const base = std.Io.Dir.openDirAbsolute(context.io, canonical_base, .{ .follow_symlinks = false }) catch return error.RootUnavailable;
+    defer base.close(context.io);
+    const agents = base.openDir(context.io, ".agents", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer agents.close(context.io);
+    const skills = agents.openDir(context.io, "skills", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer skills.close(context.io);
+    const target = skills.openDir(context.io, invocation, .{ .follow_symlinks = false, .iterate = true }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
+    defer target.close(context.io);
+    var manifest = try package.inspectResourceTree(context.io, context.allocator, target, .{});
+    defer manifest.deinit();
+    return .{
+        .effect = if (asset != null) .update else .replace_directory,
+        .install_id = if (asset) |current| current.install_id else null,
+        .record_hash = if (asset) |current| current.content_hash else null,
+        .content_hash = manifest.content_hash,
+    };
 }
 
 pub fn readDefinition(

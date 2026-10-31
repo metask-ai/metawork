@@ -140,6 +140,85 @@ pub const MutationResult = struct {
     verification_pending: bool,
 };
 
+pub const ImportTarget = union(enum) { scope: management.Scope, reimport: management.InstallId };
+pub const ImportEffect = enum { create, update, replace_directory };
+pub const ImportPhase = enum { prepared, pending_verification, ready, rolled_back, recovery_required, rejected, cancelled, outcome_unknown };
+pub const ImportReason = enum {
+    source_unavailable,
+    definition_missing,
+    multiple_definitions,
+    invalid_layout,
+    invalid_definition,
+    invalid_path,
+    unsupported_entry,
+    archive_corrupt,
+    too_large,
+    source_changed,
+    target_changed,
+    invalid_preview,
+    invalid_scope,
+    asset_unavailable,
+    state_changed,
+    busy,
+    catalog_loading,
+    workspace_changed,
+    workspace_unavailable,
+    capacity_reached,
+    shutting_down,
+    local_storage_failed,
+    outcome_unknown,
+};
+
+pub fn importReason(err: anyerror) ImportReason {
+    return switch (err) {
+        error.SourceUnavailable, error.ReadFailed => .source_unavailable,
+        error.SkillDefinitionMissing => .definition_missing,
+        error.MultipleSkillDefinitions => .multiple_definitions,
+        error.InvalidArchiveRoot => .invalid_layout,
+        error.InvalidDefinition => .invalid_definition,
+        error.InvalidPath, error.DuplicatePath => .invalid_path,
+        error.UnsupportedEntry, error.UnsupportedCompression => .unsupported_entry,
+        error.ArchiveCorrupt => .archive_corrupt,
+        error.FileLimitExceeded, error.FileTooLarge, error.TotalSizeExceeded, error.ArchiveTooLarge, error.DefinitionTooLarge => .too_large,
+        error.SourceChanged, error.InvalidAsset => .source_changed,
+        error.TargetChanged => .target_changed,
+        error.InvalidPreparation, error.InvalidConfirmation => .invalid_preview,
+        error.AssetNotFound, error.SkillNotFound => .asset_unavailable,
+        error.TaskBusy, error.TransactionAlreadyActive => .busy,
+        error.CatalogLoading, error.CatalogUnavailable => .catalog_loading,
+        error.WorkspaceEpochMismatch => .workspace_changed,
+        error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => .workspace_unavailable,
+        error.PreparationExhausted, error.OutOfMemory, error.QueueFull => .capacity_reached,
+        error.ExecutorShuttingDown => .shutting_down,
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .local_storage_failed,
+    };
+}
+
+pub const ImportExpectation = struct {
+    effect: ImportEffect,
+    install_id: ?management.InstallId = null,
+    content_hash: ?management.ContentHash = null,
+    record_hash: ?management.ContentHash = null,
+};
+
+pub const ImportOperation = struct {
+    id: u64,
+    revision: u64,
+    scope: management.Scope,
+    effect: ImportEffect,
+    install_id: ?management.InstallId,
+    phase: ImportPhase,
+    reason: ?ImportReason = null,
+    invocation_name: [management.max_target_entry_bytes]u8,
+    invocation_name_len: usize,
+    published_hash: ?management.ContentHash = null,
+
+    pub fn invocationName(self: *const ImportOperation) []const u8 {
+        return self.invocation_name[0..self.invocation_name_len];
+    }
+};
+
 pub const ExportResult = struct {
     file_name: [management.max_target_entry_bytes + 6]u8,
     file_name_len: usize,
@@ -276,6 +355,7 @@ pub const State = struct {
     source_recovery_generation: u64 = 1,
     staging_root: ?[]u8,
     reconciliation: ?Reconciliation = null,
+    import_operation: ?ImportOperation = null,
     catalog: CatalogControl = .{},
 
     pub fn inventoryConst(self: *const State) *const management.Inventory {

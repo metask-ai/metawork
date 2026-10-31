@@ -83,9 +83,12 @@ pub const Preview = struct {
     file_count: usize,
     total_bytes: u64,
     content_hash: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    /// Host-only identity of the selected root; never projected to Renderer.
+    source_root: ?[]u8 = null,
 
     pub fn deinit(self: *Preview) void {
         self.allocator.free(self.definition);
+        if (self.source_root) |root| self.allocator.free(root);
         self.* = undefined;
     }
 };
@@ -134,7 +137,7 @@ pub fn inspectDirectory(
     source: std.Io.Dir,
     limits: Limits,
 ) Error!Manifest {
-    var manifest = try scanDirectory(io, allocator, source, limits);
+    var manifest = try inspectResourceTree(io, allocator, source, limits);
     errdefer manifest.deinit();
     const root = try directoryRoot(&manifest);
     if (root.wrapperName() != null) return error.InvalidArchiveRoot;
@@ -144,7 +147,7 @@ pub fn inspectDirectory(
 /// Opens the exact root of a selected directory after inspecting the whole
 /// selection. The returned directory is owned by the caller, even for `.`.
 pub fn openDirectorySource(io: std.Io, allocator: std.mem.Allocator, selected: std.Io.Dir, limits: Limits) Error!std.Io.Dir {
-    var manifest = try scanDirectory(io, allocator, selected, limits);
+    var manifest = try inspectResourceTree(io, allocator, selected, limits);
     defer manifest.deinit();
     const root = try directoryRoot(&manifest);
     if (root.wrapperName()) |wrapper| {
@@ -184,7 +187,7 @@ fn definitionRoot(definition: []const u8) Error!ArchiveInspection {
     return root;
 }
 
-fn scanDirectory(io: std.Io, allocator: std.mem.Allocator, source: std.Io.Dir, limits: Limits) Error!Manifest {
+pub fn inspectResourceTree(io: std.Io, allocator: std.mem.Allocator, source: std.Io.Dir, limits: Limits) Error!Manifest {
     var files: std.ArrayList(FileEntry) = .empty;
     errdefer {
         for (files.items) |*entry| entry.deinit(allocator);

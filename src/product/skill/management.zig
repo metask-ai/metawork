@@ -227,6 +227,13 @@ pub const Inventory = struct {
         return null;
     }
 
+    pub fn findTarget(self: *const Inventory, scope: Scope, target_entry: []const u8) ?*const Asset {
+        for (self.assets.items) |*asset| {
+            if (asset.owner.owns(scope) and targetEntryEqual(asset.target_entry, target_entry)) return asset;
+        }
+        return null;
+    }
+
     pub fn add(self: *Inventory, input: AssetInput) Error!*Asset {
         if (!validAssetInput(input)) return error.InvalidAsset;
         return self.addOwned(Owner.fromScope(input.scope), input);

@@ -407,6 +407,11 @@ pub const SkillInstallInput = skill_runtime.InstallInput;
 pub const SkillMutationResult = skill_runtime.MutationResult;
 pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
+pub const SkillImportPreparation = skill_runtime.ImportPreparation;
+pub const SkillImportTarget = skill_runtime.ImportTarget;
+pub const SkillImportEffect = skill_runtime.ImportEffect;
+pub const SkillImportSourceKind = skill_runtime.SourceKind;
+pub const skillImportReason = skill_runtime.importReason;
 
 pub const Configuration = struct {
     run_clock: task_runtime.RunClock = .{},
@@ -2571,6 +2576,72 @@ pub const Runtime = struct {
             self.scheduleRedaction(),
         );
         self.publishScheduleChangesNoFail();
+    }
+
+    fn skillImportScope(self: *const Runtime, target: SkillImportTarget) Error!skill_runtime.ManagementScope {
+        return switch (target) {
+            .scope => |scope| scope,
+            .reimport => |id| self.skill.assetScope(id),
+        };
+    }
+
+    fn importPreparationView(self: *const Runtime, id: u64, revision: u64) Error!SkillImportPreparation {
+        var preparation = try self.skill.preparedImport(id, revision);
+        self.checkSkillMutationAuthority(preparation.scope) catch |err| {
+            preparation.blocker = skill_runtime.importReason(err);
+        };
+        return preparation;
+    }
+
+    pub fn prepareSkillImport(self: *Runtime, path: []const u8, kind: SkillImportSourceKind, target: SkillImportTarget) Error!SkillImportPreparation {
+        try self.requireSkillAssetAuthority(try self.skillImportScope(target));
+        const preparation = self.skill.prepareImport(path, kind, target) catch |err| {
+            self.bumpRevision();
+            return err;
+        };
+        self.bumpRevision();
+        return self.importPreparationView(preparation.id, preparation.revision);
+    }
+
+    pub fn retargetSkillImport(self: *Runtime, id: u64, revision: u64, target: SkillImportTarget) Error!SkillImportPreparation {
+        try self.requireSkillAssetAuthority(try self.skillImportScope(target));
+        const preparation = self.skill.retargetImport(id, revision, target) catch |err| {
+            self.bumpRevision();
+            return err;
+        };
+        self.bumpRevision();
+        return self.importPreparationView(preparation.id, preparation.revision);
+    }
+
+    /// Complete all mutable lifecycle admission before Bridge consumes its grant.
+    pub fn preflightSkillImport(self: *Runtime, id: u64, revision: u64, confirmation: SkillImportEffect) Error!void {
+        const preparation = try self.skill.preparedImport(id, revision);
+        try self.requireSkillMutationAuthority(preparation.scope);
+        _ = self.skill.validatePreparedImport(id, revision, confirmation) catch |err| {
+            self.bumpRevision();
+            return err;
+        };
+    }
+
+    pub fn commitSkillImport(self: *Runtime, id: u64, revision: u64, confirmation: SkillImportEffect) Error!SkillMutationResult {
+        const preparation = try self.skill.preparedImport(id, revision);
+        // No lifecycle sync here: preflight and grant consume have already
+        // linearized admission in this same owner-thread command.
+        try self.checkSkillMutationAuthority(preparation.scope);
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.commitPreparedImport(id, revision, confirmation, self.schedule.now()) catch |err| {
+            self.publishSkillManagementChanges(previous_health);
+            self.bumpRevision();
+            return err;
+        };
+        _ = self.skill.takeManagementChanged();
+        self.bumpRevision();
+        return result;
+    }
+
+    pub fn discardSkillImport(self: *Runtime, expected_id: ?u64) void {
+        self.skill.discardPreparedImport(expected_id);
+        self.bumpRevision();
     }
 
     pub fn previewSkillDirectory(
