@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-ports", .root_module = test_modules.account_ports },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
+        .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
         .{ .name = "metawork-product-models-metask", .root_module = test_modules.models_metask },
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
@@ -327,6 +328,10 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-control", "Run the complete Product Control test root").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.oauth_loopback_transport)
+            b.step("test-oauth-loopback-transport", "Run real OAuth callback concurrency and cancellation tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == existingImport(test_modules.oauth_loopback_transport, "app_select_start"))
+            b.step("test-select-start", "Run partial Select registration cleanup tests").dependOn(&b.addRunArtifact(tests).step);
     }
     const projection_performance_module = b.createModule(.{
         .root_source_file = b.path("tests/product/projection_performance_test.zig"),
@@ -1487,6 +1492,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const app_select_start = b.createModule(.{
+        .root_source_file = b.path("src/app/select_start.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    oauth_loopback_transport.addImport("app_select_start", app_select_start);
     oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
     const metask_transport = b.createModule(.{
         .root_source_file = b.path("src/product/metask_transport.zig"),

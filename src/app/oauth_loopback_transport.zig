@@ -1,5 +1,6 @@
 const std = @import("std");
 const loopback = @import("oauth_loopback");
+const select_start = @import("app_select_start");
 
 const request_head_bytes: usize = 16 * 1024;
 const response_bytes: usize = 4096;
@@ -143,9 +144,11 @@ pub const Server = struct {
             self.io,
             &outcome_storage,
         );
-        selection.async(.accepted, acceptOne, .{self});
-        selection.async(.deadline, waitDeadline, .{ self.io, deadline });
-        selection.async(.cancelled, waitStop, .{self});
+        select_start.startWithCleanup(&selection, .{
+            .{ .accepted, acceptOne, .{self} },
+            .{ .deadline, waitDeadline, .{ self.io, deadline } },
+            .{ .cancelled, waitStop, .{self} },
+        }, cancelAccept, .{ self.io, &selection }) catch return error.IoFailed;
         const outcome = selection.await() catch {
             while (selection.cancel()) |remaining| closeAccepted(self.io, remaining);
             if (self.isStopRequested()) {
@@ -203,6 +206,10 @@ pub const Server = struct {
         }
     }
 
+    fn cancelAccept(io: std.Io, selection: *std.Io.Select(AcceptOutcome)) void {
+        while (selection.cancel()) |remaining| closeAccepted(io, remaining);
+    }
+
     fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
         deadline.wait(io) catch {};
     }
@@ -228,9 +235,11 @@ pub const Server = struct {
             self.io,
             &outcome_storage,
         );
-        selection.async(.received, receiveHead, .{http_server});
-        selection.async(.deadline, waitDeadline, .{ self.io, deadline });
-        selection.async(.cancelled, waitStop, .{self});
+        select_start.start(&selection, .{
+            .{ .received, receiveHead, .{http_server} },
+            .{ .deadline, waitDeadline, .{ self.io, deadline } },
+            .{ .cancelled, waitStop, .{self} },
+        }) catch return error.IoFailed;
         const outcome = selection.await() catch {
             selection.cancelDiscard();
             return error.IoFailed;
@@ -402,7 +411,9 @@ const TestPolicy = struct {
 };
 
 test "Application loopback pump composes with a caller-owned callback policy" {
-    var server = try Server.init(std.testing.io);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var server = try Server.init(threaded.io());
     defer server.deinit();
     var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
@@ -453,7 +464,22 @@ test "Account loopback adapters bind distinct OS-assigned ports" {
 }
 
 test "cancel closes the Application listener and wakes blocked accept" {
-    var server = try Server.init(std.testing.io);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const Probe = struct {
+        var entered: std.Io.Event = .unset;
+        var io: std.Io = undefined;
+
+        fn accept(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, options: std.Io.net.Server.AcceptOptions) std.Io.net.Server.AcceptError!std.Io.net.Socket {
+            entered.set(std.testing.io);
+            return io.vtable.netAccept(userdata, handle, options);
+        }
+    };
+    Probe.entered = .unset;
+    Probe.io = threaded.io();
+    var vtable = Probe.io.vtable.*;
+    vtable.netAccept = Probe.accept;
+    var server = try Server.init(.{ .userdata = Probe.io.userdata, .vtable = &vtable });
     defer server.deinit();
     var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
@@ -465,13 +491,16 @@ test "cancel closes the Application listener and wakes blocked accept" {
         ),
     };
     const thread = try std.Thread.spawn(.{}, WaitContext.run, .{&context});
+    try Probe.entered.wait(std.testing.io);
     server.cancel();
     thread.join();
     try std.testing.expectEqual(error.Cancelled, context.failure.?);
 }
 
 test "deadline closes the Application listener" {
-    var server = try Server.init(std.testing.io);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var server = try Server.init(threaded.io());
     defer server.deinit();
     var callback_policy: TestPolicy = .{};
     try std.testing.expectError(
@@ -487,7 +516,22 @@ test "deadline closes the Application listener" {
 }
 
 test "cancel interrupts an accepted partial callback request" {
-    var server = try Server.init(std.testing.io);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const Probe = struct {
+        var entered: std.Io.Event = .unset;
+        var io: std.Io = undefined;
+
+        fn read(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+            entered.set(std.testing.io);
+            return io.vtable.netRead(userdata, handle, buffers);
+        }
+    };
+    Probe.entered = .unset;
+    Probe.io = threaded.io();
+    var vtable = Probe.io.vtable.*;
+    vtable.netRead = Probe.read;
+    var server = try Server.init(.{ .userdata = Probe.io.userdata, .vtable = &vtable });
     defer server.deinit();
     var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
@@ -509,13 +553,16 @@ test "cancel interrupts an accepted partial callback request" {
     var writer = stream.writer(std.testing.io, &write_buffer);
     try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
     try writer.interface.flush();
+    try Probe.entered.wait(std.testing.io);
     server.cancel();
     thread.join();
     try std.testing.expectEqual(error.Cancelled, context.failure.?);
 }
 
 test "deadline interrupts an accepted partial callback request" {
-    var server = try Server.init(std.testing.io);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var server = try Server.init(threaded.io());
     defer server.deinit();
     var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
@@ -539,4 +586,58 @@ test "deadline interrupts an accepted partial callback request" {
     try writer.interface.flush();
     thread.join();
     try std.testing.expectEqual(error.DeadlineExceeded, context.failure.?);
+}
+
+test "loopback registration failures close listener and accepted streams" {
+    const Probe = struct {
+        var io: std.Io = undefined;
+        var registered: usize = 0;
+        var fail_at: usize = 0;
+        var accepted: std.Io.Event = .unset;
+        var closed: std.atomic.Value(usize) = .init(0);
+
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, run: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            const index = registered;
+            registered += 1;
+            if (index == fail_at) {
+                if (index == 1 or index == 2) accepted.waitUncancelable(std.testing.io);
+                return error.ConcurrencyUnavailable;
+            }
+            return io.vtable.groupConcurrent(userdata, group, context, alignment, run);
+        }
+
+        fn accept(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, options: std.Io.net.Server.AcceptOptions) std.Io.net.Server.AcceptError!std.Io.net.Socket {
+            const socket = try io.vtable.netAccept(userdata, handle, options);
+            accepted.set(std.testing.io);
+            return socket;
+        }
+
+        fn close(userdata: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+            _ = closed.fetchAdd(handles.len, .monotonic);
+            io.vtable.netClose(userdata, handles);
+        }
+    };
+    for (0..6) |fail_at| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        Probe.io = threaded.io();
+        Probe.registered = 0;
+        Probe.fail_at = fail_at;
+        Probe.accepted = .unset;
+        Probe.closed.store(0, .monotonic);
+        var vtable = Probe.io.vtable.*;
+        vtable.groupConcurrent = Probe.concurrent;
+        vtable.netAccept = Probe.accept;
+        vtable.netClose = Probe.close;
+        var server = try Server.init(.{ .userdata = Probe.io.userdata, .vtable = &vtable });
+        defer server.deinit();
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(server.port()) };
+        const client = try address.connect(std.testing.io, .{ .mode = .stream, .protocol = .tcp });
+        defer client.close(std.testing.io);
+        var policy: TestPolicy = .{};
+        try std.testing.expectError(error.IoFailed, server.wait(policy.sink(), std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot })));
+        try std.testing.expectEqual(fail_at + 1, Probe.registered);
+        try std.testing.expectEqual(@as(usize, if (fail_at > 0) 2 else 1), Probe.closed.load(.monotonic));
+        try std.testing.expect(!policy.completed);
+    }
 }
