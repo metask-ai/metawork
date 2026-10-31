@@ -1,0 +1,924 @@
+{
+  "version": 1,
+  "date": "2026-10-31",
+  "scope": "Synchronous Skill file lifecycle baseline; independent of presentation budgets and real Run acceptance",
+  "implementationCommit": "6a32e30b",
+  "platform": {
+    "os": "macOS 27.0.1",
+    "architecture": "arm64",
+    "model": "Mac16,1",
+    "cpu": "Apple M4",
+    "memoryBytes": 17179869184
+  },
+  "canonicalDependency": {
+    "lock": "build_support/agentcore-bundle.macos-aarch64.lock.json",
+    "lockSha256": "3b0f0bd5b3f187b4f8ea04ef6b6da65c95874af69333b8bf31928af2801b1604",
+    "verification": "node scripts/verify-staged-agentcore-bundle.mjs; accepted by canonical build graph"
+  },
+  "harness": {
+    "path": "tests/product/skill_import_performance_test.zig",
+    "sha256": "5f8159240c89f6fffc1615ce5edae84c95d603c443085fff7b039128e25d9e05",
+    "commands": [
+      "zig build test-skill-import-performance -Dtarget=aarch64-macos -Doptimize=Debug --summary all",
+      "zig build test-skill-import-performance -Dtarget=aarch64-macos -Doptimize=ReleaseSafe --summary all"
+    ],
+    "samplesPerCell": 3
+  },
+  "phaseSemantics": {
+    "prepareNs": "Product source root/manifest/metadata preparation and target observation",
+    "preflightNs": "Read-only Product mutation admission, source and target revalidation",
+    "commitNs": "Product commit including mandatory source/target revalidation, source transformation, copies, journal persistence and target publication; returns durable verification pending"
+  },
+  "limits": [
+    "Both final measurements ran without parallel build/test/desktop probes.",
+    "Four occupied Executor workers are controlled sleeping jobs, not AgentCore Runs.",
+    "Catalog acquisition uses typed unavailable fixture; this record does not measure catalog verification, rollback or backup cleanup.",
+    "Fixture creation, archive construction and cleanup are outside timed calls. Fresh files are likely in the OS page cache; no cache eviction was attempted.",
+    "This is one Mac and one target. Three samples per cell support median/max observations, not a P99 claim.",
+    "No presentation time budget is applied to file transactions. A file isolation decision requires a separate reproducible response/event-pump experiment."
+  ],
+  "summaries": [
+    {
+      "optimize": "Debug",
+      "workload": "small",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 2,
+      "sourceBytes": 1110,
+      "timingMs": {
+        "prepareNs": {
+          "median": 1.71,
+          "max": 1.792
+        },
+        "preflightNs": {
+          "median": 1.67,
+          "max": 1.708
+        },
+        "commitNs": {
+          "median": 10.395,
+          "max": 10.575
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "small",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 2,
+      "sourceBytes": 1110,
+      "timingMs": {
+        "prepareNs": {
+          "median": 1.722,
+          "max": 1.779
+        },
+        "preflightNs": {
+          "median": 1.628,
+          "max": 1.641
+        },
+        "commitNs": {
+          "median": 10.371,
+          "max": 10.491
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "large_files",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "timingMs": {
+        "prepareNs": {
+          "median": 475.084,
+          "max": 476.366
+        },
+        "preflightNs": {
+          "median": 486.279,
+          "max": 487.019
+        },
+        "commitNs": {
+          "median": 1910.624,
+          "max": 2028.756
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "large_files",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "timingMs": {
+        "prepareNs": {
+          "median": 471.813,
+          "max": 584.324
+        },
+        "preflightNs": {
+          "median": 471.609,
+          "max": 493.903
+        },
+        "commitNs": {
+          "median": 1949.58,
+          "max": 1978.047
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "many_files",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "timingMs": {
+        "prepareNs": {
+          "median": 657.192,
+          "max": 810.015
+        },
+        "preflightNs": {
+          "median": 639.224,
+          "max": 640.324
+        },
+        "commitNs": {
+          "median": 3047.432,
+          "max": 3047.782
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "many_files",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "timingMs": {
+        "prepareNs": {
+          "median": 657.742,
+          "max": 662.13
+        },
+        "preflightNs": {
+          "median": 643.463,
+          "max": 646.867
+        },
+        "commitNs": {
+          "median": 3120.85,
+          "max": 3135.598
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "stored_zip",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "timingMs": {
+        "prepareNs": {
+          "median": 355.597,
+          "max": 359.496
+        },
+        "preflightNs": {
+          "median": 346.975,
+          "max": 350.337
+        },
+        "commitNs": {
+          "median": 1996.708,
+          "max": 2001.934
+        }
+      }
+    },
+    {
+      "optimize": "Debug",
+      "workload": "stored_zip",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "timingMs": {
+        "prepareNs": {
+          "median": 359.119,
+          "max": 363.976
+        },
+        "preflightNs": {
+          "median": 350.776,
+          "max": 350.893
+        },
+        "commitNs": {
+          "median": 1983.572,
+          "max": 2199.655
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "small",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 2,
+      "sourceBytes": 1110,
+      "timingMs": {
+        "prepareNs": {
+          "median": 1.008,
+          "max": 1.111
+        },
+        "preflightNs": {
+          "median": 0.893,
+          "max": 1.014
+        },
+        "commitNs": {
+          "median": 8.921,
+          "max": 11.577
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "small",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 2,
+      "sourceBytes": 1110,
+      "timingMs": {
+        "prepareNs": {
+          "median": 0.651,
+          "max": 0.662
+        },
+        "preflightNs": {
+          "median": 0.541,
+          "max": 0.581
+        },
+        "commitNs": {
+          "median": 5.471,
+          "max": 6.101
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "large_files",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "timingMs": {
+        "prepareNs": {
+          "median": 58.277,
+          "max": 59.61
+        },
+        "preflightNs": {
+          "median": 58.627,
+          "max": 59.191
+        },
+        "commitNs": {
+          "median": 258.38,
+          "max": 258.452
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "large_files",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "timingMs": {
+        "prepareNs": {
+          "median": 59.004,
+          "max": 59.222
+        },
+        "preflightNs": {
+          "median": 59.676,
+          "max": 59.712
+        },
+        "commitNs": {
+          "median": 261.407,
+          "max": 262.541
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "many_files",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "timingMs": {
+        "prepareNs": {
+          "median": 107.847,
+          "max": 109.027
+        },
+        "preflightNs": {
+          "median": 109.842,
+          "max": 111.502
+        },
+        "commitNs": {
+          "median": 819.812,
+          "max": 831.046
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "many_files",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "timingMs": {
+        "prepareNs": {
+          "median": 109.771,
+          "max": 131.113
+        },
+        "preflightNs": {
+          "median": 113.268,
+          "max": 138.713
+        },
+        "commitNs": {
+          "median": 833.02,
+          "max": 883.479
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "stored_zip",
+      "occupiedWorkers": 0,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "timingMs": {
+        "prepareNs": {
+          "median": 124.734,
+          "max": 129.241
+        },
+        "preflightNs": {
+          "median": 127.822,
+          "max": 129.615
+        },
+        "commitNs": {
+          "median": 801.013,
+          "max": 805.64
+        }
+      }
+    },
+    {
+      "optimize": "ReleaseSafe",
+      "workload": "stored_zip",
+      "occupiedWorkers": 4,
+      "samples": 3,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "timingMs": {
+        "prepareNs": {
+          "median": 126.614,
+          "max": 141.404
+        },
+        "preflightNs": {
+          "median": 144.519,
+          "max": 165.62
+        },
+        "commitNs": {
+          "median": 811.606,
+          "max": 865.908
+        }
+      }
+    }
+  ],
+  "samples": [
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1792333,
+      "preflightNs": 1707875,
+      "commitNs": 10575167
+    },
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1681417,
+      "preflightNs": 1669667,
+      "commitNs": 10140917
+    },
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1710083,
+      "preflightNs": 1643042,
+      "commitNs": 10394917
+    },
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1779291,
+      "preflightNs": 1641208,
+      "commitNs": 10490667
+    },
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1710292,
+      "preflightNs": 1628125,
+      "commitNs": 10280250
+    },
+    {
+      "workload": "small",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1722125,
+      "preflightNs": 1624375,
+      "commitNs": 10371500
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 464641667,
+      "preflightNs": 487019375,
+      "commitNs": 1910624041
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 475084083,
+      "preflightNs": 486279250,
+      "commitNs": 2028755583
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 476366375,
+      "preflightNs": 469753375,
+      "commitNs": 1893939125
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 470924625,
+      "preflightNs": 471609000,
+      "commitNs": 1978046709
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 584324209,
+      "preflightNs": 493902917,
+      "commitNs": 1949579833
+    },
+    {
+      "workload": "large_files",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 471812583,
+      "preflightNs": 470152125,
+      "commitNs": 1912989792
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 657192208,
+      "preflightNs": 640323708,
+      "commitNs": 3047432333
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 651420417,
+      "preflightNs": 639012000,
+      "commitNs": 3047782084
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 810015083,
+      "preflightNs": 639223583,
+      "commitNs": 3036368166
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 654823834,
+      "preflightNs": 640675209,
+      "commitNs": 3135597917
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 657741750,
+      "preflightNs": 643463250,
+      "commitNs": 3120849542
+    },
+    {
+      "workload": "many_files",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 662130500,
+      "preflightNs": 646866875,
+      "commitNs": 3086073458
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 355597125,
+      "preflightNs": 343884083,
+      "commitNs": 2001933791
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 359495791,
+      "preflightNs": 350337500,
+      "commitNs": 1996708000
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 350952208,
+      "preflightNs": 346975416,
+      "commitNs": 1978272541
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 356251000,
+      "preflightNs": 348353375,
+      "commitNs": 1983572417
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 359119167,
+      "preflightNs": 350776042,
+      "commitNs": 1979330042
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "Debug",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 363975875,
+      "preflightNs": 350892833,
+      "commitNs": 2199655375
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1110750,
+      "preflightNs": 1014250,
+      "commitNs": 11576666
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 1008417,
+      "preflightNs": 892542,
+      "commitNs": 8921375
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 664542,
+      "preflightNs": 680042,
+      "commitNs": 6605792
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 650625,
+      "preflightNs": 580541,
+      "commitNs": 6101083
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 539292,
+      "preflightNs": 540708,
+      "commitNs": 5470958
+    },
+    {
+      "workload": "small",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 2,
+      "sourceBytes": 1110,
+      "prepareNs": 661917,
+      "preflightNs": 523959,
+      "commitNs": 5273625
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 59610375,
+      "preflightNs": 59191041,
+      "commitNs": 257986958
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 58276791,
+      "preflightNs": 58626959,
+      "commitNs": 258379708
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 58227959,
+      "preflightNs": 58577250,
+      "commitNs": 258452500
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 58987458,
+      "preflightNs": 59676417,
+      "commitNs": 261111667
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 59003500,
+      "preflightNs": 59345333,
+      "commitNs": 261406709
+    },
+    {
+      "workload": "large_files",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 5,
+      "sourceBytes": 67104854,
+      "prepareNs": 59221542,
+      "preflightNs": 59711542,
+      "commitNs": 262541083
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 107520958,
+      "preflightNs": 109715958,
+      "commitNs": 819811917
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 109026833,
+      "preflightNs": 111501750,
+      "commitNs": 819272250
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 107847125,
+      "preflightNs": 109841833,
+      "commitNs": 831045541
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 109771042,
+      "preflightNs": 113268125,
+      "commitNs": 833019542
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 109552167,
+      "preflightNs": 111660334,
+      "commitNs": 827738333
+    },
+    {
+      "workload": "many_files",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 66977878,
+      "prepareNs": 131112791,
+      "preflightNs": 138713458,
+      "commitNs": 883479334
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 129240833,
+      "preflightNs": 129615208,
+      "commitNs": 805640209
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 124734083,
+      "preflightNs": 127173000,
+      "commitNs": 799817292
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 0,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 124441416,
+      "preflightNs": 127822208,
+      "commitNs": 801013250
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 0,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 126576500,
+      "preflightNs": 126486166,
+      "commitNs": 794854000
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 1,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 141403542,
+      "preflightNs": 144519375,
+      "commitNs": 811605750
+    },
+    {
+      "workload": "stored_zip",
+      "optimize": "ReleaseSafe",
+      "sample": 2,
+      "occupiedWorkers": 4,
+      "files": 512,
+      "sourceBytes": 31395926,
+      "prepareNs": 126613792,
+      "preflightNs": 165620291,
+      "commitNs": 865908000
+    }
+  ]
+}

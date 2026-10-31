@@ -344,6 +344,18 @@ pub fn build(b: *std.Build) void {
     // so unrelated parallel suites cannot distort the latency samples.
     artifacts.tests.step.dependOn(&projection_performance_tests.step);
     b.step("test-projection-performance", "Measure legal maximum scoped Product presentation budgets").dependOn(&b.addRunArtifact(projection_performance_tests).step);
+    const skill_import_measurement_module = b.createModule(.{
+        .root_source_file = b.path("tests/product/skill_import_performance_test.zig"),
+        .target = modules.product_control.resolved_target.?,
+        .optimize = modules.product_control.optimize.?,
+    });
+    skill_import_measurement_module.addImport("metawork_product_control", modules.product_control);
+    skill_import_measurement_module.addImport("product_skill_management", modules.product_skill_management);
+    skill_import_measurement_module.addImport("product_skill_package", modules.product_skill_package);
+    skill_import_measurement_module.link_libc = bundle.link_libc;
+    const skill_import_measurement_tests = b.addTest(.{ .root_module = skill_import_measurement_module, .filters = &.{"Skill file lifecycle isolated measurements"} });
+    artifacts.tests.step.dependOn(&skill_import_measurement_tests.step);
+    b.step("test-skill-import-performance", "Measure Skill file lifecycle apart from presentation and Run execution").dependOn(&b.addRunArtifact(skill_import_measurement_tests).step);
     const product_views_step = b.step("test-product-views", "Run scoped Product view and strict Bridge request tests");
     const file_preview_step = b.step("test-file-preview", "Run image container, preview lane and Product resource tests");
     file_preview_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.image_container })).step);
