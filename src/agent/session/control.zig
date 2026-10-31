@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const sdk = @import("metask_agentcore");
+pub const ModelError = @import("model_error.zig").ModelError;
 
 pub const SessionState = enum {
     idle,
@@ -63,8 +64,8 @@ pub const TerminalFailure = enum {
 /// First observation under this Session's mutex, not a global causal ordering.
 /// Contains only fixed enums and counts; callback payloads never enter it.
 pub const CallbackRejection = struct {
-    pub const Boundary = enum { admission, event_decode, input_event, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
-    pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response };
+    pub const Boundary = enum { admission, event_decode, input_event, model_error, event_copy, event_pump, notifier, ui_decode, ui_admission, ui_response, core_return };
+    pub const Reason = enum { invalid_context, identity_mismatch, invalid_state, counter_exhausted, invalid_bytes, decode_failed, oversized, allocation, queue_rejected, consumer_unavailable, unsupported_request, invalid_input_transition, callbacks_in_flight, invalid_response, invalid_model_error, duplicate_model_error, model_error_after_terminal, missing_model_error, unexpected_model_error };
     boundary: Boundary,
     reason: Reason,
     event: ?CoreEventKind = null,
@@ -220,6 +221,9 @@ pub const TerminalResult = struct {
     durable_budget: ?DurableBudgetObservation = null,
     input_counts: ?InputCounts = null,
     first_callback_rejection: ?CallbackRejection = null,
+    /// Validated supplemental observation; only OK + api_error makes it the
+    /// explanation of the Run's model failure. Dependency failures suppress it.
+    model_error: ?ModelError = null,
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];

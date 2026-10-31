@@ -38,7 +38,7 @@ fn success(runtime: *agent.Runtime, session: *agent.Session, input: agent.RunInp
     defer run.deinit();
     var result = run.execute();
     defer result.deinit();
-    if (result.failure != null or result.abi_status != .ok or result.stop_reason != .end_turn) {
+    if (result.failure != null or result.abi_status != .ok or result.stop_reason != .end_turn or result.model_error != null) {
         std.debug.print("Host Run failed: status={any}, stop={any}, failure={any}\n", .{ result.abi_status, result.stop_reason, result.failure });
         return error.HostRunFailed;
     }
@@ -184,27 +184,77 @@ pub fn main(init: std.process.Init) !void {
     checkpoint.len = 0;
     checkpoint.offset = 0;
     try isolatedIdentity(runtime, options, limits, &checkpoint);
-    const failed_session = try runtime.createSession(options);
-    defer {
-        failed_session.close(.session_close) catch unreachable;
-        runtime.releaseClosedSession(failed_session) catch unreachable;
+    {
+        const failed_session = try runtime.createSession(options);
+        defer {
+            failed_session.close(.session_close) catch unreachable;
+            runtime.releaseClosedSession(failed_session) catch unreachable;
+        }
+        var provider_error = try execute(failed_session, .{ .text = "Reject this fixture request." });
+        defer provider_error.deinit();
+        if (provider_error.abi_status != .ok or provider_error.stop_reason != .api_error or
+            provider_error.failure != null or provider_error.first_callback_rejection != null or
+            failed_session.snapshot().state != .idle)
+            return error.ProviderFailureChanged;
+        const detail = &(provider_error.model_error orelse return error.MissingModelError);
+        const observation = detail.view();
+        if (observation.run_id != 1 or observation.category != .authentication or
+            observation.http_status != 401 or observation.retry != .not_retryable or
+            observation.attempts != 1 or observation.truncated or
+            observation.code == null or !std.mem.eql(u8, observation.code.?, "authentication_error") or
+            observation.type == null or !std.mem.eql(u8, observation.type.?, "authentication_error") or
+            observation.request_id != null or observation.retry_after_ms != null or
+            !std.mem.eql(u8, observation.message, "fixture provider rejected credential"))
+            return error.InvalidModelError;
+        while (runtime.takeEvent()) |event| {
+            var owned = event;
+            defer owned.deinit();
+            if (owned.event.value == .known and owned.event.value.known == .model_error)
+                return error.RetainedModelErrorDetails;
+        }
+        _ = try success(runtime, failed_session, .{ .text = "Explicit request after provider rejection." });
+        std.debug.print("Host provider failure and later explicit Run passed: {s}\n", .{provider});
     }
-    var provider_error = try execute(failed_session, .{ .text = "Reject this fixture request." });
-    defer provider_error.deinit();
-    if (provider_error.abi_status != .ok or provider_error.stop_reason != .api_error or
-        provider_error.failure != null or provider_error.first_callback_rejection != null or
-        failed_session.snapshot().state != .idle)
-        return error.ProviderFailureChanged;
+    if (protocol == .openai_chat_completions) try longModelError(runtime, options);
+    std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
+    std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
+}
+
+fn longModelError(runtime: *agent.Runtime, options: agent.SessionOpenOptions) !void {
+    const session = try runtime.createSession(options);
+    defer {
+        session.close(.session_close) catch unreachable;
+        runtime.releaseClosedSession(session) catch unreachable;
+    }
+    var result = try execute(session, .{ .text = "Reject long model error fields." });
+    defer result.deinit();
+    if (result.abi_status != .ok or result.stop_reason != .api_error or result.failure != null or
+        result.session_disposition_at_completion != .reusable or result.first_callback_rejection != null)
+        return error.LongModelErrorFailure;
+    const detail = &(result.model_error orelse return error.MissingModelError);
+    const value = detail.view();
+    if (value.run_id != 1 or value.category != .authentication or value.http_status != 401 or
+        value.retry != .not_retryable or value.attempts != 1 or !value.truncated or
+        value.retry_after_ms != null)
+        return error.InvalidLongModelError;
+    try boundedErrorField(value.message, "message-field-", 'm', agent.ModelError.limits.message_bytes);
+    try boundedErrorField(value.code orelse return error.MissingModelErrorCode, "code-field-", 'c', agent.ModelError.limits.code_bytes);
+    try boundedErrorField(value.type orelse return error.MissingModelErrorType, "type-field-", 't', agent.ModelError.limits.type_bytes);
+    try boundedErrorField(value.request_id orelse return error.MissingModelErrorRequestId, "request-field-", 'r', agent.ModelError.limits.request_id_bytes);
     while (runtime.takeEvent()) |event| {
         var owned = event;
         defer owned.deinit();
         if (owned.event.value == .known and owned.event.value.known == .model_error)
             return error.RetainedModelErrorDetails;
     }
-    _ = try success(runtime, failed_session, .{ .text = "Explicit request after provider rejection." });
-    std.debug.print("Host provider failure and later explicit Run passed: {s}\n", .{provider});
-    std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
-    std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
+    _ = try success(runtime, session, .{ .text = "Explicit request after long model error." });
+    std.debug.print("Host model error four-field capacity acceptance passed: Chat Completions\n", .{});
+}
+
+fn boundedErrorField(value: []const u8, prefix: []const u8, fill: u8, capacity: usize) !void {
+    if (value.len != capacity or !std.mem.startsWith(u8, value, prefix) or
+        !std.mem.allEqual(u8, value[prefix.len..], fill))
+        return error.InvalidModelErrorField;
 }
 
 fn validateManifest(manifest: anytype, child: bool) !void {

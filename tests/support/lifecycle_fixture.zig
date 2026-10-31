@@ -165,6 +165,19 @@ pub const Plan = enum {
     image_input_capability_unknown_status,
     unexpected_input_receipt,
     unexpected_input_receipt_failure,
+    model_error,
+    model_error_missing,
+    model_error_duplicate,
+    model_error_wrong_id,
+    model_error_after_terminal,
+    model_error_wrong_stop,
+    model_error_oversized,
+    model_error_callback_failed,
+    model_error_core_error,
+    model_error_identity_failed,
+    model_error_counts_failed,
+    model_error_callback_outlives_run,
+    model_error_controlled,
 };
 
 pub const FakeRuntime = struct {};
@@ -2145,7 +2158,37 @@ pub fn sessionRunInput(
         if (!emitInputEvent(session, handle, run_id, json)) return wire.STATUS_CALLBACK_FAILED;
     }
 
-    if (plan == .ui_callback_outlives_run) {
+    const model_failure = credential_rejected or modelErrorPlan(plan);
+    if (model_failure) {
+        var accepted = fake_core.input_enabled or emitModelRunState(session, handle, run_id, "starting", 1);
+        if (accepted) accepted = emitModelRunState(session, handle, run_id, "finalizing", 2);
+        if (accepted and plan == .model_error_after_terminal)
+            accepted = emitModelRunState(session, handle, run_id, "failed", 3);
+        if (accepted and plan != .model_error_missing)
+            accepted = emitModelError(session, handle, run_id, plan);
+        if (accepted and plan == .model_error_duplicate)
+            accepted = emitModelError(session, handle, run_id, plan);
+        if (accepted and plan == .model_error_identity_failed)
+            accepted = emitInputEvent(session, handle, run_id + 1, "{\"text_chunk\":\"wrong Run\"}");
+        if (accepted and plan == .model_error_callback_failed)
+            accepted = emitInputEvent(session, handle, run_id, "{\"text_chunk\":\"fills the bounded pump\"}");
+        if (!accepted) {
+            session.lock();
+            session.running = false;
+            session.broadcast();
+            session.unlock();
+            diagnostic(out_error);
+            return wire.STATUS_CALLBACK_FAILED;
+        }
+        if (plan == .model_error_controlled) {
+            fake_core.lock();
+            const signal = fake_core.callback_signal;
+            fake_core.unlock();
+            if (signal) |value| _ = CallbackSignal.notify(value);
+        }
+    }
+
+    if (plan == .ui_callback_outlives_run or plan == .model_error_callback_outlives_run) {
         fake_core.lock();
         const signal = fake_core.callback_signal;
         fake_core.unlock();
@@ -2362,7 +2405,7 @@ pub fn sessionRunInput(
         }
     }
     session.lock();
-    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated) and
+    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated or plan == .model_error_controlled) and
         !session.allow_finish and !session.abort_requested)
         session.wait();
     const aborted = session.abort_requested;
@@ -2443,7 +2486,7 @@ pub fn sessionRunInput(
         result.struct_size = if (plan == .invalid_result_layout) 0 else @sizeOf(wire.RunResultV1);
         result.stop_reason_code = if (aborted)
             wire.STOP_ABORTED
-        else if (credential_rejected)
+        else if (model_failure and plan != .model_error_wrong_stop)
             wire.STOP_API_ERROR
         else switch (plan) {
             .unknown_stop_result => 42,
@@ -2463,12 +2506,57 @@ pub fn sessionRunInput(
         if (plan == .invalid_result_flags) result.result_flags = 1 << 31;
         result.input_accepted_count = session.input_accepted;
         result.input_adopted_count = session.input_adopted;
-        if (plan == .unexpected_input_receipt or plan == .unexpected_input_receipt_failure)
+        if (plan == .unexpected_input_receipt or plan == .unexpected_input_receipt_failure or plan == .model_error_counts_failed)
             result.input_accepted_count = 1;
+        if (plan == .model_error_core_error) result.stop_reason_code = 0xFFFFFFFF;
+    }
+    if (plan == .model_error_core_error) {
+        diagnostic(out_error);
+        return wire.STATUS_CORE_ERROR;
+    }
+    if (model_failure and !emitModelRunState(session, handle, run_id, if (plan == .model_error_wrong_stop) "completed" else "failed", 3)) {
+        diagnostic(out_error);
+        return wire.STATUS_CALLBACK_FAILED;
     }
     if (plan == .unexpected_input_receipt_failure) return wire.STATUS_RESOURCE_LIMIT;
     if (fake_core.forced_input_run_status) |status| return status;
     return wire.STATUS_OK;
+}
+
+fn modelErrorPlan(plan: Plan) bool {
+    return switch (plan) {
+        .model_error,
+        .model_error_missing,
+        .model_error_duplicate,
+        .model_error_wrong_id,
+        .model_error_after_terminal,
+        .model_error_wrong_stop,
+        .model_error_oversized,
+        .model_error_callback_failed,
+        .model_error_core_error,
+        .model_error_identity_failed,
+        .model_error_counts_failed,
+        .model_error_callback_outlives_run,
+        .model_error_controlled,
+        => true,
+        else => false,
+    };
+}
+
+fn emitModelRunState(session: *FakeSession, handle: ?*wire.SessionHandle, run_id: u64, phase: []const u8, sequence: u64) bool {
+    var buffer: [256]u8 = undefined;
+    const json = std.fmt.bufPrint(&buffer, "{{\"run_state\":{{\"run_id\":{d},\"transition_seq\":{d},\"phase\":\"{s}\",\"turn\":{d},\"tool_calls\":0,\"in_flight_tools\":[]}}}}", .{ run_id, sequence, phase, @as(u32, if (std.mem.eql(u8, phase, "starting")) 0 else 1) }) catch unreachable;
+    return emitInputEvent(session, handle, run_id, json);
+}
+
+fn emitModelError(session: *FakeSession, handle: ?*wire.SessionHandle, run_id: u64, plan: Plan) bool {
+    var buffer: [2048]u8 = undefined;
+    const oversized = [_]u8{'x'} ** (lifecycle.ModelError.limits.message_bytes + 1);
+    const message = if (plan == .model_error_oversized) &oversized else "fixture provider rejected credential";
+    const json = std.fmt.bufPrint(&buffer, "{{\"model_error\":{{\"run_id\":{d},\"category\":\"authentication\",\"code\":\"fixture_auth_code\",\"type\":\"authentication_error\",\"message\":\"{s}\",\"http_status\":401,\"request_id\":\"fixture_request\",\"retry\":\"not_retryable\",\"attempts\":1,\"truncated\":false}}}}", .{ if (plan == .model_error_wrong_id) run_id + 1 else run_id, message }) catch unreachable;
+    const accepted = emitInputEvent(session, handle, run_id, json);
+    @memset(&buffer, 'x');
+    return accepted;
 }
 
 pub fn sessionAbort(
