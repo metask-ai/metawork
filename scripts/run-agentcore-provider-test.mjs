@@ -407,6 +407,7 @@ function sseFor(provider) {
 
 let activeProvider = null;
 let requestCount = 0;
+let longErrorRequestCount = 0;
 let requestError = null;
 let baselineSystemPrompt = null;
 const server = createServer((request, response) => {
@@ -441,6 +442,44 @@ const server = createServer((request, response) => {
         throw new Error(
           `${activeProvider.name} request must use application/json`,
         );
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const latestUserText = hostMode
+        ? (userParts(activeProvider, payload).at(-1) ?? [])
+            .map((part) => part.text ?? "")
+            .join("\n")
+            .trimEnd()
+        : "";
+      if (
+        hostMode &&
+        latestUserText.endsWith("Reject long model error fields.")
+      ) {
+        assert.equal(activeProvider.name, "openai");
+        assert.equal(
+          requestCount,
+          12,
+          "long-field rejection has its own stage",
+        );
+        assert.equal(userParts(activeProvider, payload).length, 1);
+        assert.equal(payload.model, activeProvider.model);
+        assertHostIdentity(payload, false);
+        requestCount += 1;
+        longErrorRequestCount += 1;
+        response.writeHead(401, {
+          "content-type": "application/json",
+          "x-request-id": `request-field-${"r".repeat(200)}`,
+          connection: "close",
+        });
+        response.end(
+          JSON.stringify({
+            error: {
+              code: `code-field-${"c".repeat(200)}`,
+              type: `type-field-${"t".repeat(200)}`,
+              message: `message-field-${"m".repeat(1500)}`,
+            },
+          }),
+        );
+        return;
+      }
       if (hostMode && requestCount >= 10) {
         const failed = requestCount++ === 10;
         response.writeHead(failed ? 401 : 200, {
@@ -459,7 +498,6 @@ const server = createServer((request, response) => {
         );
         return;
       }
-      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (requestCount === 0 && !hostMode && !activeProvider.bodyOk(payload))
         throw new Error(
           `${activeProvider.name} request body was not serialized`,
@@ -630,6 +668,7 @@ pub fn build(b: *std.Build) void {
   for (const provider of providers) {
     activeProvider = provider;
     requestCount = 0;
+    longErrorRequestCount = 0;
     requestError = null;
     const baseUrl = `${serverRoot}${provider.baseUrlSuffix}`;
     if (source !== null) {
@@ -697,14 +736,23 @@ pub fn build(b: *std.Build) void {
       );
       continue;
     }
+    const expectedRequests = hostMode
+      ? provider.name === "openai"
+        ? 14
+        : 12
+      : 6;
+    const expectedLongErrors = hostMode && provider.name === "openai" ? 1 : 0;
     if (requestError)
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
-    else if (requestCount !== (hostMode ? 12 : 6))
+    else if (
+      requestCount !== expectedRequests ||
+      longErrorRequestCount !== expectedLongErrors
+    )
       providerFailures.push(
         new Error(
-          `${provider.name}: expected ${hostMode ? 12 : 6} requests, got ${requestCount}`,
+          `${provider.name}: expected ${expectedRequests} requests and ${expectedLongErrors} long-field rejection, got ${requestCount} and ${longErrorRequestCount}`,
         ),
       );
     else
