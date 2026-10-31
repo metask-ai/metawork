@@ -4003,4 +4003,36 @@ test "managed imports bind source grants and publish effective bytes through exp
     try std.testing.expect((try walker.next(std.testing.io)) == null);
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, 102);
+
+    // A fresh target exercises installArchive as well as preview/reimport.
+    var archive_home = std.testing.tmpDir(.{});
+    defer archive_home.cleanup();
+    const archive_home_path = try archive_home.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(archive_home_path);
+    var archive_store: management.FileStore = .{ .io = std.testing.io, .dir = archive_home.dir };
+    var archive_harness: TestHarness = .{};
+    var archive_runtime = try Runtime.init(std.testing.io, std.testing.allocator, archive_harness.effectPorts(), .{
+        .state = .{ .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } }, .management = .{ .file_store = &archive_store, .staging_root = staging_path } },
+        .max_workspaces = 1,
+        .canonical_user_home = archive_home_path,
+    }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+    defer {
+        archive_runtime.beginShutdown();
+        archive_runtime.finishShutdownAfterExecutorJoin(archive_harness.budget(), test_snapshot_limits);
+        archive_runtime.deinit();
+    }
+    const preparation = try archive_runtime.prepareImport(archive_path, .local_package, .{ .scope = .personal });
+    try std.testing.expectEqual(ImportEffect.create, preparation.effect);
+    const archive_installed = try archive_runtime.commitPreparedImport(preparation.id, preparation.revision, .create, 103);
+    const archive_asset = archive_runtime.state.inventoryConst().findConst(archive_installed.install_id).?;
+    try std.testing.expectEqual(management.SourceKind.local_package, archive_asset.source_kind);
+    try std.testing.expectEqualSlices(u8, &actual.content_hash, &archive_asset.content_hash);
+    const installed_definition = try archive_home.dir.readFileAlloc(std.testing.io, ".agents/skills/demo/SKILL.md", std.testing.allocator, .limited(package.max_preview_definition_bytes));
+    defer std.testing.allocator.free(installed_definition);
+    try std.testing.expectEqualStrings(expected, installed_definition);
+    const installed_marker = try archive_home.dir.readFileAlloc(std.testing.io, ".agents/skills/demo/qa-reference.txt", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(installed_marker);
+    try std.testing.expectEqualStrings("resource marker", installed_marker);
+    archive_harness.runQueued();
+    _ = archive_runtime.sync(archive_harness.budget(), test_snapshot_limits, 104);
 }
