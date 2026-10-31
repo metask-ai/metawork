@@ -25,6 +25,7 @@ pub const set_skill_enabled = "metawork.skills.setEnabled";
 pub const set_skill_source_enabled = "metawork.skills.setSourceEnabled";
 pub const recover_skill_source_settings = "metawork.skills.recoverSourceSettings";
 pub const choose_skill_import = "metawork.skills.chooseImport";
+pub const prepare_skill_import = "metawork.skills.prepareImport";
 pub const install_skill = "metawork.skills.install";
 pub const reimport_skill = "metawork.skills.reimport";
 pub const uninstall_skill = "metawork.skills.uninstall";
@@ -134,6 +135,7 @@ pub const product = [_][]const u8{
     set_skill_source_enabled,
     recover_skill_source_settings,
     choose_skill_import,
+    prepare_skill_import,
     install_skill,
     reimport_skill,
     uninstall_skill,

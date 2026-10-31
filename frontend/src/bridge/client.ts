@@ -1,3 +1,4 @@
+import type { SkillImportTarget, SkillImportEffect } from "./contracts.ts";
 import { PreviewImagePool } from "./preview-image-pool.ts";
 import { FilePreviewLoader } from "./file-preview.ts";
 import { object } from "./wire-codec.ts";
@@ -457,38 +458,63 @@ export class BridgeClient {
       }),
     );
   }
-  async chooseSkillImport(kind: "package" | "directory") {
+  private skillImportTarget(target: SkillImportTarget) {
+    return {
+      kind: target.kind,
+      workspaceId: target.kind === "project" ? target.workspaceId : null,
+      expectedWorkspaceEpoch:
+        target.kind === "project" ? target.workspaceEpoch : null,
+      installId: target.kind === "reimport" ? target.installId : null,
+    };
+  }
+  async chooseSkillImport(
+    kind: "package" | "directory",
+    target: SkillImportTarget,
+  ) {
     return decodeSkillImportPreview(
-      await this.bridge().invoke(commands.chooseSkillImport, { kind }),
+      await this.bridge().invoke(commands.chooseSkillImport, {
+        kind,
+        target: this.skillImportTarget(target),
+      }),
+    );
+  }
+  async prepareSkillImport(
+    previewId: string,
+    preparationRevision: string,
+    target: SkillImportTarget | null,
+  ) {
+    return decodeSkillImportPreview(
+      await this.invoke(commands.prepareSkillImport, {
+        previewId,
+        preparationRevision,
+        target: target === null ? null : this.skillImportTarget(target),
+      }),
     );
   }
   async installSkill(
     previewId: string,
-    scope:
-      | {
-          kind: "personal";
-        }
-      | {
-          kind: "project";
-          workspaceId: string;
-          workspaceEpoch: string;
-        },
-    allowReplace: boolean,
+    preparationRevision: string,
+    confirmation: SkillImportEffect,
   ) {
     return decodeSkillMutationResult(
       await this.invoke(commands.installSkill, {
         previewId,
-        scope: scope.kind,
-        workspaceId: scope.kind === "project" ? scope.workspaceId : null,
-        expectedWorkspaceEpoch:
-          scope.kind === "project" ? scope.workspaceEpoch : null,
-        allowReplace,
+        preparationRevision,
+        confirmation,
       }),
     );
   }
-  async reimportSkill(installId: string, previewId: string) {
+  async reimportSkill(
+    previewId: string,
+    preparationRevision: string,
+    confirmation: SkillImportEffect,
+  ) {
     return decodeSkillMutationResult(
-      await this.invoke(commands.reimportSkill, { installId, previewId }),
+      await this.invoke(commands.reimportSkill, {
+        previewId,
+        preparationRevision,
+        confirmation,
+      }),
     );
   }
   async uninstallSkill(installId: string) {

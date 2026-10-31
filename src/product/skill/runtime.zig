@@ -1006,7 +1006,14 @@ pub const Runtime = struct {
         workspaces: view.WorkspaceCatalogs,
         retry: view.RetryAvailability,
     ) view.Error!void {
+        var blocker: ?ImportReason = null;
+        if (self.prepared_import) |prepared| {
+            blocker = (self.preparedImport(prepared.id, prepared.revision) catch unreachable).blocker;
+            if (retry.import_blocker_fn) |check| blocker = check(retry.context, prepared.scope) orelse blocker;
+        }
         return view.writeManagementProjection(writer, .{
+            .import_prepared = self.prepared_import != null,
+            .import_blocker = blocker,
             .state = &self.state,
             .workspaces = workspaces,
             .retry = retry,
@@ -1192,16 +1199,23 @@ pub const Runtime = struct {
     }
 
     fn verifyImportSource(self: *Runtime, current: *const PreparedImport) AssetError!void {
-        var observed = try self.importSourcePreview(current.path, current.source_kind);
+        var observed = self.importSourcePreview(current.path, current.source_kind) catch |err| return if (err == error.OutOfMemory) err else error.SourceChanged;
         defer observed.deinit();
         if (!std.mem.eql(u8, &observed.content_hash, &current.preview.content_hash) or
             !std.mem.eql(u8, observed.source_root orelse "", current.preview.source_root orelse "")) return error.SourceChanged;
     }
 
     pub fn retargetImport(self: *Runtime, id: u64, revision: u64, target: ImportTarget) AssetError!ImportPreparation {
-        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) self.discardPreparedImport(id);
+        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) {
+            self.discardPreparedImport(id);
+            if (self.state.import_operation) |*operation| if (operation.id == id) {
+                operation.phase = .rejected;
+                operation.reason = state.importReason(err);
+            };
+        };
         _ = try self.preparedImport(id, revision);
         const current = &self.prepared_import.?;
+        if (current.target == .reimport and (target != .reimport or !std.mem.eql(u8, &current.target.reimport, &target.reimport))) return error.InvalidConfirmation;
         if (current.revision == std.math.maxInt(u64)) return error.PreparationExhausted;
         try self.verifyImportSource(current);
         const scope = try self.importTargetScope(target);
@@ -1216,13 +1230,19 @@ pub const Runtime = struct {
 
     /// Read-only pre-admission validation; no grant, files or transaction is consumed.
     pub fn validatePreparedImport(self: *Runtime, id: u64, revision: u64, confirmation: ImportEffect) MutationError!management.Scope {
-        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) self.discardPreparedImport(id);
+        errdefer |err| if (err == error.SourceChanged or err == error.TargetChanged) {
+            self.discardPreparedImport(id);
+            if (self.state.import_operation) |*operation| if (operation.id == id) {
+                operation.phase = .rejected;
+                operation.reason = state.importReason(err);
+            };
+        };
         const preparation = try self.preparedImport(id, revision);
         if (preparation.effect != confirmation) return error.InvalidConfirmation;
         try self.requireMutationAvailable(preparation.scope);
         const current = &self.prepared_import.?;
         try self.verifyImportSource(current);
-        const observed = try self.importTargetExpectation(current.scope, current.target, current.preview.invocation_name);
+        const observed = self.importTargetExpectation(current.scope, current.target, current.preview.invocation_name) catch |err| return if (err == error.OutOfMemory or err == error.TaskBusy) err else error.TargetChanged;
         if (!std.meta.eql(observed, current.expectation)) return error.TargetChanged;
         return current.scope;
     }
@@ -1245,7 +1265,15 @@ pub const Runtime = struct {
             },
         } catch |err| {
             if (self.state.import_operation) |*operation| {
-                operation.phase = if (err == error.PersistenceOutcomeUnknown or self.state.management_health == .outcome_unknown) .outcome_unknown else .rejected;
+                operation.phase = .rejected;
+                if (self.state.inventoryConst().findTarget(current.scope, current.preview.invocation_name)) |asset| {
+                    operation.install_id = asset.install_id;
+                    if (asset.recovery) |recovery| {
+                        operation.published_hash = recovery.candidate_hash;
+                        operation.phase = if (asset.requiresRecovery()) .recovery_required else .pending_verification;
+                    }
+                }
+                if (err == error.PersistenceOutcomeUnknown or self.state.management_health == .outcome_unknown) operation.phase = .outcome_unknown;
                 operation.reason = state.importReason(err);
             }
             return err;
@@ -3846,6 +3874,11 @@ test "import preparation binds revision source and target while managed updates 
     try home.dir.createDirPath(std.testing.io, ".agents/skills/demo");
     try home.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/demo/SKILL.md", .data = "external original" });
     try std.testing.expectError(error.TargetChanged, runtime.validatePreparedImport(before_target.id, before_target.revision, .create));
+    const bound_directory = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
+    try home.dir.rename(".agents/skills/demo", home.dir, ".agents/skills/old-demo", std.testing.io);
+    try home.dir.createDirPath(std.testing.io, ".agents/skills/demo");
+    try home.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/demo/SKILL.md", .data = "external original" });
+    try std.testing.expectError(error.TargetChanged, runtime.validatePreparedImport(bound_directory.id, bound_directory.revision, .replace_directory));
     const replace = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
     try std.testing.expectEqual(ImportEffect.replace_directory, replace.effect);
     const installed = try runtime.commitPreparedImport(replace.id, replace.revision, .replace_directory, 100);
@@ -3864,7 +3897,10 @@ test "import preparation binds revision source and target while managed updates 
     const update = try runtime.prepareImport(source_path, .local_directory, .{ .scope = .personal });
     try std.testing.expectEqual(ImportEffect.update, update.effect);
     try std.testing.expectEqualSlices(u8, &installed.install_id, &update.install_id.?);
-    const updated = try runtime.commitPreparedImport(update.id, update.revision, .update, 102);
+    runtime.discardPreparedImport(update.id);
+    const bound_update = try runtime.prepareImport(source_path, .local_directory, .{ .reimport = installed.install_id });
+    try std.testing.expectError(error.InvalidConfirmation, runtime.retargetImport(bound_update.id, bound_update.revision, .{ .scope = .personal }));
+    const updated = try runtime.commitPreparedImport(bound_update.id, bound_update.revision, .update, 102);
     try std.testing.expectEqualSlices(u8, &installed.install_id, &updated.install_id);
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, 103);

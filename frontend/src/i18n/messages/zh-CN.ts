@@ -437,8 +437,69 @@ export const zhCN: Record<MessageId, string> = {
   "skills.choose_package": "选择 .skill 或 .zip",
   "skills.choose_package_body": "从当前电脑导入可移植的 Skill 安装包。",
   "skills.choose_folder": "选择文件夹",
-  "skills.choose_folder_body": "导入根目录中包含 SKILL.md 的文件夹。",
+  "skills.choose_folder_body":
+    "选择根目录或唯一一层子目录含 SKILL.md 的文件夹。",
   "skills.choose_again": "重新选择",
+  "skills.import_error.invalid_scope": "请选择可用的个人或项目范围。",
+  "skills.import_error.invalid_preview": "这次确认已失效，请重新选择来源。",
+  "skills.import_error.source_unavailable":
+    "无法读取所选来源，请检查文件是否存在和访问权限，再重新选择。",
+  "skills.import_error.definition_missing":
+    "没有找到 SKILL.md。请选择 Skill 根目录或只包含一个 Skill 的文件夹。",
+  "skills.import_error.multiple_definitions":
+    "发现多个 SKILL.md。请将要导入的 Skill 单独放在一个目录中。",
+  "skills.import_error.invalid_layout":
+    "不支持这个目录结构。SKILL.md 须位于所选根或唯一的一层子目录。",
+  "skills.import_error.invalid_definition":
+    "SKILL.md 的名称或说明格式无效，请修正后重新选择。",
+  "skills.import_error.invalid_path":
+    "包中含有不安全或重复的路径，请修正后重新选择。",
+  "skills.import_error.unsupported_entry":
+    "包中含有不支持的文件类型或压缩方式。请使用普通文件和 ZIP。",
+  "skills.import_error.archive_corrupt":
+    "安装包损坏或不是有效的 ZIP，请重新导出或获取安装包。",
+  "skills.import_error.too_large":
+    "文件数量或大小超出导入上限，请缩小包后重新选择。",
+  "skills.import_error.source_changed":
+    "来源已改变，请重新选择并确认最新内容。",
+  "skills.import_error.target_changed":
+    "目标已改变，请重新选择来源，检查新的变更影响后再确认。",
+  "skills.import_error.asset_unavailable":
+    "该 Skill 已不可管理，请刷新列表后重试。",
+  "skills.import_error.state_changed": "Skill 状态已改变，请刷新后重新确认。",
+  "skills.import_error.target_exists": "目标已存在，请重新准备以确认替换影响。",
+  "skills.import_error.busy": "相关任务或 Skill 操作尚未结束，请稍后再次确认。",
+  "skills.import_error.catalog_loading":
+    "Skill 仍在查询或验证，请等待完成后再次确认。",
+  "skills.import_error.workspace_changed":
+    "项目授权已改变，请重新选择项目并确认。",
+  "skills.import_error.workspace_unavailable":
+    "项目当前不可用，请恢复目录授权后重试。",
+  "skills.import_error.capacity_reached":
+    "当前没有足够的处理容量，请稍后重试。",
+  "skills.import_error.shutting_down": "应用正在关闭，本次操作未接纳。",
+  "skills.import_error.local_storage_failed":
+    "本地文件操作失败，请检查目录权限或占用情况，并查看列表中的恢复状态。",
+  "skills.import_error.outcome_unknown":
+    "操作结果尚未确认。请查看最新列表与恢复提示，不要重复导入。",
+  "skills.effect.create": "安装 Skill",
+  "skills.effect.update": "更新 Skill",
+  "skills.effect.replace_directory": "替换目录",
+  "skills.effect_body.create": "将在此范围新增一个 Skill。",
+  "skills.effect_body.update":
+    "更新此范围中已有的受管 Skill，保留它的启用设置。",
+  "skills.effect_body.replace_directory":
+    "替换此范围中未登记的同名目录。验证完成前会保留原目录副本。",
+  "skills.operation.prepared": "已准备 {skill}，等待确认。",
+  "skills.operation.pending_verification": "{skill} 已发布，正在等待验证。",
+  "skills.operation.ready": "{skill} 已通过验证，可以使用。",
+  "skills.operation.rolled_back": "{skill} 未通过验证，文件变更已回滚。",
+  "skills.operation.recovery_required":
+    "{skill} 需要恢复，请查看对应资产的恢复操作。",
+  "skills.operation.rejected": "{skill} 的操作未完成，请查看原因。",
+  "skills.operation.cancelled": "已放弃 {skill} 的未提交准备。",
+  "skills.operation.outcome_unknown":
+    "{skill} 的操作结果尚未确认，请查看恢复提示。",
   "skills.install_scope": "安装到",
   "skills.preview_size": "{files} 个文件 · {size} 字节",
   "skills.resource_context_notice":
@@ -464,6 +525,8 @@ export const zhCN: Record<MessageId, string> = {
   "skills.error.preview": "无法将所选来源验证为 Skill。",
   "skills.error.mutation": "未能完成 Skill 变更。",
   "skills.error.detail": "无法读取本地定义。",
+  "skills.error.export_too_large":
+    "导出包将超过可重新导入的大小上限，请减少资源后再导出。",
   "skills.error.export": "未能导出 Skill。",
   "skills.error.enablement": "未能更新 Skill 的启用状态，请刷新后重试。",
   "skills.refresh": "刷新",

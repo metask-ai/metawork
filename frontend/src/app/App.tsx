@@ -3014,9 +3014,11 @@ export default function App() {
   async function commitSkillMutation(
     mutation: () => Promise<SkillMutationResult>,
   ): Promise<SkillMutationResult> {
-    const result = await mutation();
-    if (result.accepted) await refreshCommittedView();
-    return result;
+    try {
+      return await mutation();
+    } finally {
+      await refreshCommittedView();
+    }
   }
   async function setSkillEnabled(
     target:
@@ -4465,15 +4467,20 @@ export default function App() {
             onQuery={setSkillsQuery}
             onRefresh={(target) => void refreshSkillsPageCatalog(target)}
             onSetEnabled={setSkillEnabled}
-            onChooseImport={(kind) => client.chooseSkillImport(kind)}
-            onInstall={(previewId, scope, allowReplace) =>
+            onChooseImport={(kind, target) =>
+              client.chooseSkillImport(kind, target)
+            }
+            onPrepareImport={(previewId, revision, target) =>
+              client.prepareSkillImport(previewId, revision, target)
+            }
+            onInstall={(previewId, revision, confirmation) =>
               commitSkillMutation(() =>
-                client.installSkill(previewId, scope, allowReplace),
+                client.installSkill(previewId, revision, confirmation),
               )
             }
-            onReimport={(installId, previewId) =>
+            onReimport={(previewId, revision, confirmation) =>
               commitSkillMutation(() =>
-                client.reimportSkill(installId, previewId),
+                client.reimportSkill(previewId, revision, confirmation),
               )
             }
             onUninstall={(installId) =>

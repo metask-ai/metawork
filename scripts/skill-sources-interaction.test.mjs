@@ -424,3 +424,257 @@ test("Catalog issues survive zero assets and search; refreshes use the selected 
     refreshes[2].resolve({ accepted: true, reason: null });
   });
 });
+
+function importPreparation(overrides = {}) {
+  return {
+    status: "prepared",
+    previewId: "7",
+    operationId: "5",
+    preparationRevision: "2",
+    sourceKind: "local_directory",
+    effect: "update",
+    installId: "00112233445566778899aabbccddeeff",
+    scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
+    invocationName: "demo",
+    displayName: "Demo Skill",
+    description: "Check resources.",
+    definition:
+      "---\nname: demo\ndescription: Check resources.\n---\nRead note.txt.",
+    fileCount: 2,
+    totalBytes: 42,
+    blocker: null,
+    ...overrides,
+  };
+}
+function importOperation(preparation, phase) {
+  return {
+    id: preparation.operationId,
+    preparationRevision: preparation.preparationRevision,
+    effect: preparation.effect,
+    phase,
+    scope: preparation.scope,
+    installId: preparation.installId,
+    invocationName: preparation.invocationName,
+    reason: null,
+    canConfirm: false,
+    canDiscard: false,
+    blocker: null,
+  };
+}
+async function chooseImportMenu(
+  user,
+  name = "Import Skill",
+  source = "Choose folder",
+) {
+  await user.click(screen.getByRole("button", { name, exact: true }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: source, exact: true }),
+  );
+}
+
+test("Import uses the page project, retains busy confirmation and shows Host verification after one acceptance", async (ctx) => {
+  const choices = [],
+    commits = [];
+  const prepared = importPreparation();
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "chooseSkillImport",
+    async (...args) => {
+      choices.push(args);
+      return prepared;
+    },
+  );
+  ctx.mock.method(BridgeClient.prototype, "prepareSkillImport", async () => ({
+    status: "cancelled",
+  }));
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "installSkill",
+    (...args) => new Promise((resolve) => commits.push({ args, resolve })),
+  );
+  const { snapshot } = await fixture(ctx);
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: "Project settings", exact: true }),
+  );
+  const trigger = screen.getByRole("button", {
+    name: "Import Skill",
+    exact: true,
+  });
+  await chooseImportMenu(user);
+  await screen.findByRole("dialog");
+  assert.deepEqual(choices, [
+    ["directory", { kind: "project", workspaceId: "1", workspaceEpoch: "1" }],
+  ]);
+  assert.ok(screen.getByText(/Read note.txt/));
+  assert.equal(screen.queryByText("Replace folder"), null);
+  await user.click(
+    screen.getByRole("button", { name: "Update Skill", exact: true }),
+  );
+  assert.deepEqual(commits[0].args, ["7", "2", "update"]);
+  await act(async () =>
+    commits[0].resolve({
+      accepted: false,
+      installId: null,
+      verificationPending: false,
+      reason: "busy",
+    }),
+  );
+  await screen.findByText(/related task or Skill operation is still active/);
+  assert.equal(commits.length, 1);
+  await user.click(
+    screen.getByRole("button", { name: "Update Skill", exact: true }),
+  );
+  assert.deepEqual(commits[1].args, commits[0].args);
+  snapshot.revision = "50";
+  snapshot.skillManagement.importOperation = importOperation(
+    prepared,
+    "pending_verification",
+  );
+  await act(async () =>
+    commits[1].resolve({
+      accepted: true,
+      installId: prepared.installId,
+      verificationPending: true,
+      reason: null,
+    }),
+  );
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  assert.ok(
+    await screen.findByText(
+      /demo has been published and is awaiting verification/,
+    ),
+  );
+  await waitFor(() => assert.equal(document.activeElement, trigger));
+  assert.equal(commits.length, 2);
+});
+
+test("Changing import scope obtains a new revision and explicit replacement confirmation", async (ctx) => {
+  const changes = [],
+    commits = [];
+  ctx.mock.method(BridgeClient.prototype, "chooseSkillImport", async () =>
+    importPreparation(),
+  );
+  ctx.mock.method(BridgeClient.prototype, "prepareSkillImport", (...args) =>
+    args[2] === null
+      ? Promise.resolve({ status: "cancelled" })
+      : new Promise((resolve) => changes.push({ args, resolve })),
+  );
+  ctx.mock.method(BridgeClient.prototype, "installSkill", async (...args) => {
+    commits.push(args);
+    return {
+      accepted: false,
+      installId: null,
+      verificationPending: false,
+      reason: "target_changed",
+    };
+  });
+  await fixture(ctx);
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: "Project settings", exact: true }),
+  );
+  await chooseImportMenu(user);
+  await user.click(
+    await screen.findByRole("combobox", { name: "Install for" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: "User defaults", exact: true }),
+  );
+  assert.deepEqual(changes[0].args, ["7", "2", { kind: "personal" }]);
+  assert.equal(screen.getByRole("button", { name: /Working/ }).disabled, true);
+  await act(async () =>
+    changes[0].resolve(
+      importPreparation({
+        preparationRevision: "3",
+        scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+        effect: "replace_directory",
+        installId: null,
+      }),
+    ),
+  );
+  await user.click(
+    await screen.findByRole("button", { name: "Replace folder", exact: true }),
+  );
+  assert.deepEqual(commits, [["7", "3", "replace_directory"]]);
+  await screen.findByText(/target has changed/);
+  assert.equal(
+    screen.queryByRole("button", { name: "Replace folder", exact: true }),
+    null,
+  );
+  assert.equal(commits.length, 1);
+});
+
+test("Late picker results are discarded after scope navigation", async (ctx) => {
+  const choices = [],
+    discards = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "chooseSkillImport",
+    (...args) => new Promise((resolve) => choices.push({ args, resolve })),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "prepareSkillImport",
+    async (...args) => {
+      discards.push(args);
+      return { status: "cancelled" };
+    },
+  );
+  await fixture(ctx);
+  const user = userEvent.setup({ document });
+  await chooseImportMenu(user);
+  await user.click(
+    screen.getByRole("button", { name: "Project settings", exact: true }),
+  );
+  await act(async () =>
+    choices[0].resolve(
+      importPreparation({
+        scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+      }),
+    ),
+  );
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.deepEqual(discards, [["7", "2", null]]);
+});
+
+test("Lost import response resyncs without replay and removes the consumed confirmation", async (ctx) => {
+  let commits = 0;
+  ctx.mock.method(BridgeClient.prototype, "chooseSkillImport", async () =>
+    importPreparation({
+      scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+    }),
+  );
+  ctx.mock.method(BridgeClient.prototype, "prepareSkillImport", async () => ({
+    status: "cancelled",
+  }));
+  ctx.mock.method(BridgeClient.prototype, "installSkill", async () => {
+    commits++;
+    throw new Error("response lost");
+  });
+  await fixture(ctx);
+  const user = userEvent.setup({ document });
+  await chooseImportMenu(user);
+  await user.click(
+    await screen.findByRole("button", { name: "Update Skill", exact: true }),
+  );
+  await screen.findByText(/outcome has not been confirmed/);
+  assert.equal(
+    screen.queryByRole("button", { name: "Update Skill", exact: true }),
+    null,
+  );
+  assert.equal(commits, 1);
+});
+
+test("A rolled-back operation remains visible even when the new asset was removed", async (ctx) => {
+  await fixture(ctx, (snapshot) => {
+    snapshot.skillManagement.importOperation = importOperation(
+      importPreparation({
+        scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+        effect: "create",
+      }),
+      "rolled_back",
+    );
+  });
+  assert.ok(await screen.findByText(/demo failed verification.*rolled back/));
+});

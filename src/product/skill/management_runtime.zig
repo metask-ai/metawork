@@ -55,7 +55,7 @@ fn openDirectorySource(context: Context, absolute_path: []const u8) Error!std.Io
         context.io,
         absolute_path,
         .{ .follow_symlinks = false, .iterate = true },
-    ) catch return error.InvalidAsset;
+    ) catch return error.SourceUnavailable;
     defer selected.close(context.io);
     return package.openDirectorySource(context.io, context.allocator, selected, .{});
 }
@@ -72,7 +72,7 @@ pub fn previewArchive(
         context.io,
         absolute_path,
         .{ .follow_symlinks = false },
-    ) catch return error.InvalidAsset;
+    ) catch return error.SourceUnavailable;
     defer archive.close(context.io);
     const inspection = try package.inspectArchive(
         context.io,
@@ -116,13 +116,16 @@ pub fn inspectImportTarget(context: Context, canonical_base: []const u8, scope: 
         if (asset == null or !std.mem.eql(u8, &id, &asset.?.install_id)) return error.TargetChanged;
     }
     if (asset) |current| if (current.state != .ready or current.recovery != null) return error.TaskBusy;
-    const absent: state.ImportExpectation = .{ .effect = .create };
     const base = std.Io.Dir.openDirAbsolute(context.io, canonical_base, .{ .follow_symlinks = false }) catch return error.RootUnavailable;
     defer base.close(context.io);
+    const base_stat = base.stat(context.io) catch return error.RootUnavailable;
+    var absent: state.ImportExpectation = .{ .effect = .create, .base_inode = base_stat.inode };
     const agents = base.openDir(context.io, ".agents", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
     defer agents.close(context.io);
     const skills = agents.openDir(context.io, "skills", .{ .follow_symlinks = false }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
     defer skills.close(context.io);
+    const root_stat = skills.stat(context.io) catch return error.TargetUnavailable;
+    absent.root_inode = root_stat.inode;
     const target = skills.openDir(context.io, invocation, .{ .follow_symlinks = false, .iterate = true }) catch |err| return if (err == error.FileNotFound and asset == null) absent else error.TargetUnavailable;
     defer target.close(context.io);
     var manifest = try package.inspectResourceTree(context.io, context.allocator, target, .{});
@@ -132,6 +135,9 @@ pub fn inspectImportTarget(context: Context, canonical_base: []const u8, scope: 
         .install_id = if (asset) |current| current.install_id else null,
         .record_hash = if (asset) |current| current.content_hash else null,
         .content_hash = manifest.content_hash,
+        .base_inode = base_stat.inode,
+        .root_inode = root_stat.inode,
+        .target_inode = (target.stat(context.io) catch return error.TargetUnavailable).inode,
     };
 }
 

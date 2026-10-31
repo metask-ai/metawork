@@ -248,7 +248,14 @@ pub const WorkspaceIdentity = struct {
 pub const AutomaticWorkspaceRootMutation = struct {
     expectedGeneration: []const u8,
 };
-pub const SkillImportChoice = struct { kind: []const u8 };
+pub const SkillImportTarget = struct {
+    kind: []const u8,
+    workspaceId: ?[]const u8,
+    expectedWorkspaceEpoch: ?[]const u8,
+    installId: ?[]const u8,
+};
+pub const SkillImportChoice = struct { kind: []const u8, target: SkillImportTarget };
+pub const SkillPrepareImport = struct { previewId: []const u8, preparationRevision: []const u8, target: ?SkillImportTarget };
 pub const SkillSourceSetEnabled = struct { sourceId: std.json.Value, enabled: bool, expectedRevision: []const u8 };
 pub const SkillSourceRecover = struct { action: []const u8, expectedRecoveryToken: []const u8 };
 pub const SkillSetEnabled = struct {
@@ -262,15 +269,10 @@ pub const SkillSetEnabled = struct {
 };
 pub const SkillInstall = struct {
     previewId: []const u8,
-    scope: []const u8,
-    workspaceId: ?[]const u8,
-    expectedWorkspaceEpoch: ?[]const u8,
-    allowReplace: bool,
+    preparationRevision: []const u8,
+    confirmation: []const u8,
 };
-pub const SkillReimport = struct {
-    installId: []const u8,
-    previewId: []const u8,
-};
+pub const SkillReimport = SkillInstall;
 pub const SkillIdentity = struct { installId: []const u8 };
 pub const McpCreateStdioServer = struct {
     expectedDesiredGeneration: []const u8,
@@ -1238,4 +1240,18 @@ test "Output action strict payload accepts only scoped identities and known acti
             return error.InvalidPayloadAccepted;
         } else |_| {}
     }
+}
+
+test "Skill import payloads accept only typed target and exact preparation confirmation" {
+    var choice = try parsePayload(SkillImportChoice, "{\"kind\":\"directory\",\"target\":{\"kind\":\"personal\",\"workspaceId\":null,\"expectedWorkspaceEpoch\":null,\"installId\":null}}");
+    defer choice.deinit();
+    try std.testing.expectEqualStrings("personal", choice.value.target.kind);
+    var confirmation = try parsePayload(SkillInstall, "{\"previewId\":\"7\",\"preparationRevision\":\"2\",\"confirmation\":\"update\"}");
+    defer confirmation.deinit();
+    try std.testing.expectEqualStrings("2", confirmation.value.preparationRevision);
+    for ([_][]const u8{
+        "{\"previewId\":\"7\",\"scope\":\"personal\",\"workspaceId\":null,\"expectedWorkspaceEpoch\":null,\"allowReplace\":true}",
+        "{\"previewId\":\"7\",\"preparationRevision\":\"2\",\"confirmation\":\"update\",\"sourcePath\":\"/tmp/source\"}",
+        "{\"previewId\":\"7\",\"preparationRevision\":2,\"confirmation\":\"update\"}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillInstall, payload));
 }

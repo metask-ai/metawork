@@ -2181,6 +2181,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "skill_import_preview", @embedFile("frontend/src/bridge/__fixtures__/skill-import-preview.fixture"));
     product_control_contract_fixture.addOption([]const u8, "task_open", @embedFile("frontend/src/bridge/__fixtures__/task-open.fixture"));
     product_control_contract_fixture.addOption([]const u8, "scheduled_occurrences", @embedFile("frontend/src/bridge/__fixtures__/scheduled-occurrences.fixture"));
     product_control_contract_fixture.addOption([]const u8, "output_save", @embedFile("frontend/src/bridge/__fixtures__/output-save.fixture"));

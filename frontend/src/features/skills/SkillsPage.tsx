@@ -5,6 +5,9 @@ import type {
   SkillExportResult,
   SkillEnablementResult,
   SkillImportPreview,
+  SkillImportTarget,
+  SkillImportEffect,
+  SkillMutationReason,
   SkillCatalogView,
   SkillManagementView,
   SkillMutationResult,
@@ -14,6 +17,7 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
+import { Menu } from "../../components/ui/menu.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
@@ -36,9 +40,47 @@ export type SkillRefreshRequests = Record<
   { busy: boolean; error: string | null }
 >;
 type ImportKind = "package" | "directory";
-type ImportScope =
-  | { kind: "personal" }
-  | { kind: "project"; workspaceId: string; workspaceEpoch: string };
+type PreparedImport = Extract<SkillImportPreview, { status: "prepared" }>;
+
+function ImportMenu({
+  label,
+  disabled,
+  onChoose,
+}: {
+  label: string;
+  disabled: boolean;
+  onChoose: (kind: ImportKind, trigger: HTMLElement | null) => void;
+}) {
+  const { t } = useI18n();
+  const trigger = useRef<HTMLButtonElement>(null);
+  return (
+    <Menu.Root>
+      <Menu.Trigger
+        ref={trigger}
+        disabled={disabled}
+        render={<Button variant="primary" size="sm" />}
+      >
+        <Icon name="upload" />
+        {label}
+        <Icon name="chevron" />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner align="end">
+          <Menu.Popup>
+            <Menu.Item onClick={() => onChoose("package", trigger.current)}>
+              <Icon name="package" />
+              {t("skills.choose_package")}
+            </Menu.Item>
+            <Menu.Item onClick={() => onChoose("directory", trigger.current)}>
+              <Icon name="folder-up" />
+              {t("skills.choose_folder")}
+            </Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
 
 export function filterSkills(assets: Asset[], query: string): Asset[] {
   const needle = query.trim().toLocaleLowerCase();
@@ -232,6 +274,7 @@ export function SkillsPage({
   onRefresh,
   onSetEnabled,
   onChooseImport,
+  onPrepareImport,
   onInstall,
   onReimport,
   onUninstall,
@@ -268,15 +311,24 @@ export function SkillsPage({
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ) => Promise<SkillEnablementResult>;
-  onChooseImport: (kind: ImportKind) => Promise<SkillImportPreview>;
+  onChooseImport: (
+    kind: ImportKind,
+    target: SkillImportTarget,
+  ) => Promise<SkillImportPreview>;
+  onPrepareImport: (
+    previewId: string,
+    revision: string,
+    target: SkillImportTarget | null,
+  ) => Promise<SkillImportPreview>;
   onInstall: (
     previewId: string,
-    scope: ImportScope,
-    allowReplace: boolean,
+    revision: string,
+    confirmation: SkillImportEffect,
   ) => Promise<SkillMutationResult>;
   onReimport: (
-    installId: string,
     previewId: string,
+    revision: string,
+    confirmation: SkillImportEffect,
   ) => Promise<SkillMutationResult>;
   onUninstall: (installId: string) => Promise<SkillMutationResult>;
   onRetry: (installId: string) => Promise<SkillMutationResult>;
@@ -295,10 +347,14 @@ export function SkillsPage({
   const [selected, setSelected] = useState<Asset | null>(null);
   const [detail, setDetail] = useState<SkillDetailResult | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [preview, setPreview] = useState<SkillImportPreview | null>(null);
+  const [preview, setPreview] = useState<PreparedImport | null>(null);
   const [importScope, setImportScope] = useState("personal");
   const [reimportTarget, setReimportTarget] = useState<Asset | null>(null);
-  const [replaceRequired, setReplaceRequired] = useState(false);
+  const importAudience = useRef(0);
+  const previewRef = useRef<PreparedImport | null>(null);
+  previewRef.current = preview;
+  const discardRef = useRef(onPrepareImport);
+  discardRef.current = onPrepareImport;
   const [busy, setBusy] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
@@ -420,6 +476,23 @@ export function SkillsPage({
 
   useEffect(() => title.current?.focus(), []);
   useEffect(() => setEnablementError(null), [contextIdentity]);
+  useEffect(() => {
+    importAudience.current += 1;
+    discardPreview();
+    setImportOpen(false);
+    setBusy(false);
+  }, [contextIdentity, disabled]);
+  useEffect(
+    () => () => {
+      importAudience.current += 1;
+      const current = previewRef.current;
+      if (current)
+        void discardRef
+          .current(current.previewId, current.preparationRevision, null)
+          .catch(() => {});
+    },
+    [],
+  );
 
   useEffect(() => {
     if (selectedWorkspaceKey !== effectiveWorkspaceKey)
@@ -479,14 +552,27 @@ export function SkillsPage({
         : null);
   }
 
+  function discardPreview() {
+    const current = previewRef.current;
+    previewRef.current = null;
+    setPreview(null);
+    if (current)
+      void discardRef
+        .current(current.previewId, current.preparationRevision, null)
+        .catch(() => {});
+  }
+
   function closeDrawer(restoreFocus = true) {
+    importAudience.current += 1;
+    discardPreview();
     const trigger = drawerTrigger.current;
     setSelected(null);
     setDetail(null);
     setImportOpen(false);
     setPreview(null);
+    setBusy(false);
     setReimportTarget(null);
-    setReplaceRequired(false);
+
     setDetailLoading(false);
     setConfirmUninstall(false);
     setNotice(null);
@@ -516,68 +602,158 @@ export function SkillsPage({
     }
   }
 
-  function beginImport(trigger?: HTMLElement, target?: Asset) {
-    rememberTrigger(trigger);
-    setSelected(null);
-    setImportOpen(true);
-    setPreview(null);
-    setReimportTarget(target ?? null);
-    setReplaceRequired(false);
-    setError(null);
-    setNotice(null);
-    setImportScope("personal");
+  function importError(reason: SkillMutationReason) {
+    return t(`skills.import_error.${reason}`);
   }
 
-  async function choose(kind: ImportKind) {
-    if (busy) return;
-    setBusy(true);
+  async function beginImport(
+    kind: ImportKind,
+    trigger: HTMLElement | null,
+    target?: Asset,
+  ) {
+    if (busy || disabled) return;
+    if (!trigger || !drawer.current?.contains(trigger))
+      rememberTrigger(trigger ?? undefined);
+    discardPreview();
+    const audience = ++importAudience.current;
+    const requestContext = contextIdentity;
+    const intent: SkillImportTarget | null = target?.installId
+      ? { kind: "reimport", installId: target.installId }
+      : context === "personal"
+        ? { kind: "personal" }
+        : selectedWorkspace
+          ? {
+              kind: "project",
+              workspaceId: selectedWorkspace.id,
+              workspaceEpoch: selectedWorkspace.epoch,
+            }
+          : null;
+    if (!intent) return;
+    setSelected(null);
+    setImportOpen(false);
+    setReimportTarget(target ?? null);
+    setImportScope(intent.kind === "project" ? intent.workspaceId : "personal");
     setError(null);
-    setReplaceRequired(false);
+    setNotice(null);
+    setBusy(true);
     try {
-      const chosen = await onChooseImport(kind);
-      if (chosen.selected) setPreview(chosen);
+      const chosen = await onChooseImport(kind, intent);
+      if (
+        audience !== importAudience.current ||
+        requestContext !== currentContextIdentity.current
+      ) {
+        if (chosen.status === "prepared")
+          void onPrepareImport(
+            chosen.previewId,
+            chosen.preparationRevision,
+            null,
+          ).catch(() => {});
+        return;
+      }
+      if (chosen.status === "cancelled") return;
+      setImportOpen(true);
+      if (chosen.status === "rejected") {
+        setError(importError(chosen.reason));
+        return;
+      }
+      setPreview(chosen);
+      setImportScope(
+        chosen.scope.kind === "project" ? chosen.scope.workspaceId : "personal",
+      );
     } catch {
-      setError(t("skills.error.preview"));
+      if (audience === importAudience.current) {
+        setImportOpen(true);
+        setError(t("skills.error.preview"));
+      }
     } finally {
-      setBusy(false);
+      if (audience === importAudience.current) setBusy(false);
     }
   }
 
-  function selectedScope(): ImportScope | null {
-    if (importScope === "personal") return { kind: "personal" };
-    const workspace = manualWorkspaces.find((item) => item.id === importScope);
-    return workspace
-      ? {
-          kind: "project",
-          workspaceId: workspace.id,
-          workspaceEpoch: workspace.epoch,
-        }
-      : null;
-  }
-
-  async function commitImport(allowReplace = false) {
-    if (!preview?.selected || busy) return;
-    const scope = selectedScope();
-    if (!scope && !reimportTarget) return;
+  async function changeImportScope(value: string) {
+    if (!preview || busy || disabled) return;
+    const workspace = manualWorkspaces.find((item) => item.id === value);
+    const target: SkillImportTarget | null =
+      value === "personal"
+        ? { kind: "personal" }
+        : workspace
+          ? {
+              kind: "project",
+              workspaceId: workspace.id,
+              workspaceEpoch: workspace.epoch,
+            }
+          : null;
+    if (!target) return;
+    const audience = ++importAudience.current;
     setBusy(true);
     setError(null);
     try {
-      const result = reimportTarget?.installId
-        ? await onReimport(reimportTarget.installId, preview.previewId)
-        : await onInstall(preview.previewId, scope!, allowReplace);
+      const result = await onPrepareImport(
+        preview.previewId,
+        preview.preparationRevision,
+        target,
+      );
+      if (audience !== importAudience.current) return;
+      if (result.status === "prepared") {
+        setPreview(result);
+        setImportScope(
+          result.scope.kind === "project"
+            ? result.scope.workspaceId
+            : "personal",
+        );
+      } else if (result.status === "rejected") {
+        setError(importError(result.reason));
+        if (
+          !["busy", "capacity_reached", "catalog_loading"].includes(
+            result.reason,
+          )
+        )
+          discardPreview();
+      }
+    } catch {
+      if (audience === importAudience.current) {
+        discardPreview();
+        setError(t("skills.error.preview"));
+      }
+    } finally {
+      if (audience === importAudience.current) setBusy(false);
+    }
+  }
+
+  async function commitImport() {
+    if (!preview || busy || disabled) return;
+    const audience = ++importAudience.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await (reimportTarget ? onReimport : onInstall)(
+        preview.previewId,
+        preview.preparationRevision,
+        preview.effect,
+      );
+      if (audience !== importAudience.current) return;
       if (!result.accepted) {
-        if (result.reason === "target_exists") {
-          setReplaceRequired(true);
-          return;
-        }
-        setError(t("skills.error.mutation"));
+        setError(importError(result.reason));
+        if (
+          !["busy", "capacity_reached", "catalog_loading"].includes(
+            result.reason,
+          )
+        )
+          discardPreview();
         return;
       }
+      // Committed work continues in Host; closing never cancels a transaction.
+      previewRef.current = null;
+      setPreview(null);
       closeDrawer();
     } catch {
-      setError(t("skills.error.mutation"));
+      if (audience === importAudience.current) {
+        previewRef.current = null;
+        setPreview(null);
+        setError(importError("outcome_unknown"));
+      }
     } finally {
-      setBusy(false);
+      if (audience === importAudience.current) setBusy(false);
     }
   }
 
@@ -610,7 +786,11 @@ export function SkillsPage({
     try {
       const result = await onExport(selected.installId);
       if (!result.exported) {
-        setError(t("skills.error.export"));
+        setError(
+          result.reason === "too_large"
+            ? t("skills.error.export_too_large")
+            : t("skills.error.export"),
+        );
         return;
       }
       setNotice(t("skills.exported", { file: result.fileName }));
@@ -648,6 +828,29 @@ export function SkillsPage({
     );
   }
 
+  const operation = management.importOperation;
+  const currentOperation =
+    preview &&
+    operation?.id === preview.operationId &&
+    operation.preparationRevision === preview.preparationRevision
+      ? operation
+      : null;
+  const importBlocker = currentOperation
+    ? (currentOperation.blocker ??
+      (currentOperation.canConfirm ? null : "invalid_preview"))
+    : (preview?.blocker ?? null);
+  const visibleOperation =
+    operation &&
+    operation.phase !== "prepared" &&
+    operation.phase !== "cancelled" &&
+    (context === "personal"
+      ? operation.scope.kind === "personal"
+      : operation.scope.kind === "project" &&
+        operation.scope.workspaceId === selectedWorkspace?.id &&
+        operation.scope.workspaceEpoch === selectedWorkspace?.epoch)
+      ? operation
+      : null;
+
   const unavailable = management.availability !== "ready";
   const missingProjectWorkspace =
     context === "project" && selectedWorkspace === null;
@@ -681,17 +884,28 @@ export function SkillsPage({
               <Icon name="refresh" />
               {t(refreshing ? "skills.refreshing" : "skills.refresh")}
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={disabled || unavailable}
-              onClick={(event) => beginImport(event.currentTarget)}
-            >
-              <Icon name="upload" />
-              {t("skills.import")}
-            </Button>
+            <ImportMenu
+              label={t("skills.import")}
+              disabled={
+                disabled ||
+                unavailable ||
+                busy ||
+                (context === "project" && !selectedWorkspace)
+              }
+              onChoose={(kind, trigger) => void beginImport(kind, trigger)}
+            />
           </div>
         </header>
+
+        {visibleOperation && (
+          <p className="skill-drawer-notice" role="status">
+            {t(`skills.operation.${visibleOperation.phase}`, {
+              skill: visibleOperation.invocationName,
+            })}
+            {visibleOperation.reason &&
+              ` ${importError(visibleOperation.reason)}`}
+          </p>
+        )}
 
         <SkillSourceControls
           settings={management.sourceSettings}
@@ -845,15 +1059,11 @@ export function SkillsPage({
                   : "skills.empty_body",
               )}
             </p>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={disabled}
-              onClick={(event) => beginImport(event.currentTarget)}
-            >
-              <Icon name="upload" />
-              {t("skills.import_first")}
-            </Button>
+            <ImportMenu
+              label={t("skills.import_first")}
+              disabled={disabled || busy}
+              onChoose={(kind, trigger) => void beginImport(kind, trigger)}
+            />
           </div>
         ) : noResults ? (
           <div className="skill-empty-state skill-empty-state-compact">
@@ -912,31 +1122,18 @@ export function SkillsPage({
             <div className="skill-drawer-scroll">
               {importOpen ? (
                 <>
-                  {!preview?.selected ? (
-                    <div className="skill-import-choices">
-                      <button
-                        className="skill-import-choice focus-ring"
-                        disabled={busy}
-                        onClick={() => void choose("package")}
-                      >
-                        <span>
-                          <Icon name="package" />
-                        </span>
-                        <strong>{t("skills.choose_package")}</strong>
-                        <small>{t("skills.choose_package_body")}</small>
-                      </button>
-                      <button
-                        className="skill-import-choice focus-ring"
-                        disabled={busy}
-                        onClick={() => void choose("directory")}
-                      >
-                        <span>
-                          <Icon name="folder-up" />
-                        </span>
-                        <strong>{t("skills.choose_folder")}</strong>
-                        <small>{t("skills.choose_folder_body")}</small>
-                      </button>
-                    </div>
+                  {!preview ? (
+                    <ImportMenu
+                      label={t("skills.choose_again")}
+                      disabled={disabled || busy}
+                      onChoose={(kind, trigger) =>
+                        void beginImport(
+                          kind,
+                          trigger,
+                          reimportTarget ?? undefined,
+                        )
+                      }
+                    />
                   ) : (
                     <>
                       <div className="skill-import-preview">
@@ -965,7 +1162,10 @@ export function SkillsPage({
                           <span>{t("skills.install_scope")}</span>
                           <SelectField
                             value={importScope}
-                            onValueChange={setImportScope}
+                            onValueChange={(value) =>
+                              void changeImportScope(value)
+                            }
+                            disabled={busy || disabled}
                             options={[
                               {
                                 value: "personal",
@@ -980,12 +1180,25 @@ export function SkillsPage({
                           />
                         </label>
                       )}
-                      {replaceRequired && (
-                        <div className="skill-drawer-notice" role="alert">
-                          <strong>{t("skills.replace_title")}</strong>
-                          <p>{t("skills.replace_body")}</p>
-                        </div>
-                      )}
+                      <div className="skill-drawer-notice" role="status">
+                        <strong>{t(`skills.effect.${preview.effect}`)}</strong>
+                        <p>
+                          {preview.scope.kind === "personal"
+                            ? t("skills.scope.personal")
+                            : t("skills.scope.project_context", {
+                                workspace:
+                                  workspaces.find(
+                                    (w) => w.id === preview.scope.workspaceId,
+                                  )?.displayName ?? t("skills.scope.project"),
+                              })}
+                        </p>
+                        <p>{t(`skills.effect_body.${preview.effect}`)}</p>
+                        {importBlocker && <p>{importError(importBlocker)}</p>}
+                      </div>
+                      <section className="skill-definition">
+                        <h3>{t("skills.detail.definition")}</h3>
+                        <pre>{preview.definition}</pre>
+                      </section>
                     </>
                   )}
                   {error && (
@@ -1076,17 +1289,18 @@ export function SkillsPage({
             <footer>
               {importOpen ? (
                 <>
-                  {preview?.selected && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={() => {
-                        setPreview(null);
-                        setReplaceRequired(false);
-                      }}
-                    >
-                      {t("skills.choose_again")}
-                    </button>
+                  {preview && (
+                    <ImportMenu
+                      label={t("skills.choose_again")}
+                      disabled={busy || disabled}
+                      onChoose={(kind, trigger) =>
+                        void beginImport(
+                          kind,
+                          trigger,
+                          reimportTarget ?? undefined,
+                        )
+                      }
+                    />
                   )}
                   <span />
                   <Button
@@ -1097,20 +1311,16 @@ export function SkillsPage({
                   >
                     {t("common.cancel")}
                   </Button>
-                  {preview?.selected && (
+                  {preview && (
                     <Button
                       variant="primary"
                       size="sm"
-                      disabled={busy}
-                      onClick={() => void commitImport(replaceRequired)}
+                      disabled={busy || disabled || importBlocker !== null}
+                      onClick={() => void commitImport()}
                     >
                       {busy
                         ? t("skills.working")
-                        : replaceRequired
-                          ? t("skills.replace")
-                          : reimportTarget
-                            ? t("skills.reimport")
-                            : t("skills.install")}
+                        : t(`skills.effect.${preview.effect}`)}
                     </Button>
                   )}
                 </>
@@ -1126,15 +1336,13 @@ export function SkillsPage({
                     </button>
                   )}
                   {selected.canReimport && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={busy}
-                      onClick={(event) =>
-                        beginImport(event.currentTarget, selected)
+                    <ImportMenu
+                      label={t("skills.reimport")}
+                      disabled={busy || disabled}
+                      onChoose={(kind, trigger) =>
+                        void beginImport(kind, trigger, selected)
                       }
-                    >
-                      <Icon name="refresh" /> {t("skills.reimport")}
-                    </button>
+                    />
                   )}
                   {selected.canRetry && (
                     <button

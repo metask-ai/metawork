@@ -336,14 +336,9 @@ test "Skill resource context reads a managed import through tool and typed input
         try control.startCustomProviders(root, vault.capability());
         defer control.stopCustomProviders();
         try configureProvider(&control, provider.endpoint);
-        var preview = try control.previewSkillDirectory(source);
-        defer preview.deinit();
-        _ = try control.installSkillDirectory(source, .{
-            .source_kind = .local_directory,
-            .scope = .personal,
-            .expected_invocation_name = preview.invocation_name,
-            .expected_content_hash = preview.content_hash,
-        });
+        const preparation = try control.prepareSkillImport(source, .local_directory, .{ .scope = .personal });
+        try control.preflightSkillImport(preparation.id, preparation.revision, preparation.effect);
+        _ = try control.commitSkillImport(preparation.id, preparation.revision, preparation.effect);
         for (0..5000) |_| {
             try control.drainAgentEvents();
             const available = control.skillCatalog();

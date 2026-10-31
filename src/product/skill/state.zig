@@ -181,7 +181,7 @@ pub fn importReason(err: anyerror) ImportReason {
         error.ArchiveCorrupt => .archive_corrupt,
         error.FileLimitExceeded, error.FileTooLarge, error.TotalSizeExceeded, error.ArchiveTooLarge, error.DefinitionTooLarge => .too_large,
         error.SourceChanged, error.InvalidAsset => .source_changed,
-        error.TargetChanged => .target_changed,
+        error.TargetChanged, error.TargetUnavailable, error.RootUnavailable => .target_changed,
         error.InvalidPreparation, error.InvalidConfirmation => .invalid_preview,
         error.AssetNotFound, error.SkillNotFound => .asset_unavailable,
         error.TaskBusy, error.TransactionAlreadyActive => .busy,
@@ -200,6 +200,9 @@ pub const ImportExpectation = struct {
     install_id: ?management.InstallId = null,
     content_hash: ?management.ContentHash = null,
     record_hash: ?management.ContentHash = null,
+    base_inode: std.Io.File.INode = 0,
+    root_inode: ?std.Io.File.INode = null,
+    target_inode: ?std.Io.File.INode = null,
 };
 
 pub const ImportOperation = struct {

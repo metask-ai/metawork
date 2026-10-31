@@ -403,10 +403,8 @@ pub const SkillEnablementConfiguration = skill_runtime.EnablementConfiguration;
 pub const SkillEnablementScope = skill_runtime.EnablementScope;
 pub const SkillEnablementState = skill_runtime.EnablementState;
 pub const SkillEnablementMutation = skill_runtime.EnablementMutation;
-pub const SkillInstallInput = skill_runtime.InstallInput;
 pub const SkillMutationResult = skill_runtime.MutationResult;
 pub const SkillExportResult = skill_runtime.ExportResult;
-pub const SkillImportPreview = skill_runtime.Preview;
 pub const SkillImportPreparation = skill_runtime.ImportPreparation;
 pub const SkillImportTarget = skill_runtime.ImportTarget;
 pub const SkillImportEffect = skill_runtime.ImportEffect;
@@ -2590,6 +2588,11 @@ pub const Runtime = struct {
         self.checkSkillMutationAuthority(preparation.scope) catch |err| {
             preparation.blocker = skill_runtime.importReason(err);
         };
+        // These borrowed strings are display-only; the owned source and target
+        // used by commit stay inside Skill. Do not expose known credentials.
+        if (self.containsKnownCredential(preparation.invocation_name)) preparation.invocation_name = "[redacted]";
+        if (self.containsKnownCredential(preparation.description)) preparation.description = "[redacted]";
+        if (self.containsKnownCredential(preparation.definition)) preparation.definition = "[redacted]";
         return preparation;
     }
 
@@ -2642,106 +2645,6 @@ pub const Runtime = struct {
     pub fn discardSkillImport(self: *Runtime, expected_id: ?u64) void {
         self.skill.discardPreparedImport(expected_id);
         self.bumpRevision();
-    }
-
-    pub fn previewSkillDirectory(
-        self: *Runtime,
-        absolute_path: []const u8,
-    ) Error!skill_runtime.Preview {
-        return self.skill.previewDirectory(absolute_path);
-    }
-    pub fn previewSkillArchive(
-        self: *Runtime,
-        absolute_path: []const u8,
-    ) Error!skill_runtime.Preview {
-        return self.skill.previewArchive(absolute_path);
-    }
-    pub fn installSkillDirectory(
-        self: *Runtime,
-        absolute_path: []const u8,
-        input: SkillInstallInput,
-    ) Error!SkillMutationResult {
-        try self.requireSkillMutationAuthority(input.scope);
-        const previous_health = self.skill.managementHealth();
-        const result = self.skill.installDirectory(
-            absolute_path,
-            input,
-            self.schedule.now(),
-        ) catch |err| {
-            self.publishSkillManagementChanges(previous_health);
-            return err;
-        };
-        _ = self.skill.takeManagementChanged();
-        self.bumpRevision();
-        return result;
-    }
-
-    pub fn installSkillArchive(
-        self: *Runtime,
-        absolute_path: []const u8,
-        input: SkillInstallInput,
-    ) Error!SkillMutationResult {
-        try self.requireSkillMutationAuthority(input.scope);
-        const previous_health = self.skill.managementHealth();
-        const result = self.skill.installArchive(
-            absolute_path,
-            input,
-            self.schedule.now(),
-        ) catch |err| {
-            self.publishSkillManagementChanges(previous_health);
-            return err;
-        };
-        _ = self.skill.takeManagementChanged();
-        self.bumpRevision();
-        return result;
-    }
-
-    pub fn reimportSkillDirectory(
-        self: *Runtime,
-        install_id: skill_runtime.InstallId,
-        absolute_path: []const u8,
-        expected_invocation_name: []const u8,
-        expected_content_hash: skill_runtime.ContentHash,
-    ) Error!SkillMutationResult {
-        const scope = try self.skill.assetScope(install_id);
-        try self.requireSkillMutationAuthority(scope);
-        const previous_health = self.skill.managementHealth();
-        const result = self.skill.reimportDirectory(
-            install_id,
-            absolute_path,
-            expected_invocation_name,
-            expected_content_hash,
-        ) catch |err| {
-            self.publishSkillManagementChanges(previous_health);
-            return err;
-        };
-        _ = self.skill.takeManagementChanged();
-        self.bumpRevision();
-        return result;
-    }
-
-    pub fn reimportSkillArchive(
-        self: *Runtime,
-        install_id: skill_runtime.InstallId,
-        absolute_path: []const u8,
-        expected_invocation_name: []const u8,
-        expected_content_hash: skill_runtime.ContentHash,
-    ) Error!SkillMutationResult {
-        const scope = try self.skill.assetScope(install_id);
-        try self.requireSkillMutationAuthority(scope);
-        const previous_health = self.skill.managementHealth();
-        const result = self.skill.reimportArchive(
-            install_id,
-            absolute_path,
-            expected_invocation_name,
-            expected_content_hash,
-        ) catch |err| {
-            self.publishSkillManagementChanges(previous_health);
-            return err;
-        };
-        _ = self.skill.takeManagementChanged();
-        self.bumpRevision();
-        return result;
     }
 
     pub fn uninstallSkill(
@@ -8457,6 +8360,12 @@ pub const Runtime = struct {
         };
     }
 
+    fn skillImportBlocker(context: *const anyopaque, scope: skill_runtime.ManagementScope) ?skill_runtime.ImportReason {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        self.checkSkillMutationAuthority(scope) catch |err| return skill_runtime.importReason(err);
+        return null;
+    }
+
     fn skillViewContainsSensitive(
         context: *const anyopaque,
         value: []const u8,
@@ -8505,7 +8414,7 @@ pub const Runtime = struct {
                 .slot_count = self.workspace.slotCount(),
                 .get_fn = skillWorkspaceCatalog,
             },
-            .{ .context = self, .available_fn = skillRetryAvailable },
+            .{ .context = self, .available_fn = skillRetryAvailable, .import_blocker_fn = skillImportBlocker },
         ) catch return error.SnapshotTooLarge;
     }
 
@@ -10812,6 +10721,33 @@ pub const TestSupport = if (builtin.is_test) struct {
         try recordTestOutput(control, @splat(3), "results/年度报告.docx");
     }
 
+    pub fn skillImportFixture(control: *Runtime, root: []const u8, store: *skill_runtime.testing.ManagementFileStore) !void {
+        const Clock = struct {
+            fn now(_: ?*anyopaque) ?u64 {
+                return 100;
+            }
+            fn catalog(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+                return error.CatalogUnavailable;
+            }
+        };
+        try initTestRuntimeWithLimits(control, testLimits(), .{
+            .skill_management = .{ .file_store = store, .staging_root = root },
+            .schedule_timer = .{ .enabled = true, .now_unix_seconds = Clock.now },
+        });
+        errdefer control.deinit();
+        // Install fixture ports before supplying a home: normal init immediately
+        // queues discovery when a canonical home is present.
+        control.skill.ports.catalog.query_fn = Clock.catalog;
+        control.canonical_user_home = try control.allocator.dupe(u8, root);
+        control.skill.canonical_user_home = try control.allocator.dupe(u8, root);
+    }
+
+    pub fn finishSkillImportFixture(control: *Runtime) void {
+        // initTestRuntimeWithLimits has a projection-only Run, no worker.
+        control.task_runtime.tasks[0].?.runtime.active_operation = .none;
+        control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+    }
+
     pub fn filePreviewFixture(control: *Runtime, root: []const u8) !void {
         try testImagePreviewRuntime(control, root);
     }
@@ -11945,6 +11881,7 @@ fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
     total = std.math.add(usize, total, target_text) catch return null;
     total = std.math.add(usize, total, issue_codes) catch return null;
     total = std.math.add(usize, total, discovery) catch return null;
+    total = std.math.add(usize, total, skill_snapshot_structure.import_operation) catch return null;
     return std.math.add(usize, total, skill_source_settings_snapshot_bytes) catch return null;
 }
 
@@ -13251,7 +13188,7 @@ test "Automatic Workspace snapshot exposes unavailable Skill authority with no q
     workspace.object.getPtr("skillCatalog").?.object.getPtr("availability").?.* = .{ .string = "unavailable" };
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
     defer std.testing.allocator.free(expected);
-    var storage: [8192]u8 = undefined;
+    var storage: [contract_fixture.snapshot.len + 1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, try control.writeAggregateFixture(&storage));
 }
 
@@ -13303,7 +13240,7 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
         CatalogAvailability.uninitialized,
         (try control.taskCatalog(3)).availability,
     );
-    var storage: [8192]u8 = undefined;
+    var storage: [contract_fixture.snapshot.len + 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&storage);
     const fixture = std.mem.trimEnd(
         u8,

@@ -26,6 +26,7 @@ fn testOwnerResolve(_: *const anyopaque, owner: management.Owner) ?management.Sc
 /// Text, variable arrays and fixed structure are charged independently.
 pub const SnapshotStructureBounds = struct {
     asset: usize = 640,
+    import_operation: usize = 768 + management.max_target_entry_bytes * 6,
     catalog_skill: usize = 216,
     argument: usize = 3, // Two JSON quotes and at most one comma.
     // Unmatched inventory entries are emitted twice and have no catalog text
@@ -72,6 +73,7 @@ pub const WorkspaceCatalogs = struct {
 pub const RetryAvailability = struct {
     context: *const anyopaque,
     available_fn: *const fn (*const anyopaque, management.InstallId) bool,
+    import_blocker_fn: ?*const fn (*const anyopaque, management.Scope) ?state.ImportReason = null,
 };
 
 /// Maps an asset's stored ownership scope to the current authority scope of
@@ -93,6 +95,8 @@ pub const ManagementInput = struct {
     personal_source_discovery: ?state.SourceDiscoveryView,
     retry: RetryAvailability,
     owner: OwnerResolver,
+    import_blocker: ?state.ImportReason = null,
+    import_prepared: bool = false,
 };
 
 pub fn catalogProjection(
@@ -178,6 +182,30 @@ pub fn writeCatalogProjection(
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
+fn writeImportOperation(writer: *std.Io.Writer, input: ManagementInput) Error!void {
+    const operation = input.state.import_operation orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"id\":\"{d}\",\"preparationRevision\":\"{d}\",\"effect\":\"{s}\",\"phase\":\"{s}\",\"scope\":", .{ operation.id, operation.revision, @tagName(operation.effect), @tagName(operation.phase) }) catch return error.SnapshotTooLarge;
+    switch (operation.scope) {
+        .personal => writer.writeAll("{\"kind\":\"personal\",\"workspaceId\":null,\"workspaceEpoch\":null}") catch return error.SnapshotTooLarge,
+        .project => |project| writer.print("{{\"kind\":\"project\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}", .{ project.workspace_id, project.workspace_epoch }) catch return error.SnapshotTooLarge,
+    }
+    writer.writeAll(",\"installId\":") catch return error.SnapshotTooLarge;
+    if (operation.install_id) |id| {
+        const hex = std.fmt.bytesToHex(id, .lower);
+        writer.print("\"{s}\"", .{&hex}) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"invocationName\":") catch return error.SnapshotTooLarge;
+    try input.text.writeJson(writer, operation.invocationName());
+    writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+    if (operation.reason) |reason| writer.print("\"{s}\"", .{@tagName(reason)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"canConfirm\":{},\"canDiscard\":{},\"blocker\":", .{ input.import_prepared and input.import_blocker == null, input.import_prepared }) catch return error.SnapshotTooLarge;
+    if (input.import_blocker) |reason| writer.print("\"{s}\"", .{@tagName(reason)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
 pub fn writeManagementProjection(
     writer: *std.Io.Writer,
     input: ManagementInput,
@@ -187,6 +215,8 @@ pub fn writeManagementProjection(
         @tagName(input.state.enablement_health),
     }) catch return error.SnapshotTooLarge;
     try writeSourceSettings(writer, input.source_settings);
+    writer.writeAll(",\"importOperation\":") catch return error.SnapshotTooLarge;
+    try writeImportOperation(writer, input);
     writer.writeAll(",\"personalSourceDiscovery\":") catch return error.SnapshotTooLarge;
     try writeSourceDiscovery(writer, .management, input.personal_source_discovery);
     writer.writeAll(",\"assets\":[") catch return error.SnapshotTooLarge;
