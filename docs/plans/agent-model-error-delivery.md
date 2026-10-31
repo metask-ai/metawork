@@ -1,6 +1,6 @@
 # Agent 模型错误处理与交付方案
 
-日期：2026-10-31。状态：方案已收敛，尚未实施代码与现行规范修改。
+日期：2026-10-31。状态：Agent 实现和专项验证已完成；完整 Native 验收未闭合。
 
 本轮在现有 `TerminalResult` 上补齐结构化模型错误，完成 Agent 内部的捕获、校验、终态对账和所有权交付。上层通过 Agent 公共结果取得模型错误、实际执行终态与 Session 可用性，再由各自 owner 制定业务处理。
 
@@ -269,6 +269,26 @@ Native 入口对应 `scripts/build.mjs` 的 `nativeCli`，参数沿用 `scripts/
 - 四协议接线、长字段接受、测试发现、owner guard 和当前平台正式 Native graph 均通过。
 - 上层消费语义明确，产品恢复、投影、持久化与依赖输入保持本轮范围。
 
-分析阶段已通过当前 Windows x86_64 stage verifier、`status is validated before RunResult` 定向测试及现有四协议 Host probe。它们只证明现有终态和拒绝后的 Session 复用，不构成新增详情或长字段场景的验收。
+## 9 本轮实施结果
 
-本次仅整理计划，检查文档链接、格式和 `git diff --check`；实现阶段执行上述运行验证。
+实施分支为 `feat/agent-model-error-delivery`，TinyKG 根任务为 10748。方案基线、有界值、生产接入及 canonical 验证子任务均已完成并分别评估、提交；最终验证子任务 10753 因下述完整 Native 失败保持未关闭。
+
+2026-10-31 本机 Windows x86_64 验证结果：
+
+| 验证 | 结果 |
+| --- | --- |
+| canonical stage verifier | 通过，依赖和 lock 未修改 |
+| 有界值测试与正式 Agent Session root 测试发现 | 五项新增纯值测试通过，并已确认被正式 root 发现执行 |
+| 完整 Agent lifecycle root | 132/132 通过 |
+| 完整 lifecycle graph | 306/306 通过 |
+| architecture guard | 33/33 通过；按现有 guard 修正 leaf 的命名聚合引用，未修改 guard |
+| canonical Host probe | 四协议详情交付、后续显式 Run、Chat Completions 四长字段接受均通过 |
+| canonical SDK probe | 四协议通过，原有 SDK 模式保持可用 |
+| 格式、文档链接与 diff 检查 | 通过 |
+| 完整 Native graph | 未通过；出现 test runner 无响应、Skill archive 用例崩溃，Office pipeline 停滞后仅停止了已核实归属的本轮测试子进程 |
+
+已用任务开始前精确提交 `857e5339` 的临时 detached worktree，在同一工具链和 canonical 依赖上重新执行 `zig build test-product-skill-runtime --summary all`。基线同样为 30/31 通过、1 crashed，停在 `managed imports bind source grants and publish effective bytes through export and reimport` 的 archive preview。当前产物与基线均在 Windows Zig ZIP 读取路径触发 `.PENDING => unreachable`；此前的 `FileTransactionFailed` error-return context 不能据此解释为该 panic 的根因。该 Skill 失败不是本轮 Agent 修改引入。其余 runner 超时与 Office 停滞尚未归因，不能由这项对照一并认定为同因或已解决。
+
+本轮保留失败，不跳过测试、不调整 verifier、不修改 Product/Skill 或 SDK。基线 checkout 和依赖 junction 已清理，原依赖保持完整。完整 Native 通过仍是第 8 节未满足的验收条件。
+
+本地缓存日志保留于 `.zig-cache/agent-model-error-{final-agent,final-lifecycle,architecture,p3-host,p3-sdk,final-native,baseline-skill}.log`。这些是本轮复核线索，不替代可重现测试或长期验证账本。
