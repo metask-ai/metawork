@@ -391,6 +391,8 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 ### 3.1 产品视图与执行推进
 
+Product 在 Agent 结果释放前，将合法 `model_error` 按值保存到 Run 的固定容量终态记录；其容量复用 Agent 公共错误值，不借用 Session 或 SDK 存储。Host 使用既有 credential projector 清洗 message、code、type 与 request ID，分别保留上游截断和 Host 清洗/截断事实；后续首次获知、替换或释放凭据时再次清洗。该观察不改变 Agent 执行结果、Session disposition 或 Product 原有终态优先级；普通 ABI/callback 或后续 pipeline/合同失败附带的合法观察仅作补充。Agent Run identity 只作执行来源，不成为 Product 路由。错误正文不进入日志或 event pump，不从 diagnostic 反推详情。
+
 Product aggregate 独占产品事实、局部事务和执行资格。Product Control 投影只读取已经提交的事实，生成用于展示的摘要、页面上下文、当前 Task 和有界历史，不接纳 Run、不推进 lifecycle、不提交历史。Bridge 可达的版本、Workspace、Task、catalog、permission 与视图查询适用同一约束。Application 按明确 command、Agent event、worker completion 和 lifecycle wake 安排业务推进；有无 Renderer、读频率、分块和重试不得改变必要的推进路径。
 
 投影按稳定产品 identity 和内容版本维护有界编码缓存。无关 Task 的正文不参与局部展示更新；terminal Run 的脱敏、coverage 或关联事实变化仍须使对应块失效。缓存只保存可重建的产品视图，不成为产品事实或持久化的第二 owner。容量不足时淘汰可重建块，不能缩小产品限制、丢失历史访问能力或把合格数据永久变成不可显示。

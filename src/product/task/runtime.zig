@@ -782,6 +782,7 @@ pub const PreparedRun = struct {
                 "",
                 false,
                 true,
+                null,
             );
             run_record.terminal_observed = true;
             task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
@@ -6654,6 +6655,45 @@ fn redactInputProjection(input: *task_state.RunInputRecord, credential: []const 
     }
 }
 
+fn redactModelError(observation: *task_state.RunModelError, credential: []const u8, effects: RedactionEffects) void {
+    const message = &observation.detail.message;
+    observation.host_redacted = effects.redact(message.bytes[0..message.len], credential) or observation.host_redacted;
+    inline for (.{ "code", "type", "request_id" }) |field| {
+        if (@field(observation.detail, field)) |*text|
+            observation.host_redacted = effects.redact(text.bytes[0..text.len], credential) or observation.host_redacted;
+    }
+}
+
+test "late model error credential redaction covers every free text field without changing category" {
+    const Noop = struct {
+        fn release(_: *anyopaque, _: usize) void {}
+    };
+    var observation: task_state.RunModelError = .{ .detail = try agent.ModelError.init(.{
+        .run_id = 42,
+        .category = .authentication,
+        .message = "late-credential authentication",
+        .code = "late-credential",
+        .type = "late-credential",
+        .request_id = "late-credential",
+        .retry = .unknown,
+        .attempts = 1,
+    }) };
+    const effects: RedactionEffects = .{
+        .redact_fn = task_persistence.security.redactBytes,
+        .release_projection_bytes_fn = Noop.release,
+        .context = undefined,
+    };
+    redactModelError(&observation, "late-credential", effects);
+    redactModelError(&observation, "authentication", effects);
+    const value = observation.detail.view();
+    try std.testing.expect(observation.host_redacted);
+    try std.testing.expectEqual(.authentication, value.category);
+    try std.testing.expectEqual(.unknown, value.retry);
+    inline for (.{ "code", "type", "request_id" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, @field(value, field).?, "late-credential") == null);
+    try std.testing.expect(std.mem.indexOf(u8, value.message, "authentication") == null);
+}
+
 fn redactTaskProjection(
     task: *task_state.Task,
     credential: []const u8,
@@ -6725,6 +6765,7 @@ fn redactTaskProjection(
                 run.terminal_diagnostic[0..mutable.diagnostic_len],
                 credential,
             ) or mutable.diagnostic_redacted;
+            if (mutable.model_error) |*observation| redactModelError(observation, credential, effects);
         }
         if (run.execution != null and run.execution.?.automatic_title.state.load(.acquire) == .ready and
             run.execution.?.automatic_title.generated)

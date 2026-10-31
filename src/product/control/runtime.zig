@@ -6208,7 +6208,7 @@ pub const Runtime = struct {
     /// Lifecycle facts alone never accept or start a reviewer decision. The
     /// manual-response entry point uses this before Task's acceptance boundary.
     fn syncLifecycleFacts(self: *Runtime) bool {
-        self.scrubPublishedDiagnostics();
+        self.scrubPublishedTerminalData();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -6561,19 +6561,27 @@ pub const Runtime = struct {
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
     fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
-        self.scrubPublishedDiagnostics();
+        self.scrubPublishedTerminalData();
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
     /// Workers hold immutable initial/request snapshots. A response may contain
     /// a later token, so acquire its publication and scrub against the complete
-    /// Host set before Task observes or persists the terminal diagnostic.
-    fn scrubPublishedDiagnostics(self: *Runtime) void {
+    /// Host set before Task observes or persists any terminal text.
+    fn scrubPublishedTerminalData(self: *Runtime) void {
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
             for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
                 if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
                 const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
                 run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
+                if (run.terminal_payload.model_error) |*observation| {
+                    const message = &observation.detail.message;
+                    observation.host_redacted = self.redactWithKnownCredentialsNoFail(message.bytes[0..message.len]) or observation.host_redacted;
+                    inline for (.{ "code", "type", "request_id" }) |field| {
+                        if (@field(observation.detail, field)) |*text|
+                            observation.host_redacted = self.redactWithKnownCredentialsNoFail(text.bytes[0..text.len]) or observation.host_redacted;
+                    }
+                }
             };
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
                 if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
@@ -18830,6 +18838,41 @@ test "canonical prompt title and terminal diagnostic never retain the registered
             "SECRET-KEY",
         ) == null,
     );
+}
+
+test "published model errors are scrubbed against Account credentials before terminal drain" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(context, "LATE-SECRET");
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var account: u8 = 0;
+    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    run.terminal_payload.model_error = .{ .detail = try lifecycle.ModelError.init(.{
+        .run_id = 42,
+        .category = .authentication,
+        .message = "LATE-SECRET SECRET-KEY",
+        .code = "LATE-SECRET",
+        .type = "LATE-SECRET",
+        .request_id = "LATE-SECRET",
+        .retry = .unknown,
+        .attempts = 1,
+    }) };
+    control.markTerminalRunsBeforeEventDrain();
+    const observation = &run.terminal_payload.model_error.?;
+    try std.testing.expect(observation.host_redacted);
+    const value = observation.detail.view();
+    try std.testing.expect(std.mem.indexOf(u8, value.message, "SECRET") == null);
+    inline for (.{ "code", "type", "request_id" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, @field(value, field).?, "LATE-SECRET") == null);
+    try std.testing.expectEqual(.authentication, value.category);
 }
 
 test "Renderer transport failures never own Agent Run termination" {

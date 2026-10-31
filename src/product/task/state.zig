@@ -411,6 +411,13 @@ pub const PendingInterruption = enum(u8) {
     app_shutdown,
 };
 
+/// Owned safe observation, separate from the decision about the Run outcome.
+pub const RunModelError = struct {
+    detail: agent.ModelError,
+    host_redacted: bool = false,
+    host_truncated: bool = false,
+};
+
 pub const TerminalPayload = struct {
     /// Applied by the main thread only when the terminal event drain completes.
     exclude_on_product_terminal: bool,
@@ -421,6 +428,7 @@ pub const TerminalPayload = struct {
     diagnostic_len: usize = 0,
     diagnostic_truncated: bool = false,
     diagnostic_redacted: bool = false,
+    model_error: ?RunModelError = null,
 };
 
 pub const CompactTerminalPayload = struct {

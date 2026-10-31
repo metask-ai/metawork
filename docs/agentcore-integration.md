@@ -431,7 +431,7 @@ Core 返回并完成既有静止与 ABI 结果校验后，Agent 必须在最终 
 
 `failure == null` 不表示 Run 成功，合法模型失败可为 `OK + API_ERROR`。只有该合法组合才将详情作为模型失败终态的解释。`retryable` 不证明整轮重放安全；attempts 只描述最终失败请求的实际尝试，不证明全部重试已耗尽。category 与自由文本不构成 Account 授权、余额或 Models authority 的判定，模型服务权限也不是工具 Permission。HTTP 200 的流内错误与不对应失败 HTTP 请求的 output limit 均可合法出现。
 
-错误值可按值复制，其 view 仅借用所属值；移动、修改或释放后必须重新取得 view。整个 `TerminalResult` 仍保持 owned diagnostic 的单一所有者和恰好一次 deinit 约束。捕获槽在结果转移或放弃后清空，下一轮独立初始化，不建立最近错误缓存或 checkpoint 字段。当前 Product 可不消费详情；它不进入日志、Bridge、Snapshot 或产品历史，未来开放发布须另按对应 owner 合同执行 Host credential 清洗，上游脱敏不等于任意自由文本均可发布。
+错误值可按值复制，其 view 仅借用所属值；移动、修改或释放后必须重新取得 view。整个 `TerminalResult` 仍保持 owned diagnostic 的单一所有者和恰好一次 deinit 约束。捕获槽在结果转移或放弃后清空，下一轮独立初始化，不建立最近错误缓存或 checkpoint 字段。Product 的按值接收、终态优先级与 Host credential 清洗由 [Product 架构](product-architecture.md#31-产品视图与执行推进)定义；展示、wire 与历史由各自 owner 的合同定义。上游脱敏不等于任意自由文本均可发布，原始详情不进入日志或产品 event pump。
 
 ### callback 内失败
 
