@@ -2488,10 +2488,12 @@ pub const Runtime = struct {
         run_lease_owned = false;
         checkpoint_lease_owned = false;
         if (run_record.execution.?.automatic_title.state.load(.acquire) == .pending) {
-            job.title_execution = owned_task_execution.OwnedTaskExecution.clone(
-                self.allocator,
-                execution,
-            ) catch null;
+            job.title_execution = owned_task_execution.OwnedTaskExecution.cloneTarget(self.allocator, .{
+                .provider_id = execution.target.provider_id,
+                .protocol = execution.target.protocol,
+                .base_url = execution.target.base_url,
+                .model = execution.target.model,
+            }, execution.execution_generation) catch null;
             if (job.title_execution != null)
                 job.title_credential = task.runtime.execution().?.reader(effects.worker.checkpoint.io) catch null;
             if (job.title_execution == null or job.title_credential == null)

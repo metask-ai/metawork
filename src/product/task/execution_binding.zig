@@ -25,34 +25,38 @@ pub const OwnedTaskExecution = struct {
         allocator: std.mem.Allocator,
         source: models_contract.ConfigInput,
     ) std.mem.Allocator.Error!OwnedTaskExecution {
-        const model = source.target.model;
-        const base_url = source.target.base_url;
-        const api_key = source.api_key;
-        std.debug.assert(source.target.provider_id.len != 0);
-        std.debug.assert(model.len != 0);
-        std.debug.assert(base_url.len != 0);
-        std.debug.assert(source.execution_generation != 0);
-        std.debug.assert(api_key.len != 0);
-        const provider_id = try allocator.dupe(u8, source.target.provider_id);
+        std.debug.assert(source.api_key.len != 0);
+        var result = try cloneTarget(allocator, source.target, source.execution_generation);
+        errdefer result.deinit();
+        result.secret = try allocator.dupe(u8, source.api_key);
+        return result;
+    }
+
+    /// Delayed consumers freeze their target separately from the live reader.
+    pub fn cloneTarget(
+        allocator: std.mem.Allocator,
+        target: models_contract.Target,
+        execution_generation: u64,
+    ) std.mem.Allocator.Error!OwnedTaskExecution {
+        std.debug.assert(target.provider_id.len != 0);
+        std.debug.assert(target.model.len != 0);
+        std.debug.assert(target.base_url.len != 0);
+        std.debug.assert(execution_generation != 0);
+        const provider_id = try allocator.dupe(u8, target.provider_id);
         errdefer allocator.free(provider_id);
-        const owned_model = try allocator.dupe(u8, model);
+        const owned_model = try allocator.dupe(u8, target.model);
         errdefer allocator.free(owned_model);
-        const owned_base_url = try allocator.dupe(u8, base_url);
+        const owned_base_url = try allocator.dupe(u8, target.base_url);
         errdefer allocator.free(owned_base_url);
-        const owned_secret = try allocator.dupe(u8, api_key);
-        errdefer {
-            std.crypto.secureZero(u8, owned_secret);
-            allocator.free(owned_secret);
-        }
         return .{
-            .image_capabilities = try .copy(allocator, source.target.image_capabilities),
+            .image_capabilities = try .copy(allocator, target.image_capabilities),
             .allocator = allocator,
             .provider_id = provider_id,
-            .protocol = source.target.protocol,
+            .protocol = target.protocol,
             .model = owned_model,
             .base_url = owned_base_url,
-            .execution_generation = source.execution_generation,
-            .secret = owned_secret,
+            .execution_generation = execution_generation,
+            .secret = &.{},
         };
     }
 
