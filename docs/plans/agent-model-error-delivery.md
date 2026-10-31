@@ -468,7 +468,7 @@ SQL、当前内存、只读/保留 SQL payload 和待确认候选仍须遵守完
 
 按 [验证规范](../validation.md)运行受影响 Product/Application roots、`test-product-history-schema`、`test-lifecycle`、Bridge/Renderer suites、architecture guard 和正式 Native graph。涉及实际 AgentCore 调用时先通过 canonical staged verifier；当前平台真实 Product 路径须证明模型错误经过 Host 清洗进入提示，并经 SQLite 重开后仍可见，恢复入口由用户显式触发。只有存在独立平台失败模式才扩展平台矩阵。
 
-第 9 节记录的 Native Skill 归档崩溃与 Office fixture 失败已在后续修复中验证收口；runner 间歇性停滞的根因仍未定位，属于已知未闭合问题，必须与本阶段结果分别报告。单次完整 Native 通过不证明 runner 问题已消失；不跳过、不弱化 guard，也不因专项通过声称完整 Native 通过。本次仅整理方案，检查文档链接、锚点与 `git diff --check`，不执行 runtime 测试。
+第 9 节记录的 Native Skill 归档崩溃与 Office fixture 失败已在后续修复中验证收口；runner 间歇性停滞的根因仍未定位，属于已知未闭合问题，必须与本阶段结果分别报告。单次完整 Native 通过不证明 runner 问题已消失；不跳过、不弱化 guard，也不因专项通过声称完整 Native 通过。方案整理阶段只检查文档链接、锚点与 `git diff --check`；本次实施和 runtime 复核结果见第 10.13 节。
 
 最终验收以用户可观察闭环为准：错误不再随 Agent 结果释放而丢失；用户能看到具体分类与安全详情；重启后可查看已保存事实；恢复入口不扩大授权、不自动重放；一次性导入并确认 SQLite 接管后，后续只读写 SQLite，旧 `.store` 原样保留且不再读取、清洗或写回，删除以后单独决定。
 
@@ -491,3 +491,13 @@ SQL、当前内存、只读/保留 SQL payload 和待确认候选仍须遵守完
 - degraded 导入和迁移后旧版本新增的 `.store` 记录可能不在当前 SQLite 视图中；原件保留以供后续找回，不宣称全部迁移或自动合并。
 
 runner 间歇性停滞是独立的未闭合验证问题，状态沿第 10.11 节报告；不将方案 APPROVE、专项通过或单次 Native 通过当作其根因已解决。
+
+### 10.13 实施结果（2026-10-31，Windows x64）
+
+Product 范围已实施在 `feat/product-model-error-delivery`，TinyKG root 为 `10790`，P0–P5 各自跟踪并评估提交。Run 使用准入前分配的固定容量 owned 值，维持原有 RunRecord 本体上限；追加 0002，0001 保持原字节；错误及冻结来源随 Run 保存。Bridge、严格 decoder、双语提示和纯文本折叠详情已接通；设置只导航，准备重试只填入 Composer。`.store` 只保留首次导入职责，SQLite 接管后不再读取、清洗或写回，原件不删除。
+
+[当前平台执行证据](../evidence/product-model-error-windows-20261031.json)绑定 canonical Core、执行 artifact 与探针/CSS 的精确摘要。真实桌面通过在途旧请求与新 Host 凭据构造独立清洗场景，保留 `hostRedacted=true` 强断言；验证了 Account/Models 无错误驱动变更、键盘展开/折叠、44 px 点击区、真实原生 1320/390 px 窗口和两种主题、显式设置、仅填入 Composer、SQLite 冷恢复及损坏残留 `.store` 字节不变。未操作用户日常数据目录。
+
+相关 Native 联合验证、Bridge/Renderer suite、格式和文档差异检查通过；正式 Native graph 首轮有两个 runner 超时，随后原 graph 复核通过，不能据此宣布 runner 根因已解决。全量 Node 仍有 Composer feature 依赖方向与 Schedule 文案两项失败；隔离导出起始提交 `5ff1ff3b` 后，同样两个 suite 复现相同失败。因此不宣称 `npm test` 全绿，也不修改 guard 或弱化基线来消除失败。
+
+新增 Product 路径不记录模型错误正文。桌面诊断捕获还观察到 canonical Core 自身会向 stderr 输出原始 HTTP 错误 body；上游进程内日志的全面清洗不由本轮 Product 投影回归证明，不能将“Host 发布到 Bridge/SQLite 前清洗”扩大为“所有上游日志已安全”。其他平台、真实登录/支付与分发验收均未在本轮取得证据。

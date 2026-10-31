@@ -9375,6 +9375,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-diagnostics summary {
   cursor: pointer;
   width: fit-content;
+  min-height: 44px;
+  padding-block: 12px;
 }
 .model-error-message {
   white-space: pre-wrap;

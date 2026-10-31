@@ -39,6 +39,7 @@ import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runSkillAutoRefreshVertical } from "./skill-auto-refresh-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
+import { runModelErrorVertical } from "./agentcore-model-error-vertical.mjs";
 import { runMcpLifecycleVertical } from "./mcp-lifecycle-vertical.mjs";
 import { runScheduledTasksVertical } from "./scheduled-tasks-vertical.mjs";
 import {
@@ -472,6 +473,31 @@ startApplication();
 
 desktopVertical: try {
   await waitForBridge();
+  if (process.env.METAWORK_MODEL_ERROR_ONLY === "1") {
+    if (chromeProbePort === null)
+      throw new Error(
+        "Model-error WebView acceptance currently requires Windows",
+      );
+    await runModelErrorVertical({
+      invoke: invokeBridge,
+      runPrepared: invokePreparedRun,
+      snapshot,
+      poll,
+      provider,
+      connect: () => connectTestWebView(chromeProbePort),
+      resize: resizeActiveInputVisualWindow,
+      stop: () => stopApplication("model-error cold history stop"),
+      restart: async () => {
+        await rm(automationDir, { recursive: true, force: true });
+        startApplication();
+        await waitForBridge();
+      },
+      dataRoot,
+      evidenceDir: path.join(root, ".zig-cache", "model-error-desktop"),
+    });
+    await stopApplication("model-error acceptance complete");
+    break desktopVertical;
+  }
   if (process.env.METAWORK_SCHEDULE_ONLY === "1") {
     await runScheduledTasksVertical({
       invoke: invokeBridge,
@@ -3841,6 +3867,7 @@ async function removeWorkspaceWithRetry() {
 }
 
 function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
+  let modelProbeCredential = "metawork-agentcore-vertical-fixture-key";
   let served = 0;
   let titleCompletions = 0;
   let nextTitleGate = null;
@@ -3974,6 +4001,30 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           );
           return;
         }
+        if (payload.messages?.[0]?.content === "Reply with OK.") {
+          assert.equal(request.headers["x-api-key"], modelProbeCredential);
+          assert.equal(request.headers.authorization, undefined);
+          assert.equal(request.headers["anthropic-version"], "2023-06-01");
+          assert.equal(payload.model, "claude-sonnet-4-20250514");
+          assert.equal(payload.messages.length, 1);
+          assert.equal(payload.messages[0].role, "user");
+          assert.equal(payload.stream, undefined);
+          assert.equal(payload.tools, undefined);
+          response.writeHead(200, {
+            "content-type": "application/json",
+            connection: "close",
+          });
+          response.end(
+            JSON.stringify({
+              type: "message",
+              role: "assistant",
+              content: [{ type: "text", text: "OK" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+          );
+          return;
+        }
         if (request.headers["x-api-key"] !== undefined) {
           if (
             request.headers["x-api-key"] !==
@@ -4033,7 +4084,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
         served += 1;
         if (response.destroyed) return;
         if (fixture?.status !== undefined) {
-          assert.equal(fixture.status, 400);
+          assert.ok([400, 401].includes(fixture.status));
           response.writeHead(fixture.status, {
             "content-type": "application/json",
             connection: "close",
@@ -4065,6 +4116,10 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     });
   });
   return {
+    expectModelProbeCredential(credential) {
+      assert.ok(credential.length > 0 && credential.length <= 4096);
+      modelProbeCredential = credential;
+    },
     enqueue(...fixtures) {
       queue.splice(served, 0, ...fixtures);
     },
