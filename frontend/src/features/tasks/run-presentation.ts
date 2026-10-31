@@ -147,7 +147,9 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
         !responseVisible),
     tools,
     runningToolName:
-      activity?.kind === "executing_tools" && runningTools.length === 1
+      activity?.kind === "executing_tools" &&
+      activity.inFlight === "1" &&
+      runningTools.length === 1
         ? runningTools[0]!.name
         : null,
   };

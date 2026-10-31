@@ -128,7 +128,7 @@ test("commentary remains narrative content instead of technical process evidence
   assert.deepEqual(presentation.activity, { kind: "thinking" });
 });
 
-test("presentation orders Tool evidence and only names one typed running Tool", () => {
+test("presentation orders Tool evidence without deriving activity from records", () => {
   const presentation = deriveRunPresentation(
     run({
       activity: { kind: "executing_tools", inFlight: "1" },
@@ -139,6 +139,10 @@ test("presentation orders Tool evidence and only names one typed running Tool", 
     presentation.tools.map((item) => item.id),
     ["current", "later"],
   );
+  assert.deepEqual(presentation.activity, {
+    kind: "executing_tools",
+    inFlight: "1",
+  });
   assert.equal(presentation.runningToolName, "Tool current");
 
   const ambiguous = deriveRunPresentation(
@@ -147,7 +151,32 @@ test("presentation orders Tool evidence and only names one typed running Tool", 
       tools: [tool("one", "1", "running"), tool("two", "2", "running")],
     }),
   );
+  assert.deepEqual(ambiguous.activity, {
+    kind: "executing_tools",
+    inFlight: "2",
+  });
   assert.equal(ambiguous.runningToolName, null);
+
+  for (const inFlight of ["2", null]) {
+    const inconsistent = deriveRunPresentation(
+      run({
+        activity: { kind: "executing_tools", inFlight },
+        tools: [tool("current", "1", "running")],
+      }),
+    );
+    assert.deepEqual(inconsistent.activity, {
+      kind: "executing_tools",
+      inFlight,
+    });
+    assert.equal(inconsistent.runningToolName, null);
+  }
+  const degraded = deriveRunPresentation(
+    run({
+      activity: { kind: "waiting_model" },
+      tools: [tool("old", "1", "running")],
+    }),
+  );
+  assert.equal(degraded.runningToolName, null);
 });
 
 test("successful final response retains Tool evidence without a duplicate notice", () => {

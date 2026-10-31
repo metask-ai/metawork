@@ -1136,7 +1136,7 @@ test("conversation renders commentary, provisional, and response through one Mar
     ],
   });
   const activeMarkup = renderTaskContent(active);
-  assert.match(activeMarkup, />Preparing a response</);
+  assert.match(activeMarkup, />Generating content</);
   assert.doesNotMatch(activeMarkup, /aria-expanded=/);
   assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
   assert.match(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
@@ -1862,7 +1862,7 @@ test("live revisions extend the narrative while replacing one bottom status in p
   const view = render(taskContentElement(activeTask));
   const statusSurface = document.querySelector(".run-process");
   assert.ok(statusSurface);
-  assert.ok(screen.getByText("Analyzing"));
+  assert.ok(screen.getByText("Thinking"));
 
   view.rerender(
     taskContentElement(
@@ -1939,7 +1939,7 @@ test("discarded provisional output disappears on the next Snapshot revision", ()
     ),
   );
   assert.equal(screen.queryByText("This segment may be discarded"), null);
-  assert.ok(screen.getByText("Waiting for the next step"));
+  assert.ok(screen.getByText("Working"));
 });
 
 test("Run status keeps technical Tool details behind nested disclosures", async () => {
@@ -2035,7 +2035,7 @@ test("Tool disclosures expand independently and survive Work process collapse", 
 
   render(localizedView(createElement(Harness)));
   const process = screen.getByRole("button", {
-    name: /Working/,
+    name: "Processing 1 tool call",
   });
   await user.click(process);
   await user.click(
@@ -2141,11 +2141,11 @@ test("technical process disclosure remains user-controlled across revisions and 
   });
   const view = render(taskContentElement(active));
   let disclosure = screen.getByRole("button", {
-    name: "Preparing a response",
+    name: "Generating content",
   });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
   await user.click(disclosure);
-  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  disclosure = screen.getByRole("button", { name: "Generating content" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(
@@ -2165,16 +2165,16 @@ test("technical process disclosure remains user-controlled across revisions and 
       "2",
     ),
   );
-  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  disclosure = screen.getByRole("button", { name: "Generating content" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(taskContentElement(task({ id: "task-b" }), "3"));
   assert.equal(
-    screen.queryByRole("button", { name: "Preparing a response" }),
+    screen.queryByRole("button", { name: "Generating content" }),
     null,
   );
   view.rerender(taskContentElement(active, "4"));
-  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  disclosure = screen.getByRole("button", { name: "Generating content" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 });
 
@@ -3238,7 +3238,7 @@ test("typed Run activity uses safe localized labels", () => {
     runs: [thinkingRun],
   });
   const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
-  assert.match(thinkingContent, />正在分析</);
+  assert.match(thinkingContent, />正在思考</);
 
   const writingTask = task({
     currentRunId: "9",
@@ -3251,17 +3251,17 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在组织回复</);
+  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在输出内容</);
 
   for (const [activity, expected] of [
     [{ kind: "starting" }, "正在准备"],
-    [{ kind: "executing_tools", inFlight: "2" }, "正在处理"],
+    [{ kind: "executing_tools", inFlight: "2" }, "正在处理 2 项工具调用"],
     [
       { kind: "retrying_provider", attempt: "1", max: "2", delayMs: "50" },
-      "正在重试连接",
+      "正在重试模型请求",
     ],
     [{ kind: "compacting_context" }, "正在整理上下文"],
-    [{ kind: "finalizing" }, "正在整理结果"],
+    [{ kind: "finalizing" }, "正在收尾"],
   ]) {
     const activityTask = task({
       currentRunId: "9",
@@ -3291,7 +3291,7 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待下一步</);
+  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在处理</);
 
   const stoppingTask = task({
     currentRunId: "9",
@@ -3306,7 +3306,82 @@ test("typed Run activity uses safe localized labels", () => {
   });
   const stoppingContent = renderTaskContent(stoppingTask, "zh-CN");
   assert.match(stoppingContent, />正在停止</);
-  assert.doesNotMatch(stoppingContent, />正在分析</);
+  assert.doesNotMatch(stoppingContent, />正在处理</);
+});
+
+test("tool activity describes open calls without inferring execution from Tool records", () => {
+  const cases = [
+    ["1", ["Read"], "Inspecting the workspace", "正在检查工作区"],
+    ["1", ["Edit"], "Updating content", "正在更新内容"],
+    ["1", ["Bash"], "Running an operation", "正在运行操作"],
+    ["1", ["GenerateImage"], "Processing 1 tool call", "正在处理 1 项工具调用"],
+    [
+      "1",
+      ["mcp__demo__fetch_web"],
+      "Processing 1 tool call",
+      "正在处理 1 项工具调用",
+    ],
+    ["1", [], "Processing 1 tool call", "正在处理 1 项工具调用"],
+    ["1", ["Read", "Bash"], "Processing 1 tool call", "正在处理 1 项工具调用"],
+    ["2", ["Read", "Bash"], "Processing 2 tool calls", "正在处理 2 项工具调用"],
+    ["2", ["Read"], "Processing 2 tool calls", "正在处理 2 项工具调用"],
+    ["2", [], "Processing 2 tool calls", "正在处理 2 项工具调用"],
+    ["12345", [], "Processing 12,345 tool calls", "正在处理 12,345 项工具调用"],
+    [null, ["Read"], "Processing tool calls", "正在处理工具调用"],
+    [null, [], "Processing tool calls", "正在处理工具调用"],
+  ];
+  for (const [inFlight, names, english, chinese] of cases) {
+    const value = run({
+      phase: "running",
+      activity: { kind: "executing_tools", inFlight },
+      terminal: null,
+      tools: names.map((name, index) =>
+        technicalTool({
+          id: `tool-${index}`,
+          order: String(index + 1),
+          name,
+          state: "running",
+        }),
+      ),
+    });
+    for (const [locale, expected] of [
+      ["en-US", english],
+      ["zh-CN", chinese],
+    ]) {
+      const view = render(
+        localizedView(
+          createElement(RunProcess, {
+            presentation: deriveRunPresentation(value),
+            reviewingPermission: false,
+            expanded: false,
+            onExpandedChange() {},
+          }),
+          locale,
+        ),
+      );
+      assert.equal(
+        view.container.querySelector(".run-process-heading strong").textContent,
+        expected,
+      );
+      view.rerender(
+        localizedView(
+          createElement(RunProcess, {
+            presentation: deriveRunPresentation(value),
+            reviewingPermission: false,
+            expanded: false,
+            synchronized: false,
+            onExpandedChange() {},
+          }),
+          locale,
+        ),
+      );
+      assert.equal(
+        view.container.querySelector(".run-process-heading strong").textContent,
+        locale === "zh-CN" ? "状态尚未同步" : "Status not synchronized",
+      );
+      view.unmount();
+    }
+  }
 });
 
 test("Work process does not duplicate Tool file references", () => {

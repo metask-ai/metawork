@@ -13,7 +13,7 @@ import { ToolDetailView } from "./ToolDetailView.tsx";
 
 const emptyExpandedToolIds: ReadonlySet<string> = new Set();
 
-function toolActivityMessage(name: string | null): MessageId {
+function toolActivityMessage(name: string | null): MessageId | null {
   switch (name) {
     case "Read":
     case "Glob":
@@ -29,7 +29,7 @@ function toolActivityMessage(name: string | null): MessageId {
     case "KillShell":
       return "run.activity.running_operation";
     default:
-      return "run.activity.executing_tools";
+      return null;
   }
 }
 
@@ -49,7 +49,14 @@ function activityMessage(
     case "writing_response":
       return "run.activity.writing_response";
     case "executing_tools":
-      return toolActivityMessage(runningToolName);
+      return (
+        (activity.inFlight === "1" && toolActivityMessage(runningToolName)) ||
+        (activity.inFlight === null
+          ? "run.activity.executing_tools"
+          : activity.inFlight === "1"
+            ? "run.activity.tool_running_one"
+            : "run.activity.tool_running_many")
+      );
     case "retrying_provider":
       return "run.activity.retrying_provider";
     case "waiting_user":
@@ -419,7 +426,12 @@ export function RunProcess({
       : activity?.kind === "waiting_user" && reviewingPermission
         ? t("task.phase.reviewing")
         : activity
-          ? t(activityMessage(activity, presentation.runningToolName))
+          ? t(
+              activityMessage(activity, presentation.runningToolName),
+              activity.kind === "executing_tools" && activity.inFlight !== null
+                ? { count: formatInteger(locale, BigInt(activity.inFlight)) }
+                : undefined,
+            )
           : t("run.process.title");
   const detail =
     unsynchronized || stopPending

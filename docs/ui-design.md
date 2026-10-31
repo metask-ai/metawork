@@ -649,9 +649,9 @@ provisional 与 closed output 复用同一个安全 GFM 渲染根并始终跳过
 
 #### Activity 与 Tool presentation
 
-非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Renderer 不复制 activity 状态机，只把 Host activity 本地化并做两项有界派生：phase 缺失时只能使用同 phase 的防御性通用标签，`executing_tools` 且恰有一个真实 running Tool 时可以把固定 Tool identifier 映射为“检查工作区”“更新内容”或“运行操作”。多个、零个或未知 Tool 时回退到 canonical activity，不读取参数、结果或历史 Tool 推断 Agent 当前意图。
+非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Host 的状态依据、优先级和退出条件由 [AgentCore 集成契约](agentcore-integration.md#current-activity-的依据与优先级)定义。Renderer 不复制状态机，只把 Host activity 本地化并做有界呈现：activity 缺失时只能使用同 phase 的防御性通用标签。`waiting_model` 显示“正在处理”，`thinking` 显示“正在思考”，`writing_response` 显示“正在输出内容”，`finalizing` 显示“正在收尾”。这些是最近已知活动，不承诺持续的模型内部阶段，不展示推理正文或统计纯思考时长。`executing_tools.inFlight` 为已知正数时显示“正在处理 N 项工具调用”，为 null 时显示“正在处理工具调用”；数量为 1 且只有一条一致的 running 记录时保留“正在检查工作区”“正在更新内容”“正在运行操作”等已知单工具类别，未知名称或记录未到齐则显示数量。数量表示开放调用尝试，不表示实际并发运行。不从 Tool 列表重建数量，也不按 Tool identifier、参数、结果或历史记录推断主状态或 Agent 当前意图。重试显示“正在重试模型请求”，不将缺少原因的 notice 扩写为连接问题。
 
-Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程用于检查当前证据；terminal 后相同 Tool records 继续通过默认折叠的稳定 process 摘要提供历史检查入口。每条 Tool 主记录固定为单行：左侧依次显示名称及至多一项 Host 安全摘要，右侧固定显示状态、Host elapsed 与可用的 disclosure 箭头；摘要依次取 Bash description、有限 progress 摘录或结构化 fileRefs 的 `displayPath`，空间不足时单行省略，不把不同来源拆成多行。fileRefs 在这里仅作为只读文件名摘要，不提供图标、按钮或预览交互；存在可呈现的 input/progress/result、Bash 字段、截断或脱敏说明时，用户点击对应 Tool 后在该行下方独立展开详情，多个 Tool disclosure 可以同时打开。没有详情正文或说明的 Tool 行保持只读摘要，不提供空 disclosure。
+Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程用于检查当前证据；terminal 后相同 Tool records 继续通过默认折叠的稳定 process 摘要提供历史检查入口。Tool record 的 running 状态显示“处理中”，表示调用尚未收口，不承诺实际已执行。每条 Tool 主记录固定为单行：左侧依次显示名称及至多一项 Host 安全摘要，右侧固定显示状态、Host elapsed 与可用的 disclosure 箭头；摘要依次取 Bash description、有限 progress 摘录或结构化 fileRefs 的 `displayPath`，空间不足时单行省略，不把不同来源拆成多行。fileRefs 在这里仅作为只读文件名摘要，不提供图标、按钮或预览交互；存在可呈现的 input/progress/result、Bash 字段、截断或脱敏说明时，用户点击对应 Tool 后在该行下方独立展开详情，多个 Tool disclosure 可以同时打开。没有详情正文或说明的 Tool 行保持只读摘要，不提供空 disclosure。
 
 #### Snapshot revision、阅读位置与稀疏输出
 
@@ -687,7 +687,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - 已 terminal 且非空的 `final | partial` response 在所属 Assistant 回复的信息栏中提供纯图标“复制回复”，沿用[统一消息信息栏](#73-用户指令)的显隐与布局规则；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
 - 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间与同条复制图标共用显隐条件，遵循用户指令时间的相同规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
 - 回复完成时间后以同样的 12px muted 样式显示该 Run 的实际 `execution.model`，时间存在时用间隔点分隔；模型与时间和复制按钮同步显隐，长名称在窄窗口可换行。模型只读取该 Run 已保存的执行事实，不使用当前默认、Task 下一轮选择或当前目录名称补写历史，不在此展示 Provider、protocol 或 generation；时间缺失不隐藏已有模型事实，模型文字不属于回复正文或复制内容。
-- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
+- 不展示原始 chain-of-thought，不从内容 delta 推断持续运行阶段；Current activity 的文案、工具调用数量和 retry detail 遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，可见输出独立渐进呈现，不能把整个 active Run 的明确生命周期统一退化成一个不变的通用标签；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 
@@ -712,7 +712,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 
 ### 7.5 当前状态、请求与结果
 
-- active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
+- active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。工具数量、单工具分类与未知状态的文案遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，不在主状态中暴露原始 Tool 名称、参数或命令；
 - Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
