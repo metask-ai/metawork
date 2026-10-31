@@ -32,6 +32,7 @@ function textContrast(foreground, background) {
 // Device metrics/theme scenarios exercise WebView content, not OS chrome/input.
 export async function runApprovalReadabilityVertical({
   invoke,
+  invokeRun,
   snapshot,
   poll,
   provider,
@@ -193,13 +194,21 @@ export async function runApprovalReadabilityVertical({
         : null;
     }, `readability mode ${targetMode}`);
   };
-  const start = async (input, tool, args, userText = input) => {
+  const start = async (
+    input,
+    tool,
+    args,
+    userText = input,
+    priorCalls = [],
+    siblingCalls = [],
+  ) => {
     provider.enqueue(
-      toolSse(input, `${input}-tool`, tool, args),
+      ...priorCalls,
+      toolSse(input, `${input}-tool`, tool, args, null, siblingCalls),
       textSse(`${input}-done`, "Readability fixture completed after denial."),
     );
     const before = await readTask();
-    const result = await invoke("metawork.tasks.run", {
+    const result = await invokeRun({
       taskId,
       expectedBindingEpoch: before.binding.epoch,
       input: { kind: "text", text: userText },
@@ -262,7 +271,7 @@ export async function runApprovalReadabilityVertical({
         for(let item=element;item;item=item.parentElement) layers.push(color(getComputedStyle(item).backgroundColor));
         return layers.reverse().reduce((base,layer) => base.map((value,index) => layer[index]*layer[3]+value*(1-layer[3])), [255,255,255]);
       };
-      const appearance = [...card.querySelectorAll('h3,.approval-purpose,.approval-purpose span,.approval-target,.approval-concern,.approval-concern span,.approval-unavailable,.approval-details-toggle,.ai-intervention-actions button')]
+      const appearance = [...card.querySelectorAll('h3,.approval-purpose,.approval-purpose span,.approval-target,.approval-concern,.approval-concern span,.approval-unavailable,.approval-operation-preview,.approval-preview-note,.approval-details-toggle,.ai-intervention-actions button')]
         .filter(item => item.textContent.trim() && item.getClientRects().length)
         .map(item => ({label:item.textContent.slice(0,80),foreground:color(getComputedStyle(item).color),background:background(item)}));
       return { title: card.querySelector('h3').textContent, text: card.textContent,
@@ -324,10 +333,19 @@ export async function runApprovalReadabilityVertical({
         view.text.includes(translate(locale, "approval.agent_purpose")),
         !expected.fallback,
       );
-      assert.equal(
-        view.visibleCode,
-        expected.fallback ? null : expected.command,
-      );
+      if (expected.partial) {
+        assert.ok(view.visibleCode.startsWith(expected.command.slice(0, 160)));
+        assert.ok(view.visibleCode.endsWith(expected.command.slice(-80)));
+        assert.ok(Array.from(view.visibleCode).length <= 243);
+        assert.ok(
+          view.text.includes(translate(locale, "approval.partial_preview")),
+        );
+      } else {
+        assert.equal(
+          view.visibleCode,
+          expected.fallback ? null : expected.command,
+        );
+      }
       if (expected.fallback) {
         assert.ok(
           view.text.includes(translate(locale, "approval.command_unavailable")),
@@ -378,6 +396,7 @@ export async function runApprovalReadabilityVertical({
         `document.querySelector(${JSON.stringify(selector + " .approval-request-details")}).textContent`,
       );
       assert.ok(expanded.includes(task.pendingUi.args));
+      if (expected.partial) assert.ok(expanded.includes(expected.command));
       if (expected.manual)
         assert.ok(expanded.includes(translate(locale, "approval.manual_mode")));
       if (expected.tool !== "Write")
@@ -545,7 +564,36 @@ export async function runApprovalReadabilityVertical({
         description: purpose,
       },
       "请检查审批请求，确认这条命令的用途。",
+      [
+        toolSse(
+          "approval-context-write",
+          "approval-context-write-tool",
+          "Write",
+          {
+            file_path: path.join(workspaceRoot, "approval-context.py"),
+            content: "print('BEFORE')\n",
+          },
+        ),
+      ],
+      [
+        {
+          id: "approval-context-edit-tool",
+          name: "Edit",
+          input: {
+            file_path: path.join(workspaceRoot, "approval-context.py"),
+            old_string: "BEFORE",
+            new_string: "AFTER",
+          },
+        },
+      ],
     );
+    if (provider.error) {
+      const run = task.runs.find((item) => item.id === task.pendingUi.runId);
+      throw new Error(
+        `review fixture failed; observed tools=${JSON.stringify(run.tools.map((item) => ({ name: item.name, state: item.state, order: item.order })))}`,
+        { cause: provider.error },
+      );
+    }
     assert.equal(task.permissionReviewExplanation.cause, "reviewer_concern");
     assert.equal(task.permissionReviewExplanation.reason, reason);
     assert.equal(provider.readabilityReviewRequests, 1);
@@ -568,6 +616,26 @@ export async function runApprovalReadabilityVertical({
       manual: true,
       command,
     });
+    await deny(task);
+    const previewCommand = `powershell -NoProfile -Command "Write-Output '${"project/".repeat(80)}report'"`;
+    task = await start("approval-readable-preview", "Bash", {
+      command: previewCommand,
+      description: purpose,
+    });
+    await show(task.pendingUi.requestId);
+    for (const width of [1320, 390])
+      await capture(
+        task,
+        `preview-zh-CN-${width}-light`,
+        "zh-CN",
+        width,
+        "light",
+        {
+          manual: true,
+          partial: true,
+          command: previewCommand,
+        },
+      );
     await deny(task);
     const longCommand = `powershell -NoProfile -Command "Write-Output '${"x".repeat(8 * 1024)}'"`;
     task = await start("approval-readable-fallback", "Bash", {

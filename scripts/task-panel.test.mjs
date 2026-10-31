@@ -7293,6 +7293,122 @@ test("permission cards distinguish Agent purpose from the visible command and ac
   }
 });
 
+test("long manual approval requests keep literal previews and disclose the complete operation", () => {
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const tool of ["Bash", "send_message"]) {
+      const source = task({
+        approvalMode: "manual",
+        permissionReviewState: "idle",
+        runs: [run()],
+        currentRunId: "7",
+      });
+      setRepeatedPermissionSource(source);
+      const content = `python "${"目录/".repeat(120)}verify.py"; send_report --destination external`;
+      Object.assign(source.pendingUi, {
+        tool,
+        toolNamespace: tool === "Bash" ? "builtin" : "mcp",
+        args: JSON.stringify({ command: content }),
+        presentation:
+          tool === "Bash"
+            ? { kind: "command", command: content, description: null }
+            : null,
+      });
+      const decisions = [];
+      const view = render(
+        localizedView(
+          createElement(ApprovalPanel, {
+            pending: source.pendingUi,
+            task: source,
+            busy: false,
+            responsePhase: "idle",
+            respond: (value) => decisions.push(value),
+          }),
+          locale,
+        ),
+      );
+      assert.equal(view.container.querySelector(".approval-purpose"), null);
+      const preview = view.container.querySelector(
+        ".approval-operation-preview",
+      );
+      assert.ok(
+        preview.textContent.startsWith(
+          tool === "Bash" ? 'python "' : '{"command":',
+        ),
+      );
+      assert.ok(preview.textContent.includes("external"));
+      assert.ok(preview.textContent.includes("\n…\n"));
+      assert.ok(Array.from(preview.textContent).length <= 243);
+      assert.ok(
+        screen.getByText(translate(locale, "approval.partial_preview")),
+      );
+      assert.equal(screen.queryByText(content), null);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.full_request"),
+        }),
+      );
+      const details = screen.getByRole("region", {
+        name: translate(locale, "approval.full_request"),
+      });
+      assert.ok(details.textContent.includes(source.pendingUi.args));
+      if (tool === "Bash")
+        assert.ok(
+          screen.getByText(content).closest(".approval-request-details"),
+        );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: translate(locale, "approval.allow_once"),
+        }),
+      );
+      assert.deepEqual(decisions, [
+        { kind: "permission", permission: "allow_once" },
+      ]);
+      cleanup();
+    }
+  }
+});
+
+test("multiline approval previews keep literal request content despite blank boundary lines", () => {
+  const source = task({
+    approvalMode: "manual",
+    permissionReviewState: "idle",
+    runs: [run()],
+    currentRunId: "7",
+  });
+  setRepeatedPermissionSource(source);
+  const command = "\n\npython verify.py\nrm report.tmp\n\n";
+  source.pendingUi.presentation = {
+    kind: "command",
+    command,
+    description: null,
+  };
+  const view = render(
+    localizedView(
+      createElement(ApprovalPanel, {
+        pending: source.pendingUi,
+        task: source,
+        busy: false,
+        responsePhase: "idle",
+        respond() {},
+      }),
+    ),
+  );
+  const preview = view.container.querySelector(".approval-operation-preview");
+  assert.ok(preview.textContent.startsWith("python verify.py"));
+  assert.ok(preview.textContent.endsWith("rm report.tmp"));
+  assert.ok(screen.getByText(translate("en-US", "approval.partial_preview")));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "approval.full_request"),
+    }),
+  );
+  assert.equal(
+    view.container.querySelector(".approval-request-details pre").textContent,
+    command,
+  );
+  cleanup();
+});
+
 test("compact file approval titles keep the name and full location visible", () => {
   for (const [kind, tool, target] of [
     ["read", "Read", "C:\\outside\\项目说明.docx"],

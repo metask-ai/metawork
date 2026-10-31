@@ -13,6 +13,21 @@ import { useI18n } from "../../i18n/context.ts";
 import { diagnoseRepeatedPermission } from "./permission-diagnostics.ts";
 import type { UiResponsePhase } from "./response-state.ts";
 
+// A literal excerpt of Host-projected request data, never a Shell summary.
+function requestPreview(value: string) {
+  const characters = Array.from(value);
+  const lines = value.split(/\r?\n/);
+  if (characters.length <= 240 && lines.length <= 3) return value;
+  const nonemptyLines = lines.filter((line) => line.trim().length > 0);
+  const head = Array.from(nonemptyLines[0] ?? lines[0])
+    .slice(0, 160)
+    .join("");
+  const tail = Array.from(nonemptyLines.at(-1) ?? lines.at(-1) ?? "")
+    .slice(-80)
+    .join("");
+  return `${head}\n…\n${tail}`;
+}
+
 export function ApprovalPanel({
   pending,
   task,
@@ -79,6 +94,9 @@ export function ApprovalPanel({
       ? (explanation?.cause ?? "unavailable")
       : null;
   const showArguments = !presentation && !isCommand;
+  const operation = command || (showArguments ? pending.args : null);
+  const preview = operation === null ? null : requestPreview(operation);
+  const partialPreview = preview !== operation;
   const detailsOpen = expandedRequest === pending.requestId;
   const detailsId = `ui-request-${pending.requestId}-details`;
 
@@ -125,12 +143,6 @@ export function ApprovalPanel({
           <span>{t("approval.agent_purpose")}</span> {description}
         </p>
       )}
-      {command && (
-        <CodeBlock aria-label={t("approval.command")} value={command} />
-      )}
-      {showArguments && (
-        <CodeBlock aria-label={t("approval.arguments")} value={pending.args} />
-      )}
       {isCommand && !command && (
         <p className="approval-unavailable">
           {t("approval.command_unavailable")}
@@ -145,6 +157,20 @@ export function ApprovalPanel({
         <p className="approval-unavailable" role="status" aria-live="polite">
           {t(`approval.handoff.${handoffCause}`)}
         </p>
+      )}
+      {preview !== null && (
+        <div className="approval-operation">
+          <CodeBlock
+            className="approval-operation-preview"
+            aria-label={t(command ? "approval.command" : "approval.arguments")}
+            value={preview}
+          />
+          {partialPreview && (
+            <p className="approval-preview-note">
+              {t("approval.partial_preview")}
+            </p>
+          )}
+        </div>
       )}
       <div className="approval-footer">
         <button
@@ -281,7 +307,10 @@ export function ApprovalPanel({
             </p>
           )}
           {isCommand && <p>{t("approval.command_effects")}</p>}
-          {!showArguments && (
+          {command && partialPreview && (
+            <CodeBlock aria-label={t("approval.command")} value={command} />
+          )}
+          {(!showArguments || partialPreview) && (
             <CodeBlock
               aria-label={t("approval.arguments")}
               value={pending.args}

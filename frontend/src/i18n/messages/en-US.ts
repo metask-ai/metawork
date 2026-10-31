@@ -1161,6 +1161,8 @@ export const enUS = {
   "approval.reviewer_note": "Reviewer’s note:",
   "approval.agent_purpose": "Agent’s description:",
   "approval.command": "Command to run",
+  "approval.partial_preview":
+    "Only part of this operation is shown. Open operation details to see it in full.",
   "approval.command_effects":
     "The system has not verified the command’s full effects.",
   "approval.command_unavailable":

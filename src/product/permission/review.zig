@@ -473,6 +473,30 @@ test "history window uses encoded budget without making a valid current request 
     try std.testing.expectError(error.InputLimit, encodeInput(std.testing.allocator, input));
 }
 
+test "permission review retains user constraints beyond sixteen KiB with no tool context" {
+    var input = test_input;
+    const message = [_]u8{'a'} ** 20000;
+    const history = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
+        .{ .run_id = "1", .messages = [_][]const u8{ "Do not upload files", &message } },
+        .{ .run_id = "2", .messages = [_][]const u8{"Check the repaired file"} },
+    }, .{});
+    defer std.testing.allocator.free(history);
+    input.user_history_json = history;
+    var encoded = try encodeInput(std.testing.allocator, input);
+    defer encoded.deinit();
+    try std.testing.expect(encoded.len > 16 * 1024);
+    try std.testing.expect(encoded.len <= max_input_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, encoded.bytes[0..encoded.len], .{});
+    defer parsed.deinit();
+    const evidence = parsed.value.object.get("evidence").?.object;
+    const selected = evidence.get("earlier_user_instructions").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), selected.len);
+    try std.testing.expectEqualStrings("Do not upload files", selected[0].object.get("messages").?.array.items[0].string);
+    try std.testing.expectEqualStrings(&message, selected[0].object.get("messages").?.array.items[1].string);
+    try std.testing.expectEqualStrings("2", selected[1].object.get("run_id").?.string);
+    try std.testing.expectEqual(@as(i64, 0), evidence.get("omitted_earlier_user_messages").?.integer);
+}
+
 test "history evidence rejects malformed groups and preserves chronological messages" {
     var input = test_input;
     for ([_][]const u8{ "{}", "[{\"run_id\":\"1\",\"messages\":[]}]", "[{\"run_id\":\"1\",\"messages\":[1]}]" }) |invalid| {
