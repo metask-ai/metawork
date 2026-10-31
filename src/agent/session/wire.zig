@@ -150,6 +150,12 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
                     if (!validUtf8(&.{ tool.tool_call_id, tool.name })) return false;
                 return true;
             },
+            .model_error => |value| validUtf8(&.{
+                value.message,
+                value.code orelse "",
+                value.type orelse "",
+                value.request_id orelse "",
+            }),
             .context_warning => |warning| std.unicode.utf8ValidateSlice(warning.level),
             .auto_compact => |compact| std.unicode.utf8ValidateSlice(compact.cause),
             .permission_provenance => |value| validUtf8(&.{
@@ -274,6 +280,10 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
     try std.testing.expectError(
         error.InvalidPayload,
         decodeCoreEvent(std.testing.allocator, invalid_event),
+    );
+    try std.testing.expectError(
+        error.InvalidPayload,
+        decodeCoreEvent(std.testing.allocator, "{\"model_error\":{\"run_id\":1,\"category\":\"unknown\",\"message\":[203],\"retry\":\"unknown\",\"attempts\":1}}"),
     );
 
     const invalid_ui =

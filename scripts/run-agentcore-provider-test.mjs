@@ -441,6 +441,24 @@ const server = createServer((request, response) => {
         throw new Error(
           `${activeProvider.name} request must use application/json`,
         );
+      if (hostMode && requestCount >= 10) {
+        const failed = requestCount++ === 10;
+        response.writeHead(failed ? 401 : 200, {
+          "content-type": failed ? "application/json" : "text/event-stream",
+          connection: "close",
+        });
+        response.end(
+          failed
+            ? JSON.stringify({
+                error: {
+                  type: "authentication_error",
+                  message: "fixture provider rejected credential",
+                },
+              })
+            : sseFor(activeProvider),
+        );
+        return;
+      }
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (requestCount === 0 && !hostMode && !activeProvider.bodyOk(payload))
         throw new Error(
@@ -683,10 +701,10 @@ pub fn build(b: *std.Build) void {
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
-    else if (requestCount !== (hostMode ? 10 : 6))
+    else if (requestCount !== (hostMode ? 12 : 6))
       providerFailures.push(
         new Error(
-          `${provider.name}: expected ${hostMode ? 10 : 6} requests, got ${requestCount}`,
+          `${provider.name}: expected ${hostMode ? 12 : 6} requests, got ${requestCount}`,
         ),
       );
     else

@@ -184,6 +184,25 @@ pub fn main(init: std.process.Init) !void {
     checkpoint.len = 0;
     checkpoint.offset = 0;
     try isolatedIdentity(runtime, options, limits, &checkpoint);
+    const failed_session = try runtime.createSession(options);
+    defer {
+        failed_session.close(.session_close) catch unreachable;
+        runtime.releaseClosedSession(failed_session) catch unreachable;
+    }
+    var provider_error = try execute(failed_session, .{ .text = "Reject this fixture request." });
+    defer provider_error.deinit();
+    if (provider_error.abi_status != .ok or provider_error.stop_reason != .api_error or
+        provider_error.failure != null or provider_error.first_callback_rejection != null or
+        failed_session.snapshot().state != .idle)
+        return error.ProviderFailureChanged;
+    while (runtime.takeEvent()) |event| {
+        var owned = event;
+        defer owned.deinit();
+        if (owned.event.value == .known and owned.event.value.known == .model_error)
+            return error.RetainedModelErrorDetails;
+    }
+    _ = try success(runtime, failed_session, .{ .text = "Explicit request after provider rejection." });
+    std.debug.print("Host provider failure and later explicit Run passed: {s}\n", .{provider});
     std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
     std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
 }

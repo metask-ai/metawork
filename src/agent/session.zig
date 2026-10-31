@@ -2831,6 +2831,7 @@ pub const Session = struct {
                 }
             },
             .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
+            .model_error => |value| input_event_valid = value.run_id == run_id,
             else => {},
         }
         if (!input_event_valid) {
@@ -2839,6 +2840,7 @@ pub const Session = struct {
                 else => null,
             }, .observed_run_id = switch (parsed.value.known) {
                 .run_state => |value| value.run_id,
+                .model_error => |value| value.run_id,
                 else => null,
             } });
             self.failCoreIdentityLocked();
@@ -2847,6 +2849,12 @@ pub const Session = struct {
         if (!input_event_valid) {
             parsed.deinit();
             return wire.EVENT_FATAL;
+        }
+        // This supplementary observation does not change MetaWork's existing
+        // provider-failure handling. Do not retain or project its details.
+        if (parsed.value.known == .model_error) {
+            parsed.deinit();
+            return wire.EVENT_CONTINUE;
         }
         const is_file_changes = switch (parsed.value) {
             .unknown => false,

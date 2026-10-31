@@ -1797,7 +1797,7 @@ pub fn applyEvent(
     if (envelope.delivered_file != null and event != .tool_result) return error.InvalidDeliveryReceipt;
     var durable_boundary = false;
     switch (event) {
-        .prompt_manifest => return .unchanged,
+        .prompt_manifest, .model_error => return .unchanged,
         .goal_updated => return .unknown,
         .input_adopted => |input| {
             var found = false;
