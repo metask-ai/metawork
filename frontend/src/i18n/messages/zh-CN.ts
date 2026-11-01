@@ -1,5 +1,53 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "run.model_error.category.authentication": "模型服务拒绝了请求凭据",
+  "run.model_error.category.permission": "模型服务权限不足",
+  "run.model_error.category.payment_required": "模型服务要求处理支付状态",
+  "run.model_error.category.not_found": "模型服务未找到请求的资源",
+  "run.model_error.category.invalid_request": "模型服务拒绝了请求",
+  "run.model_error.category.context_window": "模型上下文超过限制",
+  "run.model_error.category.rate_limited": "模型服务请求受到限流",
+  "run.model_error.category.overloaded": "模型服务繁忙",
+  "run.model_error.category.server_error": "模型服务内部错误",
+  "run.model_error.category.timeout": "模型服务请求超时",
+  "run.model_error.category.connection": "无法连接模型服务",
+  "run.model_error.category.stream_interrupted": "模型回复传输中断",
+  "run.model_error.category.output_limit": "模型输出达到限制",
+  "run.model_error.category.unknown": "模型服务请求失败",
+  "run.model_error.recovery.account_settings":
+    "请在账号设置中检查登录或支付状态。",
+  "run.model_error.recovery.model_settings": "请检查模型及其服务商设置。",
+  "run.model_error.recovery.review_context":
+    "请检查上下文，并在操作可用时压缩上下文或选择合适的模型。",
+  "run.model_error.recovery.revise_instruction":
+    "请调整指令，或明确发送新消息继续处理。",
+  "run.model_error.recovery.wait": "请稍后再尝试，并先检查已经完成的操作。",
+  "run.model_error.recovery.prepare_retry":
+    "准备再次尝试前，请检查已经完成的操作。",
+  "run.model_error.open_account": "打开账号设置",
+  "run.model_error.open_models": "打开模型设置",
+  "run.model_error.supplemental":
+    "此模型错误是补充观察，本次运行的终止原因以上方提示为准。",
+  "run.model_error.message_hidden": "模型错误正文已因隐私保护而隐藏。",
+  "run.model_error.upstream_truncated": "上游已截断部分模型错误详情。",
+  "run.model_error.host_redacted": "MetaWork 已清洗此详情中的敏感内容。",
+  "run.model_error.host_truncated": "MetaWork 已按显示容量截断此详情。",
+  "run.model_error.diagnostic_withheld": "另有内部技术诊断保留在 Host。",
+  "run.model_error.diagnostic_absent": "此模型错误没有附带其他内部技术诊断。",
+  "run.model_error.category_label": "模型错误分类",
+  "run.model_error.agent_run": "Agent 执行 ID",
+  "run.model_error.code": "服务端错误代码",
+  "run.model_error.type": "服务端错误类型",
+  "run.model_error.requestId": "服务端请求 ID",
+  "run.model_error.attempts": "失败请求的实际尝试次数",
+  "run.model_error.retry_label": "请求层重试建议",
+  "run.model_error.retry.retryable":
+    "再次发送同一请求可能有效，不代表可安全重放整轮运行。",
+  "run.model_error.retry.not_retryable": "原样再次发送同一请求通常无效。",
+  "run.model_error.retry.unknown": "无法确定再次发送此请求是否有效。",
+  "run.model_error.retry_after": "建议再次请求的等待时间",
+  "run.model_error.empty": "（空字符串）",
+
   "archive.success": "任务已归档，可在“设置 → 已归档任务”中查看。",
   "archive.undo": "撤销",
   "archive.view": "查看",

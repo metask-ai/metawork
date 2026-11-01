@@ -53,6 +53,109 @@ fn temporaryPath(allocator: std.mem.Allocator, dir: std.Io.Dir) ![]const u8 {
     return std.fs.path.join(allocator, &.{ bytes[0..len], "history.db" });
 }
 
+fn modelErrorFixture() history.wire.ModelErrorWire {
+    return .{
+        .run_id = std.math.maxInt(u64),
+        .category = .authentication,
+        .message = "服务拒绝 late-credential",
+        .code = "future-code late-credential",
+        .type = "late-credential",
+        .request_id = "request late-credential",
+        .http_status = 200,
+        .retry = .unknown,
+        .retry_after_ms = std.math.maxInt(u64),
+        .attempts = 2,
+        .truncated = true,
+        .host_redacted = false,
+        .host_truncated = true,
+        .source = .metask,
+    };
+}
+
+test "model error migration upgrades published v1 records to null and rejects the old schema afterward" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]);
+        defer database.destroy() catch unreachable;
+        const rows = try schema.codec.rowsFor(a, state, .{}, history.limits);
+        var mutations: std.ArrayList(sql.Mutation) = .empty;
+        for (rows) |row| {
+            var columns: std.ArrayList(u8) = .empty;
+            var markers: std.ArrayList(u8) = .empty;
+            var params: std.ArrayList(sql.Value) = .empty;
+            for (row.columns, row.values) |column, value| {
+                if (std.mem.eql(u8, column, "model_error_json")) continue;
+                if (params.items.len != 0) {
+                    try columns.append(a, ',');
+                    try markers.append(a, ',');
+                }
+                try columns.appendSlice(a, column);
+                try params.append(a, value);
+                try markers.appendSlice(a, try std.fmt.allocPrint(a, "?{d}", .{params.items.len}));
+            }
+            try mutations.append(a, .{ .statement = .{
+                .sql = try std.fmt.allocPrint(a, "INSERT INTO {s}({s}) VALUES({s})", .{ row.table, columns.items, markers.items }),
+                .params = params.items,
+            } });
+        }
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(mutations.items));
+    }
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        try expectSame(a, database.capability(), state);
+        const loaded = try history.load(a, database.capability());
+        try std.testing.expect(loaded.tasks[0].runs[0].model_error == null);
+    }
+    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
+}
+
+test "model error history survives restart and credential sanitization with exact integer facts" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    state.tasks[0].runs[0].model_error = modelErrorFixture();
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(a, database.capability(), state);
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    try expectSame(a, database.capability(), state);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    defer repository.deinit();
+    try repository.seed(state, .{});
+    try repository.sanitize("late-credential", @splat(3));
+    const loaded = try history.load(a, database.capability());
+    try std.testing.expect(!try history.wire.security.contains(a, loaded, "late-credential"));
+    const detail = loaded.tasks[0].runs[0].model_error.?;
+    try std.testing.expect(detail.host_redacted);
+    try std.testing.expectEqual(std.math.maxInt(u64), detail.run_id);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), detail.retry_after_ms);
+    try std.testing.expectEqual(.authentication, detail.category);
+    try std.testing.expectEqual(.metask, detail.source.?);
+    // Enum names are structure even when a credential has the same bytes.
+    try std.testing.expect(!try history.wire.security.contains(a, detail, "authentication"));
+    inline for (.{ "[]", "{}", "null", "invalid" }) |raw| {
+        const outcome = database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET model_error_json=?1", .params = &.{.{ .text = raw }} } }});
+        if (std.mem.eql(u8, raw, "{}")) {
+            try std.testing.expectEqual(sql.MutationOutcome.committed, outcome);
+            if (history.load(a, database.capability())) |_| return error.InvalidModelErrorAccepted else |_| {}
+        } else try std.testing.expectEqual(sql.MutationOutcome.constraint, outcome);
+    }
+}
+
 test "history schema preserves optional source-qualified Task model intent" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -897,7 +1000,7 @@ test "history schema deferred parent rebuild preserves every child and value" {
         if (std.mem.startsWith(u8, line, "CREATE ") and std.mem.indexOf(u8, line, " ON tasks(") != null)
             try script.appendSlice(allocator, line);
     }
-    const migrations = [_]sql.Migration{ schema.migrations[0], .{ .version = 2, .name = "rebuild_parent", .sql = script.items } };
+    const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{.{ .version = schema.migrations.len + 1, .name = "rebuild_parent", .sql = script.items }};
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
     defer database.destroy() catch unreachable;
     for (tables) |table| {
@@ -926,9 +1029,8 @@ test "history schema named nullable checks and unique indexes evolve through Sto
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
-    const migrations = [_]sql.Migration{
-        schema.migrations[0],
-        .{ .version = 2, .name = "named_constraints", .sql =
+    const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{
+        .{ .version = schema.migrations.len + 1, .name = "named_constraints", .sql =
         \\ALTER TABLE runs DROP CONSTRAINT runs_assistant_output_kind_domain;
         \\ALTER TABLE runs ADD CONSTRAINT runs_assistant_output_kind_domain CHECK(assistant_output_kind IS NULL OR assistant_output_kind IN ('final','partial','future'));
         \\DROP INDEX workspaces_canonical_root_unique;
@@ -1430,7 +1532,7 @@ test "history first keyset page rejects invalid keys instead of hiding them behi
             "ALTER TABLE tasks DROP CONSTRAINT tasks_id_domain;UPDATE tasks SET id=X'0000000000000000';"
         else
             "ALTER TABLE runs DROP CONSTRAINT runs_ordinal_domain;UPDATE runs SET ordinal=-1;";
-        const migrations = [_]sql.Migration{ schema.migrations[0], .{ .version = 2, .name = "broken_first_key", .sql = corrupt } };
+        const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{.{ .version = schema.migrations.len + 1, .name = "broken_first_key", .sql = corrupt }};
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
         defer database.destroy() catch unreachable;
         if (history.load(a, database.capability())) |_| return error.InvalidFirstKeyHidden else |_| {}

@@ -4,6 +4,9 @@ import {
   skillImportEffects,
   skillImportPhases,
   outputActionStates,
+  modelErrorCategories,
+  modelErrorRecoveries,
+  type RunModelError,
 } from "./contracts.ts";
 import {
   decodeTaskApprovalResultWire,
@@ -2602,6 +2605,83 @@ function decodeBashPresentation(
     },
   };
 }
+function decodeModelError(value: unknown, path: string): RunModelError | null {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "agentRunId",
+    "category",
+    "message",
+    "code",
+    "type",
+    "requestId",
+    "httpStatus",
+    "retry",
+    "retryAfterMs",
+    "attempts",
+    "truncated",
+    "hostRedacted",
+    "hostTruncated",
+    "source",
+    "recovery",
+  ]);
+  const bounded = (value: unknown, name: string, limit: number) => {
+    const text = stringValue(value, `${path}.${name}`);
+    if (new TextEncoder().encode(text).length > limit)
+      fail(`${path}.${name}`, "model error text exceeds capacity");
+    return text;
+  };
+  const optionalText = (name: string) =>
+    item[name] === null ? null : bounded(item[name], name, 128);
+  const status =
+    item.httpStatus === null
+      ? null
+      : numberValue(item.httpStatus, `${path}.httpStatus`);
+  if (status !== null && (status < 0 || status > 65535))
+    fail(`${path}.httpStatus`, "expected u16");
+  const result: RunModelError = {
+    agentRunId: positiveU64WireId(item.agentRunId, `${path}.agentRunId`),
+    category: enumValue(
+      item.category,
+      `${path}.category`,
+      modelErrorCategories,
+    ),
+    message: bounded(item.message, "message", 1024),
+    code: optionalText("code"),
+    type: optionalText("type"),
+    requestId: optionalText("requestId"),
+    httpStatus: status,
+    retry: enumValue(item.retry, `${path}.retry`, [
+      "retryable",
+      "not_retryable",
+      "unknown",
+    ] as const),
+    retryAfterMs:
+      item.retryAfterMs === null
+        ? null
+        : u64WireInteger(item.retryAfterMs, `${path}.retryAfterMs`),
+    attempts: positiveU64WireId(item.attempts, `${path}.attempts`),
+    truncated: booleanValue(item.truncated, `${path}.truncated`),
+    hostRedacted: booleanValue(item.hostRedacted, `${path}.hostRedacted`),
+    hostTruncated: booleanValue(item.hostTruncated, `${path}.hostTruncated`),
+    source: nullableEnum(item.source, `${path}.source`, [
+      "metask",
+      "custom_provider",
+    ] as const),
+    recovery: enumValue(
+      item.recovery,
+      `${path}.recovery`,
+      modelErrorRecoveries,
+    ),
+  };
+  if (BigInt(result.attempts) > 4294967295n)
+    fail(`${path}.attempts`, "expected u32");
+  if (!result.message && !result.hostRedacted && !result.hostTruncated)
+    fail(`${path}.message`, "expected model failure message");
+  if (result.recovery === "account_settings" && result.source !== "metask")
+    fail(`${path}.recovery`, "account recovery requires Metask provenance");
+  return result;
+}
+
 function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
   return value === null
     ? null
@@ -2610,8 +2690,9 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
           "outcome",
           "cause",
           "diagnosticDisposition",
+          "modelError",
         ]);
-        return {
+        const result = {
           outcome: enumValue(
             terminalItem.outcome,
             `${path}.outcome`,
@@ -2623,7 +2704,21 @@ function decodeRunTerminal(value: unknown, path: string): RunView["terminal"] {
             `${path}.diagnosticDisposition`,
             ["absent", "withheld"] as const,
           ),
+          modelError: decodeModelError(
+            terminalItem.modelError,
+            `${path}.modelError`,
+          ),
         };
+        if (
+          result.cause !== "provider_failure" &&
+          result.modelError &&
+          result.modelError.recovery !== "none"
+        )
+          fail(
+            `${path}.modelError.recovery`,
+            "supplemental observation cannot grant recovery",
+          );
+        return result;
       })();
 }
 function decodeRunOutput(value: unknown, path: string): RunView["output"] {

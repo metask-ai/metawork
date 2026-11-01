@@ -6208,7 +6208,7 @@ pub const Runtime = struct {
     /// Lifecycle facts alone never accept or start a reviewer decision. The
     /// manual-response entry point uses this before Task's acceptance boundary.
     fn syncLifecycleFacts(self: *Runtime) bool {
-        self.scrubPublishedDiagnostics();
+        self.scrubPublishedTerminalData();
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -6561,19 +6561,27 @@ pub const Runtime = struct {
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
     fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
-        self.scrubPublishedDiagnostics();
+        self.scrubPublishedTerminalData();
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
     /// Workers hold immutable initial/request snapshots. A response may contain
     /// a later token, so acquire its publication and scrub against the complete
-    /// Host set before Task observes or persists the terminal diagnostic.
-    fn scrubPublishedDiagnostics(self: *Runtime) void {
+    /// Host set before Task observes or persists any terminal text.
+    fn scrubPublishedTerminalData(self: *Runtime) void {
         for (self.task_runtime.tasks) |entry| if (entry) |task| {
             for (task.durable.runs) |*run_entry| if (run_entry.*) |*run| {
                 if (run.terminal_observed or run.terminal_publication.load(.acquire) != .published) continue;
                 const changed = self.redactWithKnownCredentialsNoFail(run.terminal_diagnostic[0..run.terminal_payload.diagnostic_len]);
                 run.terminal_payload.diagnostic_redacted = changed or run.terminal_payload.diagnostic_redacted;
+                if (run.terminal_payload.model_error) |observation| {
+                    const message = &observation.detail.message;
+                    observation.host_redacted = self.redactWithKnownCredentialsNoFail(message.bytes[0..message.len]) or observation.host_redacted;
+                    inline for (.{ "code", "type", "request_id" }) |field| {
+                        if (@field(observation.detail, field)) |*text|
+                            observation.host_redacted = self.redactWithKnownCredentialsNoFail(text.bytes[0..text.len]) or observation.host_redacted;
+                    }
+                }
             };
             for (task.durable.compacts) |*compact_entry| if (compact_entry.*) |*compact| {
                 if (compact.terminal_observed or compact.terminal_publication.load(.acquire) != .published) continue;
@@ -18832,6 +18840,84 @@ test "canonical prompt title and terminal diagnostic never retain the registered
     );
 }
 
+test "published model errors are scrubbed against Account credentials before terminal drain" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(context, "LATE-SECRET");
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var account: u8 = 0;
+    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .detail = try lifecycle.ModelError.init(.{
+        .run_id = 42,
+        .category = .authentication,
+        .message = "LATE-SECRET SECRET-KEY",
+        .code = "LATE-SECRET",
+        .type = "LATE-SECRET",
+        .request_id = "LATE-SECRET",
+        .retry = .unknown,
+        .attempts = 1,
+    }) };
+    run.terminal_payload.model_error = storage;
+    control.markTerminalRunsBeforeEventDrain();
+    const observation = run.terminal_payload.model_error.?;
+    try std.testing.expect(observation.host_redacted);
+    const value = observation.detail.view();
+    try std.testing.expect(std.mem.indexOf(u8, value.message, "SECRET") == null);
+    inline for (.{ "code", "type", "request_id" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, @field(value, field).?, "LATE-SECRET") == null);
+    try std.testing.expectEqual(.authentication, value.category);
+}
+
+test "model error projection matches the shared Renderer fixture after Host credential cleaning" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const storage = try control.allocator.create(task_test_state.RunModelError);
+    run.model_error_storage = storage;
+    storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+        .run_id = 900,
+        .category = .authentication,
+        .message = "SECRET-KEY credential rejected",
+        .code = "future-code",
+        .type = "",
+        .request_id = "req-fixture",
+        .http_status = 200,
+        .retry = .unknown,
+        .retry_after_ms = std.math.maxInt(u64),
+        .attempts = 2,
+        .truncated = true,
+    }) };
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    run.terminal_payload.model_error = storage;
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    detachTaskForTest(&control, task);
+    var bytes: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeAggregateFixture(&bytes);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    const actual = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer actual.deinit();
+    const expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("model_error.fixture"), .{});
+    defer expected.deinit();
+    const projected = actual.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("terminal").?.object.get("modelError").?;
+    inline for (.{ "agentRunId", "category", "message", "code", "type", "requestId", "retry", "retryAfterMs", "attempts", "source", "recovery" }) |field|
+        try std.testing.expectEqualStrings(expected.value.object.get(field).?.string, projected.object.get(field).?.string);
+    inline for (.{ "truncated", "hostRedacted", "hostTruncated" }) |field|
+        try std.testing.expectEqual(expected.value.object.get(field).?.bool, projected.object.get(field).?.bool);
+    try std.testing.expectEqual(expected.value.object.get("httpStatus").?.integer, projected.object.get("httpStatus").?.integer);
+}
+
 test "Renderer transport failures never own Agent Run termination" {
     const cases = [_]struct {
         stage: TransportFailureStage,
@@ -20969,7 +21055,7 @@ test "projection failure after Agent terminal becomes a product failure" {
 }
 
 test "event capacity causes serialize to the shared Renderer fixture" {
-    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8 }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
+    const cases = try std.json.parseFromSlice([]const struct { outcome: []const u8, cause: []const u8, diagnosticDisposition: []const u8, modelError: ?std.json.Value }, std.testing.allocator, @embedFile("event_failure.fixture"), .{});
     defer cases.deinit();
     for (cases.value) |expected| {
         var control = try testRuntime();
@@ -21035,7 +21121,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeAggregateFixture(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\",\"modelError\":null}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }

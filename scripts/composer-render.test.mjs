@@ -257,6 +257,7 @@ function renderCompletedSurface(
               outcome: "completed",
               cause: null,
               diagnosticDisposition: "absent",
+              modelError: null,
             },
         usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
         tools: [

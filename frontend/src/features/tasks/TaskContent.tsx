@@ -294,6 +294,7 @@ export function TaskContent({
   onPrepareOutputEdit,
   webLink,
   onPrepareRetry,
+  onOpenSettings,
   onPreviewFile,
   loadFilePreview,
   onReviewFileChanges,
@@ -324,6 +325,7 @@ export function TaskContent({
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
+  onOpenSettings?: (target: "account" | "models") => void;
   loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
     taskId: string,
@@ -822,7 +824,9 @@ export function TaskContent({
                   state={outcomeState(terminal.outcome)}
                   label={t(
                     terminal.cause === "provider_failure"
-                      ? "run.provider_failure.title"
+                      ? terminal.modelError
+                        ? `run.model_error.category.${terminal.modelError.category}`
+                        : "run.provider_failure.title"
                       : terminalMessage(
                           run.output.responseKind,
                           terminal.outcome,
@@ -838,6 +842,14 @@ export function TaskContent({
                               : "run.provider_failure.no_response_impact",
                           )}
                         </span>
+                        {terminal.modelError &&
+                          terminal.modelError.recovery !== "none" && (
+                            <span>
+                              {t(
+                                `run.model_error.recovery.${terminal.modelError.recovery}`,
+                              )}
+                            </span>
+                          )}
                         {run.tools.length > 0 && (
                           <span>
                             {t("run.provider_failure.review_tool_effects")}
@@ -856,8 +868,35 @@ export function TaskContent({
                     (isCurrent &&
                       retryAvailable &&
                       retryable(terminal.outcome)) ||
-                    terminal.cause === "provider_failure" ? (
+                    terminal.cause === "provider_failure" ||
+                    terminal.modelError ? (
                       <div className="run-terminal-actions">
+                        {onOpenSettings &&
+                          terminal.cause === "provider_failure" &&
+                          (terminal.modelError?.recovery ===
+                            "account_settings" ||
+                            terminal.modelError?.recovery ===
+                              "model_settings") && (
+                            <button
+                              className="ai-activity-retry focus-ring"
+                              disabled={responseDisabled || !synchronized}
+                              onClick={() =>
+                                onOpenSettings(
+                                  terminal.modelError?.recovery ===
+                                    "account_settings"
+                                    ? "account"
+                                    : "models",
+                                )
+                              }
+                            >
+                              {t(
+                                terminal.modelError.recovery ===
+                                  "account_settings"
+                                  ? "run.model_error.open_account"
+                                  : "run.model_error.open_models",
+                              )}
+                            </button>
+                          )}
                         {isCurrent &&
                           retryAvailable &&
                           retryable(terminal.outcome) && (

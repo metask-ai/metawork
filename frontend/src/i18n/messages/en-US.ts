@@ -1,4 +1,66 @@
 export const enUS = {
+  "run.model_error.category.authentication":
+    "Model service rejected the credential",
+  "run.model_error.category.permission": "Model service permission denied",
+  "run.model_error.category.payment_required":
+    "Model service requires payment action",
+  "run.model_error.category.not_found": "Model service resource not found",
+  "run.model_error.category.invalid_request":
+    "Model service rejected the request",
+  "run.model_error.category.context_window": "Model context limit reached",
+  "run.model_error.category.rate_limited": "Model service rate limit reached",
+  "run.model_error.category.overloaded": "Model service is overloaded",
+  "run.model_error.category.server_error": "Model service internal error",
+  "run.model_error.category.timeout": "Model service request timed out",
+  "run.model_error.category.connection":
+    "Could not connect to the model service",
+  "run.model_error.category.stream_interrupted":
+    "Model response was interrupted",
+  "run.model_error.category.output_limit": "Model output limit reached",
+  "run.model_error.category.unknown": "Model service request failed",
+  "run.model_error.recovery.account_settings":
+    "Review your account or payment status in account settings.",
+  "run.model_error.recovery.model_settings":
+    "Review the model and its provider settings.",
+  "run.model_error.recovery.review_context":
+    "Review the context; compact it or select an appropriate model when available.",
+  "run.model_error.recovery.revise_instruction":
+    "Adjust the instruction or explicitly continue with a new message.",
+  "run.model_error.recovery.wait":
+    "Wait before trying again, and review any operations already completed.",
+  "run.model_error.recovery.prepare_retry":
+    "Review completed operations before preparing another attempt.",
+  "run.model_error.open_account": "Open account settings",
+  "run.model_error.open_models": "Open model settings",
+  "run.model_error.supplemental":
+    "This model error is an additional observation; the run ended for the reason shown above.",
+  "run.model_error.message_hidden":
+    "The model error message was removed for privacy.",
+  "run.model_error.upstream_truncated":
+    "The model service detail was truncated upstream.",
+  "run.model_error.host_redacted":
+    "MetaWork removed sensitive content from this detail.",
+  "run.model_error.host_truncated":
+    "MetaWork shortened this detail to its display capacity.",
+  "run.model_error.diagnostic_withheld":
+    "Separate internal diagnostics remain on the Host.",
+  "run.model_error.diagnostic_absent":
+    "No separate internal diagnostic accompanied this model error.",
+  "run.model_error.category_label": "Model error category",
+  "run.model_error.agent_run": "Agent execution ID",
+  "run.model_error.code": "Service error code",
+  "run.model_error.type": "Service error type",
+  "run.model_error.requestId": "Service request ID",
+  "run.model_error.attempts": "Attempts of the failed request",
+  "run.model_error.retry_label": "Request retry advice",
+  "run.model_error.retry.retryable":
+    "Retrying the same request may help; this does not authorize replaying the run.",
+  "run.model_error.retry.not_retryable":
+    "Sending the same request unchanged is unlikely to help.",
+  "run.model_error.retry.unknown":
+    "It is unknown whether resending this request would help.",
+  "run.model_error.retry_after": "Suggested retry delay",
+  "run.model_error.empty": "(empty)",
   "archive.success": "Task archived. Find it in Settings → Archived tasks.",
   "archive.undo": "Undo",
   "archive.view": "View",

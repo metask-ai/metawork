@@ -411,6 +411,15 @@ pub const PendingInterruption = enum(u8) {
     app_shutdown,
 };
 
+/// Owned safe observation, separate from the decision about the Run outcome.
+pub const RunModelError = struct {
+    pub const Source = models_contract.Source;
+    detail: agent.ModelError,
+    source: ?Source = null,
+    host_redacted: bool = false,
+    host_truncated: bool = false,
+};
+
 pub const TerminalPayload = struct {
     /// Applied by the main thread only when the terminal event drain completes.
     exclude_on_product_terminal: bool,
@@ -421,6 +430,7 @@ pub const TerminalPayload = struct {
     diagnostic_len: usize = 0,
     diagnostic_truncated: bool = false,
     diagnostic_redacted: bool = false,
+    model_error: ?*RunModelError = null,
 };
 
 pub const CompactTerminalPayload = struct {
@@ -973,6 +983,10 @@ pub const RunRecord = struct {
     terminal_drain_rejection: ?OutputProtocolObservation = null,
     drain_rejection_reported: bool = false,
     terminal_diagnostic: []u8,
+    /// Reserved before execution; publication only copies into this owned value.
+    /// Restored history allocates it only when a model error is present.
+    model_error_storage: ?*RunModelError = null,
+    model_error_source: ?models_contract.Source = null,
     initial_credentials: [2][]const u8 = .{ &.{}, &.{} },
     /// Main-thread view of every version that may still reach this operation.
     /// Workers use initialRedactionSecrets and their owned request copies;
