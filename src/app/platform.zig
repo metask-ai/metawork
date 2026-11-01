@@ -15,6 +15,54 @@ pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 pub const mcp_oauth_timer_id: u64 = 0x4d57_4d43_504f_4155;
 pub const mcp_catalog_timer_id: u64 = 0x4d57_4d43_5043_4154;
 
+// The Windows host takes its lifetime lock in wake(), and WebView2 handlers
+// hold that lock across synchronous Bridge callbacks. A worker that wakes
+// directly cannot exit while a Bridge command joins it. Required wakes are
+// handed to this thread, so the worker never blocks on the host.
+const RequiredWake = struct {
+    const pending: u32 = 1;
+    const closed: u32 = 2;
+
+    io: std.Io,
+    services: native_sdk.platform.PlatformServices,
+    state: std.atomic.Value(u32) = .init(0),
+    thread: ?std.Thread = null,
+
+    fn start(self: *RequiredWake) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    /// Any thread. Never blocks; false once closed.
+    fn request(self: *RequiredWake) bool {
+        const previous = self.state.fetchOr(pending, .release);
+        if (previous & closed != 0) return false;
+        if (previous & pending == 0) self.io.futexWake(u32, &self.state.raw, 1);
+        return true;
+    }
+
+    fn run(self: *RequiredWake) void {
+        while (true) {
+            if (self.state.load(.acquire) == 0) {
+                self.io.futexWaitUncancelable(u32, &self.state.raw, 0);
+                continue;
+            }
+            const taken = self.state.fetchAnd(~pending, .acq_rel);
+            if (taken & pending != 0) self.services.wake() catch
+                @panic("Application completion lost its required main-loop wake");
+            if (taken & closed != 0) return;
+        }
+    }
+
+    /// Main thread, outside host callbacks. An accepted request is delivered
+    /// before the thread exits.
+    fn close(self: *RequiredWake) void {
+        _ = self.state.fetchOr(closed, .release);
+        self.io.futexWake(u32, &self.state.raw, 1);
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+};
+
 // This is the single DispatcherPlatform vtable implementation. It owns the
 // Native SDK runtime/services references required by that vtable and delegates
 // window-system behavior to window.State; it is not a general platform module.
@@ -24,6 +72,7 @@ pub const Adapter = struct {
     trace_product_delivery: bool = false,
     native_runtime: ?*native_sdk.Runtime = null,
     platform_services: ?native_sdk.platform.PlatformServices = null,
+    required_wake: ?RequiredWake = null,
     window: app_window.State = .{},
 
     pub fn init(io: std.Io, main_thread_id: std.Thread.Id) Adapter {
@@ -37,6 +86,13 @@ pub const Adapter = struct {
     pub fn start(self: *Adapter, runtime: *native_sdk.Runtime) !void {
         const services_value = runtime.options.platform.services;
         if (services_value.wake_fn == null) return error.MainLoopWakeUnavailable;
+        self.required_wake = .{ .io = self.io, .services = services_value };
+        const required_wake = &self.required_wake.?;
+        required_wake.start() catch {
+            self.required_wake = null;
+            return error.MainLoopWakeUnavailable;
+        };
+        errdefer self.closeRequiredWake();
         try self.window.bind(services_value);
         self.native_runtime = runtime;
         self.platform_services = services_value;
@@ -44,8 +100,21 @@ pub const Adapter = struct {
 
     pub fn stop(self: *Adapter, runtime: *native_sdk.Runtime) void {
         self.window.removeTray(runtime);
+        // App stop runs after the host message loop has exited, so the relay
+        // cannot be parked on the host lock while this joins it.
+        self.closeRequiredWake();
         self.platform_services = null;
         if (self.native_runtime == runtime) self.native_runtime = null;
+    }
+
+    fn closeRequiredWake(self: *Adapter) void {
+        if (self.required_wake) |*required_wake| required_wake.close();
+        self.required_wake = null;
+    }
+
+    fn requestRequiredWake(self: *Adapter) bool {
+        const required_wake = if (self.required_wake) |*value| value else return false;
+        return required_wake.request();
     }
 
     pub fn outputFileSave(self: *Adapter) control_ports.OutputFileSave {
@@ -181,7 +250,8 @@ pub const Adapter = struct {
     }
 
     pub fn notifyRequired(context: *anyopaque) void {
-        if (!notifyMainLoop(context))
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (!self.requestRequiredWake())
             @panic("Application completion lost its required main-loop wake");
     }
 
@@ -501,6 +571,74 @@ test "main-loop wake startup rejects a missing service before publication" {
     try std.testing.expect(adapter.services() == null);
     try std.testing.expect(adapter.native_runtime == null);
     try std.testing.expect(!Adapter.notifyMainLoop(&adapter));
+    try std.testing.expect(!adapter.requestRequiredWake());
+}
+
+const RequiredWakeTest = struct {
+    // Stands in for the Windows host lifetime lock taken by wake().
+    var host_lock: std.Io.Mutex = .init;
+    var calls: std.atomic.Value(usize) = .init(0);
+
+    fn wake(_: ?*anyopaque) anyerror!void {
+        host_lock.lockUncancelable(std.testing.io);
+        defer host_lock.unlock(std.testing.io);
+        _ = calls.fetchAdd(1, .monotonic);
+    }
+
+    const Worker = struct {
+        adapter: *Adapter,
+        exited: std.Io.Event = .unset,
+
+        fn run(self: *@This()) void {
+            Adapter.notifyRequired(self.adapter);
+            self.exited.set(std.testing.io);
+        }
+    };
+};
+
+test "required wake lets a worker exit while a Bridge callback holds the host lock" {
+    const T = RequiredWakeTest;
+    T.calls.store(0, .monotonic);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = T.wake;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+
+    // The UI thread owns the host lock for the whole callback and joins.
+    T.host_lock.lockUncancelable(std.testing.io);
+    var worker: T.Worker = .{ .adapter = &adapter };
+    const thread = try std.Thread.spawn(.{}, T.Worker.run, .{&worker});
+    const exited = worker.exited.waitTimeout(std.testing.io, .{
+        .duration = .{ .raw = .fromSeconds(5), .clock = .boot },
+    });
+    T.host_lock.unlock(std.testing.io);
+    thread.join();
+    try exited;
+
+    adapter.stop(&harness.runtime);
+    try std.testing.expectEqual(@as(usize, 1), T.calls.load(.monotonic));
+    try std.testing.expect(!adapter.requestRequiredWake());
+}
+
+test "required wake coalesces requests while the host is busy" {
+    const T = RequiredWakeTest;
+    T.calls.store(0, .monotonic);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = T.wake;
+    var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    try adapter.start(&harness.runtime);
+    defer adapter.stop(&harness.runtime);
+
+    T.host_lock.lockUncancelable(std.testing.io);
+    for (0..32) |_| Adapter.notifyRequired(&adapter);
+    T.host_lock.unlock(std.testing.io);
+
+    adapter.stop(&harness.runtime);
+    const calls = T.calls.load(.monotonic);
+    try std.testing.expect(calls >= 1 and calls <= 2);
 }
 
 const WakePublicationTest = struct {
