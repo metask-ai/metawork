@@ -4147,8 +4147,7 @@ pub const Runtime = struct {
             target_run.pending_file_change_artifacts == 0 and
             target_run.file_change_observation == .collecting)
         {
-            const terminal = task_state.terminalPayload(target_run).?;
-            target_run.file_change_observation = if (terminal.phase == .completed and !target_run.file_changes_known_loss) .complete else .incomplete;
+            target_run.file_change_observation = task_state.finalizedFileChangeObservation(target_run);
         }
         task.durable.recent_order = self.takeRecentOrder();
         return true;

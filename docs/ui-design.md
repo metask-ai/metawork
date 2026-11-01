@@ -721,8 +721,9 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 无结构化详情时显示“模型服务请求失败”，有合法详情时按 category 表达凭据拒绝、服务权限、支付状态、上下文/输出限制、限流、服务繁忙、超时或连接/流中断。不能根据 code、message 或 HTTP status 推断业务状态。`tool_failure` 与 `image_input_unsupported` 保持各自原因和恢复建议，不展示 provider raw body；
-- `provider_failure` 的主区 notice 表达原因、无回复或部分回复的影响与 Product 给出的恢复建议；已发生工具操作时保留检查执行详情的提醒。Account/模型设置按钮只导航到当前产品入口，后续登录、充值或修改继续由对应 owner 校验，不直接触发。补充模型错误只放入运行详情，不覆盖 pipeline、权限或 dependency failure 的主提示；
-- 失败 Run 的“查看运行详情”是 notice 下默认折叠的 disclosure，仅展开时挂载正文，折叠后卸载。按精确 Run 的 model、protocol、Product Run ID 和 Agent 执行 ID 展示 provenance；结构化详情使用普通文本，安全换行，不执行 HTML、命令或上游链接。区分上游截断、Host 清洗和 Host 截断；正文被完全清除时给出固定隐私占位。独立 diagnostic 的 absent/withheld 不得被描述成模型错误详情也不可见。没有结构化详情时不得猜测鉴权、限流或网络分类。设置入口在断连时禁用；只有当前 Task 可继续时才提供既有准备重试或查看待保留草稿动作，文字明确只把指令填入 Composer；详情展开本身不执行任何恢复动作；
+- `provider_failure` 有结构化详情时，主区 notice 用回复结果作简短标题，在正文说明 Product 已知的具体原因与恢复建议；无回复和部分回复互斥表达，不重复追加运行结果。凭据与付款问题分别说明，不把付款分类解释成余额不足、登录失效或充值后必然恢复，也不承诺设置页提供不存在的支付状态查询。有 Tool 记录时只提醒查看执行记录，不据数量、完成状态或 `isError` 推断业务操作已经完成。Account/模型设置按钮只导航到当前产品入口，后续登录、充值或修改继续由对应 owner 校验，不直接触发。补充模型错误只放入运行详情，不覆盖 pipeline、权限或 dependency failure 的主提示；
+- 恢复动作的主次由 Product 的 `recovery` 决定，不推断当前问题是否已解决：设置建议突出对应设置入口，填回输入框作为次要动作；准备再次发送建议可突出填回输入框，等待或调整指令建议不把再次发送承诺为有效恢复。设置导航可以保留在历史 Run，执行准备仍受当前 Task 资格约束，不机械共用最新 Run 限制；
+- 失败 Run 的“错误详情”是 notice 下默认折叠的 disclosure，仅展开时挂载正文，折叠后卸载。按精确 Run 的 model、protocol、Product Run ID 和 Agent 执行 ID 展示 provenance；结构化详情使用普通文本，安全换行，不执行 HTML、命令或上游链接。区分上游截断、Host 清洗和 Host 截断；正文被完全清除时给出固定隐私占位。独立 diagnostic 的 absent/withheld 不得被描述成模型错误详情也不可见。没有结构化详情时不得猜测鉴权、限流或网络分类。设置入口在断连时禁用；只有当前 Task 可继续时才提供既有准备重试或查看待保留草稿动作，文字明确只把指令填入 Composer；详情展开本身不执行任何恢复动作；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令尚未应答时显示“正在请求停止”；应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 
 ### 7.6 滚动与密度

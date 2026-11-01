@@ -885,6 +885,45 @@ test "callback diagnostic enrichment preserves terminal decisions and bounded cr
     }
 }
 
+test "terminal file observation loss is retained even without a file record" {
+    var run: state.RunRecord = .{
+        .id = 7,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .openai_chat_completions,
+        .execution_model = "fixture",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = &.{} } },
+        .commentary_ends = &.{},
+        .tools = &.{},
+        .file_change_observation = .collecting,
+        .terminal_diagnostic = &.{},
+    };
+    const result: agent.TerminalResult = .{
+        .allocator = std.testing.allocator,
+        .diagnostic_storage = &.{},
+        .diagnostic_len = 0,
+        .diagnostic_truncated = false,
+        .abi_status = .ok,
+        .raw_status_code = null,
+        .stop_reason = .end_turn,
+        .raw_stop_reason_code = null,
+        .abort_status = null,
+        .raw_abort_status_code = null,
+        .termination_signal = null,
+        .failure = null,
+        .session_disposition_at_completion = .reusable,
+        .file_changes_lost = true,
+    };
+    try std.testing.expect(commitAgentTerminal(.{ .project_fn = projectSanitized }, &run, &result));
+    run.event_stream_finalized = true;
+    try std.testing.expectEqual(@as(usize, 0), run.file_changes.len);
+    try std.testing.expect(run.file_changes_known_loss);
+    try std.testing.expectEqual(state.FileChangeObservation.incomplete, state.finalizedFileChangeObservation(&run));
+    try std.testing.expectEqual(state.RunOutcome.completed, state.productTerminalFacts(&run).?.outcome);
+}
+
 test "model error publication owns sanitized fields and preserves primary and supplemental terminal facts" {
     for ([_]bool{ false, true }) |callback_failed| {
         var storage: [32]u8 = undefined;

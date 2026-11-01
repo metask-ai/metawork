@@ -200,14 +200,14 @@ export async function runModelErrorVertical({
     "model error must not invalidate catalog or test authority",
   );
   let webview = await connect();
-  const selectTask = async () =>
+  const selectTask = async (selectedTaskId = taskId) =>
     poll(
       () =>
         webview.evaluate(`(() => {
     const dialog=document.querySelector('[role=dialog]');
     const skip=dialog && [...dialog.querySelectorAll('button')].find(item=>/暂时跳过|Skip for now/.test(item.textContent));
     if(skip){skip.click();return false;}
-    const row=[...document.querySelectorAll('.task-list-item')].find(item=>item.dataset.taskId===${JSON.stringify(taskId)});
+    const row=[...document.querySelectorAll('.task-list-item')].find(item=>item.dataset.taskId===${JSON.stringify(selectedTaskId)});
     if(!row)return false; if(row.getAttribute('aria-current')!=='page'){row.click();return false;}
     return !!document.querySelector('.run-diagnostics');
   })()`),
@@ -302,7 +302,7 @@ export async function runModelErrorVertical({
     assert.equal(provider.served, servedBefore + 1);
     await key("Escape", "Escape", 27);
     await webview.evaluate(`(() => {
-      const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/重新填入指令|Copy instruction to Composer/.test(item.textContent));
+      const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/填回输入框|Copy to input box/.test(item.textContent));
       if(!button || button.disabled)throw new Error('prepare retry missing');button.click();
     })()`);
     await poll(
@@ -385,6 +385,142 @@ export async function runModelErrorVertical({
   } finally {
     webview.close();
   }
+  // A real Core payment failure must not manufacture an incomplete file observation.
+  // This loopback Custom Provider tests classification and UI, not Metask billing.
+  const paymentReady = await poll(
+    async () => {
+      const current = await snapshot();
+      return current.newTaskAdmission.available ? current : null;
+    },
+    timeout,
+    "execution authority is ready after history restart",
+  );
+  const paymentWorkspace = paymentReady.workspaces.find(
+    (item) => item.id === chosen.workspaceId,
+  );
+  const paymentCreated = await invoke("metawork.tasks.create", {
+    workspace: {
+      kind: "manual",
+      workspaceId: paymentWorkspace.id,
+      expectedWorkspaceEpoch: paymentWorkspace.epoch,
+    },
+    expectedExecutionGeneration: paymentReady.newTaskAdmission.activeGeneration,
+    expectedSelectionRevision:
+      paymentReady.newTaskAdmission.activeSelectionRevision,
+    modelSelection: null,
+    expectedSkillCatalogRevision: null,
+    expectedSkillSelectionRevision: null,
+    approvalMode: "manual",
+  });
+  accepted(paymentCreated);
+  const paymentTaskId = paymentCreated.taskId;
+  assert.equal(
+    (
+      await invoke("metawork.tasks.rename", {
+        taskId: paymentTaskId,
+        title: "Payment error acceptance",
+      })
+    ).renamed,
+    true,
+  );
+  const readPaymentTask = async () =>
+    (await snapshot({ taskId: paymentTaskId })).tasks.find(
+      (item) => item.id === paymentTaskId,
+    );
+  const servedBeforePayment = provider.served;
+  provider.enqueue(() => ({
+    status: 402,
+    body: JSON.stringify({
+      error: {
+        type: "billing_error",
+        message: "PAYMENT_ERROR_VERTICAL fixture account requires payment",
+      },
+    }),
+  }));
+  accepted(
+    await runPrepared({
+      taskId: paymentTaskId,
+      expectedBindingEpoch: paymentCreated.bindingEpoch,
+      input: {
+        kind: "text",
+        text: "Verify the payment error notice without file changes.",
+      },
+    }),
+  );
+  const paymentRun = await poll(
+    async () => {
+      const latest = (await readPaymentTask())?.runs.at(-1);
+      return latest?.terminal ? latest : null;
+    },
+    timeout,
+    "canonical Core payment failure reaches Product",
+  );
+  assert.equal(paymentRun.terminal.cause, "provider_failure");
+  if (provider.error) throw provider.error;
+  assert.equal(paymentRun.terminal.modelError.category, "payment_required");
+  assert.equal(paymentRun.terminal.modelError.source, "custom_provider");
+  assert.equal(paymentRun.terminal.modelError.recovery, "model_settings");
+  assert.deepEqual(paymentRun.fileChanges, {
+    observation: "complete",
+    changes: [],
+  });
+  assert.equal(paymentRun.tools.length, 0);
+  assert.equal(provider.served, servedBeforePayment + 1);
+  webview = await connect();
+  try {
+    await selectTask(paymentTaskId);
+    for (const width of [1320, 390]) {
+      await resize(width, 900);
+      for (const theme of ["light", "dark"]) {
+        await webview.evaluate(
+          `document.documentElement.dataset.theme=${JSON.stringify(theme)}; document.querySelector('.run-terminal-activity').scrollIntoView({block:'center'})`,
+        );
+        await webview.evaluate(
+          "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
+        );
+        const observation = await webview.evaluate(`(() => {
+          const notice=document.querySelector('.run-terminal-activity'), r=notice.getBoundingClientRect();
+          const settings=notice.querySelector('button[data-primary="true"]');
+          const retry=notice.querySelector('button[data-primary="false"]');
+          return {text:notice.textContent, notices:document.querySelectorAll('.run-terminal-activity').length,
+            fits:notice.scrollWidth<=notice.clientWidth+1 && r.left>=0 && r.right<=innerWidth+1,
+            controls:!!settings && !!retry && [settings,retry].every(item=>item.getBoundingClientRect().height>=44),
+            detailMounted:!!document.querySelector('.model-error-message'),
+            fileWarning:[...document.querySelectorAll('[role=status]')].some(item=>/未能完整确认|could not fully verify/i.test(item.textContent))};
+        })()`);
+        assert.equal(observation.notices, 1);
+        assert.equal(observation.fits, true);
+        assert.equal(observation.controls, true);
+        assert.equal(observation.detailMounted, false);
+        assert.equal(observation.fileWarning, false);
+        assert.match(observation.text, /付款|payment/i);
+        assert.doesNotMatch(observation.text, /登录|sign-in|余额|balance/i);
+        const png = await webview.send("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: false,
+        });
+        await writeFile(
+          path.join(evidenceDir, `payment-${width}-${theme}.png`),
+          Buffer.from(png.data, "base64"),
+        );
+      }
+    }
+  } finally {
+    webview.close();
+  }
+  await stop();
+  await restart();
+  const restoredPaymentRun = (await readPaymentTask()).runs.at(-1);
+  assert.deepEqual(
+    restoredPaymentRun.terminal.modelError,
+    paymentRun.terminal.modelError,
+  );
+  assert.deepEqual(restoredPaymentRun.fileChanges, paymentRun.fileChanges);
+  assert.equal(
+    provider.served,
+    servedBeforePayment + 1,
+    "payment history restore must not resend a request",
+  );
   await writeFile(
     path.join(evidenceDir, "result.json"),
     JSON.stringify(
@@ -399,6 +535,13 @@ export async function runModelErrorVertical({
         sqliteReopen: true,
         retiredStoreUnchanged: true,
         keyboardDisclosure: true,
+        paymentTaskId,
+        paymentRunId: paymentRun.id,
+        paymentError: paymentRun.terminal.modelError,
+        paymentObservationCompleteWithZeroRecords: true,
+        paymentSqliteReopen: true,
+        paymentActionHierarchy: true,
+        externalMetaskBillingVerified: false,
         widths: [1320, 390],
         themes: ["light", "dark"],
       },

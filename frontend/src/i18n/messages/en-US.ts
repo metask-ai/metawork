@@ -1,39 +1,54 @@
 export const enUS = {
   "run.model_error.category.authentication":
-    "Model service rejected the credential",
-  "run.model_error.category.permission": "Model service permission denied",
+    "The model service could not verify your credentials.",
+  "run.model_error.category.permission":
+    "The model service did not grant permission for this request.",
   "run.model_error.category.payment_required":
-    "Model service requires payment action",
-  "run.model_error.category.not_found": "Model service resource not found",
+    "The model service reported a payment issue.",
+  "run.model_error.category.not_found":
+    "The model service could not find the requested model or resource.",
   "run.model_error.category.invalid_request":
-    "Model service rejected the request",
-  "run.model_error.category.context_window": "Model context limit reached",
-  "run.model_error.category.rate_limited": "Model service rate limit reached",
-  "run.model_error.category.overloaded": "Model service is overloaded",
-  "run.model_error.category.server_error": "Model service internal error",
-  "run.model_error.category.timeout": "Model service request timed out",
+    "The model service did not accept this request.",
+  "run.model_error.category.context_window":
+    "This conversation exceeds the model's context limit.",
+  "run.model_error.category.rate_limited":
+    "The model service is limiting request frequency.",
+  "run.model_error.category.overloaded": "The model service is busy.",
+  "run.model_error.category.server_error":
+    "The model service encountered an error while handling this request.",
+  "run.model_error.category.timeout":
+    "The model service did not respond in time.",
   "run.model_error.category.connection":
-    "Could not connect to the model service",
+    "Could not connect to the model service.",
   "run.model_error.category.stream_interrupted":
-    "Model response was interrupted",
-  "run.model_error.category.output_limit": "Model output limit reached",
-  "run.model_error.category.unknown": "Model service request failed",
-  "run.model_error.recovery.account_settings":
-    "Review your account or payment status in account settings.",
+    "Receiving the model response was interrupted.",
+  "run.model_error.category.output_limit":
+    "This response reached the model's output limit.",
+  "run.model_error.category.unknown":
+    "The model service could not complete this request.",
   "run.model_error.recovery.model_settings":
     "Review the model and its provider settings.",
   "run.model_error.recovery.review_context":
-    "Review the context; compact it or select an appropriate model when available.",
+    "Shorten your next message, or compact the conversation when available.",
   "run.model_error.recovery.revise_instruction":
-    "Adjust the instruction or explicitly continue with a new message.",
-  "run.model_error.recovery.wait":
-    "Wait before trying again, and review any operations already completed.",
+    "Ask for a smaller response or send a new message to continue.",
+  "run.model_error.recovery.wait": "Please try again later.",
   "run.model_error.recovery.prepare_retry":
-    "Review completed operations before preparing another attempt.",
+    "You can copy the instruction to the input box and review it before sending.",
+  "run.model_error.recovery.account_authentication":
+    "Open account settings to check your Metask sign-in.",
+  "run.model_error.recovery.account_payment":
+    "Open the Metask top-up page from account settings.",
+  "run.model_error.recovery.provider_authentication":
+    "Check the provider credentials in model settings.",
+  "run.model_error.recovery.provider_payment":
+    "Check your account with the model provider.",
+  "run.provider_failure.no_response_title": "Could not generate a response",
+  "run.provider_failure.partial_title": "The response is incomplete",
   "run.model_error.open_account": "Open account settings",
   "run.model_error.open_models": "Open model settings",
   "run.model_error.supplemental":
-    "This model error is an additional observation; the run ended for the reason shown above.",
+    "The following model error also occurred. The main reason this request ended is shown above.",
   "run.model_error.message_hidden":
     "The model error message was removed for privacy.",
   "run.model_error.upstream_truncated":
@@ -41,20 +56,20 @@ export const enUS = {
   "run.model_error.host_redacted":
     "MetaWork removed sensitive content from this detail.",
   "run.model_error.host_truncated":
-    "MetaWork shortened this detail to its display capacity.",
+    "MetaWork shows only part of this detail because it is too long.",
   "run.model_error.diagnostic_withheld":
-    "Separate internal diagnostics remain on the Host.",
+    "Additional technical details are stored on this device and cannot be shown here.",
   "run.model_error.diagnostic_absent":
-    "No separate internal diagnostic accompanied this model error.",
+    "No additional technical details were provided.",
   "run.model_error.category_label": "Model error category",
   "run.model_error.agent_run": "Agent execution ID",
   "run.model_error.code": "Service error code",
   "run.model_error.type": "Service error type",
   "run.model_error.requestId": "Service request ID",
-  "run.model_error.attempts": "Attempts of the failed request",
-  "run.model_error.retry_label": "Request retry advice",
+  "run.model_error.attempts": "Attempts for this request",
+  "run.model_error.retry_label": "Trying the request again",
   "run.model_error.retry.retryable":
-    "Retrying the same request may help; this does not authorize replaying the run.",
+    "Another request may work. This does not mean earlier tool actions can safely be repeated.",
   "run.model_error.retry.not_retryable":
     "Sending the same request unchanged is unlikely to help.",
   "run.model_error.retry.unknown":
@@ -980,7 +995,7 @@ export const enUS = {
   "run.process.elapsed": "Turn time {duration}",
   "run.process.toggle_tool": "Show or hide details for {name}",
   "run.process.tool_detail": "Details for {name}",
-  "run.prepare_retry": "Copy instruction to Composer",
+  "run.prepare_retry": "Copy to input box",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",
   "run.review_draft": "Review current draft",
@@ -995,15 +1010,15 @@ export const enUS = {
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
   "run.provider_failure.title": "Model service request failed",
   "run.provider_failure.no_response_impact":
-    "This run did not produce a usable response.",
+    "No response was generated. You can try again later.",
   "run.provider_failure.partial_impact":
-    "This run produced only a partial response, which may be incomplete.",
+    "The response stopped before it was complete.",
   "run.provider_failure.diagnostic_absent":
-    "MetaWork did not receive additional diagnostics for this run.",
+    "No additional technical details are available.",
   "run.provider_failure.diagnostic_withheld":
-    "MetaWork received additional technical diagnostics, but the current security boundary does not allow their contents to be shown here.",
+    "Additional technical details are stored on this device and cannot be shown here.",
   "run.provider_failure.review_tool_effects":
-    "Some operations completed before the failure. Check their effects before running again.",
+    "Review the earlier execution records before sending again.",
   "run.view_diagnostics": "View run details",
   "slash.title": "Composer actions",
   "slash.group.commands": "Commands",

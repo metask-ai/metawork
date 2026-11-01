@@ -20587,6 +20587,92 @@ test "completed terminal drain closes collecting file change observation" {
     ) != null);
 }
 
+test "file observation closure agrees after event drain and delayed artifact completion" {
+    const Case = struct {
+        phase: task_test_state.RunPhase = .failed,
+        outcome: task_test_state.RunOutcome = .failed,
+        cause: ?task_test_state.RunCause = .provider_failure,
+        known_loss: bool = false,
+        already_incomplete: bool = false,
+        running_tool: bool = false,
+        closed_tool: bool = false,
+        projection_failure: ?task_test_state.EventProjectionFailure = null,
+        expected: task_test_state.FileChangeObservation = .complete,
+    };
+    const cases = [_]Case{
+        .{}, // First request rejected, with no file or tool records.
+        .{ .cause = .tool_failure, .closed_tool = true },
+        .{ .phase = .completed, .outcome = .completed, .cause = null },
+        .{ .phase = .stopped, .outcome = .stopped, .cause = null },
+        .{ .phase = .stopped, .outcome = .stopped, .cause = .resource_limit },
+        .{ .cause = .resource_limit, .expected = .incomplete },
+        .{ .phase = .cancelled, .outcome = .cancelled, .cause = .timeout, .expected = .incomplete },
+        .{ .phase = .cancelled, .outcome = .cancelled, .cause = .user_cancel, .expected = .incomplete },
+        .{ .phase = .stopped, .outcome = .stopped, .cause = .permission_required, .closed_tool = true, .expected = .incomplete },
+        .{ .known_loss = true, .expected = .incomplete },
+        .{ .already_incomplete = true, .expected = .incomplete },
+        .{ .running_tool = true, .expected = .incomplete },
+        .{ .cause = null, .expected = .incomplete },
+        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .consumer_rejected, .expected = .incomplete },
+        .{ .phase = .completed, .outcome = .completed, .cause = null, .projection_failure = .dependency_contract_failure, .expected = .incomplete },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |delayed_artifact| {
+            var control = try testRuntime();
+            defer control.deinit();
+            const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+            if (case.running_tool or case.closed_tool) {
+                var tool = try testEnvelope(3, 7, if (case.running_tool)
+                    "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\"}}"
+                else
+                    "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"stopped\",\"is_error\":true}}");
+                defer tool.deinit();
+                try control.applyEvent(&tool);
+            }
+            if (delayed_artifact) {
+                var change = try testEnvelope(3, 7, "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"result.txt\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}");
+                defer change.deinit();
+                try control.applyEvent(&change);
+                run.pending_file_change_artifacts = 1;
+            }
+            run.file_changes_known_loss = case.known_loss;
+            if (case.already_incomplete) run.file_change_observation = .incomplete;
+            run.event_projection_failure = case.projection_failure;
+            try std.testing.expect(commitTerminal(run, case.phase, case.outcome, case.cause, .reusable, "", false));
+            control.markTerminalRunsBeforeEventDrain();
+            control.finalizeMarkedTerminalRunsAfterEventDrain();
+            if (delayed_artifact) {
+                if (!case.already_incomplete)
+                    try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
+                const change = &run.file_changes[0].?;
+                try std.testing.expect(control.task_runtime.completeFileChangeArtifact(3, run.generation, change.order, .{
+                    .run_generation = run.generation,
+                    .change_order = change.order,
+                    .digest = @splat(0),
+                    .byte_size = 1,
+                }, false));
+            }
+            try std.testing.expectEqual(case.expected, run.file_change_observation.?);
+            try std.testing.expectEqual(@as(u32, 0), run.pending_file_change_artifacts);
+        }
+    }
+}
+
+test "failed file artifact remains incomplete after a model failure" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    var change_event = try testEnvelope(3, 7, "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"result.txt\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}");
+    defer change_event.deinit();
+    try control.applyEvent(&change_event);
+    run.pending_file_change_artifacts = 1;
+    try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    try std.testing.expect(control.task_runtime.completeFileChangeArtifact(3, run.generation, run.file_changes[0].?.order, null, false));
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
+}
+
 test "terminal persistence degrades pending file change observation without mutating the live Run" {
     var control = try testRuntime();
     defer control.deinit();
