@@ -1,0 +1,150 @@
+{
+  "id": "E-WIN-MODEL-ERROR-UI-20261101",
+  "date": "2026-11-01",
+  "platform": "Windows x64",
+  "branch": "feat/model-error-presentation",
+  "implementationRevision": "761d7930c457527df21b13dc63ceae44cb91bdb7",
+  "qaDelta": "Executed payment scenario and HTTP 402 fixture are bound by qaFiles hashes before their acceptance commit.",
+  "canonicalCore": {
+    "version": "0.13.0-dev+723af0baee8d",
+    "sourceCommit": "723af0baee8da6b7768f72ab4f869d4d847bde1e",
+    "lockSha256": "7bf8abbe30b4e794db252098c3b67e83501ae2c62b7905c0df82ba4554c021f2"
+  },
+  "nativeExecutable": {
+    "artifact": "automation Debug",
+    "sha256": "c9d1f96fa8b67fb909c9d817ed6e06a0c7960e540f90e3215f6e2bfeb1962e08"
+  },
+  "qaFiles": {
+    "scripts/agentcore-model-error-vertical.mjs": "1be4f9aef5d291f887f08485b6216f40c63a6be7c409ccd065ba72ae8ac4cc51",
+    "scripts/test-agentcore-vertical-macos.mjs": "99cf0605663a658184df9274cd04d38d030c12a5238d00e0bce0618cffca9fab",
+    "frontend/src/features/tasks/TaskContent.tsx": "69ec049c5d72ed8ea8a79c725e9111d3dd07f79775b58f810ce0df4adb21c766",
+    "frontend/src/index.css": "91fbc119bc55ef9218b208bb0d764a7eebad738d2489207e4c997f383bd77587",
+    "frontend/src/i18n/messages/en-US.ts": "8535ba07c93204c77f2f7722c05c795d93b1e2897fab27507d857c5cb13362e9",
+    "frontend/src/i18n/messages/zh-CN.ts": "2e05f466814668678cc6a411c8e224e80e5119461184f4710d90218331c8bf44"
+  },
+  "entry": "METAWORK_MODEL_ERROR_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs",
+  "realDesktop": {
+    "platform": "win32",
+    "taskId": "1",
+    "runId": "1",
+    "modelError": {
+      "agentRunId": "1",
+      "category": "authentication",
+      "message": "MODEL_ERROR_VERTICAL ************************************* rejected",
+      "code": "authentication_error",
+      "type": "authentication_error",
+      "requestId": null,
+      "httpStatus": 401,
+      "retry": "not_retryable",
+      "retryAfterMs": null,
+      "attempts": "1",
+      "truncated": false,
+      "hostRedacted": true,
+      "hostTruncated": false,
+      "source": "custom_provider",
+      "recovery": "model_settings"
+    },
+    "hostCredentialScrubbed": true,
+    "accountAndModelsUnchanged": true,
+    "explicitSettingsAndComposerOnlyRetry": true,
+    "sqliteReopen": true,
+    "retiredStoreUnchanged": true,
+    "keyboardDisclosure": true,
+    "paymentTaskId": "2",
+    "paymentRunId": "1",
+    "paymentError": {
+      "agentRunId": "1",
+      "category": "payment_required",
+      "message": "PAYMENT_ERROR_VERTICAL fixture account requires payment",
+      "code": "billing_error",
+      "type": "billing_error",
+      "requestId": null,
+      "httpStatus": 402,
+      "retry": "not_retryable",
+      "retryAfterMs": null,
+      "attempts": "1",
+      "truncated": false,
+      "hostRedacted": false,
+      "hostTruncated": false,
+      "source": "custom_provider",
+      "recovery": "model_settings"
+    },
+    "paymentObservationCompleteWithZeroRecords": true,
+    "paymentSqliteReopen": true,
+    "paymentActionHierarchy": true,
+    "externalMetaskBillingVerified": false,
+    "widths": [1320, 390],
+    "themes": ["light", "dark"]
+  },
+  "checks": {
+    "product": {
+      "passed": 312,
+      "skipped": 2,
+      "steps": "17/17"
+    },
+    "formalNative": {
+      "passed": 1661,
+      "skipped": 8,
+      "steps": "247/247"
+    },
+    "affectedRendererAndBridge": {
+      "passed": 232,
+      "failed": 0
+    },
+    "composerSubmission": {
+      "passed": 30,
+      "failed": 0
+    },
+    "supplementalGuards": {
+      "passed": 87,
+      "failed": 1,
+      "skipped": 1
+    },
+    "repositoryCheck": "npm run check passed",
+    "affectedFormattingAndDiff": "passed"
+  },
+  "baselineFailure": {
+    "test": "frontend-boundaries: Renderer modules preserve the approved dependency direction",
+    "cause": "features/composer/ModelSelector.tsx imports feature models",
+    "evidence": "File and guard are unchanged from main 4b1287cc; the same failure is recorded in docs/evidence/product-model-error-windows-20261031.json.",
+    "action": "Preserved without weakening the guard or changing unrelated code; not a clean repository-wide acceptance."
+  },
+  "fixtureCorrections": [
+    "Initial payment case waited for an unselected Task catalog without starting preparation; use existing runPrepared catalog_loading flow.",
+    "The Provider fixture rejected HTTP 402; explicitly add 402 to the existing 400/401 fixture status set.",
+    "Name the new Task like the original error Task to avoid unrelated automatic-title traffic.",
+    "Automation startup restores the fixed fixture credential; removed the unnecessary replacement run-credential configuration."
+  ],
+  "localEvidence": {
+    "desktop": ".zig-cache/model-error-desktop",
+    "desktopLog": ".zig-cache/model-error-desktop-run.log",
+    "native": ".zig-cache/model-error-native.log",
+    "product": ".zig-cache/model-error-product-tests.log",
+    "renderer": ".zig-cache/model-error-renderer-tests.log",
+    "composer": ".zig-cache/model-error-composer-tests.log",
+    "guards": ".zig-cache/model-error-guards.log",
+    "initialFailures": [
+      ".zig-cache/model-error-desktop-initial-failure.log",
+      ".zig-cache/model-error-desktop-fixture-failure.log",
+      ".zig-cache/model-error-desktop-fixture-diagnostic.log",
+      ".zig-cache/model-error-desktop-credential-diagnostic.log"
+    ]
+  },
+  "screenshots": {
+    ".zig-cache/model-error-desktop/1320-dark.png": "a27318490590a2311aedf863a40218905e205a6bea41d73341244145252f04f1",
+    ".zig-cache/model-error-desktop/1320-light.png": "393172fe880903d24d34132d65985f94bd694c2178a37df1841925028dc05ab0",
+    ".zig-cache/model-error-desktop/390-dark.png": "3b80dbb9f5cace3028b4791bc68b96cb37959cb9ab2dfb7d1ea668d46da0cc1d",
+    ".zig-cache/model-error-desktop/390-light.png": "3b3b3bfa14959a64270575c1dfa32010bd8a2e7ca4ab1c707ad2997638d34cc7",
+    ".zig-cache/model-error-desktop/payment-1320-dark.png": "601646df79076a333d020a6606ad8e54f6a958e90565f2a491d388b07ec53f3e",
+    ".zig-cache/model-error-desktop/payment-1320-light.png": "de0f95dfea7263ed09d4238c1dc1515d4cf91356d7e0aec5e2b308c67d5847f0",
+    ".zig-cache/model-error-desktop/payment-390-dark.png": "8d2b85ed9484b2efd5c7af2c97b0cf449b58740e63c552cc47fbd5fcebfa8e45",
+    ".zig-cache/model-error-desktop/payment-390-light.png": "f1c8e828f442aed8a3070bd53f0dd9cd08ff928fe7ff14e00e2bcf04059e9baf"
+  },
+  "limitations": [
+    "Loopback Custom Provider verifies actual Core classification, Product/Bridge/Renderer and SQLite; it does not verify Metask billing or real account payment recovery.",
+    "Metask account navigation and localized guidance are covered by Renderer fixtures, not an external billing transaction.",
+    "No macOS, Windows ARM64, signing, distribution or release-readiness claim.",
+    "Existing persisted incomplete observations are retained. Initial collecting and the existing null/history discrepancy are not changed.",
+    "The canonical Core can emit fixture HTTP error bodies to stderr; no new product error logging was added and global upstream stderr sanitization is not claimed."
+  ]
+}

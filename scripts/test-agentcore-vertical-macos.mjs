@@ -4084,7 +4084,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
         served += 1;
         if (response.destroyed) return;
         if (fixture?.status !== undefined) {
-          assert.ok([400, 401].includes(fixture.status));
+          assert.ok([400, 401, 402].includes(fixture.status));
           response.writeHead(fixture.status, {
             "content-type": "application/json",
             connection: "close",
