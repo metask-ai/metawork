@@ -302,7 +302,7 @@ export async function runModelErrorVertical({
     assert.equal(provider.served, servedBefore + 1);
     await key("Escape", "Escape", 27);
     await webview.evaluate(`(() => {
-      const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/重新填入指令|Copy instruction to Composer/.test(item.textContent));
+      const button=[...document.querySelectorAll('.run-terminal-actions button')].find(item=>/填回输入框|Copy to input box/.test(item.textContent));
       if(!button || button.disabled)throw new Error('prepare retry missing');button.click();
     })()`);
     await poll(
