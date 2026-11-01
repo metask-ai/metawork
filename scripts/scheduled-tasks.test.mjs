@@ -164,7 +164,7 @@ test("attention explains its cause and requires confirmation while deletion stay
   );
   assert.match(
     document.body.textContent,
-    /default model or connection changed/,
+    /The model or connection changed\. Edit and confirm\./,
   );
   fireEvent.click(
     screen.getByRole("button", { name: /Review.*Review every line/ }),
@@ -452,7 +452,12 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
     { target: { value: "Summarize current work" } },
   );
   await user.click(screen.getByRole("combobox", { name: "Permissions" }));
-  await user.keyboard("{ArrowDown}{Enter}");
+  await user.click(
+    await screen.findByRole("option", {
+      name: "Direct execution",
+      exact: true,
+    }),
+  );
   assert.match(
     dialog.textContent,
     /skips routine MetaWork approval.*still stop the run and require attention/,
