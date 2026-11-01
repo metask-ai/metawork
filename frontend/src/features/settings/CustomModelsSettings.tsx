@@ -13,8 +13,8 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
+import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { ModelVendorIcon } from "../models/ModelVendorIcon.tsx";
 
 import {
   builtinProviderEndpoint,
@@ -391,12 +391,12 @@ export function CustomModelsSettings({
     ...models.builtinProviderPresets.map((recipe) => ({
       value: `preset:${recipe.id}`,
       label: recipe.displayName,
-      leading: <ModelVendorIcon vendor={recipe.id} />,
+      leading: <BrandIcon brand={recipe.id} />,
     })),
     {
       value: "custom",
       label: t("settings.model_connection_custom"),
-      leading: <ModelVendorIcon />,
+      leading: <BrandIcon />,
     },
   ];
   async function remove() {
@@ -470,9 +470,7 @@ export function CustomModelsSettings({
           >
             <div className="settings-model-identity">
               <strong>
-                <ModelVendorIcon
-                  vendor={source.builtinProviderId ?? "custom"}
-                />
+                <BrandIcon brand={source.builtinProviderId ?? "custom"} />
                 <span>{model.displayName || model.id}</span>
               </strong>
               <Badge className="shrink-0 whitespace-nowrap">
@@ -598,7 +596,7 @@ export function CustomModelsSettings({
                       ariaLabel={t("settings.model_connection_provider")}
                       leading={
                         draft.choice ? (
-                          <ModelVendorIcon vendor={preset?.id ?? "custom"} />
+                          <BrandIcon brand={preset?.id ?? "custom"} />
                         ) : undefined
                       }
                       disabled={busy}

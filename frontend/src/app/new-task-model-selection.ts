@@ -5,10 +5,7 @@ import type {
   NewTaskAdmissionView,
   NewTaskModelSelectionIntent,
 } from "../bridge/contracts.ts";
-import {
-  catalogModelVendor,
-  type ModelVendor,
-} from "../features/models/model-vendor.ts";
+import type { Brand } from "../components/ui/BrandIcon.tsx";
 
 export type NewTaskModelOption = {
   selectionId: string;
@@ -16,7 +13,7 @@ export type NewTaskModelOption = {
   sourceGeneration: string;
   catalogGeneration: string;
   displayName: string;
-  vendor: ModelVendor;
+  vendor: Brand;
   group?: "custom";
   metadata: ModelMetadata | null;
 };
@@ -30,6 +27,20 @@ export type NewTaskModelSelectionState = {
   selectedMetadata: ModelMetadata | null;
   intent: NewTaskModelSelectionIntent | null;
 };
+
+/** Presentation only, for the official catalog; never infer a custom source's vendor. */
+function catalogModelVendor(modelId: string): Brand {
+  const family = modelId.toLowerCase().split("-", 1)[0];
+  switch (family) {
+    case "deepseek":
+    case "glm":
+    case "kimi":
+    case "minimax":
+      return family;
+    default:
+      return "custom";
+  }
+}
 
 export function newTaskModelSelectionState(
   models: ModelsView,

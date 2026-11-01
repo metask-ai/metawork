@@ -1,15 +1,14 @@
 import type { Ref } from "react";
+import { BrandIcon, type Brand } from "../../components/ui/BrandIcon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { ModelVendorIcon } from "../models/ModelVendorIcon.tsx";
-import type { ModelVendor } from "../models/model-vendor.ts";
 
 export type ModelSelectorOption = {
   selectionId: string;
   displayName: string;
   triggerLabel?: string;
   group?: "custom";
-  vendor?: ModelVendor;
+  vendor?: Brand;
 };
 
 export function ModelSelector({
@@ -39,7 +38,7 @@ export function ModelSelector({
   if (!editable)
     return (
       <strong className="composer-model-readonly" title={contextTitle}>
-        <ModelVendorIcon vendor={selected?.vendor} />
+        <BrandIcon brand={selected?.vendor} />
         <span>{label}</span>
       </strong>
     );
@@ -54,7 +53,7 @@ export function ModelSelector({
           model.displayName || model.selectionId || t("account.model_fallback"),
         triggerLabel:
           model.selectionId === selectedId ? label : model.triggerLabel,
-        leading: <ModelVendorIcon vendor={model.vendor} />,
+        leading: <BrandIcon brand={model.vendor} />,
         groupLabel:
           model.group === "custom" && options[index - 1]?.group !== "custom"
             ? t("settings.custom_models")
@@ -66,7 +65,7 @@ export function ModelSelector({
       helper={contextTitle}
       disabled={disabled}
       busy={pending}
-      leading={<ModelVendorIcon vendor={selected?.vendor} />}
+      leading={<BrandIcon brand={selected?.vendor} />}
       triggerClassName="composer-model-trigger w-auto"
       contentClassName="composer-model-menu"
       onValueChange={onSelect}
