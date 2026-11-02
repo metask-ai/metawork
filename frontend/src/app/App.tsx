@@ -33,9 +33,17 @@ import {
 } from "./completion-receipt.ts";
 import {
   attentionStatus,
+  beginFeedback,
+  createFeedbackState,
+  dismissFeedback,
+  observeFeedback,
   publishStatus,
   quietStatus,
-  selectCommandBarStatus,
+  resetFeedback,
+  selectCommandBarFeedback,
+  settleFeedback,
+  statusVisibleInCommandBar,
+  type FeedbackToken,
   type ShellStatus,
   type ShellRoute,
   type ShellStatusState,
@@ -46,6 +54,7 @@ import {
   connectionStatus,
 } from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
+import { FeedbackNotice } from "../components/ui/FeedbackNotice.tsx";
 import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
@@ -53,7 +62,7 @@ import { Dialog } from "../components/ui/dialog.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
-import { accountErrorMessageId } from "../i18n/account-error.ts";
+import { accountFeedback } from "../features/account/account-feedback.ts";
 import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
 import {
   SettingsPage,
@@ -384,12 +393,17 @@ export default function App() {
   const fileChangeRequestGeneration = useRef(0);
   const fileChangeFocusRequest = useRef(0);
   const fileChangeRequestsInFlight = useRef(new Set<string>());
-  const [statuses, setStatuses] = useState<ShellStatusState>(() =>
-    publishStatus(
-      {},
-      quietStatus("connection.connecting", { scope: "connection" }),
-    ),
-  );
+  const [statuses, setStatuses] =
+    useState<ShellStatusState>(createFeedbackState);
+  const feedbackRef = useRef(statuses);
+  const accountFeedbackRequest = useRef({
+    serial: 0,
+    awaitingSync: false,
+    unknown: null as { observation: string | null } | null,
+    observed: false,
+    attemptId: null as string | null,
+    lastObservation: null as string | null,
+  });
   const [accountBusy, setAccountBusy] = useState(false);
   const [executionBusy, setExecutionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
@@ -629,8 +643,83 @@ export default function App() {
       }
     })();
   }
+  function updateFeedbackState(
+    update: (current: ShellStatusState) => ShellStatusState,
+  ) {
+    const next = update(feedbackRef.current);
+    feedbackRef.current = next;
+    setStatuses(next);
+  }
   function setStatus(status: ShellStatus) {
-    setStatuses((current) => publishStatus(current, status));
+    const announce = statusVisibleInCommandBar(status, {
+      route,
+      settingsOpen,
+      workspaceId: composerWorkspaceId ?? null,
+      taskId: activeTask?.id ?? null,
+    });
+    updateFeedbackState((current) => {
+      const next = publishStatus(current, status);
+      return announce ? next : { ...next, announcement: current.announcement };
+    });
+  }
+  function observeAccountFeedback(
+    account: WorkbenchSnapshot["account"],
+    announce: boolean,
+    force = false,
+  ) {
+    if (accountFeedbackRequest.current.awaitingSync) return;
+    const observation = JSON.stringify([
+      account.errorCode,
+      account.safeDiagnostic,
+    ]);
+    const unknown = accountFeedbackRequest.current.unknown;
+    if (unknown) {
+      if (unknown.observation === null) {
+        unknown.observation = observation;
+        return;
+      }
+      if (unknown.observation === observation) return;
+      // A changed recent fact is observable without attributing it to this request.
+      accountFeedbackRequest.current.unknown = null;
+      force = true;
+    }
+    if (
+      !force &&
+      accountFeedbackRequest.current.lastObservation === observation
+    )
+      return;
+    accountFeedbackRequest.current.lastObservation = observation;
+    const result = accountFeedback(account);
+    updateFeedbackState((current) =>
+      observeFeedback(
+        current,
+        "account:operation",
+        "result",
+        result
+          ? attentionStatus(
+              result.id,
+              { scope: "account" },
+              { diagnostic: result.diagnostic },
+            )
+          : null,
+        announce,
+      ),
+    );
+  }
+  function resetFeedbackContext() {
+    accountFeedbackRequest.current = {
+      serial: accountFeedbackRequest.current.serial + 1,
+      awaitingSync: false,
+      unknown: null,
+      observed: false,
+      attemptId: null,
+      lastObservation: null,
+    };
+    updateFeedbackState(resetFeedback);
+    accountBusyRef.current = false;
+    accountCancelBusyRef.current = false;
+    setAccountBusy(false);
+    setAccountCancelBusy(false);
   }
   const snapshot = workbench.snapshot;
   const deleteTarget =
@@ -1583,19 +1672,6 @@ export default function App() {
   async function refreshCommittedView() {
     await refreshSnapshot().catch(() => undefined);
   }
-  useEffect(() => {
-    const errorCode = snapshot.account.errorCode;
-    if (errorCode === "none" || errorCode === "user_cancelled") return;
-    setStatus(
-      attentionStatus(
-        accountErrorMessageId(errorCode),
-        { scope: "account" },
-        {
-          diagnostic: snapshot.account.safeDiagnostic || undefined,
-        },
-      ),
-    );
-  }, [snapshot.account.errorCode, snapshot.account.safeDiagnostic]);
   // Subscribe before connection bootstrap, including a queued native click.
   useEffect(() => {
     if (!client.available()) return;
@@ -1679,6 +1755,11 @@ export default function App() {
           )
             setHistoryRequests({});
           latestSnapshotRef.current = next;
+          observeAccountFeedback(
+            next.account,
+            accountFeedbackRequest.current.observed,
+          );
+          accountFeedbackRequest.current.observed = true;
           publishApprovalObservations(
             approvalRequestsRef.current.observe(next, generation),
           );
@@ -1768,7 +1849,15 @@ export default function App() {
           )
             setRootRenderBlockReason("bootstrap_failed");
           setConnectionBusy(next.kind === "recovering");
-          setStatus(connectionStatus(next));
+          const status = connectionStatus(next);
+          updateFeedbackState((current) =>
+            observeFeedback(
+              current,
+              "connection",
+              "condition",
+              next.kind === "connected" ? null : status,
+            ),
+          );
         }
       },
       onReady: (ready) => {
@@ -1776,6 +1865,7 @@ export default function App() {
       },
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
+        resetFeedbackContext();
         setRenameEditor(null);
         latestSnapshotRef.current = null;
         setHistoryRequests({});
@@ -1794,6 +1884,7 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
+          resetFeedbackContext();
           setHistoryRequests({});
           taskReadingMemory.reading.clear();
           taskReadingMemory.processDisclosure.clear();
@@ -2084,71 +2175,148 @@ export default function App() {
     }
   }
   async function runAccountCommand(
-    invoke: () => Promise<{
-      accepted: boolean;
-      errorCode: string;
-    }>,
+    invoke: () => Promise<
+      import("../bridge/contracts.ts").AccountCommandResult
+    >,
+    cancelling = false,
   ) {
-    if (bridgeUnavailable || accountBusyRef.current) return false;
-    accountBusyRef.current = true;
-    setAccountBusy(true);
+    if (
+      bridgeUnavailable ||
+      (cancelling ? accountCancelBusyRef.current : accountBusyRef.current)
+    )
+      return false;
+    if (cancelling) {
+      accountCancelBusyRef.current = true;
+      setAccountCancelBusy(true);
+    } else {
+      accountBusyRef.current = true;
+      setAccountBusy(true);
+    }
+    const request = ++accountFeedbackRequest.current.serial;
+    const epoch = feedbackRef.current.epoch;
+    const current = () =>
+      request === accountFeedbackRequest.current.serial &&
+      epoch === feedbackRef.current.epoch;
+    accountFeedbackRequest.current.awaitingSync = true;
+    accountFeedbackRequest.current.unknown = null;
+    let token: FeedbackToken;
+    function startCycle(id: ShellStatus["id"]) {
+      const started = beginFeedback(
+        feedbackRef.current,
+        "account:operation",
+        quietStatus(id, { scope: "account" }),
+      );
+      token = started.token;
+      updateFeedbackState(() => started.state);
+    }
+    startCycle("account.feedback.sending");
     try {
       const result = await invoke();
+      if (!current()) return false;
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
-            result.errorCode === "generation_mismatch"
-              ? "account.options_updated"
-              : "account.command_rejected",
-            { scope: "account" },
+        if (!current()) return false;
+        accountFeedbackRequest.current.awaitingSync = false;
+        if (latestSnapshotRef.current)
+          observeAccountFeedback(
+            latestSnapshotRef.current.account,
+            false,
+            true,
+          );
+        startCycle("account.feedback.sending");
+        updateFeedbackState((state) =>
+          settleFeedback(
+            state,
+            token,
+            attentionStatus(
+              result.errorCode === "generation_mismatch"
+                ? "account.options_updated"
+                : "account.command_rejected",
+              { scope: "account" },
+            ),
           ),
         );
         return false;
       }
-      await refreshAfterCommit("account.updated", "operation.account", {
-        scope: "account",
-      });
+      accountFeedbackRequest.current.attemptId = result.attemptId;
+      accountFeedbackRequest.current.lastObservation = null;
+      startCycle("account.feedback.received");
+      try {
+        await refreshSnapshot();
+        if (!current()) return false;
+        accountFeedbackRequest.current.awaitingSync = false;
+        if (latestSnapshotRef.current)
+          observeAccountFeedback(latestSnapshotRef.current.account, true, true);
+      } catch {
+        // Acceptance remains acceptance. The connection owns the sync failure.
+        if (current()) accountFeedbackRequest.current.awaitingSync = false;
+      }
       return true;
-    } catch (error) {
-      if (
-        await reconcileCommandTimeout(error, "operation.account", {
-          scope: "account",
-        })
-      )
-        return false;
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus("account.command_failed", { scope: "account" }),
+    } catch {
+      if (!current()) return false;
+      accountFeedbackRequest.current.awaitingSync = false;
+      const observedAccount = latestSnapshotRef.current?.account;
+      accountFeedbackRequest.current.unknown = {
+        observation: observedAccount
+          ? JSON.stringify([
+              observedAccount.errorCode,
+              observedAccount.safeDiagnostic,
+            ])
+          : accountFeedbackRequest.current.lastObservation,
+      };
+      updateFeedbackState((state) =>
+        settleFeedback(
+          state,
+          token,
+          attentionStatus("account.feedback.unknown", { scope: "account" }),
+        ),
       );
+      await refreshSnapshot().catch(() => undefined);
       return false;
     } finally {
-      accountBusyRef.current = false;
-      setAccountBusy(false);
+      if (epoch === feedbackRef.current.epoch) {
+        if (cancelling) {
+          accountCancelBusyRef.current = false;
+          setAccountCancelBusy(false);
+        } else {
+          accountBusyRef.current = false;
+          setAccountBusy(false);
+        }
+      }
     }
   }
   async function openAccountRecharge() {
     if (bridgeUnavailable || accountBusyRef.current) return;
     accountBusyRef.current = true;
     setAccountBusy(true);
+    const started = beginFeedback(
+      feedbackRef.current,
+      "account:recharge",
+      quietStatus("account.feedback.sending", { scope: "account" }),
+    );
+    updateFeedbackState(() => started.state);
+    const finish = (failed: boolean) =>
+      updateFeedbackState((state) =>
+        settleFeedback(
+          state,
+          started.token,
+          failed
+            ? attentionStatus("account.recharge_open_failed", {
+                scope: "account",
+              })
+            : null,
+        ),
+      );
     try {
       const result = await client.openAccountRecharge();
-      if (!result.accepted) {
-        setStatus(
-          attentionStatus("account.recharge_open_failed", {
-            scope: "account",
-          }),
-        );
-      }
+      finish(!result.accepted);
     } catch {
-      setStatus(
-        attentionStatus("account.recharge_open_failed", {
-          scope: "account",
-        }),
-      );
+      finish(true);
     } finally {
-      accountBusyRef.current = false;
-      setAccountBusy(false);
+      if (started.token.epoch === feedbackRef.current.epoch) {
+        accountBusyRef.current = false;
+        setAccountBusy(false);
+      }
     }
   }
   async function runExecutionCommand(
@@ -2171,7 +2339,7 @@ export default function App() {
         );
         return false;
       }
-      await refreshAfterCommit("execution.updated", "operation.execution", {
+      await refreshAfterCommit("execution.updated", {
         scope: "execution",
       });
       return true;
@@ -2307,7 +2475,7 @@ export default function App() {
         );
         return;
       }
-      await refreshAfterCommit("task.model.updated", "operation.account", {
+      await refreshAfterCommit("task.model.updated", {
         scope: "task",
         taskId: task.id,
       });
@@ -2335,33 +2503,7 @@ export default function App() {
       !snapshot.account.canCancel
     )
       return;
-    accountCancelBusyRef.current = true;
-    setAccountCancelBusy(true);
-    try {
-      const result = await client.cancelAccountOperation();
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(quietStatus("account.cancel_rejected", { scope: "account" }));
-        return;
-      }
-      await refreshAfterCommit(
-        "account.cancelled",
-        "operation.account_cancel",
-        { scope: "account" },
-      );
-    } catch (error) {
-      if (
-        await reconcileCommandTimeout(error, "operation.account_cancel", {
-          scope: "account",
-        })
-      )
-        return;
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(attentionStatus("account.cancel_failed", { scope: "account" }));
-    } finally {
-      accountCancelBusyRef.current = false;
-      setAccountCancelBusy(false);
-    }
+    await runAccountCommand(() => client.cancelAccountOperation(), true);
   }
   async function chooseWorkspaceForDraft() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
@@ -2857,7 +2999,7 @@ export default function App() {
         return;
       }
       if (taskId)
-        await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
+        await refreshAfterCommit("run.stop_requested", {
           scope: "task",
           taskId,
         });
@@ -2912,7 +3054,7 @@ export default function App() {
         );
         return;
       }
-      await refreshAfterCommit("compact.started", "operation.compact", {
+      await refreshAfterCommit("compact.started", {
         scope: "task",
         taskId,
       });
@@ -3212,7 +3354,7 @@ export default function App() {
         return;
       }
       setRenameEditor((current) => (current === editor ? null : current));
-      await refreshAfterCommit("task.renamed", "operation.task_rename", {
+      await refreshAfterCommit("task.renamed", {
         scope: "task",
         taskId,
       });
@@ -3287,7 +3429,6 @@ export default function App() {
       }
       await refreshAfterCommit(
         archived ? "task.archived_status" : "task.restored",
-        archived ? "operation.task_archive" : "operation.task_restore",
         { scope: "task", taskId },
       );
       publishArchiveResult(taskId, archived);
@@ -3372,14 +3513,10 @@ export default function App() {
         return;
       }
       setDeleteTargetId(null);
-      await refreshAfterCommit(
-        "task.delete_requested",
-        "operation.task_delete",
-        {
-          scope: "task",
-          taskId,
-        },
-      );
+      await refreshAfterCommit("task.delete_requested", {
+        scope: "task",
+        taskId,
+      });
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3435,11 +3572,10 @@ export default function App() {
       return;
     }
     acceptUiResponse(identity);
-    await refreshAfterCommit(
-      "approval.response_sent",
-      "operation.ui_response",
-      { scope: "task", taskId },
-    );
+    await refreshAfterCommit("approval.response_sent", {
+      scope: "task",
+      taskId,
+    });
   }
   const outputEditAudience = attachmentAudience.current;
   function prepareOutputEdit(
@@ -3568,20 +3704,10 @@ export default function App() {
   }
   async function refreshAfterCommit(
     success: MessageId,
-    operation: MessageId,
     audience: StatusAudience,
   ) {
-    try {
-      await refreshSnapshot();
-      setStatus(quietStatus(success, audience));
-    } catch (error) {
-      setStatus(
-        attentionStatus("view.refresh_after_commit_failed", audience, {
-          values: { operation: t(operation) },
-          diagnostic: errorText(error),
-        }),
-      );
-    }
+    setStatus(quietStatus(success, audience));
+    await refreshCommittedView();
   }
   async function reconcileCommandTimeout(
     error: unknown,
@@ -3591,21 +3717,18 @@ export default function App() {
     if (!(error instanceof BridgeCommandTimeoutError)) return false;
     try {
       await refreshSnapshot();
+      // Preserve legacy replacement semantics; the caller checks business facts.
       setStatus(
         quietStatus("command.timeout_reconciled", audience, {
           values: { operation: t(operation) },
         }),
       );
     } catch {
-      setStatus(
-        attentionStatus("command.timeout_sync_failed", audience, {
-          values: { operation: t(operation) },
-        }),
-      );
+      // The connection owns sync failure; do not leave a second stale warning.
     }
     return true;
   }
-  const connectionShellStatus = statuses.connection;
+  const connectionShellStatus = statuses.entries.connection;
   const connectionFailure = connectionFailurePresentation(
     connectionShellStatus,
   );
@@ -3658,12 +3781,25 @@ export default function App() {
         }
       : null,
   });
-  const commandBarStatus = selectCommandBarStatus(statuses, {
+  const commandBarFeedback = selectCommandBarFeedback(statuses, {
     route,
     settingsOpen,
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
+  if (
+    connectionBusy &&
+    connectionShellStatus &&
+    !commandBarFeedback.includes(connectionShellStatus)
+  )
+    commandBarFeedback.unshift(connectionShellStatus);
+  const commandBarStatus = commandBarFeedback[0] ?? null;
+  const accountFeedbackEntries = Object.values(statuses.entries).flatMap(
+    (entry) =>
+      entry && entry.audience.scope === "account" && !entry.dismissed
+        ? [entry]
+        : [],
+  );
   const visibleSubmissions = localSubmissions.filter(
     (entry) =>
       (newTaskDraftActive
@@ -4076,44 +4212,77 @@ export default function App() {
       }
       onSearch={() => setSearchOpen(true)}
       attentionNotice={
-        connectionBusy
-          ? t("connection.sync_retrying")
-          : commandBarStatus
-            ? t(commandBarStatus.id, commandBarStatus.values)
-            : null
+        commandBarFeedback.length > 1
+          ? t("feedback.open", { count: String(commandBarFeedback.length) })
+          : connectionBusy
+            ? t("connection.sync_retrying")
+            : commandBarStatus
+              ? commandBarStatus.audience.scope === "account"
+                ? t("feedback.account")
+                : t(commandBarStatus.id, commandBarStatus.values)
+              : null
+      }
+      attentionAnnouncement={
+        statuses.announcement
+          ? {
+              key: statuses.announcement.sequence,
+              text: t(
+                statuses.announcement.status.id,
+                statuses.announcement.status.values,
+              ),
+            }
+          : null
       }
       attentionBusy={connectionBusy}
       attentionContent={
-        connectionBusy ? (
-          <p>{t("connection.sync_retrying")}</p>
-        ) : commandBarStatus?.audience.scope === "connection" ? (
-          <>
-            <p>{t(connectionFailure.helpId)}</p>
-            {connectionRetryable && (
+        <div className="feedback-list">
+          {commandBarFeedback.map((entry) =>
+            entry.audience.scope === "account" ? (
               <Button
+                key={entry.key}
                 type="button"
                 variant="secondary"
                 size="sm"
-                onClick={() => void retryViewSynchronization()}
+                onClick={() => openSettings("account")}
               >
-                {t("connection.retry_sync")}
+                {t("feedback.account")}
               </Button>
-            )}
-            {connectionShellStatus?.diagnostic && (
-              <details className="connection-diagnostic">
-                <summary className="focus-ring">
-                  {t("connection.details")}
-                </summary>
-                <p>
-                  {connectionShellStatus.sourceId
-                    ? `${t(connectionShellStatus.sourceId)}: `
-                    : ""}
-                  {connectionShellStatus.diagnostic}
-                </p>
-              </details>
-            )}
-          </>
-        ) : undefined
+            ) : (
+              <FeedbackNotice
+                key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}
+                title={t(entry.id, entry.values)}
+                message={
+                  entry.audience.scope === "connection" && !connectionBusy
+                    ? t(connectionFailurePresentation(entry).helpId)
+                    : undefined
+                }
+                diagnostic={
+                  entry.diagnostic
+                    ? `${entry.sourceId ? `${t(entry.sourceId)}: ` : ""}${entry.diagnostic}`
+                    : undefined
+                }
+                detailsLabel={t("feedback.details")}
+                pending={
+                  entry.audience.scope === "connection" && connectionBusy
+                }
+                actions={
+                  entry.audience.scope === "connection" &&
+                  connectionFailurePresentation(entry).retryable ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={connectionBusy}
+                      onClick={() => void retryViewSynchronization()}
+                    >
+                      {t("connection.retry_sync")}
+                    </Button>
+                  ) : undefined
+                }
+              />
+            ),
+          )}
+        </div>
       }
       left={
         <div className="sidebar-frame">
@@ -4248,6 +4417,7 @@ export default function App() {
 
           <AccountIdentity
             account={snapshot.account}
+
             updates={snapshot.updates}
             updateControls={{
               disabled: bridgeUnavailable,
@@ -4413,6 +4583,27 @@ export default function App() {
               onDelete: requestTaskDeletion,
             }}
             account={snapshot.account}
+            accountFeedback={accountFeedbackEntries.map((entry) => (
+              <FeedbackNotice
+                key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}
+                title={t("account.feedback.title")}
+                message={t(entry.id, entry.values)}
+                diagnostic={entry.diagnostic}
+                detailsLabel={t("feedback.details")}
+                dismissLabel={t("feedback.dismiss")}
+                pending={entry.tone === "quiet"}
+                onDismiss={() => {
+                  updateFeedbackState((current) =>
+                    dismissFeedback(current, entry.key, entry.cycle),
+                  );
+                  window.requestAnimationFrame(() =>
+                    document
+                      .querySelector<HTMLElement>("#settings-account h2")
+                      ?.focus(),
+                  );
+                }}
+              />
+            ))}
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
             customProviderCapabilities={{

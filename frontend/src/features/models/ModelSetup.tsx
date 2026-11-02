@@ -3,7 +3,6 @@ import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
-import { accountErrorMessageId } from "../../i18n/account-error.ts";
 import type {
   ModelSetupReason,
   ModelSetupAction,
@@ -27,7 +26,6 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   checking: "account.checking.title",
   authorizing: "model_setup.authorizing",
   loading: "model_setup.loading",
-  account_error: "account.error.generic",
   sign_in: "model_setup.sign_in",
   no_models: "model_setup.no_models",
   catalog_failed: "model_setup.catalog_failed",
@@ -42,9 +40,7 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
 };
 
 export function modelSetupMessage(notice: Notice): MessageId {
-  return notice.errorCode
-    ? accountErrorMessageId(notice.errorCode)
-    : reasonMessages[notice.reason];
+  return reasonMessages[notice.reason];
 }
 
 export function ModelSetupNotice({

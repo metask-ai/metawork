@@ -28,6 +28,12 @@ const { buildUsageCalendar } = await vite.ssrLoadModule(
 const { accountErrorMessageId } = await vite.ssrLoadModule(
   "/src/i18n/account-error.ts",
 );
+const { accountFeedback } = await vite.ssrLoadModule(
+  "/src/features/account/account-feedback.ts",
+);
+const { FeedbackNotice } = await vite.ssrLoadModule(
+  "/src/components/ui/FeedbackNotice.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -180,9 +186,18 @@ function withI18n(child) {
 }
 
 function renderSettings(account, models = readyModels, options = {}) {
+  const feedback = accountFeedback(account);
   return withI18n(
     createElement(SettingsPage, {
       account,
+      accountFeedback: feedback
+        ? createElement(FeedbackNotice, {
+            title: translate("en-US", "account.feedback.title"),
+            message: translate("en-US", feedback.id),
+            diagnostic: feedback.diagnostic,
+            detailsLabel: "Technical details",
+          })
+        : null,
       models,
       automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
       initialSection: options.initialSection ?? "general",

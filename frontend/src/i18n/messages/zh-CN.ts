@@ -1,5 +1,20 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "feedback.details": "技术详情",
+  "feedback.dismiss": "关闭这条提示",
+  "feedback.open": "查看反馈（{count}）",
+  "feedback.account": "查看账号操作结果",
+  "account.feedback.title": "最近的账号操作结果",
+  "account.feedback.sending": "正在发送账号请求。",
+  "account.feedback.received": "账号请求已接收，结果尚待当前状态确认。",
+  "account.feedback.unknown":
+    "账号操作的结果尚未确认，请检查当前账号状态后再决定下一步。",
+  "account.feedback.rate_limited": "最近的账号请求受到频率限制，请稍后再试。",
+  "account.feedback.service_unavailable":
+    "最近的账号请求未能完成，当时 Metask 服务不可用。",
+  "account.feedback.credential_read": "未能读取这台设备上保存的登录凭据。",
+  "account.feedback.credential_write": "未能保存这台设备上的登录凭据。",
+  "account.feedback.credential_delete": "未能清除这台设备上的登录凭据。",
   "run.model_error.category.authentication": "模型服务验证身份失败。",
   "run.model_error.category.permission": "模型服务未授予这次请求所需的权限。",
   "run.model_error.category.payment_required": "模型服务返回了付款相关错误。",

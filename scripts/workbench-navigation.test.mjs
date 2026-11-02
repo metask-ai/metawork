@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   attentionStatus,
+  createFeedbackState,
   publishStatus,
   quietStatus,
   selectCommandBarStatus,
@@ -423,7 +424,7 @@ test("command bar attention is explicit and cannot leak across product identity"
       taskId: "task-a",
     }),
     quietStatus("task.archived_status", { scope: "task", taskId: "task-b" }),
-  ].reduce(publishStatus, {});
+  ].reduce(publishStatus, createFeedbackState());
   assert.equal(
     selectCommandBarStatus(concurrent, taskA)?.id,
     "task.archive_failed",
@@ -431,7 +432,7 @@ test("command bar attention is explicit and cannot leak across product identity"
   assert.equal(selectCommandBarStatus(concurrent, taskB), null);
   const recoveredWorkspace = publishStatus(
     publishStatus(
-      {},
+      createFeedbackState(),
       attentionStatus("workspace.selection_failed", {
         scope: "workspace",
         workspaceId: null,
@@ -454,7 +455,7 @@ test("command bar attention is explicit and cannot leak across product identity"
       scope: "task",
       taskId: "task-a",
     }),
-  ].reduce(publishStatus, {});
+  ].reduce(publishStatus, createFeedbackState());
   assert.equal(
     selectCommandBarStatus(mixedScope, taskA)?.id,
     "run.stop_failed",

@@ -17,7 +17,28 @@ export type ShellStatus = {
   sourceId?: MessageId;
 };
 
-export type ShellStatusState = Readonly<Partial<Record<string, ShellStatus>>>;
+export type FeedbackEntry = ShellStatus & {
+  key: string;
+  lifecycle: "condition" | "result" | "legacy";
+  cycle: number;
+  dismissed: boolean;
+};
+
+export type FeedbackToken = { key: string; cycle: number; epoch: number };
+export type ShellStatusState = {
+  epoch: number;
+  sequence: number;
+  entries: Readonly<Partial<Record<string, FeedbackEntry>>>;
+  announcement: { sequence: number; status: ShellStatus } | null;
+};
+
+export function createFeedbackState(epoch = 0): ShellStatusState {
+  return { epoch, sequence: 0, entries: {}, announcement: null };
+}
+
+export function resetFeedback(state: ShellStatusState): ShellStatusState {
+  return createFeedbackState(state.epoch + 1);
+}
 export type ShellRoute = "workbench" | "skills" | "mcp" | "scheduled-tasks";
 
 type ShellStatusContext = {
@@ -62,15 +83,142 @@ export function publishStatus(
   state: ShellStatusState,
   status: ShellStatus,
 ): ShellStatusState {
-  const next = { ...state };
+  const entries = { ...state.entries };
   if (
     status.tone === "quiet" &&
     status.audience.scope === "workspace" &&
     status.audience.workspaceId !== null
   )
-    delete next["workspace:*"];
-  next[statusKey(status.audience)] = status;
-  return next;
+    delete entries["legacy:workspace:*"];
+  return observeFeedback(
+    { ...state, entries },
+    `legacy:${statusKey(status.audience)}`,
+    "legacy",
+    status,
+  );
+}
+
+function sameStatus(left: ShellStatus, right: ShellStatus): boolean {
+  return (
+    left.id === right.id &&
+    left.tone === right.tone &&
+    statusKey(left.audience) === statusKey(right.audience) &&
+    left.diagnostic === right.diagnostic &&
+    left.sourceId === right.sourceId &&
+    JSON.stringify(left.values) === JSON.stringify(right.values)
+  );
+}
+
+function writeFeedback(
+  state: ShellStatusState,
+  entry: FeedbackEntry,
+  announce: boolean,
+): ShellStatusState {
+  const sequence = state.sequence + 1;
+  return {
+    ...state,
+    sequence,
+    entries: { ...state.entries, [entry.key]: entry },
+    announcement:
+      announce && entry.tone === "attention"
+        ? { sequence, status: entry }
+        : state.announcement,
+  };
+}
+
+/** A source observation is not evidence of a new business occurrence. */
+export function observeFeedback(
+  state: ShellStatusState,
+  key: string,
+  lifecycle: FeedbackEntry["lifecycle"],
+  status: ShellStatus | null,
+  announce = true,
+): ShellStatusState {
+  if (!status) {
+    if (!state.entries[key]) return state;
+    const entries = { ...state.entries };
+    delete entries[key];
+    return { ...state, entries };
+  }
+  const previous = state.entries[key];
+  if (previous && sameStatus(previous, status)) return state;
+  return writeFeedback(
+    state,
+    {
+      ...status,
+      key,
+      lifecycle,
+      cycle: previous?.cycle ?? state.sequence + 1,
+      dismissed: false,
+    },
+    announce,
+  );
+}
+
+/** Local display identity; it does not correlate an asynchronous Host result. */
+export function beginFeedback(
+  state: ShellStatusState,
+  key: string,
+  status: ShellStatus,
+): { state: ShellStatusState; token: FeedbackToken } {
+  const cycle = state.sequence + 1;
+  return {
+    state: writeFeedback(
+      state,
+      { ...status, key, lifecycle: "result", cycle, dismissed: false },
+      false,
+    ),
+    token: { key, cycle, epoch: state.epoch },
+  };
+}
+
+export function feedbackTokenCurrent(
+  state: ShellStatusState,
+  token: FeedbackToken,
+): boolean {
+  return (
+    state.epoch === token.epoch &&
+    state.entries[token.key]?.cycle === token.cycle
+  );
+}
+
+export function settleFeedback(
+  state: ShellStatusState,
+  token: FeedbackToken,
+  status: ShellStatus | null,
+  announce = true,
+): ShellStatusState {
+  return feedbackTokenCurrent(state, token)
+    ? observeFeedback(state, token.key, "result", status, announce)
+    : state;
+}
+
+export function dismissFeedback(
+  state: ShellStatusState,
+  key: string,
+  cycle: number,
+): ShellStatusState {
+  const entry = state.entries[key];
+  if (!entry || entry.cycle !== cycle || entry.dismissed) return state;
+  return {
+    ...state,
+    entries: { ...state.entries, [key]: { ...entry, dismissed: true } },
+  };
+}
+
+function commandBarScopes(context: ShellStatusContext): string[] {
+  return context.settingsOpen
+    ? ["connection", "execution", "account"]
+    : context.route === "skills"
+      ? ["connection", "skills", "execution", "account"]
+      : [
+          "connection",
+          `task:${context.taskId}`,
+          `workspace:${context.workspaceId}`,
+          "workspace:*",
+          "execution",
+          "account",
+        ];
 }
 
 export function statusVisibleInCommandBar(
@@ -78,6 +226,8 @@ export function statusVisibleInCommandBar(
   context: ShellStatusContext,
 ): boolean {
   if (status.tone !== "attention") return false;
+  if (!commandBarScopes(context).includes(statusKey(status.audience)))
+    return false;
   if (status.audience.scope === "connection") return true;
   if (status.audience.scope === "account") return true;
   if (status.audience.scope === "execution") return true;
@@ -99,25 +249,25 @@ export function statusVisibleInCommandBar(
 export function selectCommandBarStatus(
   state: ShellStatusState,
   context: ShellStatusContext,
-): ShellStatus | null {
-  const candidates = context.settingsOpen
-    ? [state.connection, state.execution, state.account]
-    : context.route === "skills"
-      ? [state.connection, state.skills, state.execution, state.account]
-      : [
-          state.connection,
-          context.taskId === null ? undefined : state[`task:${context.taskId}`],
-          context.workspaceId === null
-            ? undefined
-            : state[`workspace:${context.workspaceId}`],
-          state["workspace:*"],
-          state.execution,
-          state.account,
-        ];
-  return (
-    candidates.find(
-      (status): status is ShellStatus =>
-        status !== undefined && statusVisibleInCommandBar(status, context),
-    ) ?? null
-  );
+): FeedbackEntry | null {
+  return selectCommandBarFeedback(state, context)[0] ?? null;
+}
+
+export function selectCommandBarFeedback(
+  state: ShellStatusState,
+  context: ShellStatusContext,
+): FeedbackEntry[] {
+  const scopes = commandBarScopes(context);
+  return Object.values(state.entries)
+    .filter(
+      (entry): entry is FeedbackEntry =>
+        !!entry &&
+        !entry.dismissed &&
+        statusVisibleInCommandBar(entry, context),
+    )
+    .sort(
+      (left, right) =>
+        scopes.indexOf(statusKey(left.audience)) -
+        scopes.indexOf(statusKey(right.audience)),
+    );
 }
