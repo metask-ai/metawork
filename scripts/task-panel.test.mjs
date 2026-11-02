@@ -6411,6 +6411,39 @@ async function renderAppFixture(
   };
 }
 
+test("App Workspace selection failure stays by its draft with source diagnostics and no global duplicate", async (ctx) => {
+  await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      chooseWorkspace: async () => {
+        throw new Error("safe-picker-diagnostic <plain text>");
+      },
+    },
+  );
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "New task" })),
+  );
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Add" }).disabled, false),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  await waitFor(() =>
+    assert.ok(document.querySelector(".workspace-selection-feedback")),
+  );
+  assert.ok(document.querySelector(".commandbar-alert") === null);
+  assert.ok(screen.queryByText("safe-picker-diagnostic <plain text>") === null);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Workspace diagnostics" }),
+  );
+  await screen.findByText("safe-picker-diagnostic <plain text>");
+  assert.ok(document.querySelector(".feedback-notice-details plain") === null);
+  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  await selectRecentTask(/First task/);
+  assert.ok(document.querySelector(".workspace-selection-feedback") === null);
+});
+
 test("App opens unreferenced workspace files in preview tabs and revokes them with workspace authority", async (ctx) => {
   const listings = [],
     reads = [];

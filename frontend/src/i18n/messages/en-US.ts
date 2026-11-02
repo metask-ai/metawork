@@ -1004,6 +1004,8 @@ export const enUS = {
   "run.actions": "Run actions",
   "run.terminal.partial_reason": "{reason} Response incomplete.",
   "account.diagnostics": "Account diagnostics",
+  "feedback.pending": "Working…",
+  "workspace.diagnostics": "Workspace diagnostics",
   "run.terminal.stopped": "Work stopped",
   "run.terminal.interrupted": "Work interrupted",
   "run.terminal.failed": "Work failed",

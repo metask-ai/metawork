@@ -866,6 +866,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.actions": "本轮操作",
   "run.terminal.partial_reason": "{reason}回复未完成。",
   "account.diagnostics": "账号诊断",
+  "feedback.pending": "正在处理…",
+  "workspace.diagnostics": "工作目录诊断",
   "run.terminal.stopped": "工作已停止",
   "run.terminal.interrupted": "工作意外中断",
   "run.terminal.failed": "工作失败",

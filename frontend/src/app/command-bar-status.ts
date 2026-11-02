@@ -15,6 +15,7 @@ export type ShellStatus = {
   values?: Record<string, string>;
   diagnostic?: string;
   sourceId?: MessageId;
+  local?: boolean;
 };
 
 export type FeedbackEntry = ShellStatus & {
@@ -105,6 +106,7 @@ function sameStatus(left: ShellStatus, right: ShellStatus): boolean {
     statusKey(left.audience) === statusKey(right.audience) &&
     left.diagnostic === right.diagnostic &&
     left.sourceId === right.sourceId &&
+    left.local === right.local &&
     JSON.stringify(left.values) === JSON.stringify(right.values)
   );
 }
@@ -226,6 +228,7 @@ export function statusVisibleInCommandBar(
   context: ShellStatusContext,
 ): boolean {
   if (status.tone !== "attention") return false;
+  if (status.local) return false;
   if (!commandBarScopes(context).includes(statusKey(status.audience)))
     return false;
   if (status.audience.scope === "connection") return true;

@@ -26,6 +26,32 @@ const connection = attentionStatus("connection.refresh_failed", {
   scope: "connection",
 });
 
+test("migrated local results stay outside global feedback and legacy scope replacement", () => {
+  const status = {
+    ...attentionStatus("workspace.selection_failed", {
+      scope: "workspace",
+      workspaceId: null,
+    }),
+    local: true,
+  };
+  let state = observeFeedback(
+    createFeedbackState(),
+    "workspace:selection:draft1",
+    "result",
+    status,
+  );
+  state = publishStatus(
+    state,
+    quietStatus("workspace.grant_confirmed", {
+      scope: "workspace",
+      workspaceId: "w1",
+    }),
+  );
+  assert.equal(statusVisibleInCommandBar(status, context), false);
+  assert.equal(selectCommandBarFeedback(state, context).length, 0);
+  assert.equal(state.entries["workspace:selection:draft1"].id, status.id);
+});
+
 test("Skills excludes workspace feedback from candidates and announcements while connection stays first", () => {
   const workspace = attentionStatus("workspace.selection_failed", {
     scope: "workspace",

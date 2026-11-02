@@ -7,24 +7,23 @@ import { chooseWorkspaceAndMigrateDraft } from "../frontend/src/features/workspa
 test("a failed authoritative refresh cannot move or lose the source draft", async () => {
   const calls = [];
   const failure = new Error("snapshot unavailable");
-  await assert.rejects(
-    chooseWorkspaceAndMigrateDraft({
-      choose: async () => {
-        calls.push("choose");
-        return { selected: true, workspaceId: "7" };
-      },
-      refresh: async () => {
-        calls.push("refresh");
-        throw failure;
-      },
-      migratableDraftId: "unscoped",
-      moveDraft() {
-        calls.push("move");
-        return "moved";
-      },
-    }),
-    failure,
-  );
+  const result = await chooseWorkspaceAndMigrateDraft({
+    choose: async () => {
+      calls.push("choose");
+      return { selected: true, workspaceId: "7" };
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      throw failure;
+    },
+    migratableDraftId: "unscoped",
+    current: () => true,
+    moveDraft() {
+      calls.push("move");
+      return "moved";
+    },
+  });
+  assert.deepEqual(result, { kind: "sync_failed" });
   assert.deepEqual(calls, ["choose", "refresh"]);
 });
 
@@ -37,6 +36,7 @@ test("choosing a Workspace without a migratable draft only changes draft context
     },
     refresh: async () => calls.push("refresh"),
     migratableDraftId: null,
+    current: () => true,
     moveDraft() {
       calls.push("move");
     },
@@ -46,6 +46,30 @@ test("choosing a Workspace without a migratable draft only changes draft context
     result: { selected: true, workspaceId: "7" },
   });
   assert.deepEqual(calls, ["choose", "refresh"]);
+});
+
+test("a late Workspace picker or read never migrates a different draft", async () => {
+  for (const stage of ["picker", "read"]) {
+    let current = true,
+      moves = 0,
+      reads = 0;
+    const result = await chooseWorkspaceAndMigrateDraft({
+      choose: async () => {
+        if (stage === "picker") current = false;
+        return { selected: true, workspaceId: "7" };
+      },
+      refresh: async () => {
+        reads++;
+        current = false;
+      },
+      current: () => current,
+      migratableDraftId: "unscoped",
+      moveDraft: () => moves++,
+    });
+    assert.deepEqual(result, { kind: "superseded" });
+    assert.equal(moves, 0);
+    assert.equal(reads, stage === "read" ? 1 : 0);
+  }
 });
 
 const deferred = () => {

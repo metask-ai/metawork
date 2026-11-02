@@ -671,6 +671,26 @@ export default function App() {
       return announce ? next : { ...next, announcement: current.announcement };
     });
   }
+  function beginOperationFeedback(source: string, audience: StatusAudience) {
+    const started = beginFeedback(feedbackRef.current, source, {
+      ...quietStatus("feedback.pending", audience),
+      local: true,
+    });
+    updateFeedbackState(() => started.state);
+    return started.token;
+  }
+  function settleOperationFeedback(
+    token: FeedbackToken,
+    status: ShellStatus | null,
+  ) {
+    updateFeedbackState((current) =>
+      settleFeedback(
+        current,
+        token,
+        status ? { ...status, local: true } : null,
+      ),
+    );
+  }
   function observeAccountFeedback(
     account: WorkbenchSnapshot["account"],
     announce: boolean,
@@ -2520,6 +2540,13 @@ export default function App() {
   }
   async function chooseWorkspaceForDraft() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return null;
+    const requestedAudience = attachmentAudience.current;
+    const scope = composerDraftScope;
+    const token = beginOperationFeedback(`workspace:selection:${scope}`, {
+      scope: "workspace",
+      workspaceId: composerWorkspaceId ?? null,
+    });
+    const current = () => attachmentAudience.current === requestedAudience;
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
@@ -2530,32 +2557,36 @@ export default function App() {
           newTaskDraftId === unscopedNewTaskDraftId ? newTaskDraftId : null,
         moveDraft: (sourceId, targetId) =>
           newTaskDrafts.moveDraft(sourceId, targetId),
+        current,
       });
+      if (!current()) {
+        settleOperationFeedback(token, null);
+        return null;
+      }
+      if (outcome.kind === "superseded" || outcome.kind === "sync_failed") {
+        settleOperationFeedback(token, null);
+        return null;
+      }
       if (outcome.kind === "selected") {
         const { result } = outcome;
         dispatchWorkbench({
           type: "task.draft.opened",
           workspaceId: result.workspaceId,
         });
-        setStatus(
-          quietStatus("workspace.grant_confirmed", {
-            scope: "workspace",
-            workspaceId: result.workspaceId,
-          }),
-        );
+        settleOperationFeedback(token, null);
         window.requestAnimationFrame(() => composer.current?.focus());
         return result;
       }
-      setStatus(
-        quietStatus("workspace.selection_cancelled", {
-          scope: "workspace",
-          workspaceId: workbench.draftWorkspaceId,
-        }),
-      );
+      settleOperationFeedback(token, null);
       window.requestAnimationFrame(() => composer.current?.focus());
       return null;
     } catch (error) {
-      setStatus(
+      if (!current()) {
+        settleOperationFeedback(token, null);
+        return null;
+      }
+      settleOperationFeedback(
+        token,
         attentionStatus(
           "workspace.selection_failed",
           { scope: "workspace", workspaceId: null },
@@ -2588,7 +2619,12 @@ export default function App() {
       workspace.kind !== "manual" ||
       workspace.authorization !== "available"
     ) {
-      setStatus(
+      const token = beginOperationFeedback(
+        `workspace:selection:${composerDraftScope}`,
+        { scope: "workspace", workspaceId: composerWorkspaceId ?? null },
+      );
+      settleOperationFeedback(
+        token,
         attentionStatus("workspace.selection_unavailable", {
           scope: "workspace",
           workspaceId: null,
@@ -3915,8 +3951,22 @@ export default function App() {
       ? entry.scope === composerDraftScope
       : entry.taskId === activeTask?.id,
   );
+  const workspaceSelectionFeedback =
+    statuses.entries[`workspace:selection:${composerDraftScope}`];
   const composerFooter = (
     <>
+      {workspaceSelectionFeedback?.tone === "attention" &&
+        !workspaceSelectionFeedback.dismissed && (
+          <p
+            className="projection-note workspace-selection-feedback"
+            role="status"
+          >
+            {t(
+              workspaceSelectionFeedback.id,
+              workspaceSelectionFeedback.values,
+            )}
+          </p>
+        )}
       {currentStopFeedback &&
         !(
           currentStopFeedback.phase === "requesting" &&
@@ -4016,6 +4066,7 @@ export default function App() {
                 )
               : t("workspace.none")
         }
+        workspaceDiagnostic={workspaceSelectionFeedback?.diagnostic}
         workspaceOptions={[
           {
             id: automaticWorkspaceOptionId,
