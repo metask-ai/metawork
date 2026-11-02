@@ -2017,7 +2017,6 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     ...snapshot.models,
     availability: "ready",
     providers: [],
-    metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
     builtinProviderPresets: [],
     customProviders: [
@@ -2455,9 +2454,10 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const modelOutsideCatalog = clone(fixture);
-  modelOutsideCatalog.models.metaskSelection.modelId = "missing-model";
+  modelOutsideCatalog.models.defaultSelection.modelId = "missing-model";
   assert.equal(
-    decodeWorkbenchSnapshot(modelOutsideCatalog).models.metaskSelection.modelId,
+    decodeWorkbenchSnapshot(modelOutsideCatalog).models.defaultSelection
+      .modelId,
     "missing-model",
   );
 
@@ -3298,7 +3298,6 @@ test("ready Metask catalog can retain unavailable desired selections", () => {
     const value = clone(fixture);
     value.models.providers[0].models = models;
     value.models.providers[0].errorCode = models.length ? "none" : "no_models";
-    value.models.metaskSelection.modelId = "retired-model";
     value.models.defaultSelection.modelId = "retired-model";
     const decoded = decodeWorkbenchSnapshot(value);
     assert.equal(decoded.models.providers[0].catalogState, "ready");

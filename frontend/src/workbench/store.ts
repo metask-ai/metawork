@@ -154,8 +154,6 @@ export const initialWorkbenchState: WorkbenchState = {
       availability: "needs_authentication",
       persistenceHealth: "unavailable",
       providers: [],
-      metaskSelection: null,
-      metaskSelectionRevision: "0",
       defaultSelection: null,
       selectionRevision: "0",
       operation: "idle",

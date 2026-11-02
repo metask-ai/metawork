@@ -1981,3 +1981,26 @@ test("App schedule_persistence_outcome_unknown preserves later edits and permits
   assert.equal(fixture.inputs[0][2].text, "Newer unsent draft");
   await fixture.settle();
 });
+
+test("preference save failure is separate feedback and keeps valid creation and model selection available", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  fixture.snapshot.models.errorCode = "preference_not_saved";
+  await fixture.publish();
+  await screen.findByText(
+    "Your model preference could not be saved. This task is ready to use.",
+  );
+  assert.equal(screen.getByRole("combobox", { name: "Model" }).disabled, false);
+  fireEvent.change(fixture.textarea, {
+    target: { value: "Send with the explicitly selected model" },
+  });
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await fixture.created();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(
+    fixture.inputs[0][2].text,
+    "Send with the explicitly selected model",
+  );
+  await fixture.settle();
+});

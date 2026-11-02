@@ -97,7 +97,7 @@ User submits explicit ModelRef and source/catalog generations
 → interactive confirmed choice may independently persist the starting preference
 ```
 
-Metask 只保留 principal、授权、source generation 与目录 authority；protocol 由每个具体模型的当前目录解析，不依赖 Provider-local 选择。`defaultSelection` 仅为起始偏好，更新不解析 credential、不安装配置、不触发执行替换或 Schedule timer。
+Metask 只保留 principal、授权、source generation 与目录 authority；protocol 由每个具体模型的当前目录解析，不依赖 Provider-local 选择。`defaultSelection` 仅为起始偏好，更新不解析 credential、不安装配置、不触发执行替换或 Schedule timer。仅偏好变化的提交未确认时拒绝该次记忆、保留旧内存偏好并独立诊断；两种可能 canonical 的来源 authority 相同，不撤销执行或冻结其他 Task。普通来源 mutation 的未知结果仍关闭其 canonical mutation 资格。
 
 Models 配置与纯偏好事务不等待 Task 或 Schedule 消费者。Task 与 Schedule 显式解析后分别取得 owned candidate；后续安装或持久化失败只进入对应 owner 的恢复，不回滚 Models 或 Account。
 
@@ -125,19 +125,19 @@ Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，M
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
-`models.json` schema 2 是 Models aggregate 的唯一 canonical store。它保存 Metask 无 secret 来源 authority、source-qualified 起始偏好及其 revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone；不保存 OAuth token、API credential、credential locator、migration marker 或 Product binding generation。Custom Provider API credential 只进入系统安全存储。schema 2 的 Metask intent 不含 API Key identity，Metask `source_id` 固定为 `metask`；系统没有 `ModelConnection` 对象，也不识别或映射 `connections` 字段。
+`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。生图不形成用户选择、独立 revision 或持久化 intent。
 
-生图模型不形成用户选择、独立 revision 或持久化 intent。既有 schema 1/2 文件中的退休 `metask_image` 字段仅在读取时丢弃，正常提交不再输出；起始偏好、revision 和 Custom Provider 按当前 canonical 格式保存；生图字段退休不增加新的模型偏好或 authority。
 
 生图默认模型与正式服务 target 的机器定义由 [Models 值合同](../src/product/models/contract.zig)唯一拥有。每次 Run preparation 优先采用当前目录中具备明确生图资格的默认模型；默认模型缺失或不合格时，按该次目录返回顺序采用第一个具备生图资格的成员。没有合格成员时返回不可用，不从对话默认、名称、输出 metadata 或旧持久选择推断模型。此回退仅在请求发送前解析配置，不构成发送失败后的自动重试或模型切换。
 
 图片执行 candidate 只在 Models 接收当次 Host authorization lease 的借用输入后构造：principal、authorization generation 必须与已接纳目录匹配；目录加载中或授权不可用均拒绝新解析。Models 在同一主线程调用内解析模型并复制该次 lease 的有界 credential，不借用 catalog 缓存的执行 token，也不获取、刷新或持久化授权。其 owned model、固定 Metask Images Generation target、catalog generation 与 credential 构成独立配置，不包含对话 protocol、Product execution generation、principal 或授权代次。消费者不提交或覆盖模型与 URL；已接纳 Run 的目标、模型与可用性不随目录或 logout 热替换，其中 credential 按前述连续 scope 续期规则消费，执行 owner 静止后清零释放。
 
-首次 bootstrap 读取 schema 2，并仅为既有 schema 1 Metask intent 提供一次确定性迁移：丢弃旧 `api_key_id`，把旧 `metask:<api-key-id>` selection source 归一为固定 `metask`，保留 model、revision、generation 与 Custom Provider 事实，下一次提交写回 schema 2。canonical 文件不存在时，在一次 Models transaction 中初始化空的 schema 2；`preferences.json`、`custom-providers.json` 及其 decoder、归档和迁移 marker 不属于当前 authority，也不参与恢复或 fallback。除此之外的缺失字段、未知 shape 或损坏必须 fail closed，不能猜测 generation/revision、默认来源或静默清空已有事实。
+Bootstrap 只严格读取当前 canonical 格式。退休 schema 1/2 先保留 exact bytes quarantine，再以原子提交安装空的当前 store 并继续，不迁移、不双读、不重放旧记录。quarantine 或安装失败必须发布真实 persistence health，旧 bytes 不丢失；quarantine 不进入任何 active decoder。canonical 缺失时初始化空 store；`preferences.json` 与 `custom-providers.json` 不参与读取、恢复或 fallback。
 
-Models persistence health 精确区分：当前 canonical 可用为 `ready`；Models file capability 存在但 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 本身不存在为 `unavailable`。只有 `recovery_required` 允许用户确认显式恢复；Models owner 与 Product Control 必须在执行时重新校验该资格。恢复执行时先重新读取并严格解码 canonical：合法 schema 1/2 必须重装且不得清空，其中 schema 1 按上一段迁移，中断的 `testing` 状态确定性收敛为 `failed`，并在确认提交后恢复 `ready`；读取失败或资源耗尽拒绝恢复且不得写盘；只有文件缺失或严格解码确认损坏时，才允许用当前可信内存事实安装空的 schema 2 store。`ready` 与 `unavailable` 都拒绝该命令，Renderer 不能为其显示恢复动作。恢复不猜测解释或归档旧 bytes，不改写 Account、Workspace、Task、Run 或对话历史；既有 Task 已拥有的 ExecutionConfig 继续按原生命周期收口。
+Models persistence health 精确区分：当前 canonical 可用为 `ready`；file capability 存在但当前 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 不存在为 `unavailable`。只有 `recovery_required` 允许显式 reset。恢复重新读取 canonical：当前合法格式非破坏性重装，中断 `testing` 状态收敛为 `failed` 后确认提交；读取失败或资源耗尽拒绝且不写盘；退休格式沿用 exact quarantine 后空 store 的 hard cut，当前格式缺失或损坏按原有 owner 恢复规则处理。commit outcome unknown 通过 exact readback 决议。恢复不得改写 Account、Workspace、Task、Run 或 checkpoint；Task-owned 配置按原生命周期收口。
 
-Provider 删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整 Provider。credential 替换先持久撤销旧 readiness 和对应 default，再覆盖同一稳定 Provider credential locator，最后以新的 provider/source generation 恢复为待测试状态；写入或最终提交失败时 Provider 必须保持 `missing/configuring`，不得让旧 readiness 配上新 credential。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
+Provider 删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后一次 registry commit 替换为完整 Provider。credential 替换先持久撤销 readiness，再覆盖同一稳定 credential locator，最后以新的 provider/source generation 恢复为待测试状态；写入或最终提交失败保持 `missing/configuring`。确认 credential 缺失时持久化 `credential_status = missing`，安全存储暂时不可读不能误写为已确认缺失。上述操作不改写起始偏好；失效身份继续可见，执行消费者独立校验来源与具体模型。启动和后续 mutation 排空 tombstone，单个 vault 失败不阻塞其他 ID。
+
 
 ### 2.2 Workspace 与 Task admission
 
@@ -161,14 +161,14 @@ custom root 必须为随机 child 预留路径容量，且不得等于 Manual re
 
 Task 创建在产生外部 effect 前必须证明：
 
-- 当前默认 ExecutionConfig 与 expected generation 仍有效；
+- 明确模型目标的 source/catalog generation、membership、protocol 与 credential authority 仍有效；
 - Workspace intent、ownership、epoch 与 authorization 有效；
 - Workspace、Task、Agent Session 与 projection 容量可用；
-- Product Control 尚未进入 replacement 或 shutdown。
+- Product Control 尚未进入 shutdown，相关 owner 没有阻止该事务的未决提交。
 
 Automatic admission 在完成上述证明后才创建候选目录、临时 Workspace record、Agent Session 和 Task record。发布前的任何失败必须释放 Session 与候选 record，并只回滚本次创建且仍为空的目录；Task 已 durable 发布后的 Run admission 或执行失败不能回滚真实 Task 或目录。Manual admission 对 registry、recent order 与 Task 引用的变化必须与 Task candidate 一同提交，不能发布只更新一半的关系。
 
-每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
+每个 Task 在创建时取得 owned ExecutionConfig 和初始 binding epoch。起始偏好变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
 
 Task aggregate 独占普通消息的接收、顺序、推进、停止及失败状态。Renderer 只提交 Task、operationId 与内容；Control 只协调 Workspace、Models、Skill、Attachment、Schedule 与执行资源，不持有第二份队列或复制 Task 的调度规则。Task 在主线程先取得唯一 owned payload 与安全投影预留，接收不等待 Run readiness、标题、checkpoint、compact、restore 或合法配置准备；真实 authority、内容和容量失败仍明确拒绝。
 
@@ -544,6 +544,8 @@ checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending ope
 唯一无 checkpoint 恢复例外是：Task 没有 checkpoint record、covered 前沿均为零且没有 pending operation。此时 Product 可以在原 Task 上 fresh attach 空 Conversation，以完整 Product operation history 和 durable UI history 高水位初始化各自 allocator；全部 excluded 历史继续可见，不进入新上下文，也不自动重放。只要存在 covered 历史，checkpoint 缺失、损坏或 store 不可用都必须 fail closed。
 
 历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
+
+Cold restoration resolves the explicit Task target into a new owned configuration and execution generation; confirmed installation advances the Task binding epoch while historical Run identities remain immutable.
 
 detached Task 的显式模型意图沿同一恢复事务提交：冻结该来源的当前 authority，先按旧 checkpoint 的模型 expectation 恢复，模型改变时设置目标模型并导出对应 checkpoint，确认实际 model/protocol/binding 后才能安装。原模型未变时可沿用原 checkpoint，不能为冷恢复额外制造新的覆盖事实。没有原 live attachment 时，不构造原连接 credential 或进程前的 Skill/MCP 恢复输入，也不执行原配置回退；失败保持原 Task、意图和历史，等待明确重试。目标来源或模型已失效时不得借用全局默认。无 covered 历史且没有 checkpoint 的 Task 仍可走既有 fresh attach 例外，并使用所选完整配置。
 

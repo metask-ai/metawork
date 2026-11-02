@@ -1,5 +1,7 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "model_setup.preference_not_saved":
+    "未能记住本次模型选择，当前任务仍可正常使用。",
   "mutation.reason.schedule_persistence_unavailable":
     "定时任务存储不可用，请先在定时任务页恢复后再重试。",
   "mutation.reason.schedule_persistence_failed":

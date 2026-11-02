@@ -96,10 +96,7 @@ pub const Registry = struct {
     providers: std.ArrayList(OwnedProvider) = .empty,
     pending_credential_deletions: std.ArrayList([]u8) = .empty,
     metask_principal_ref: []u8 = &.{},
-    metask_model_id: []u8 = &.{},
-    metask_protocol: ?contract.Protocol = null,
     metask_source_generation: u64 = 0,
-    metask_selection_revision: u64 = 0,
     default_source_id: []u8 = &.{},
     default_model_id: []u8 = &.{},
     selection_revision: u64 = 0,
@@ -120,7 +117,6 @@ pub const Registry = struct {
         self.view_storage.deinit(self.allocator);
         self.model_view_storage.deinit(self.allocator);
         self.freeSelectionText(&self.metask_principal_ref);
-        self.freeSelectionText(&self.metask_model_id);
         self.freeSelectionText(&self.default_source_id);
         self.freeSelectionText(&self.default_model_id);
         self.* = undefined;
@@ -129,9 +125,7 @@ pub const Registry = struct {
     pub fn clone(self: *const Registry) (std.mem.Allocator.Error || Error)!Registry {
         var result = Registry.init(self.allocator);
         errdefer result.deinit();
-        result.metask_protocol = self.metask_protocol;
         result.metask_source_generation = self.metask_source_generation;
-        result.metask_selection_revision = self.metask_selection_revision;
         result.selection_revision = self.selection_revision;
         try result.pending_credential_deletions.ensureTotalCapacity(
             self.allocator,
@@ -147,8 +141,6 @@ pub const Registry = struct {
         }
         if (self.metask_principal_ref.len != 0)
             result.metask_principal_ref = try self.allocator.dupe(u8, self.metask_principal_ref);
-        if (self.metask_model_id.len != 0)
-            result.metask_model_id = try self.allocator.dupe(u8, self.metask_model_id);
         if (self.default_source_id.len != 0)
             result.default_source_id = try self.allocator.dupe(u8, self.default_source_id);
         if (self.default_model_id.len != 0)
@@ -229,7 +221,6 @@ pub const Registry = struct {
     pub fn remove(
         self: *Registry,
         selection: contract.CustomProviderSelectionCommand,
-        next_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         const index = self.findIndex(selection.source_id) orelse
             return error.ProviderNotFound;
@@ -239,28 +230,12 @@ pub const Registry = struct {
         if (self.pending_credential_deletions.items.len >=
             max_pending_credential_deletions)
             return error.Capacity;
-        const clears_default = std.mem.eql(
-            u8,
-            self.default_source_id,
-            selection.source_id,
-        );
-        if (clears_default) {
-            const revision = next_selection_revision orelse
-                return error.InvalidProvider;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidProvider;
-        } else if (next_selection_revision != null) {
-            return error.InvalidProvider;
-        }
+
         const cleanup_id = try self.allocator.dupe(u8, provider.id);
         errdefer self.allocator.free(cleanup_id);
         try self.pending_credential_deletions.append(self.allocator, cleanup_id);
         provider.deinit(self.allocator);
         _ = self.providers.orderedRemove(index);
-        if (clears_default) {
-            self.clearDefaultSelection();
-            self.selection_revision = next_selection_revision.?;
-        }
     }
 
     /// Persists an intent to delete a not-yet-committed credential. Creation
@@ -332,7 +307,6 @@ pub const Registry = struct {
         input: contract.CustomProviderUpdateCommand,
         next_provider_revision: u64,
         next_source_generation: ?u64,
-        next_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         contract.validateCustomProviderSpec(input.spec) catch
             return error.InvalidProvider;
@@ -346,16 +320,7 @@ pub const Registry = struct {
                 next_source_generation.? == provider.source_generation)) or
             (!binding_changed and next_source_generation != null))
             return error.InvalidProvider;
-        const clears_default = binding_changed and
-            std.mem.eql(u8, self.default_source_id, provider.id);
-        if (clears_default) {
-            const revision = next_selection_revision orelse
-                return error.InvalidProvider;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidProvider;
-        } else if (next_selection_revision != null) {
-            return error.InvalidProvider;
-        }
+
         const display_name = try self.allocator.dupe(u8, input.spec.display_name);
         errdefer self.allocator.free(display_name);
         const base_url = try self.allocator.dupe(u8, input.spec.normalized_base_url);
@@ -373,10 +338,6 @@ pub const Registry = struct {
                 model.ready_source_generation = 0;
             }
             provider.source_generation = next_source_generation.?;
-            if (clears_default) {
-                self.clearDefaultSelection();
-                self.selection_revision = next_selection_revision.?;
-            }
         } else {
             _ = settleTesting(provider);
         }
@@ -443,7 +404,6 @@ pub const Registry = struct {
         command: contract.CustomModelReplaceCommand,
         next_provider_revision: u64,
         next_catalog_generation: u64,
-        next_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         const provider = try self.selectedCatalog(
             command.selection.source_id,
@@ -471,16 +431,7 @@ pub const Registry = struct {
             command.selection.model_id,
             command.replacement.id,
         );
-        const default_changed = identity_changed and
-            std.mem.eql(u8, self.default_source_id, provider.id) and
-            std.mem.eql(u8, self.default_model_id, command.selection.model_id);
-        if (default_changed) {
-            const revision = next_selection_revision orelse return error.InvalidProvider;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidProvider;
-        } else if (next_selection_revision != null) {
-            return error.InvalidProvider;
-        }
+
         var replacement: OwnedModel = .{
             .id = try self.allocator.dupe(u8, command.replacement.id),
             .display_name = try self.allocator.dupe(u8, command.replacement.display_name),
@@ -496,10 +447,7 @@ pub const Registry = struct {
                 provider.models.items[index].ready_source_generation,
         };
         errdefer replacement.deinit(self.allocator);
-        if (default_changed) {
-            self.clearDefaultSelection();
-            self.selection_revision = next_selection_revision.?;
-        }
+
         provider.models.items[index].deinit(self.allocator);
         provider.models.items[index] = replacement;
         provider.provider_revision = next_provider_revision;
@@ -512,7 +460,6 @@ pub const Registry = struct {
         command: contract.CustomModelRemoveCommand,
         next_provider_revision: u64,
         next_catalog_generation: u64,
-        next_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         const provider = try self.selectedCatalog(
             command.selection.source_id,
@@ -531,26 +478,15 @@ pub const Registry = struct {
             }
         }
         const index = model_index orelse return error.ModelNotFound;
-        const default_changed = std.mem.eql(u8, self.default_source_id, provider.id) and
-            std.mem.eql(u8, self.default_model_id, command.selection.model_id);
-        if (default_changed) {
-            const revision = next_selection_revision orelse return error.InvalidProvider;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidProvider;
-        } else if (next_selection_revision != null) {
-            return error.InvalidProvider;
-        }
+
         if (provider.models.items.len == 1) {
             try self.remove(.{
                 .source_id = provider.id,
                 .expected_provider_revision = provider.provider_revision,
-            }, next_selection_revision);
+            });
             return;
         }
-        if (default_changed) {
-            self.clearDefaultSelection();
-            self.selection_revision = next_selection_revision.?;
-        }
+
         provider.models.items[index].deinit(self.allocator);
         _ = provider.models.orderedRemove(index);
         provider.provider_revision = next_provider_revision;
@@ -570,74 +506,17 @@ pub const Registry = struct {
         return changed;
     }
 
-    pub const MetaskIntent = struct {
-        principal_ref: []const u8,
-        model_id: []const u8,
-        protocol: ?contract.Protocol,
-        source_generation: u64,
-        selection_revision: u64,
-    };
-
-    pub fn metaskIntent(self: *const Registry) ?MetaskIntent {
+    pub const MetaskSource = struct { principal_ref: []const u8, source_generation: u64 };
+    pub fn metaskSource(self: *const Registry) ?MetaskSource {
         if (self.metask_principal_ref.len == 0) return null;
-        return .{
-            .principal_ref = self.metask_principal_ref,
-            .model_id = self.metask_model_id,
-            .protocol = self.metask_protocol,
-            .source_generation = self.metask_source_generation,
-            .selection_revision = self.metask_selection_revision,
-        };
+        return .{ .principal_ref = self.metask_principal_ref, .source_generation = self.metask_source_generation };
     }
-
-    pub fn configureMetask(
-        self: *Registry,
-        principal_ref: []const u8,
-        model_id: []const u8,
-        protocol: ?contract.Protocol,
-        source_generation: u64,
-        selection_revision: u64,
-        next_default_selection_revision: ?u64,
-    ) (std.mem.Allocator.Error || Error)!void {
-        const same_selection = std.mem.eql(u8, principal_ref, self.metask_principal_ref) and
-            std.mem.eql(u8, model_id, self.metask_model_id);
-        const updates_default = self.metaskChangeUpdatesDefault(model_id);
-        if (principal_ref.len == 0 or principal_ref.len > contract.Limits.principal_ref_bytes or
-            model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
-            ((protocol == null) != (source_generation == 0)) or selection_revision == 0 or
-            (!same_selection and selection_revision == self.metask_selection_revision))
-            return error.InvalidData;
-        if (updates_default) {
-            const revision = next_default_selection_revision orelse return error.InvalidData;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidData;
-        } else if (next_default_selection_revision != null) {
-            return error.InvalidData;
-        }
+    pub fn configureMetaskSource(self: *Registry, principal_ref: []const u8, source_generation: u64) (std.mem.Allocator.Error || Error)!void {
+        if (principal_ref.len == 0 or principal_ref.len > contract.Limits.principal_ref_bytes or source_generation == 0) return error.InvalidData;
         const principal = try self.allocator.dupe(u8, principal_ref);
-        errdefer self.allocator.free(principal);
-        const model = try self.allocator.dupe(u8, model_id);
-        errdefer self.allocator.free(model);
-        var default_source: []u8 = &.{};
-        if (updates_default)
-            default_source = try self.allocator.dupe(u8, contract.metask_source_id);
-        errdefer if (default_source.len != 0) self.allocator.free(default_source);
-        var default_model: []u8 = &.{};
-        if (updates_default)
-            default_model = try self.allocator.dupe(u8, model_id);
-        errdefer if (default_model.len != 0) self.allocator.free(default_model);
         self.freeSelectionText(&self.metask_principal_ref);
-        self.freeSelectionText(&self.metask_model_id);
         self.metask_principal_ref = principal;
-        self.metask_model_id = model;
-        self.metask_protocol = protocol;
         self.metask_source_generation = source_generation;
-        self.metask_selection_revision = selection_revision;
-        if (updates_default) {
-            self.clearDefaultSelection();
-            self.default_source_id = default_source;
-            self.default_model_id = default_model;
-            self.selection_revision = next_default_selection_revision.?;
-        }
     }
 
     pub fn defaultSelection(self: *const Registry) ?contract.ModelRef {
@@ -653,75 +532,17 @@ pub const Registry = struct {
         return self.providers.items[index].source_generation;
     }
 
-    fn validDurableSelection(
-        self: *const Registry,
-        source_id: []const u8,
-        model_id: []const u8,
-    ) bool {
-        if (self.metaskIntent()) |intent| {
-            if (std.mem.eql(u8, contract.metask_source_id, source_id))
-                return std.mem.eql(u8, intent.model_id, model_id);
-        }
-        const index = self.findIndex(source_id) orelse return false;
-        return providerHasReadyModel(&self.providers.items[index], model_id);
-    }
-
-    fn defaultTracksMetaskIntent(self: *const Registry) bool {
-        const intent = self.metaskIntent() orelse return false;
-        return std.mem.eql(u8, self.default_source_id, contract.metask_source_id) and
-            std.mem.eql(u8, self.default_model_id, intent.model_id);
-    }
-
-    pub fn metaskChangeUpdatesDefault(
-        self: *const Registry,
-        model_id: []const u8,
-    ) bool {
-        return self.defaultTracksMetaskIntent() and
-            !std.mem.eql(u8, model_id, self.metask_model_id);
-    }
-
-    pub fn selectMetaskDefault(
-        self: *Registry,
-        selection_revision: u64,
-    ) (std.mem.Allocator.Error || Error)!void {
-        const intent = self.metaskIntent() orelse return error.InvalidData;
-        if (selection_revision == 0 or selection_revision == self.selection_revision)
-            return error.InvalidData;
-        const source_id = try self.allocator.dupe(u8, contract.metask_source_id);
-        errdefer self.allocator.free(source_id);
-        const model_id = try self.allocator.dupe(u8, intent.model_id);
+    /// Called only with a confirmed consumer selection. Catalog membership is
+    /// execution authority; remembering an identity does not grant authority.
+    pub fn rememberPreference(self: *Registry, target: contract.ModelRef, revision: u64) (std.mem.Allocator.Error || Error)!void {
+        if (target.source_id.len == 0 or target.source_id.len > contract.Limits.provider_id_bytes or target.model_id.len == 0 or target.model_id.len > contract.Limits.model_id_bytes or revision == 0 or revision == self.selection_revision) return error.InvalidData;
+        const source = try self.allocator.dupe(u8, target.source_id);
+        errdefer self.allocator.free(source);
+        const model = try self.allocator.dupe(u8, target.model_id);
         self.clearDefaultSelection();
-        self.default_source_id = source_id;
-        self.default_model_id = model_id;
-        self.selection_revision = selection_revision;
-    }
-
-    pub fn selectDefault(
-        self: *Registry,
-        selection: contract.CustomProviderSelectionCommand,
-        model_id: []const u8,
-        selection_revision: u64,
-    ) (std.mem.Allocator.Error || Error)!void {
-        if (selection_revision == 0 or selection_revision == self.selection_revision)
-            return error.InvalidProvider;
-        const provider = try self.selected(selection);
-        if (provider.state != .ready or provider.credential_status != .ready or
-            !provider.enabled)
-            return error.InvalidProvider;
-        for (provider.models.items) |model| {
-            if (!std.mem.eql(u8, model.id, model_id)) continue;
-            if (!modelReady(provider, model)) return error.InvalidProvider;
-            const default_source_id = try self.allocator.dupe(u8, provider.id);
-            errdefer self.allocator.free(default_source_id);
-            const default_model_id = try self.allocator.dupe(u8, model_id);
-            self.freeSelectionText(&self.default_source_id);
-            self.freeSelectionText(&self.default_model_id);
-            self.default_source_id = default_source_id;
-            self.default_model_id = default_model_id;
-            self.selection_revision = selection_revision;
-            return;
-        }
-        return error.ModelNotFound;
+        self.default_source_id = source;
+        self.default_model_id = model;
+        self.selection_revision = revision;
     }
 
     pub fn clearDefault(self: *Registry, selection_revision: u64) bool {
@@ -744,27 +565,14 @@ pub const Registry = struct {
     pub fn markCredentialMissing(
         self: *Registry,
         selection: contract.CustomProviderSelectionCommand,
-        next_selection_revision: ?u64,
     ) Error!void {
         const provider = try self.selected(selection);
-        const clears_default = std.mem.eql(u8, self.default_source_id, provider.id);
-        if (clears_default) {
-            const revision = next_selection_revision orelse return error.InvalidProvider;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidProvider;
-        } else if (next_selection_revision != null) {
-            return error.InvalidProvider;
-        }
 
         provider.credential_status = .missing;
         provider.state = .configuring;
         for (provider.models.items) |*model| {
             model.test_status = .untested;
             model.ready_source_generation = 0;
-        }
-        if (clears_default) {
-            self.clearDefaultSelection();
-            self.selection_revision = next_selection_revision.?;
         }
     }
 
@@ -780,7 +588,7 @@ pub const Registry = struct {
         return output[0..count];
     }
 
-    pub const DefaultBinding = struct {
+    pub const ModelBinding = struct {
         provider_id: []const u8,
         model_id: []const u8,
         protocol: contract.Protocol,
@@ -789,45 +597,10 @@ pub const Registry = struct {
         source_generation: u64,
     };
 
-    pub fn desiredDefaultBinding(self: *const Registry) ?DefaultBinding {
-        if (self.default_source_id.len == 0 or self.default_model_id.len == 0 or
-            self.selection_revision == 0)
-            return null;
-        const index = self.findIndex(self.default_source_id) orelse return null;
-        const provider = self.providers.items[index];
-        var model_matches: usize = 0;
-        var model_ready = false;
-        for (provider.models.items) |model| {
-            if (std.mem.eql(u8, model.id, self.default_model_id)) {
-                model_matches += 1;
-                model_ready = modelReady(&provider, model);
-            }
-        }
-        if (model_matches != 1 or !model_ready) return null;
-        return .{
-            .provider_id = provider.id,
-            .model_id = self.default_model_id,
-            .protocol = provider.protocol,
-            .normalized_base_url = provider.normalized_base_url,
-            .provider_revision = provider.provider_revision,
-            .source_generation = provider.source_generation,
-        };
-    }
-
-    pub fn defaultBinding(self: *const Registry) ?DefaultBinding {
-        const desired = self.desiredDefaultBinding() orelse return null;
-        const index = self.findIndex(desired.provider_id) orelse return null;
-        const provider = self.providers.items[index];
-        if (provider.state != .ready or
-            provider.credential_status != .ready or !provider.enabled)
-            return null;
-        return desired;
-    }
-
     pub fn probeBinding(
         self: *const Registry,
         command: contract.CustomModelTestCommand,
-    ) Error!DefaultBinding {
+    ) Error!ModelBinding {
         const index = self.findIndex(command.model.source_id) orelse
             return error.ProviderNotFound;
         const provider = self.providers.items[index];
@@ -1018,15 +791,7 @@ fn cloneProvider(
     return result;
 }
 
-const MetaskIntentWire = struct {
-    principal_ref: []const u8,
-    /// Schema 1 migration input. Schema 2 always writes null.
-    api_key_id: ?[]const u8 = null,
-    model_id: []const u8,
-    protocol: ?contract.Protocol = null,
-    source_generation: u64 = 0,
-    selection_revision: u64,
-};
+const MetaskSourceWire = struct { principal_ref: []const u8, source_generation: u64 };
 
 const ModelRefWire = struct {
     source_id: []const u8,
@@ -1083,25 +848,11 @@ const CanonicalProviderWire = struct {
 
 const CanonicalWire = struct {
     schema: u32,
-    metask: ?MetaskIntentWire,
-    // Read-only migration: discard the retired selection while preserving all
-    // other Models data. It is never emitted by current writes.
-    metask_image: ?std.json.Value = null,
+    metask: ?MetaskSourceWire,
     default_selection: ?ModelRefWire,
     selection_revision: u64,
     pending_credential_deletions: []const []const u8,
     custom_providers: []const CanonicalProviderWire,
-
-    pub fn jsonStringify(self: CanonicalWire, writer: anytype) !void {
-        try writer.beginObject();
-        inline for (std.meta.fields(CanonicalWire)) |field| {
-            if (!std.mem.eql(u8, field.name, "metask_image")) {
-                try writer.objectField(field.name);
-                try writer.write(@field(self, field.name));
-            }
-        }
-        try writer.endObject();
-    }
 };
 
 pub fn encodeAlloc(
@@ -1137,19 +888,13 @@ pub fn encodeAlloc(
             .models = model_storage[provider_index][0..provider.models.items.len],
         };
     }
-    const metask: ?MetaskIntentWire = if (registry.metaskIntent()) |intent| .{
-        .principal_ref = intent.principal_ref,
-        .model_id = intent.model_id,
-        .protocol = intent.protocol,
-        .source_generation = intent.source_generation,
-        .selection_revision = intent.selection_revision,
-    } else null;
+    const metask: ?MetaskSourceWire = if (registry.metaskSource()) |source| .{ .principal_ref = source.principal_ref, .source_generation = source.source_generation } else null;
     const default_selection: ?ModelRefWire = if (registry.defaultSelection()) |selection| .{
         .source_id = selection.source_id,
         .model_id = selection.model_id,
     } else null;
     const wire: CanonicalWire = .{
-        .schema = 2,
+        .schema = 3,
         .metask = metask,
         .default_selection = default_selection,
         .selection_revision = registry.selection_revision,
@@ -1180,27 +925,14 @@ pub fn decode(
     };
     defer parsed.deinit();
     const wire = parsed.value;
-    if ((wire.schema != 1 and wire.schema != 2) or
+    if (wire.schema != 3 or
         wire.custom_providers.len > contract.Limits.custom_provider_entries or
         wire.pending_credential_deletions.len > max_pending_credential_deletions)
         return error.InvalidData;
     var result = Registry.init(allocator);
     errdefer result.deinit();
     result.selection_revision = wire.selection_revision;
-    if (wire.metask) |metask| {
-        if ((wire.schema == 1) != (metask.api_key_id != null))
-            return error.InvalidData;
-        if ((metask.protocol == null) != (metask.source_generation == 0))
-            return error.InvalidData;
-        try result.configureMetask(
-            metask.principal_ref,
-            metask.model_id,
-            metask.protocol,
-            metask.source_generation,
-            metask.selection_revision,
-            null,
-        );
-    }
+    if (wire.metask) |metask| try result.configureMetaskSource(metask.principal_ref, metask.source_generation);
     for (wire.pending_credential_deletions, 0..) |provider_id, index| {
         if (provider_id.len == 0 or
             provider_id.len > contract.Limits.instance_id_bytes)
@@ -1268,19 +1000,23 @@ pub fn decode(
         if (selection.source_id.len == 0 or selection.model_id.len == 0 or
             wire.selection_revision == 0)
             return error.InvalidData;
-        const source_id = if (wire.schema == 1 and
-            std.mem.startsWith(u8, selection.source_id, "metask:"))
-            contract.metask_source_id
-        else
-            selection.source_id;
-        if (!result.validDurableSelection(source_id, selection.model_id))
-            return error.InvalidData;
-        result.default_source_id = try allocator.dupe(u8, source_id);
+        if (selection.source_id.len > contract.Limits.provider_id_bytes or selection.model_id.len > contract.Limits.model_id_bytes) return error.InvalidData;
+        result.default_source_id = try allocator.dupe(u8, selection.source_id);
         result.default_model_id = try allocator.dupe(u8, selection.model_id);
     }
     for (result.views()) |view|
         contract.validateCustomProviderView(view) catch return error.InvalidData;
     return result;
+}
+
+/// Recognize only retired envelope versions. Current-format corruption keeps
+/// the ordinary recovery path; no retired records are replayed into live state.
+pub fn isRetiredCanonical(allocator: std.mem.Allocator, bytes: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const schema = parsed.value.object.get("schema") orelse return false;
+    return schema == .integer and (schema.integer == 1 or schema.integer == 2);
 }
 
 test "canonical decode preserves allocation exhaustion" {
@@ -1295,47 +1031,27 @@ test "canonical decode preserves allocation exhaustion" {
     );
 }
 
-test "legacy Models canonical remains image-unset and preserves its shape" {
-    const canonical = "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
-    var registry = try decode(std.testing.allocator, canonical);
-    defer registry.deinit();
-    const encoded = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(encoded);
-    try std.testing.expectEqualStrings(canonical, encoded);
-    var migrated = try decode(std.testing.allocator, "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}");
-    defer migrated.deinit();
-}
-
-test "retired image intent is discarded while dialogue and custom Providers survive migration" {
+test "retired Models schemas are rejected and current empty schema round trips" {
+    for ([_]u32{ 1, 2 }) |version| {
+        const legacy = try std.fmt.allocPrint(std.testing.allocator, "{{\"schema\":{d},\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}}", .{version});
+        defer std.testing.allocator.free(legacy);
+        try std.testing.expect(isRetiredCanonical(std.testing.allocator, legacy));
+        try std.testing.expectError(error.InvalidData, decode(std.testing.allocator, legacy));
+    }
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try registry.configureMetask("principal-a", "chat", .anthropic_messages, 3, 5, null);
-    try registry.selectMetaskDefault(7);
-    try testCreate(&registry, .{
-        .provider_id = "custom",
-        .spec = .{
-            .display_name = "Custom",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://example.com/v1/responses",
-        },
-        .credential_slot = .{ .id = "custom" },
-        .model = .{ .id = "custom-chat" },
-    });
-    const current = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(current);
-    for ([_][]const u8{ "{\"principal_ref\":\"principal-a\",\"model_id\":\"old-image\",\"selection_revision\":1}", "{\"principal_ref\":\"principal-a\",\"model_id\":null,\"selection_revision\":2}" }) |intent| {
-        const legacy = try std.fmt.allocPrint(std.testing.allocator, "{s},\"metask_image\":{s}}}", .{ current[0 .. current.len - 1], intent });
-        defer std.testing.allocator.free(legacy);
-        var restored = try decode(std.testing.allocator, legacy);
-        defer restored.deinit();
-        const rewritten = try encodeAlloc(std.testing.allocator, &restored);
-        defer std.testing.allocator.free(rewritten);
-        try std.testing.expectEqualStrings(current, rewritten);
-        try std.testing.expect(std.mem.indexOf(u8, rewritten, "metask_image") == null);
-        try std.testing.expectEqualStrings("chat", restored.defaultSelection().?.model_id);
-        try std.testing.expectEqual(@as(u64, 7), restored.selection_revision);
-        try std.testing.expectEqualStrings("principal-a", restored.metaskIntent().?.principal_ref);
-        try std.testing.expectEqualStrings("custom-chat", restored.views()[0].models[0].id);
+    const bytes = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(bytes);
+    var restored = try decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expect(restored.defaultSelection() == null);
+}
+
+test "retired provider-local and image fields are rejected by the current schema" {
+    for ([_][]const u8{ "metask_image", "metask_model_id", "metask_selection_revision" }) |field| {
+        const bytes = try std.fmt.allocPrint(std.testing.allocator, "{{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"{s}\":null}}", .{field});
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectError(error.InvalidData, decode(std.testing.allocator, bytes));
     }
 }
 
@@ -1430,6 +1146,24 @@ pub const FileStore = struct {
             return error.ReadFailed;
         if (read != bytes.len) return error.ReadFailed;
         return bytes;
+    }
+
+    /// Preserve the exact retired canonical before the normal atomic empty
+    /// replacement. Failure leaves the original canonical available to retry.
+    pub fn quarantine(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        var random: [16]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const hex = std.fmt.bytesToHex(random, .lower);
+        var storage: [80]u8 = undefined;
+        const name = std.fmt.bufPrint(&storage, ".models.{s}.quarantine", .{hex}) catch return error.WriteFailed;
+        const file = self.dir.createFile(self.io, name, .{ .exclusive = true, .permissions = privateFilePermissions(), .resolve_beneath = true }) catch return error.WriteFailed;
+        defer file.close(self.io);
+        file.writeStreamingAll(self.io, bytes) catch return error.WriteFailed;
+        file.sync(self.io) catch return error.WriteFailed;
+        if (builtin.os.tag != .windows) {
+            const directory: std.Io.File = .{ .handle = self.dir.handle, .flags = .{ .nonblocking = false } };
+            directory.sync(self.io) catch return error.WriteFailed;
+        }
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
@@ -1542,7 +1276,7 @@ test "model configurations with the same endpoint and vendor remain independent 
             .selection = .{ .source_id = "model-config-one", .model_id = "deepseek-flash" },
             .expected_provider_revision = 1,
             .expected_catalog_generation = 3,
-        }, 4, 5, null);
+        }, 4, 5);
         try std.testing.expectEqual(@as(usize, 1), restored.views().len);
         try std.testing.expectEqualStrings("model-config-two", restored.views()[0].id);
         try std.testing.expectEqualStrings("deepseek-flash", restored.views()[0].models[0].id);
@@ -1586,7 +1320,7 @@ test "registry removes the connection and queues credential cleanup when its las
         .selection = .{ .source_id = "slot-empty", .model_id = "gpt-5" },
         .expected_provider_revision = 4,
         .expected_catalog_generation = 5,
-    }, 6, 7, null);
+    }, 6, 7);
     try std.testing.expectEqual(@as(usize, 0), restored.views().len);
     try std.testing.expectEqual(@as(usize, 1), restored.credentialDeletions().len);
     try std.testing.expectEqualStrings("slot-empty", restored.credentialDeletions()[0]);
@@ -1678,14 +1412,12 @@ test "registry rejects stale generation and unknown models" {
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try std.testing.expectError(error.GenerationMismatch, registry.selectDefault(.{
-        .source_id = "slot-1",
-        .expected_provider_revision = 2,
-    }, "gemini-2.5-flash", 1));
-    try std.testing.expectError(error.ModelNotFound, registry.selectDefault(.{
-        .source_id = "slot-1",
-        .expected_provider_revision = 1,
-    }, "missing", 1));
+    var stale = probe;
+    stale.expected_provider_revision += 1;
+    try std.testing.expectError(error.GenerationMismatch, registry.probeBinding(stale));
+    stale = probe;
+    stale.model.model_id = "missing";
+    try std.testing.expectError(error.ModelNotFound, registry.probeBinding(stale));
 }
 
 test "registry updates public metadata without exposing credential bytes" {
@@ -1711,73 +1443,27 @@ test "registry updates public metadata without exposing credential bytes" {
             .protocol = .openai_chat_completions,
             .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         },
-    }, 2, null, null);
+    }, 2, null);
     const view = registry.views()[0];
     try std.testing.expectEqualStrings("OpenAI Team", view.display_name);
     try std.testing.expectEqual(@as(u64, 2), view.provider_revision);
     try std.testing.expect(view.credential_status == .ready);
 }
 
-test "registry validates default revisions before update and remove commit" {
+test "provider deletion preserves a remembered identity across canonical round trip" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try testCreate(&registry, .{
-        .provider_id = "slot-transaction",
-        .spec = .{
-            .display_name = "OpenAI",
-            .protocol = .openai_chat_completions,
-            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-        },
-        .credential_slot = .{ .id = "slot-transaction" },
-        .model = .{ .id = "gpt-5" },
-    });
-    const selection: contract.CustomProviderSelectionCommand = .{
-        .source_id = "slot-transaction",
-        .expected_provider_revision = 1,
-    };
-    const probe: contract.CustomModelTestCommand = .{
-        .model = .{ .source_id = "slot-transaction", .model_id = "gpt-5" },
-        .expected_provider_revision = 1,
-        .expected_source_generation = 2,
-        .expected_catalog_generation = 3,
-    };
-    try registry.markTesting(probe);
-    try registry.completeTest(probe, true);
-    try registry.selectDefault(selection, "gpt-5", 7);
-    const before = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(before);
-
-    try std.testing.expectError(error.InvalidProvider, registry.update(.{
-        .selection = selection,
-        .spec = .{
-            .display_name = "OpenAI renamed",
-            .protocol = .openai_chat_completions,
-            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-        },
-    }, 4, null, 8));
-    const after_display = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(after_display);
-    try std.testing.expectEqualStrings(before, after_display);
-
-    try std.testing.expectError(error.InvalidProvider, registry.update(.{
-        .selection = selection,
-        .spec = .{
-            .display_name = "OpenAI Responses",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://api.openai.com/v1/responses",
-        },
-    }, 4, 5, null));
-    const after_binding = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(after_binding);
-    try std.testing.expectEqualStrings(before, after_binding);
-
-    try std.testing.expectError(error.InvalidProvider, registry.remove(selection, null));
-    const after_remove = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(after_remove);
-    try std.testing.expectEqualStrings(before, after_remove);
-    try std.testing.expectEqual(@as(usize, 1), registry.views().len);
-    try std.testing.expectEqual(@as(usize, 0), registry.credentialDeletions().len);
-    try std.testing.expect(registry.defaultSelection() != null);
+    try testCreate(&registry, .{ .provider_id = "slot", .spec = .{ .display_name = "OpenAI", .protocol = .openai_responses, .normalized_base_url = "https://api.openai.com/v1/responses" }, .credential_slot = .{ .id = "slot" }, .model = .{ .id = "gpt-5" } });
+    try registry.rememberPreference(.{ .source_id = "slot", .model_id = "gpt-5" }, 7);
+    try registry.remove(.{ .source_id = "slot", .expected_provider_revision = 1 });
+    try std.testing.expectEqualStrings("gpt-5", registry.defaultSelection().?.model_id);
+    try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
+    const bytes = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(bytes);
+    var restored = try decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 0), restored.views().len);
+    try std.testing.expectEqualStrings("slot", restored.defaultSelection().?.source_id);
 }
 
 test "display-only provider updates settle stale probes without revoking readiness" {
@@ -1801,10 +1487,7 @@ test "display-only provider updates settle stale probes without revoking readine
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.selectDefault(.{
-        .source_id = "slot-retest",
-        .expected_provider_revision = 1,
-    }, "gpt-5", 7);
+    try registry.rememberPreference(.{ .source_id = "slot-retest", .model_id = "gpt-5" }, 7);
     try registry.markTesting(probe);
 
     try registry.update(.{
@@ -1817,13 +1500,13 @@ test "display-only provider updates settle stale probes without revoking readine
             .protocol = .openai_responses,
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
-    }, 4, null, null);
+    }, 4, null);
 
     const settled = registry.views()[0];
     try std.testing.expectEqual(contract.CustomProviderState.ready, settled.state);
     try std.testing.expectEqual(contract.CustomModelTestStatus.failed, settled.models[0].test_status);
     try std.testing.expect(settled.models[0].ready);
-    try std.testing.expect(registry.defaultBinding() != null);
+    try std.testing.expect(testReadyBinding(&registry) != null);
     try std.testing.expectError(error.GenerationMismatch, registry.completeTest(probe, true));
     try registry.markTesting(.{
         .model = probe.model,
@@ -1842,76 +1525,31 @@ test "display-only provider updates settle stale probes without revoking readine
             .protocol = .openai_chat_completions,
             .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         },
-    }, 5, 6, 8);
+    }, 5, 6);
     const rebound = registry.views()[0];
     try std.testing.expectEqual(contract.CustomProviderState.configuring, rebound.state);
     try std.testing.expectEqual(contract.CustomModelTestStatus.untested, rebound.models[0].test_status);
     try std.testing.expect(!rebound.models[0].ready);
     try std.testing.expectEqual(@as(u64, 6), rebound.source_generation);
-    try std.testing.expect(registry.defaultSelection() == null);
-    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
+    try std.testing.expect(registry.defaultSelection() != null);
+    try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
 }
 
-test "registry keeps a tracked Metask default coherent with intent changes" {
+test "Metask source authority never changes remembered consumer identity" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try registry.configureMetask(
-        "principal-1",
-        "model-1",
-        .anthropic_messages,
-        3,
-        5,
-        null,
-    );
-    try registry.selectMetaskDefault(7);
-
-    try std.testing.expectError(
-        error.InvalidData,
-        registry.configureMetask(
-            "principal-1",
-            "model-2",
-            .anthropic_messages,
-            3,
-            6,
-            null,
-        ),
-    );
-    try std.testing.expectEqualStrings("model-1", registry.metaskIntent().?.model_id);
-    try std.testing.expectEqualStrings("model-1", registry.defaultSelection().?.model_id);
-
-    try registry.configureMetask(
-        "principal-1",
-        "model-2",
-        .anthropic_messages,
-        3,
-        6,
-        8,
-    );
-    try std.testing.expectEqualStrings("model-2", registry.metaskIntent().?.model_id);
-    try std.testing.expectEqualStrings("metask", registry.defaultSelection().?.source_id);
+    try registry.configureMetaskSource("principal-1", 3);
+    try std.testing.expect(registry.defaultSelection() == null);
+    try registry.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 7);
+    try registry.configureMetaskSource("principal-2", 9);
     try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
-    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
-
-    try registry.configureMetask(
-        "principal-1",
-        "model-2",
-        .anthropic_messages,
-        9,
-        10,
-        null,
-    );
-    try std.testing.expectEqualStrings("metask", registry.defaultSelection().?.source_id);
-    try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
-    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
-
-    const encoded = try encodeAlloc(std.testing.allocator, &registry);
-    defer std.testing.allocator.free(encoded);
-    var restored = try decode(std.testing.allocator, encoded);
+    try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
+    const bytes = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(bytes);
+    var restored = try decode(std.testing.allocator, bytes);
     defer restored.deinit();
-    try std.testing.expectEqualStrings("model-2", restored.metaskIntent().?.model_id);
-    try std.testing.expectEqualStrings("metask", restored.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("principal-2", restored.metaskSource().?.principal_ref);
     try std.testing.expectEqualStrings("model-2", restored.defaultSelection().?.model_id);
-    try std.testing.expectEqual(@as(u64, 8), restored.selection_revision);
 }
 
 test "registry fails closed when a durable credential disappears" {
@@ -1939,34 +1577,24 @@ test "registry fails closed when a durable credential disappears" {
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.selectDefault(selection, "gpt-5", 7);
+    try registry.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }, 7);
 
-    try std.testing.expectError(
-        error.InvalidProvider,
-        registry.markCredentialMissing(selection, null),
-    );
-    try std.testing.expectEqual(
-        contract.CustomProviderCredentialStatus.ready,
-        registry.views()[0].credential_status,
-    );
-    try std.testing.expect(registry.defaultSelection() != null);
-
-    try registry.markCredentialMissing(selection, 8);
+    try registry.markCredentialMissing(selection);
 
     const view = registry.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.missing, view.credential_status);
     try std.testing.expectEqual(contract.CustomProviderState.configuring, view.state);
     try std.testing.expectEqual(contract.CustomModelTestStatus.untested, view.models[0].test_status);
-    try std.testing.expect(registry.defaultSelection() == null);
-    try std.testing.expect(registry.defaultBinding() == null);
-    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
+    try std.testing.expect(registry.defaultSelection() != null);
+    try std.testing.expect(testReadyBinding(&registry) == null);
+    try std.testing.expectEqual(@as(u64, 7), registry.selection_revision);
 
     const encoded = try encodeAlloc(std.testing.allocator, &registry);
     defer std.testing.allocator.free(encoded);
     var restored = try decode(std.testing.allocator, encoded);
     defer restored.deinit();
-    try std.testing.expect(restored.defaultSelection() == null);
-    try std.testing.expectEqual(@as(u64, 8), restored.selection_revision);
+    try std.testing.expect(restored.defaultSelection() != null);
+    try std.testing.expectEqual(@as(u64, 7), restored.selection_revision);
     const restored_view = restored.views()[0];
     try std.testing.expectEqual(
         contract.CustomProviderCredentialStatus.missing,
@@ -2002,17 +1630,14 @@ test "registry codec restores opaque slots and the durable default binding" {
     };
     try registry.markTesting(probe);
     try registry.completeTest(probe, true);
-    try registry.selectDefault(.{
-        .source_id = "custom-provider-0123456789abcdef0123456789abcdef",
-        .expected_provider_revision = 1,
-    }, "gemini-2.5-flash", 9);
+    try registry.rememberPreference(.{ .source_id = "custom-provider-0123456789abcdef0123456789abcdef", .model_id = "gemini-2.5-flash" }, 9);
 
     const encoded = try encodeAlloc(std.testing.allocator, &registry);
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "api-key") == null);
     var restored = try decode(std.testing.allocator, encoded);
     defer restored.deinit();
-    const binding = restored.defaultBinding() orelse
+    const binding = testReadyBinding(&restored) orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqualStrings(
         "custom-provider-0123456789abcdef0123456789abcdef",
@@ -2030,12 +1655,12 @@ test "registry codec restores opaque slots and the durable default binding" {
         contract.CustomModelTestStatus.testing,
         restored.views()[0].models[0].test_status,
     );
-    try std.testing.expect(restored.defaultBinding() != null);
+    try std.testing.expect(testReadyBinding(&restored) != null);
     try std.testing.expect(restored.reconcileInterruptedTests());
     const failed_retest = restored.views()[0];
     try std.testing.expectEqual(contract.CustomProviderState.ready, failed_retest.state);
     try std.testing.expectEqual(contract.CustomModelTestStatus.failed, failed_retest.models[0].test_status);
-    try std.testing.expect(restored.defaultBinding() != null);
+    try std.testing.expect(testReadyBinding(&restored) != null);
 }
 
 test "custom models use source-qualified atomic CRUD and exact probe tokens" {
@@ -2059,10 +1684,7 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
     };
     try registry.markTesting(model_a_probe);
     try registry.completeTest(model_a_probe, true);
-    try registry.selectDefault(.{
-        .source_id = "slot-multi",
-        .expected_provider_revision = 1,
-    }, "model-a", 10);
+    try registry.rememberPreference(.{ .source_id = "slot-multi", .model_id = "model-a" }, 10);
     try registry.markTesting(model_a_probe);
 
     try registry.addCustomModel(.{
@@ -2104,7 +1726,7 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
             .display_name = "Model B updated",
             .metadata = .{ .max_output_tokens = 32_000 },
         },
-    }, 6, 7, null);
+    }, 6, 7);
     view = registry.views()[0];
     try std.testing.expectEqual(contract.CustomModelTestStatus.failed, view.models[0].test_status);
     try std.testing.expect(view.models[0].ready);
@@ -2154,8 +1776,8 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
         .selection = .{ .source_id = "slot-multi", .model_id = "model-a" },
         .expected_provider_revision = 8,
         .expected_catalog_generation = 9,
-    }, 11, 12, 13);
-    try std.testing.expect(registry.defaultSelection() == null);
+    }, 11, 12);
+    try std.testing.expect(registry.defaultSelection() != null);
     view = registry.views()[0];
     try std.testing.expectEqual(@as(usize, 2), view.models.len);
     try std.testing.expectEqual(@as(u64, 2), view.source_generation);
@@ -2278,4 +1900,13 @@ test "image declarations do not admit a Custom model before readiness proof" {
     try std.testing.expectEqual(@as(usize, 1), declarations.len);
     try std.testing.expectEqualStrings("vision-model", declarations[0].model);
     try std.testing.expect(declarations[0].supported);
+}
+
+fn testReadyBinding(registry: *Registry) ?Registry.ModelBinding {
+    const target = registry.defaultSelection() orelse return null;
+    for (registry.views()) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) {
+        for (provider.models) |model| if (std.mem.eql(u8, model.id, target.model_id) and model.ready)
+            return registry.probeBinding(.{ .model = target, .expected_provider_revision = provider.provider_revision, .expected_source_generation = provider.source_generation, .expected_catalog_generation = provider.catalog_generation }) catch null;
+    };
+    return null;
 }

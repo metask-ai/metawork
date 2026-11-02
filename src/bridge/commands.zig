@@ -76,8 +76,6 @@ pub const account_refresh_summary = "metawork.account.refreshSummary";
 pub const account_open_recharge = "metawork.account.openRecharge";
 pub const models_refresh_catalog = "metawork.models.refreshCatalog";
 pub const models_reset_store = "metawork.models.resetStore";
-pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
-pub const models_select_default = "metawork.models.selectDefault";
 pub const custom_provider_create = "metawork.models.customProviders.create";
 pub const builtin_provider_create = "metawork.models.builtinProviders.create";
 pub const builtin_provider_update_base_url = "metawork.models.builtinProviders.updateBaseUrl";
@@ -187,8 +185,6 @@ pub const product = [_][]const u8{
     account_open_recharge,
     models_refresh_catalog,
     models_reset_store,
-    models_configure_metask_selection,
-    models_select_default,
     custom_provider_create,
     builtin_provider_create,
     builtin_provider_update_base_url,

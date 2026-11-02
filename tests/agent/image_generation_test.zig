@@ -1245,14 +1245,7 @@ const image_product = struct {
         };
         candidate.deinit();
         try std.testing.expect(control.completeCustomModelTest(command, true).accepted);
-        const view = control.modelsView();
-        const ready = view.custom_providers[0];
-        try std.testing.expect(control.selectModelsDefault(.{
-            .selection = .{ .source_id = id, .model_id = model },
-            .expected_selection_revision = view.selection_revision,
-            .expected_source_generation = ready.source_generation,
-            .expected_catalog_generation = ready.catalog_generation,
-        }).accepted);
+        try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = id, .model_id = model }).accepted);
     }
 
     fn finish(control: *control_api.Runtime, task_id: u64, id: u64, stop_effects: ?*Effects) !void {
@@ -1378,7 +1371,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     control.setImageRunPreparation(coordinator.imageRunPreparation());
-    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual });
+    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual }, try image_product.control_api.TestSupport.fixtureModelSelection(&control));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
@@ -1389,7 +1382,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         defer access.deinit();
         try expectImageDeclaration(h.runtime, access.session.?, large_read, .host);
     }
-    try std.testing.expectEqual(.custom_provider, control.execution_state.activeSource().?);
+    try std.testing.expect(std.mem.startsWith(u8, control.task_runtime.find(task_id).?.runtime.executionConst().?.provider_id, "custom_provider:"));
     const projection_epoch = control.projectionSecurityEpoch();
     const first_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
     if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
@@ -1424,7 +1417,6 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         account.commit(&rotated);
         try std.testing.expect(account.dispatchCommitted(&rotated) == null);
         control.commitAccountFactNoFail(account.preparedFact(&rotated));
-        control.finishAccountCommitNoFail();
         coordinator.authorizationChanged();
         for (0..5000) |_| {
             coordinator.drain();
@@ -1908,7 +1900,7 @@ fn canonicalProductDelivery(content: []const u8, checked: ?CheckedXlsxReport, st
     try image_product.configureDialogue(&control, h.fixture.provider_endpoint, false);
     var delivery: ProductDeliveryEffect = .{ .reader = .{ .root = h.root, .main_thread_id = std.Thread.getCurrentId() } };
     control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
-    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual });
+    const task_id = try control.createTask(.{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual }, try image_product.control_api.TestSupport.fixtureModelSelection(&control));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.catalogProjection(task_id).?.availability != .loading) break;
@@ -1998,7 +1990,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     control.setFileDeliveryPreparation(.{ .context = &delivery, .prepare_fn = ProductDeliveryEffect.prepare });
     const input: image_product.control_api.TaskCreateInput = .{ .workspace_root = h.root, .trust = .{ .explicitly_trusted = {} }, .approval_mode = .manual };
     const initial_search = control.task_runtime.searchRevision();
-    const first = try control.createTask(input);
+    const first = try control.createTask(input, try image_product.control_api.TestSupport.fixtureModelSelection(&control));
     try std.testing.expect(control.task_runtime.searchRevision() > initial_search);
     for (0..5000) |_| {
         control.syncLifecycle();
@@ -2020,7 +2012,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     const receipt = task.durable.runs[0].?.outputs[0].?.id;
     const old_epoch = task.durable.binding_epoch;
     const before_close_search = control.task_runtime.searchRevision();
-    try std.testing.expectError(error.SessionReleasing, control.createTask(input));
+    try std.testing.expectError(error.SessionReleasing, control.createTask(input, try image_product.control_api.TestSupport.fixtureModelSelection(&control)));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (task.runtime.attachment == .detached) break;
@@ -2028,7 +2020,7 @@ test "Session pressure canonical Product preserves checkpoint history with one l
     } else return error.TestUnexpectedResult;
     try std.testing.expect(task.runtime.parked_capabilities != null);
     try std.testing.expectEqual(before_close_search, control.task_runtime.searchRevision());
-    const second = try control.createTask(input);
+    const second = try control.createTask(input, try image_product.control_api.TestSupport.fixtureModelSelection(&control));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (control.task_runtime.catalogProjection(second).?.availability != .loading) break;

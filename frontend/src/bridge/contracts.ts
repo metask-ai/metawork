@@ -213,6 +213,7 @@ export type AccountView = {
 };
 export type ModelsErrorCode =
   | "none"
+  | "preference_not_saved"
   | "authorization_unavailable"
   | "persistence_unavailable"
   | "catalog_unavailable"
@@ -242,8 +243,6 @@ export type ModelsView = {
     errorCode: ModelsErrorCode;
     safeDiagnostic: string;
   }[];
-  metaskSelection: ModelRef | null;
-  metaskSelectionRevision: string;
   defaultSelection: ModelRef | null;
   selectionRevision: string;
   operation: "idle" | "refreshing_catalog";

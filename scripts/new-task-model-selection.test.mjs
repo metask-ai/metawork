@@ -68,7 +68,6 @@ function metaskModels() {
         ],
       },
     ],
-    metaskSelection: { sourceId: "metask", modelId: "model-1" },
     defaultSelection: { sourceId: "metask", modelId: "model-1" },
     customProviders: [],
   };
@@ -246,7 +245,6 @@ test("a ready custom source can select another model for only the new Task", () 
     availability: "ready",
     persistenceHealth: "ready",
     providers: [],
-    metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "custom-1" },
     customProviders: [
       {

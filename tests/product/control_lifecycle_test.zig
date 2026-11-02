@@ -22,6 +22,52 @@ const installControlExecutionGeneration = fixture.installProductControlExecution
 const task_state = product_task.testing.state_module;
 const task_execution = product_task.testing.execution_module;
 
+test "only confirmed interactive Task choices remember a preference without replacing execution" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1 }, productControlConfiguration());
+    defer workbench.deinit();
+    var vault: TaskModelsVault = .{};
+    try workbench.startCustomProviders(root, vault.port());
+    defer workbench.stopCustomProviders();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    product_control.TestSupport.clearModelPreference(&workbench);
+    var input = productControlTaskInput();
+    input.workspace_root = root;
+    input.trust = .explicitly_trusted;
+    const workspace = try workbench.openWorkspace(input);
+    const epoch = try workbench.workspaceEpoch(workspace);
+    const first = try workbench.createTaskInWorkspace(workspace, epoch, newTaskModelSelectionInput(&workbench, "fixture-model"), null, null, .{ .interactive = .manual });
+    try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
+    const second = try workbench.createTaskInWorkspace(workspace, epoch, newTaskModelSelectionInput(&workbench, "fixture-model-2"), null, null, .{ .noninteractive = .approval_required });
+    try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
+    const source = workbench.modelsView().providers[0].source_generation;
+    const catalog = workbench.modelsView().providers[0].catalog_generation;
+    const security = workbench.projectionSecurityEpoch();
+    const execution = workbench.executionGeneration();
+    _ = try workbench.selectTaskModel(first, taskModelSelectionInput(&workbench, 1, "fixture-model-2"));
+    try std.testing.expectEqualStrings("fixture-model-2", workbench.modelsView().default_selection.?.model_id);
+    try std.testing.expectEqualStrings("fixture-model", workbench.task_runtime.find(first).?.runtime.executionConst().?.model);
+    try std.testing.expectEqualStrings("fixture-model-2", workbench.task_runtime.find(second).?.runtime.executionConst().?.model);
+    try std.testing.expectEqual(source, workbench.modelsView().providers[0].source_generation);
+    try std.testing.expectEqual(catalog, workbench.modelsView().providers[0].catalog_generation);
+    try std.testing.expectEqual(security, workbench.projectionSecurityEpoch());
+    try std.testing.expectEqual(execution, workbench.executionGeneration());
+    // A pending refresh cannot veto memory of the already confirmed choice.
+    _ = workbench.prepareMetaskCatalogRefresh("account-1", 17);
+    try std.testing.expect(workbench.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
+    try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
+}
+
 test "ordinary Task creation does not retry MCP errors on null Selection or generic Core failure" {
     for ([_]struct { status: u32, failure: anyerror }{
         .{ .status = wire.STATUS_MCP_NOT_REFRESHED, .failure = error.McpNotRefreshed },
@@ -43,9 +89,9 @@ test "ordinary Task creation does not retry MCP errors on null Selection or gene
         defer control.deinit();
         try installControlExecution(&control);
         fake_core.forced_session_create_status = case.status;
-        try std.testing.expectError(case.failure, control.createTask(productControlTaskInput()));
+        try std.testing.expectError(case.failure, control.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&control)));
         try std.testing.expectEqual(@as(usize, 0), fake_core.session_created);
-        const task = try control.createTask(productControlTaskInput());
+        const task = try control.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&control));
         try std.testing.expectEqual(@as(u64, 1), task);
         try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
     }
@@ -108,9 +154,9 @@ test "history capacity creates one hundred Tasks with one live Session" {
         for (0..100) |_| {
             for (0..5000) |_| {
                 const created = if (automatic)
-                    control.createTaskForWorkspace(.automatic, control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .manual })
+                    control.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&control), null, null, .{ .interactive = .manual })
                 else
-                    control.createTask(input);
+                    control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
                 if (created) |id| {
                     try waitInitialTaskCatalog(&control, id);
                     break;
@@ -187,7 +233,7 @@ const ReviewScenario = struct {
         try installControlExecution(&self.control);
         var input = productControlTaskInput();
         input.approval_mode = .manual;
-        self.task_id = try self.control.createTask(input);
+        self.task_id = try self.control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&self.control));
         // Task catalog readiness does not prove Workspace discovery has
         // vacated the one-slot executor queue. Finish both setup operations
         // before this fixture starts the Run whose approval it exercises.
@@ -240,13 +286,13 @@ test "approval modes start with automatic review and restore the global choice w
     try std.testing.expectEqualStrings("auto_review", permissions.get("defaultMode").?.string);
     try std.testing.expectEqualStrings("approval_required", permissions.get("defaultProfile").?.string);
     var input = productControlTaskInput();
-    const reviewed = try control.createTask(input);
+    const reviewed = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
     try std.testing.expectEqual(.approval_required, try control.taskPermissionProfile(reviewed));
-    const inherited = try control.createTask(productControlTaskInput());
+    const inherited = try control.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&control));
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(inherited));
     input.approval_mode = .full_access;
-    const full = try control.createTask(input);
+    const full = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     try std.testing.expectEqual(.full_access, control.defaultApprovalMode());
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
     var restart = productControlConfiguration();
@@ -278,7 +324,7 @@ test "approval modes restore each saved choice instead of applying the fresh-ins
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = mode;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         try std.testing.expectEqual(mode, control.defaultApprovalMode());
         var restart = productControlConfiguration();
         restart.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
@@ -384,7 +430,7 @@ test "Control permission reviewer keeps repeated manual and full-access requests
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = mode;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const run_id = try runPreparedTask(&control, task_id, .{ .text = "Inspect two local operations" });
         try waitControlSnapshot(&control, "\"pendingUi\":{\"requestId\":\"1\"");
         try control.respondUi(task_id, run_id, 1, .{ .permission = .allow_once });
@@ -424,7 +470,7 @@ test "Control permission reviewer cannot preempt a valid manual command with a q
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const run_id = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         const request_id = control.task_runtime.find(task_id).?.runtime.pending_ui_request_id;
@@ -469,7 +515,7 @@ test "Control permission reviewer survives stale identities and unavailable manu
     try installControlExecution(&control);
     var input = productControlTaskInput();
     input.approval_mode = .auto_review;
-    const task_id = try control.createTask(input);
+    const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const run_id = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
     try transport.awaitEntered(&control);
     const task = control.task_runtime.find(task_id).?;
@@ -539,7 +585,7 @@ test "Control permission reviewer commits once-only decisions and projects audit
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try transport.awaitEntered(&control);
         try waitControlSnapshot(&control, "\"permissionReviewState\":\"reviewing\"");
@@ -598,7 +644,7 @@ test "Control permission reviewer scrubs decoded arguments and leaves MCP and Ho
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Inspect the local operation" });
         if (case == 0) {
             try transport.awaitEntered(&control);
@@ -633,7 +679,7 @@ test "Control permission reviewer cancellation survives manual response delete a
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         switch (case) {
@@ -682,7 +728,7 @@ test "Control permission reviewer requires confirmed persistence and never retri
         try installControlExecution(&control);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Perform the bounded operation" });
         try transport.awaitEntered(&control);
         persistence.result = failure;
@@ -716,7 +762,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
         fake_core.setNextPlan(.ui_wait);
         var input = productControlTaskInput();
         input.approval_mode = .auto_review;
-        id.* = try control.createTask(input);
+        id.* = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, id.*, .{ .text = "Perform the bounded operation" });
         for (0..1000) |_| {
             control.syncLifecycle();
@@ -1478,7 +1524,7 @@ test "Saved Workspace selection restores usable Manual roots without a picker" {
         try std.testing.expect(probe.root_checks.load(.acquire) > 0);
         try std.testing.expect(probe.queries.load(.acquire) > 0);
         try expectWorkspaceSkillProjection(&restored, workspace_id, true);
-        const task_id = try restored.createTaskInWorkspace(workspace_id, authority.epoch, restored.executionGeneration(), restored.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .manual });
+        const task_id = try restored.createTaskInWorkspace(workspace_id, authority.epoch, try product_control.TestSupport.fixtureModelSelection(&restored), null, null, .{ .interactive = .manual });
         try std.testing.expectEqual(workspace_id, try restored.taskWorkspaceId(task_id));
     }
 }
@@ -1565,7 +1611,7 @@ test "Automatic catalog uses personal discovery after creation and waits for Ses
             if (!restore_workspace and !recover_sources) probe.hold_queries.store(true, .release);
             try installControlExecution(&workbench);
             if (!restore_workspace) {
-                task_id = try workbench.createTaskForWorkspace(.automatic, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+                task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
                 if (!recover_sources) {
                     for (0..5000) |_| {
                         if (probe.queries.load(.acquire) > 0) break;
@@ -1644,7 +1690,7 @@ test "Automatic deletion retains Workspace authority until the catalog worker dr
     probe.hold_queries.store(true, .release);
     defer probe.hold_queries.store(false, .release);
     try installControlExecution(&workbench);
-    const id = try workbench.createTaskForWorkspace(.automatic, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .full_access });
+    const id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = .full_access });
     for (0..5000) |_| {
         if (probe.queries.load(.acquire) > 0) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -1713,7 +1759,7 @@ test "Skill source authorization returns after close failures and checkpoint int
         try settleWorkspaceSkillQueries(&workbench, workspace_id);
         try probe.expectQueries(1);
         const epoch = try workbench.workspaceEpoch(workspace_id);
-        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
         if (immediate_failure) {
             // Close admission succeeds, but Session close must not start until
             // the exporting checkpoint has settled and released its lease.
@@ -1771,7 +1817,7 @@ fn taskModelSelectionInput(
     return .{
         .expected_selection_revision = expected_revision,
         .target = .{
-            .source_id = models.metask_selection.?.source_id,
+            .source_id = models_contract.metask_source_id,
             .model_id = target_model,
         },
         .expected_source_generation = models.providers[0].source_generation,
@@ -1786,7 +1832,7 @@ fn newTaskModelSelectionInput(
     const models = workbench.modelsView();
     return .{
         .target = .{
-            .source_id = models.metask_selection.?.source_id,
+            .source_id = models_contract.metask_source_id,
             .model_id = target_model,
         },
         .expected_source_generation = models.providers[0].source_generation,
@@ -1824,61 +1870,24 @@ test "new Task model selection binds only the created Task and rejects stale aut
     installTwoModelCatalog(&workbench);
     const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
-    const admission = workbench.newTaskAdmissionView();
     var stale = newTaskModelSelectionInput(&workbench, "fixture-model-2");
     stale.expected_catalog_generation += 1;
     try std.testing.expectError(
         error.ModelSelectionChanged,
-        workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            admission.active_generation,
-            admission.active_selection_revision,
-            stale,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskInWorkspace(workspace_id, workspace_epoch, stale, null, null, .{ .interactive = null }),
     );
     var stale_source = newTaskModelSelectionInput(&workbench, "fixture-model-2");
     stale_source.expected_source_generation += 1;
     try std.testing.expectError(
         error.ModelSelectionChanged,
-        workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            admission.active_generation,
-            admission.active_selection_revision,
-            stale_source,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskInWorkspace(workspace_id, workspace_epoch, stale_source, null, null, .{ .interactive = null }),
     );
     try std.testing.expectError(
         error.ModelSelectionChanged,
-        workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            admission.active_generation,
-            admission.active_selection_revision,
-            newTaskModelSelectionInput(&workbench, "missing-model"),
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskInWorkspace(workspace_id, workspace_epoch, newTaskModelSelectionInput(&workbench, "missing-model"), null, null, .{ .interactive = null }),
     );
 
-    const task_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        workspace_epoch,
-        admission.active_generation,
-        admission.active_selection_revision,
-        newTaskModelSelectionInput(&workbench, "fixture-model-2"),
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, workspace_epoch, newTaskModelSelectionInput(&workbench, "fixture-model-2"), null, null, .{ .interactive = null });
     const identity = try workbench.taskExecutionIdentity(task_id);
     try std.testing.expectEqualStrings("fixture-model-2", identity.model);
     const intent = workbench.task_runtime.findConst(task_id).?.durable.model_intent.?;
@@ -1889,10 +1898,6 @@ test "new Task model selection binds only the created Task and rejects stale aut
     try std.testing.expectEqualStrings(
         "fixture-model",
         workbench.modelsView().default_selection.?.model_id,
-    );
-    try std.testing.expectEqualStrings(
-        "fixture-model",
-        workbench.newTaskAdmissionView().active_model_ref.?.model_id,
     );
     const run_id = try runPreparedTask(&workbench, task_id, .{ .text = "Use the model selected before the first send" });
     try waitControlSnapshot(&workbench, "\"phase\":\"completed\"");
@@ -1923,15 +1928,15 @@ test "new Task model selection is independent of default execution admission" {
     const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     const epoch = try workbench.workspaceEpoch(workspace_id);
     const selection = newTaskModelSelectionInput(&workbench, "fixture-model-2");
-    try workbench.beginDefaultExecutionReplacement();
-    defer workbench.endExecutionReplacementNoFail();
-    try std.testing.expect(!workbench.newTaskAdmissionView().available);
-    const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 0, 0, selection, null, null, .{ .interactive = null });
+    product_control.TestSupport.clearModelPreference(&workbench);
+    try std.testing.expect(workbench.newTaskAdmissionView().available);
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, selection, null, null, .{ .interactive = null });
     const identity = try workbench.taskExecutionIdentity(task_id);
     try std.testing.expectEqualStrings("fixture-model-2", identity.model);
     try std.testing.expect(identity.generation != 0);
     try expectFakeSessionModel(0, "fixture-model-2");
-    try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
+    try std.testing.expect(workbench.modelsView().default_selection == null);
+    try std.testing.expectEqual(models_contract.ModelsError.preference_not_saved, workbench.modelsView().error_code);
     const execution = workbench.task_runtime.findConst(task_id).?.runtime.executionConst().?;
     try std.testing.expectEqual(models_contract.Protocol.anthropic_messages, execution.protocol);
     try std.testing.expectEqualStrings(models_contract.metask_anthropic_messages_url, execution.base_url);
@@ -2027,9 +2032,9 @@ test "new Task model selection uses the full custom connection with or without a
         if (!has_default) {
             try std.testing.expect(workbench.clearCustomProviderDefault().accepted);
             try std.testing.expect(workbench.modelsView().default_selection == null);
-            try std.testing.expect(!workbench.newTaskAdmissionView().available);
+            try std.testing.expect(workbench.newTaskAdmissionView().available);
         }
-        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 0, 0, selection, null, null, .{ .interactive = null });
+        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, selection, null, null, .{ .interactive = null });
         const task = workbench.task_runtime.findConst(task_id).?;
         const execution = task.runtime.executionConst().?;
         try std.testing.expectEqualStrings("custom_provider:" ++ Vault.slot, execution.provider_id);
@@ -2040,7 +2045,7 @@ test "new Task model selection uses the full custom connection with or without a
         try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
         try std.testing.expectEqual(@as(?u32, wire.PROVIDER_OPENAI), fake_core.last_created_provider_kind_code);
         try std.testing.expectEqual(@as(?u32, wire.OPENAI_PROTOCOL_RESPONSES), fake_core.last_created_protocol_kind_code);
-        if (has_default) try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
+        try std.testing.expectEqualStrings(TaskModelsVault.slot, workbench.modelsView().default_selection.?.source_id);
     }
 }
 
@@ -2147,7 +2152,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         workspace_input.trust = .explicitly_trusted;
         const workspace = try workbench.openWorkspace(workspace_input);
         fake_core.setNextPlan(.controlled);
-        const task_id = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), workbench.newTaskAdmissionView().active_generation, workbench.newTaskAdmissionView().active_selection_revision, .{
+        const task_id = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), .{
             .target = initial.model,
             .expected_source_generation = initial.expected_source_generation,
             .expected_catalog_generation = initial.expected_catalog_generation,
@@ -2225,7 +2230,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         try std.testing.expectEqual(if (replace_credential) models_contract.Protocol.openai_responses else models_contract.Protocol.gemini_native, execution.protocol);
         try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
         try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
-        try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
+        try std.testing.expectEqualStrings(TaskModelsVault.slot, workbench.modelsView().default_selection.?.source_id);
         try std.testing.expectEqual(@as(u64, 2), try runPreparedTask(&workbench, task_id, .{ .text = "apply the explicitly selected new authority" }));
         try std.testing.expectEqual(execution.protocol, task.durable.runs[1].?.execution_protocol);
     }
@@ -2309,7 +2314,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const id = try workbench.createTask(input);
+        const id = try workbench.createTask(input, try product_control.TestSupport.fixtureModelSelection(&workbench));
         const task = workbench.task_runtime.find(id).?;
         const old_epoch = task.durable.binding_epoch;
         const old_generation = task.durable.execution_generation;
@@ -2574,7 +2579,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         try std.testing.expectEqualStrings("fixture-model", task.durable.runs[0].?.execution_model);
         try std.testing.expectEqualStrings("other-model", task.durable.model_intent.?.model_id);
         try std.testing.expectEqual(revision, task.durable.model_intent.?.revision);
-        try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
+        try std.testing.expectEqualStrings(TaskModelsVault.slot, workbench.modelsView().default_selection.?.source_id);
         const execution = task.runtime.executionConst().?;
         if (!reject_target and task.durable.binding_epoch == old_epoch) std.debug.print("unexpected rollback: failure={s} model={s} exports={d} restores={d}\n", .{
             if (task.runtime.last_restore_failure) |reason| @tagName(reason) else "none", task.durable.execution_model, fake_core.checkpoint_exports, fake_core.checkpoint_restores,
@@ -2692,7 +2697,7 @@ test "Task model rebind candidate close releases an earlier shared writer waiter
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
     input.approval_mode = .manual;
-    const waiter_id = try workbench.createTask(input);
+    const waiter_id = try workbench.createTask(input, try product_control.TestSupport.fixtureModelSelection(&workbench));
     const waiter = workbench.task_runtime.find(waiter_id).?;
     try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&workbench, waiter_id));
     for (0..5000) |_| {
@@ -2700,7 +2705,7 @@ test "Task model rebind candidate close releases an earlier shared writer waiter
         if (waiter.runtime.attachment == .detached and waiter.runtime.close_thread == null) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.WaiterDidNotDetach;
-    const id = try workbench.createTask(input);
+    const id = try workbench.createTask(input, try product_control.TestSupport.fixtureModelSelection(&workbench));
     const task = workbench.task_runtime.find(id).?;
     _ = try runPreparedTask(&workbench, id, .{ .text = "Preserve this context while changing connection." });
     try waitCheckpointRecord(&workbench, &barrier.persistence);
@@ -2870,7 +2875,7 @@ test "Task model rebind shutdown settles completed and running close workers wit
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const id = try workbench.createTask(input);
+        const id = try workbench.createTask(input, try product_control.TestSupport.fixtureModelSelection(&workbench));
         const task = workbench.task_runtime.find(id).?;
         const epoch = task.durable.binding_epoch;
         _ = try runPreparedTask(&workbench, id, .{ .text = "Keep this original context." });
@@ -2974,7 +2979,7 @@ test "detached Task restores its committed target across restart without a globa
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const id = try first.createTask(input);
+        const id = try first.createTask(input, try product_control.TestSupport.fixtureModelSelection(&first));
         if (has_history) {
             _ = try runPreparedTask(&first, id, .{ .text = "original context survives a different protocol" });
             try waitCheckpointRecord(&first, &persistence);
@@ -3008,7 +3013,7 @@ test "detached Task restores its committed target across restart without a globa
         _ = try configureTaskRebindTarget(&restored);
         try std.testing.expect(restored.clearCustomProviderDefault().accepted);
         try std.testing.expect(restored.modelsView().default_selection == null);
-        try std.testing.expect(!restored.newTaskAdmissionView().available);
+        try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
         const recovered = restored.task_runtime.findConst(id).?;
         try std.testing.expectEqual(selected_revision, recovered.durable.model_intent.?.revision);
@@ -3092,7 +3097,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
     input.approval_mode = .manual;
-    const id = try first.createTask(input);
+    const id = try first.createTask(input, try product_control.TestSupport.fixtureModelSelection(&first));
     const task = first.task_runtime.find(id).?;
     const workspace_id = task.durable.workspace_id;
     _ = try runPreparedTask(&first, id, .{ .text = "original context survives the crash" });
@@ -3321,7 +3326,7 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
-    _ = try workbench.createTask(productControlTaskInput());
+    _ = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
 
     try std.testing.expect(fake_core.product_allowlist_seen);
 }
@@ -3357,7 +3362,7 @@ test "Task permission profile is immutable and successful interactive create rem
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const default_task = try workbench.createTask(productControlTaskInput());
+    const default_task = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
         try workbench.taskPermissionProfile(default_task),
@@ -3375,7 +3380,7 @@ test "Task permission profile is immutable and successful interactive create rem
 
     var full_access_input = productControlTaskInput();
     full_access_input.approval_mode = .full_access;
-    const explicit_full_access = try workbench.createTask(full_access_input);
+    const explicit_full_access = try workbench.createTask(full_access_input, try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try workbench.taskPermissionProfile(explicit_full_access),
@@ -3388,7 +3393,7 @@ test "Task permission profile is immutable and successful interactive create rem
         product_control.PermissionProfile.full_access,
         workbench.defaultPermissionProfile(),
     );
-    const inherited_full_access = try workbench.createTask(productControlTaskInput());
+    const inherited_full_access = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try workbench.taskPermissionProfile(inherited_full_access),
@@ -3402,7 +3407,7 @@ test "Task permission profile is immutable and successful interactive create rem
 
     var explicit_input = productControlTaskInput();
     explicit_input.approval_mode = .manual;
-    const explicit_task = try workbench.createTask(explicit_input);
+    const explicit_task = try workbench.createTask(explicit_input, try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
         try workbench.taskPermissionProfile(explicit_task),
@@ -3421,7 +3426,7 @@ test "Task permission profile is immutable and successful interactive create rem
     var rejected_input = productControlTaskInput();
     rejected_input.approval_mode = .full_access;
     task_persistence.result = .failed;
-    const degraded_task = try workbench.createTask(rejected_input);
+    const degraded_task = try workbench.createTask(rejected_input, try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try workbench.taskPermissionProfile(degraded_task),
@@ -3435,7 +3440,7 @@ test "Task permission profile is immutable and successful interactive create rem
     capacity_rejected_input.approval_mode = .manual;
     try std.testing.expectError(
         error.SessionCapacity,
-        workbench.createTask(capacity_rejected_input),
+        workbench.createTask(capacity_rejected_input, try product_control.TestSupport.fixtureModelSelection(&workbench)),
     );
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
@@ -3488,7 +3493,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     var workbench_initialized = true;
     defer if (workbench_initialized) workbench.deinit();
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "persist checkpoint" });
     try waitCheckpointRecord(&workbench, &persistence);
 
@@ -3723,16 +3728,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .expected_selection_revision = catalog.selection_revision.?,
     });
     catalog = try first.workspaceCatalog(workspace_id);
-    const task_id = try first.createTaskInWorkspace(
-        workspace_id,
-        try first.workspaceEpoch(workspace_id),
-        1,
-        first.newTaskAdmissionView().active_selection_revision,
-        null,
-        catalog.revision,
-        catalog.selection_revision,
-        .{ .interactive = .full_access },
-    );
+    const task_id = try first.createTaskInWorkspace(workspace_id, try first.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&first), catalog.revision, catalog.selection_revision, .{ .interactive = .full_access });
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try first.taskPermissionProfile(task_id),
@@ -3832,11 +3828,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         try restored.taskBindingEpoch(task_id),
     );
     fake_core.waitUntilRestoreEntered();
-    var execution_replacement_pending = false;
-    defer if (execution_replacement_pending)
-        restored.endExecutionReplacementNoFail();
-    try restored.beginExecutionReplacement();
-    execution_replacement_pending = true;
+    installTwoModelCatalog(&restored);
     fake_core.releaseControlledRestore();
     try waitTaskSnapshot(
         &restored,
@@ -3863,8 +3855,6 @@ test "restart recovery revalidates live authority and continues the same Convers
         sessions_destroyed_before_execution_replacement + 1,
         sessions_destroyed_after_execution_replacement,
     );
-    restored.endExecutionReplacementNoFail();
-    execution_replacement_pending = false;
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -4211,15 +4201,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecutionGeneration(&first, 1);
-    const task_id = try first.createTaskForWorkspace(
-        .automatic,
-        1,
-        first.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try first.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&first), null, null, .{ .interactive = null });
     try waitInitialTaskCatalog(&first, task_id);
     _ = try runPreparedTask(&first, task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
@@ -4358,7 +4340,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
-    try std.testing.expectEqual(@as(u64, 2), try continued.taskBindingEpoch(task_id));
+    try std.testing.expectEqual(@as(u64, 3), try continued.taskBindingEpoch(task_id));
     try waitInitialTaskCatalog(&continued, task_id);
     try std.testing.expectEqual(
         product_control.CatalogAvailability.unavailable,
@@ -4430,7 +4412,7 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "cancel checkpoint export" });
     fake_core.waitCheckpointExportEntered();
     // Product terminal publication must not wait for the same executor job's
@@ -4485,7 +4467,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     var initialized = true;
     defer if (initialized) workbench.deinit();
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "descriptor commit fails" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
@@ -4596,7 +4578,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     var initialized = true;
     defer if (initialized) workbench.deinit();
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "descriptor outcome is unknown" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
@@ -4736,7 +4718,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const task_id = try first.createTask(productControlTaskInput());
+    const task_id = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     _ = try runPreparedTask(&first, task_id, .{ .text = "prepare recovery queue failure" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
@@ -4784,8 +4766,8 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     defer restored.deinit();
     try installControlExecution(&restored);
     const workspace_id = try restored.openWorkspace(productControlTaskInput());
-    const blocker_one = try restored.createTask(productControlTaskInput());
-    const blocker_two = try restored.createTask(productControlTaskInput());
+    const blocker_one = try restored.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&restored));
+    const blocker_two = try restored.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&restored));
     try restored.renameTask(blocker_one, "restore blocker one");
     try restored.renameTask(blocker_two, "restore blocker two");
     // Begin the second command's catalog preparation while the worker is free.
@@ -4887,7 +4869,7 @@ test "terminal drain candidate restarts without a stale active operation" {
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const task_id = try first.createTask(productControlTaskInput());
+    const task_id = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     _ = try runPreparedTask(&first, task_id, .{ .text = "persist terminal boundary" });
     const run = &first.task_runtime.tasks[0].?.durable.runs[0].?;
     for (0..10_000) |_| {
@@ -5005,7 +4987,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     ) != null);
     try checkpoint_store.verify(identity);
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "Continue without saved history" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeAggregateFixture(&snapshot_storage);
@@ -5049,7 +5031,7 @@ test "unavailable checkpoint store does not close Task admission" {
         workbench.checkpointStoreHealth(),
     );
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "checkpoint store unavailable" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
@@ -5170,7 +5152,7 @@ const TestScheduleSupport = struct {
     }
 };
 
-test "retired Schedule data leaves Account ready and New Task admission unavailable" {
+test "retired Schedule data starts empty without locking interactive Task creation" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -5202,75 +5184,14 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     );
     defer workbench.deinit();
 
-    try product_control.TestSupport.prepareMetaskDefault(&workbench, 1);
-    try workbench.beginExecutionReplacement();
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            models_contract.metask_anthropic_messages_url,
-        ),
-        1,
-        try std.testing.allocator.dupe(u8, "fixture-secret"),
-        "",
-    );
-    var execution_owned = true;
-    defer if (execution_owned) execution.deinit();
-    try std.testing.expectError(
-        error.ScheduledTaskPersistenceUnavailable,
-        workbench.prepareExecutionInstall(execution.input()),
-    );
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
-
+    try installControlExecution(&workbench);
     try account_contract.validateView(workbench.accountView());
-    const admission = workbench.newTaskAdmissionView();
-    try std.testing.expect(admission.state == .unavailable);
-    try std.testing.expect(admission.active_model_ref == null);
-    try std.testing.expect(!admission.available);
-
-    var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        snapshot,
-        "\"scheduledTaskPersistenceHealth\":\"corrupt\"",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        snapshot,
-        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeProtocol\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        snapshot,
-        "\"scheduledTaskRecoveryAvailable\":true",
-    ) != null);
-
-    try std.testing.expectEqual(
-        product_control.PersistenceRecoveryOutcome.recovered,
-        workbench.recoverScheduledTaskStore(workbench.currentRevision()),
-    );
-    try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
-    const recovered_snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        recovered_snapshot,
-        "\"scheduledTaskPersistenceHealth\":\"ready\",\"scheduledTaskRecoveryAvailable\":false",
-    ) != null);
-    try workbench.beginExecutionReplacement();
-    try workbench.prepareExecutionInstall(execution.input());
-    workbench.installExecutionNoFail(&execution);
-    workbench.execution_state.recordDefaultAuthorityNoFail(
-        workbench.custom_providers.defaultAuthority().?,
-    );
-    execution_owned = false;
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
     try std.testing.expect(workbench.newTaskAdmissionView().available);
+    try std.testing.expectEqual(product_control.SchedulePersistenceHealth.ready, workbench.schedule.persistenceHealth());
+    try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    try std.testing.expect(task_id != 0);
+    for (workbench.schedule.store.items) |item| try std.testing.expect(item == null);
 }
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {
@@ -5326,7 +5247,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Permission boundary",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Perform an operation requiring permission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -5429,7 +5350,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Required durability",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Do not run without durable Task history",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -5503,7 +5424,7 @@ test "scheduled durable admission failure does not block an interactive Product 
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Durable automatic run",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Run only after durable admission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -5522,15 +5443,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, rejected, "\"tasks\":[]") != null);
 
-    const task_id = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "Continue interactively" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeAggregateFixture(&snapshot_storage);
@@ -5599,7 +5512,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Unknown durable admission",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Do not enqueue an uncertain admission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -5744,15 +5657,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "Remain accepted" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
@@ -5825,15 +5730,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         }
     };
     var acceptance = Acceptance{};
-    const task_id = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
         .text = "Compare these",
         .attachment_ids = &ids,
@@ -5989,7 +5886,7 @@ test "new accepted input does not inherit an abandoned direct Run preparation" {
     try installControlExecution(&workbench);
     const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     _ = try waitCatalogReady(&workbench, workspace_id);
-    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     var probe: WorkspaceSkillQueryProbe = .{};
     probe.attach(&workbench);
     defer probe.hold_queries.store(false, .release);
@@ -6071,16 +5968,7 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
         "review",
         catalog.skills[0].invocation_name,
     );
-    const task_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        try workbench.workspaceEpoch(workspace_id),
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        catalog.revision,
-        catalog.selection_revision,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), catalog.revision, catalog.selection_revision, .{ .interactive = null });
     const task_catalog = try workbench.taskCatalog(task_id);
     try std.testing.expectEqualStrings(catalog.revision, task_catalog.revision);
     var probe: WorkspaceSkillQueryProbe = .{};
@@ -6268,18 +6156,10 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
     const epoch = before[0].epoch;
 
     persistence.result = .failed;
-    const task_id = try workbench.createTaskForWorkspace(
-        .{ .manual = .{
-            .workspace_id = workspace_id,
-            .expected_epoch = epoch,
-        } },
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskForWorkspace(.{ .manual = .{
+        .workspace_id = workspace_id,
+        .expected_epoch = epoch,
+    } }, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const after = try workbench.copyWorkspaceProjections(&projection_storage);
     try std.testing.expect(after[0].recent_order > recent_order);
     var snapshot_storage: [128 * 1024]u8 = undefined;
@@ -6312,7 +6192,7 @@ test "Task model selection during a Run persists intent for the next explicit ad
     defer workbench.deinit();
     try installControlExecution(&workbench);
     installTwoModelCatalog(&workbench);
-    const id = try workbench.createTask(productControlTaskInput());
+    const id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const task = workbench.task_runtime.find(id).?;
     const epoch = task.durable.binding_epoch;
     const profile = task.durable.permission_profile;
@@ -6407,7 +6287,7 @@ test "Task model selection save failure preserves installed execution and unknow
         defer workbench.deinit();
         try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
-        const task_id = try workbench.createTask(productControlTaskInput());
+        const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
         persistence.result = .failed;
@@ -6443,7 +6323,7 @@ test "Task model selection save failure preserves installed execution and unknow
         defer workbench.deinit();
         try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
-        const task_id = try workbench.createTask(productControlTaskInput());
+        const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
         try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, workbench.selectTaskModel(
@@ -6525,15 +6405,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
     const manual_recent_order = before[0].recent_order;
 
-    const first_task = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const first_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
         product_control.WorkspaceKind.automatic,
@@ -6570,16 +6442,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
     try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        workbench.createTaskInWorkspace(
-            first_workspace,
-            try workbench.workspaceEpoch(first_workspace),
-            1,
-            workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskInWorkspace(first_workspace, try workbench.workspaceEpoch(first_workspace), try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null }),
     );
     try std.testing.expectError(
         error.CatalogUnavailable,
@@ -6591,15 +6454,7 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
         } }),
     );
 
-    const second_task = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const second_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     const second_workspace = try workbench.taskWorkspaceId(second_task);
     try std.testing.expect(first_workspace != second_workspace);
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
@@ -6708,20 +6563,12 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
-    _ = try workbench.createTask(productControlTaskInput());
+    _ = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const revision = workbench.currentRevision();
 
     try std.testing.expectError(
         error.SessionCapacity,
-        workbench.createTaskForWorkspace(
-            .automatic,
-            1,
-            workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null }),
     );
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
@@ -6762,24 +6609,18 @@ test "custom schedule creates updates and launches manual and timed Tasks throug
     try workbench.startCustomProviders(root_storage[0..root_len], vault.port());
     defer workbench.stopCustomProviders();
     const probe = try configureTaskRebindTarget(&workbench);
-    const provider = workbench.modelsView().custom_providers[0];
-    try std.testing.expect(workbench.selectModelsDefault(.{
-        .selection = probe.model,
-        .expected_selection_revision = workbench.modelsView().selection_revision,
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }).accepted);
+    try std.testing.expect(workbench.custom_providers.rememberPreference(probe.model).accepted);
     workbench.setScheduleBackgroundAvailableNoFail(true);
     const id = try workbench.createScheduledTask(.{
         .title = "Custom schedule",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Review work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
     try workbench.updateScheduledTask(id, 1, .{
         .title = "Updated custom schedule",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Review work",
         .recurrence = .{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 300 } },
@@ -6869,7 +6710,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .full_access,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -6882,7 +6723,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
         error.InvalidScheduledTaskInput,
         workbench.createScheduledTask(.{
             .title = "Empty schedule input",
-            .binding = scheduledBinding(&workbench),
+            .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
             .permission_profile = .approval_required,
             .input = "",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -6909,7 +6750,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     try workbench.updateScheduledTask(default_schedule, 1, .{
         .title = "Independent brief",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -7054,31 +6895,15 @@ test "schedule rejection retains the automatic Task created before a full Run qu
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
-        .binding = scheduledBinding(&workbench),
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
     fake_core.setNextPlan(.controlled);
     defer fake_core.releaseControlled();
-    const running_task = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
-    const queued_task = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const running_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    const queued_task = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, running_task, .{ .text = "hold worker" });
     try waitControlSnapshot(
         &workbench,
@@ -7221,16 +7046,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     const catalog = try waitCatalogReady(&workbench, workspace_id);
     try std.testing.expectError(
         error.StaleCatalog,
-        workbench.createTaskInWorkspace(
-            workspace_id,
-            try workbench.workspaceEpoch(workspace_id),
-            1,
-            workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            "stale-revision",
-            catalog.selection_revision,
-            .{ .interactive = null },
-        ),
+        workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), "stale-revision", catalog.selection_revision, .{ .interactive = null }),
     );
     fake_core.lock();
     const sessions_before = fake_core.session_created;
@@ -7238,16 +7054,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     try std.testing.expectEqual(@as(usize, 0), sessions_before);
 
     fake_core.setNextPlan(.stale_catalog);
-    const task_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        try workbench.workspaceEpoch(workspace_id),
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        catalog.revision,
-        catalog.selection_revision,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), catalog.revision, catalog.selection_revision, .{ .interactive = null });
     try std.testing.expectError(
         error.StaleCatalog,
         workbench.runTask(task_id, .{ .skill = .{
@@ -7329,16 +7136,7 @@ test "Product Control refreshes an idle Task from committed policy after an enab
     const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     try waitCatalogUnavailable(&workbench, workspace_id);
     fake_core.setNextPlan(.controlled);
-    const task_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        try workbench.workspaceEpoch(workspace_id),
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "hold refresh" });
     try waitControlSnapshot(
         &workbench,
@@ -7419,7 +7217,7 @@ test "Task deletion waits for a requested Session close before its worker starts
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try workbench.setTaskArchived(task_id, true);
     const task = workbench.task_runtime.find(task_id).?;
     var lease = try task.runtime.worker_leases.acquire();
@@ -7458,7 +7256,7 @@ test "Task deletion retries an off-thread Session release failure" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try workbench.setTaskArchived(task_id, true);
     fake_core.failNextSessionDestroy();
     try workbench.deleteTask(task_id);
@@ -7503,7 +7301,7 @@ test "asynchronous Task deletion commit failure retains an unarchived record" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     persistence.result = .failed;
     try workbench.deleteTask(task_id);
     try waitControlSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
@@ -7530,7 +7328,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const run_id = try runPreparedTask(&workbench, task_id, .{ .text = "finish before deletion" });
     fake_core.waitRunEntered();
     _ = run_id;
@@ -7563,7 +7361,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const workspace_id = try workbench.taskWorkspaceId(task_id);
     _ = try runPreparedTask(
         &workbench,
@@ -7602,7 +7400,7 @@ test "Workspace removal failure remains a retryable Workspace fact" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const workspace_id = try workbench.taskWorkspaceId(task_id);
     fake_core.failNextSessionDestroy();
     try workbench.removeWorkspace(workspace_id);
@@ -7638,7 +7436,7 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const run_id = try runPreparedTask(
         &workbench,
         task_id,
@@ -7688,7 +7486,7 @@ test "Product Control manual compact uses the active operation lane and appends 
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectError(
         error.NoSuchRun,
         workbench.compactTaskAtBinding(task_id, 1),
@@ -7761,9 +7559,9 @@ test "compact queue rejection persists a legal terminal record and returns its o
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const compact_task = try workbench.createTask(productControlTaskInput());
-    const blocking_task = try workbench.createTask(productControlTaskInput());
-    const queued_task = try workbench.createTask(productControlTaskInput());
+    const compact_task = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const blocking_task = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const queued_task = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, compact_task, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
@@ -7829,7 +7627,7 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
@@ -7877,7 +7675,7 @@ test "Product Control terminal compact result wins a too-late cancellation race"
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
@@ -7917,8 +7715,8 @@ test "Product Control coverage saves queued Run cancellation before and after th
     defer persistence.record_id = 0;
     defer fake_core.releaseControlled();
     try installControlExecution(&workbench);
-    const blocker_id = try workbench.createTask(productControlTaskInput());
-    const target_id = try workbench.createTask(productControlTaskInput());
+    const blocker_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const target_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try workbench.renameTask(target_id, "queued cancellation target");
     fake_core.setSessionPlan(.controlled);
     _ = try runPreparedTask(&workbench, blocker_id, .{ .text = "occupy the worker" });
@@ -7977,8 +7775,8 @@ test "Product Control coverage saves queued compact cancellation without enterin
     defer persistence.record_id = 0;
     try installControlExecution(&workbench);
 
-    const blocking_task_id = try workbench.createTask(productControlTaskInput());
-    const compact_task_id = try workbench.createTask(productControlTaskInput());
+    const blocking_task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const compact_task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try workbench.renameTask(blocking_task_id, "blocking target");
     try workbench.renameTask(compact_task_id, "compact target");
     _ = try runPreparedTask(&workbench, blocking_task_id, .{ .text = "first conversation" });
@@ -8047,8 +7845,8 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
     defer gate.release();
     defer fake_core.releaseControlled();
     try installControlExecution(&workbench);
-    const blocker_id = try workbench.createTask(productControlTaskInput());
-    const target_id = try workbench.createTask(productControlTaskInput());
+    const blocker_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const target_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try workbench.renameTask(target_id, "worker failure target");
     if (compact_operation) {
         _ = try runPreparedTask(&workbench, target_id, .{ .text = "establish Conversation" });
@@ -8165,7 +7963,7 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "wait for shutdown" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
@@ -8231,7 +8029,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const task_id = try first.createTask(productControlTaskInput());
+    const task_id = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     try std.testing.expectEqual(
         @as(u64, 1),
         try runPreparedTask(&first, task_id, .{ .text = "checkpoint before shutdown" }),
@@ -8379,7 +8177,7 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const task_id = try first.createTask(productControlTaskInput());
+    const task_id = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     fake_core.setSessionPlan(.ui_wait);
     fake_core.rearmControlled();
     try std.testing.expectEqual(
@@ -8541,7 +8339,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const task_id = try first.createTask(productControlTaskInput());
+    const task_id = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     fake_core.setSessionPlan(.ui_wait);
     fake_core.rearmControlled();
     try std.testing.expectEqual(
@@ -8623,7 +8421,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     );
     const attached = restored.task_runtime.find(task_id).?;
     try std.testing.expectEqual(@as(u64, 2), attached.durable.binding_epoch);
-    try std.testing.expectEqual(@as(u64, 2), attached.durable.execution_generation);
+    try std.testing.expectEqual(@as(u64, 3), attached.durable.execution_generation);
     try std.testing.expect(attached.durable.checkpoint == null);
     // The attachment is published only after the new binding is canonical.
     var canonical = try product_task.history.decode(std.testing.allocator, persistence_storage[0..persistence.len], .{
@@ -8647,7 +8445,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
     defer canonical.deinit();
     const binding = canonical.value.tasks[0].binding;
     try std.testing.expectEqual(@as(u64, 2), binding.epoch);
-    try std.testing.expectEqual(@as(u64, 2), binding.execution_generation);
+    try std.testing.expectEqual(@as(u64, 3), binding.execution_generation);
     fake_core.lock();
     const restore_calls = fake_core.checkpoint_restores;
     fake_core.unlock();
@@ -8715,7 +8513,7 @@ test "poisoned Session closes and the same Task continues with a fresh Conversat
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     try std.testing.expectEqual(
         @as(u64, 1),
         try runPreparedTask(&workbench, task_id, .{ .text = "poison this Session" }),
@@ -8813,7 +8611,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
-    const continuation_task = try first.createTask(productControlTaskInput());
+    const continuation_task = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     try first.renameTask(continuation_task, "continuation target");
     try std.testing.expectEqual(
         @as(u64, 1),
@@ -8821,7 +8619,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     );
     try waitCheckpointRecord(&first, &persistence);
 
-    const blocker_task = try first.createTask(productControlTaskInput());
+    const blocker_task = try first.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&first));
     try first.renameTask(blocker_task, "executor blocker");
     // A Run can occupy the executor queue only after its Skill query completes.
     try std.testing.expectError(error.CatalogLoading, first.runTask(continuation_task, .{ .text = "never entered AgentCore" }));
@@ -8940,7 +8738,7 @@ test "Product Control shutdown rejects new Task admission without creating produ
     workbench.shutdownExecutor();
     try std.testing.expectError(
         error.ExecutorShuttingDown,
-        workbench.createTask(productControlTaskInput()),
+        workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench)),
     );
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 
@@ -8967,7 +8765,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     defer workbench.deinit();
     try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(productControlTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
     const first_run_id = try runPreparedTask(
         &workbench,
         task_id,
@@ -9064,15 +8862,7 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
         try std.testing.expectEqual(limits.max_attachment_file_bytes, descriptor.size_bytes);
         id.* = descriptor.id;
     }
-    const task_id = try workbench.createTaskForWorkspace(
-        .automatic,
-        1,
-        workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try workbench.createTaskForWorkspace(.automatic, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
     try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{ .text = text }));
     try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{
         .multimodal = .{ .text = text, .attachment_ids = &ids },
@@ -9126,7 +8916,7 @@ test "approval mutation workers retain the same Session and historical Run permi
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const task = control.task_runtime.find(task_id).?;
         const epoch = task.durable.binding_epoch;
         const route = task.runtime.routeId();
@@ -9351,7 +9141,7 @@ test "approval Core refusal and export failure keep the old mode or restore its 
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const task = control.task_runtime.find(task_id).?;
         const epoch = task.durable.binding_epoch;
         const route = task.runtime.routeId();
@@ -9420,7 +9210,7 @@ test "approval Core refusal and export failure keep the old mode or restore its 
         try std.testing.expectEqual(case.reason, task.approval_result.?.reason.?);
         try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
         try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
-        try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+        try std.testing.expectEqual(epoch + @as(u64, if (case.restore_required and !case.artifact_unknown) 1 else 0), task.durable.binding_epoch);
         try std.testing.expectEqual(case.restore_required, route != task.runtime.routeId());
         try std.testing.expectEqual(case.restore_required and !case.artifact_unknown, task.runtime.last_restore_report != null);
         try std.testing.expect(!task.runtime.worker_leases.hasLive());
@@ -9537,7 +9327,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
     input.approval_mode = .manual;
-    const task_id = try control.createTask(input);
+    const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     try waitInitialTaskCatalog(&control, task_id);
     _ = try runPreparedTask(&control, task_id, .{ .text = "fail without covering Conversation history" });
     try waitTaskSnapshot(&control, "\"id\":\"1\"", "\"continuationRecoveryAvailable\":true");
@@ -9602,7 +9392,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(task_id));
     try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
-    try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+    try std.testing.expectEqual(epoch + 1, task.durable.binding_epoch);
     try std.testing.expectEqual(@as(u64, 1), task.durable.next_run_generation);
     try std.testing.expectEqual(.excluded, task.durable.runs[0].?.coverage);
     try std.testing.expect(task.runtime.last_restore_report == null);
@@ -9778,8 +9568,8 @@ test "recovery binding confirmation retains candidates and never writes on the m
             var seed = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
             defer seed.deinit();
             try installControlExecution(&seed);
-            if (case.writer_waiter) waiter_id = try seed.createTask(input);
-            task_id = try seed.createTask(input);
+            if (case.writer_waiter) waiter_id = try seed.createTask(input, try product_control.TestSupport.fixtureModelSelection(&seed));
+            task_id = try seed.createTask(input, try product_control.TestSupport.fixtureModelSelection(&seed));
         }
         const old_frame = try std.testing.allocator.dupe(u8, storage[0..history.len]);
         defer std.testing.allocator.free(old_frame);
@@ -9799,6 +9589,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         // preparation before testing recovery's controlled history writer.
         try settleWorkspaceSkillQueries(&control, restored_workspace);
         const task = control.task_runtime.find(task_id).?;
+        const original_execution_generation = task.durable.execution_generation;
         const main_commits = history.main_commits;
         fake_core.lock();
         fake_core.session_destroy_probe = .{ .context = &history, .observe_fn = Harness.observeClose };
@@ -9809,6 +9600,8 @@ test "recovery binding confirmation retains candidates and never writes on the m
             _ = try control.setApprovalMode(task_id, .auto_review, 1, 1);
             break :approval task.runtime.restore_job.?.attempt.attempt_id;
         } else try control.restoreTaskConversation(task_id, 1);
+        const target_execution_generation = task.runtime.restore_job.?.attempt.target_execution_generation;
+        try std.testing.expect(target_execution_generation > original_execution_generation);
         if (case.reject_model or case.cancel_candidate) {
             const restore = task.runtime.restore_job.?;
             for (0..2000) |_| {
@@ -9838,7 +9631,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
             try std.testing.expectEqual(@as(usize, 0), task.runtime.executionConst().?.secret.len);
             try std.testing.expectEqual(.candidate_cleanup_failed, task.runtime.last_restore_failure.?);
             try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
-            try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+            try std.testing.expectEqual(original_execution_generation, task.durable.execution_generation);
             try std.testing.expect(!task.runtime.worker_leases.hasLive());
             try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "rejected model cannot run" }));
             for (0..10) |_| control.syncLifecycle();
@@ -9897,7 +9690,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
             try std.testing.expectEqual(.cancelled, task.runtime.last_restore_failure.?);
             try std.testing.expectEqual(.ready, control.task_persistence_health);
             try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
-            try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+            try std.testing.expectEqual(original_execution_generation, task.durable.execution_generation);
             for (0..10) |_| control.syncLifecycle();
             try std.testing.expectEqual(@as(usize, 0), history.worker_commits);
             try std.testing.expectEqual(main_commits, history.main_commits);
@@ -9917,7 +9710,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         try std.testing.expectEqual(.candidate, std.meta.activeTag(restore.outcome));
         try std.testing.expect(task.runtime.attachment == .detached);
         try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
-        try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+        try std.testing.expectEqual(original_execution_generation, task.durable.execution_generation);
         try std.testing.expect(task.runtime.worker_leases.hasLive());
         try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
         if (waiter_id) |id| {
@@ -10064,7 +9857,7 @@ test "recovery binding confirmation retains candidates and never writes on the m
         try std.testing.expect(!task.runtime.worker_leases.hasLive());
         const committed = case.result == .committed or (case.result == .outcome_unknown and case.resolved == .committed);
         try std.testing.expectEqual(@as(u64, if (committed) 2 else 1), task.durable.binding_epoch);
-        try std.testing.expectEqual(@as(u64, if (committed) 2 else 1), task.durable.execution_generation);
+        try std.testing.expectEqual(if (committed) target_execution_generation else original_execution_generation, task.durable.execution_generation);
         if (case.close_failure) {
             try std.testing.expect(task.runtime.close_failed);
             try std.testing.expect(task.runtime.discarding_restore);
@@ -10146,7 +9939,7 @@ test "approval delegation can change while the only Run worker waits for permiss
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const task = control.task_runtime.find(task_id).?;
         const route = task.runtime.routeId();
         const run_id = try runPreparedTask(&control, task_id, .{ .text = "review this pending operation explicitly" });
@@ -10333,7 +10126,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         const task = control.task_runtime.find(task_id).?;
         const route = task.runtime.routeId();
         const main_writes = history.main_writes;
@@ -10411,7 +10204,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
             if (!case.candidate_is_canonical) try std.testing.expectEqual(.persistence_failed, task.approval_result.?.reason.?);
             try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try control.taskApprovalMode(task_id));
             try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), task.durable.approval_revision);
-            try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+            try std.testing.expectEqual(@as(u64, if (!case.fault_baseline and !case.candidate_is_canonical) 2 else 1), task.durable.binding_epoch);
             try std.testing.expectEqual(route, task.runtime.routeId());
             try std.testing.expect(!task.runtime.worker_leases.hasLive());
             try std.testing.expectEqual(@as(usize, if (case.candidate_is_canonical) 2 else 1), history.mode_writes);
@@ -10514,7 +10307,7 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         try std.testing.expectEqual(@as(@TypeOf(task.approval_result.?.outcome), if (case.candidate_is_canonical) .completed else .failed), task.approval_result.?.outcome);
         try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try control.taskApprovalMode(task_id));
         try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), task.durable.approval_revision);
-        try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+        try std.testing.expectEqual(@as(u64, if (!case.fault_baseline and !case.candidate_is_canonical) 2 else 1), task.durable.binding_epoch);
         try std.testing.expect(task.runtime.hasAttachedSession());
         try std.testing.expectEqual(case.candidate_is_canonical, route == task.runtime.routeId());
         try std.testing.expect(!task.runtime.worker_leases.hasLive());
@@ -10870,7 +10663,7 @@ test "active input Schedule confirmation precedes transfer and failed confirmati
         const source = &task.durable.runs[0].?;
         const schedule_id = try scenario.control.createScheduledTask(.{
             .title = "source occurrence",
-            .binding = scheduledBinding(&scenario.control),
+            .model_selection = try product_control.TestSupport.fixtureModelSelection(&scenario.control),
             .permission_profile = .approval_required,
             .input = "source input",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
@@ -11355,7 +11148,7 @@ test "image permission review carries Host cost facts without trusting a same-na
         control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
         var input = productControlTaskInput();
         input.approval_mode = .manual;
-        const task_id = try control.createTask(input);
+        const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
         _ = try runPreparedTask(&control, task_id, .{ .text = "Draw without exposing run-image-secret-a or fixture-secret" });
         try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
         _ = try control.task_runtime.testSetPermissionReviewDelegation(task_id, true);
@@ -11563,7 +11356,7 @@ test "built-in source replacement keeps canonical Task catalog pinned until expl
     input.trust = .explicitly_trusted;
     const workspace = try workbench.openWorkspace(input);
     const catalog = try waitCatalogReady(&workbench, workspace);
-    const task = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), 1, workbench.newTaskAdmissionView().active_selection_revision, null, catalog.revision, catalog.selection_revision, .{ .interactive = null });
+    const task = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), try product_control.TestSupport.fixtureModelSelection(&workbench), catalog.revision, catalog.selection_revision, .{ .interactive = null });
     try settleWorkspaceSkillQueries(&workbench, workspace);
     try std.testing.expect(try workbench.replaceBuiltinSkillSource(.{ .root = root_b, .lifetime = second.lifetime() }));
     try settleWorkspaceSkillQueries(&workbench, workspace);
@@ -11659,7 +11452,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
     var input = productControlTaskInput();
     input.workspace_root = home;
     input.trust = .explicitly_trusted;
-    const waiter_id = try control.createTask(input);
+    const waiter_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const waiter = control.task_runtime.find(waiter_id).?;
     try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, waiter_id));
     for (0..5000) |_| {
@@ -11667,7 +11460,7 @@ test "MCP apply barrier never releases an unrelated idle Session as capacity rec
         if (waiter.runtime.attachment == .detached and waiter.runtime.close_thread == null) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
-    const other_id = try control.createTask(input);
+    const other_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     const other = control.task_runtime.find(other_id).?;
     const destroyed = fake_core.session_destroyed;
     runtime.mcp_refresh_running = true;
@@ -11713,12 +11506,12 @@ test "Session pressure never cancels busy work or automatically retries a failed
     input.trust = .explicitly_trusted;
     input.approval_mode = .manual;
     fake_core.setNextPlan(.controlled);
-    const id = try control.createTask(input);
+    const id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     try waitInitialTaskCatalog(&control, id);
     const run_id = try runPreparedTask(&control, id, .{ .text = "Keep this accepted work running." });
     try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");
     const task = control.task_runtime.find(id).?;
-    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control)));
     try std.testing.expect(task.runtime.hasAttachedSession());
     try std.testing.expect(!task.runtime.cancel_requested);
     try std.testing.expectEqual(run_id, task.runtime.active_operation.run);
@@ -11731,14 +11524,14 @@ test "Session pressure never cancels busy work or automatically retries a failed
     } else return error.TestUnexpectedResult;
     // Terminal work still cannot be released while an artifact or continuation owns it.
     task.durable.runs[0].?.pending_file_change_artifacts = 1;
-    try std.testing.expectError(error.SessionCapacity, control.createTask(input));
+    try std.testing.expectError(error.SessionCapacity, control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control)));
     try std.testing.expect(task.runtime.hasAttachedSession());
     task.durable.runs[0].?.pending_file_change_artifacts = 0;
     task.durable.runs[0].?.input_continuation_pending = true;
     try std.testing.expect(control.task_runtime.idleReleaseRouteId(null) == null);
     task.durable.runs[0].?.input_continuation_pending = false;
     fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
-    try std.testing.expectError(error.SessionReleasing, control.createTask(input));
+    try std.testing.expectError(error.SessionReleasing, control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control)));
     for (0..5000) |_| {
         control.syncLifecycle();
         if (task.runtime.close_failed) break;
@@ -11749,7 +11542,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
     try std.testing.expectEqual(id, control.sessionReleaseFailureTaskId().?);
     const destroyed = fake_core.session_destroyed;
     for (0..8) |_| {
-        try std.testing.expectError(error.SessionReleaseFailed, control.createTask(input));
+        try std.testing.expectError(error.SessionReleaseFailed, control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control)));
         control.syncLifecycle();
     }
     try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
@@ -11761,7 +11554,7 @@ test "Session pressure never cancels busy work or automatically retries a failed
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestUnexpectedResult;
     fake_core.setNextPlan(.controlled);
-    const second = try control.createTask(input);
+    const second = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     try waitInitialTaskCatalog(&control, second);
     _ = try runPreparedTask(&control, second, .{ .text = "Occupy the only live Session." });
     try waitControlSnapshot(&control, "\"currentRunPhase\":\"running\"");

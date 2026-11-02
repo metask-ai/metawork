@@ -3916,23 +3916,30 @@ export default function App() {
                     )
         }
         modelNotice={
-          setupNotice && (
-            <ModelSetupNotice
-              notice={setupNotice}
-              disabled={
-                bridgeUnavailable ||
-                accountBusy ||
-                executionBusy ||
-                accountCancelBusy
-              }
-              onAction={runModelSetupAction}
-              onChooseSetup={
-                setupNotice.action === "login" && customProvidersAvailable
-                  ? openModelSetup
-                  : undefined
-              }
-            />
-          )
+          <>
+            {snapshot.models.errorCode === "preference_not_saved" && (
+              <p className="composer-model-notice" role="status">
+                {t("model_setup.preference_not_saved")}
+              </p>
+            )}
+            {setupNotice && (
+              <ModelSetupNotice
+                notice={setupNotice}
+                disabled={
+                  bridgeUnavailable ||
+                  accountBusy ||
+                  executionBusy ||
+                  accountCancelBusy
+                }
+                onAction={runModelSetupAction}
+                onChooseSetup={
+                  setupNotice.action === "login" && customProvidersAvailable
+                    ? openModelSetup
+                    : undefined
+                }
+              />
+            )}
+          </>
         }
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={

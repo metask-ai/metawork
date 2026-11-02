@@ -12,9 +12,24 @@ pub const StartError = error{
     CustomProvidersDirectoryUnavailable,
     ModelsStateUnavailable,
 };
-pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
+pub const ModelBinding = registry_impl.Registry.ModelBinding;
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn fixtureSelectionAvailable(runtime: *Runtime) bool {
+        const target = runtime.view().default_selection orelse return false;
+        const view = runtime.view();
+        for (view.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.sourceModelProtocol(target, provider.source_generation, provider.catalog_generation) != null;
+        for (view.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.sourceModelProtocol(target, provider.source_generation, provider.catalog_generation) != null;
+        return false;
+    }
+    pub fn resolveFixtureSelection(runtime: *Runtime) !?contract.OwnedSourceCandidate {
+        const target = runtime.view().default_selection orelse return null;
+        const view = runtime.view();
+        for (view.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.resolveModel(target, provider.source_generation, provider.catalog_generation);
+        for (view.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.resolveModel(target, provider.source_generation, provider.catalog_generation);
+        return null;
+    }
+
     pub fn clearFixturePreference(runtime: *Runtime) void {
         _ = runtime.registry.clearDefault(runtime.registry.selection_revision + 1);
     }
@@ -93,17 +108,15 @@ pub const TestSupport = if (builtin.is_test) struct {
         );
         if (!runtime.metask_catalog.hasModel(selected_model))
             return error.InvalidTestModel;
-        const configure_updates_default = runtime.registry.metaskChangeUpdatesDefault(selected_model);
-        try runtime.registry.configureMetask(
-            principal_ref,
-            selected_model,
-            .anthropic_messages,
-            source_generation,
-            metask_selection_revision,
-            if (configure_updates_default) default_selection_revision else null,
-        );
-        if (!configure_updates_default)
-            try runtime.registry.selectMetaskDefault(default_selection_revision);
+        _ = metask_selection_revision;
+        try runtime.registry.configureMetaskSource(principal_ref, source_generation);
+        if (runtime.registry.defaultSelection()) |current| {
+            if (runtime.registry.selection_revision == default_selection_revision) {
+                _ = current;
+                runtime.registry.selection_revision = 0;
+            }
+        }
+        try runtime.registry.rememberPreference(.{ .source_id = contract.metask_source_id, .model_id = selected_model }, default_selection_revision);
         runtime.metask_catalog_state = .ready;
         runtime.metask_catalog_generation = catalog_generation;
         runtime.metask_catalog_authorization_generation = 17;
@@ -172,6 +185,7 @@ pub const Runtime = struct {
     metask_catalog: metask_provider.CatalogSession,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
     metask_catalog_state: contract.CatalogState = .needs_authentication,
+    preference_error: contract.ModelsError = .none,
     metask_catalog_generation: u64 = 0,
     metask_catalog_authorization_generation: u64 = 0,
     metask_error: contract.ModelsError = .none,
@@ -243,14 +257,7 @@ pub const Runtime = struct {
 
     pub fn view(self: *Runtime) contract.ModelsView {
         self.assertMainThread();
-        const intent = self.registry.metaskIntent();
-        var metask_selection: ?contract.ModelRef = null;
-        if (intent) |value| {
-            metask_selection = .{
-                .source_id = contract.metask_source_id,
-                .model_id = value.model_id,
-            };
-        }
+        const intent = self.registry.metaskSource();
         self.provider_views[0] = .{
             .id = contract.metask_source_id,
             .display_name = "Metask",
@@ -275,12 +282,10 @@ pub const Runtime = struct {
             else
                 .unavailable,
             .providers = self.provider_views[0..],
-            .metask_selection = metask_selection,
-            .metask_selection_revision = if (intent) |value| value.selection_revision else 0,
             .default_selection = self.registry.defaultSelection(),
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
-            .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
+            .error_code = if (!self.store_healthy) .persistence_unavailable else if (self.preference_error != .none) self.preference_error else self.metask_error,
             .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };
@@ -397,84 +402,36 @@ pub const Runtime = struct {
             self.metask_error = .local_resource_exhausted;
             return self.metask_error;
         };
-        // Selection belongs to Models, not the network worker. Preserve an
-        // existing intent even when the authoritative catalog excludes it.
-        const current_intent = self.registry.metaskIntent();
-        const restored_model_id = if (current_intent) |intent|
-            if (std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()))
-                intent.model_id
-            else
-                session.firstModelId()
-        else
-            session.firstModelId();
-        // Preserve the intent's last declared route when it leaves the catalog.
-        // It remains unresolvable, but credential authority must still advance
-        // for other explicitly selected models on this source.
-        const protocol = (if (restored_model_id) |model_id| session.modelProtocol(model_id) else null) orelse if (current_intent) |intent|
-            if (std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view())) intent.protocol else null
-        else
-            null;
-        const keeps_authority = if (current_intent) |intent|
-            std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()) and
-                intent.protocol == protocol and intent.source_generation != 0 and
+        // Source authority is independent of catalog order and consumer choices.
+        const current = self.registry.metaskSource();
+        const keeps_authority = if (current) |source|
+            std.mem.eql(u8, source.principal_ref, attempt.principal_ref.view()) and
                 self.metask_catalog.sameCredential(session)
         else
             false;
-        if (!keeps_authority) if (protocol) |selected_protocol| {
-            const selected_model_id = restored_model_id.?;
+        if (!keeps_authority) {
             var candidate = self.registry.clone() catch {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .local_resource_exhausted;
                 return self.metask_error;
             };
             defer candidate.deinit();
-            const current = candidate.metaskIntent();
-            const same_selection = if (current) |value|
-                std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                    std.mem.eql(u8, value.model_id, selected_model_id)
-            else
-                false;
-            const source_generation = self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
+            const generation = self.freshGeneration(if (current) |source| source.source_generation else 0) catch {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .local_resource_exhausted;
                 return self.metask_error;
             };
-            const selection_revision = if (same_selection and current.?.selection_revision != 0)
-                current.?.selection_revision
-            else
-                self.freshGeneration(if (current) |value| value.selection_revision else 0) catch {
-                    self.metask_catalog_state = .failed;
-                    self.metask_error = .local_resource_exhausted;
-                    return self.metask_error;
-                };
-            const updates_default = candidate.metaskChangeUpdatesDefault(selected_model_id);
-            const default_selection_revision = if (updates_default)
-                self.freshGeneration(candidate.selection_revision) catch {
-                    self.metask_catalog_state = .failed;
-                    self.metask_error = .local_resource_exhausted;
-                    return self.metask_error;
-                }
-            else
-                null;
-            candidate.configureMetask(
-                attempt.principal_ref.view(),
-                selected_model_id,
-                selected_protocol,
-                source_generation,
-                selection_revision,
-                default_selection_revision,
-            ) catch {
+            candidate.configureMetaskSource(attempt.principal_ref.view(), generation) catch {
                 self.metask_catalog_state = .failed;
-                self.metask_error = .catalog_invalid;
+                self.metask_error = .local_resource_exhausted;
                 return self.metask_error;
             };
-            const committed = self.commitCandidate(&candidate, true);
-            if (!committed.accepted) {
+            if (!self.commitCandidate(&candidate, true).accepted) {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .persistence_unavailable;
                 return self.metask_error;
             }
-        };
+        }
         self.metask_catalog.deinit();
         self.metask_catalog = session.take();
         public_catalog.replaceFromSession(&self.metask_catalog);
@@ -513,197 +470,36 @@ pub const Runtime = struct {
         self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
     }
 
-    pub fn configureMetaskSelection(
-        self: *Runtime,
-        command: contract.ConfigureMetaskSelectionCommand,
-    ) contract.CommandResult {
-        self.assertMainThread();
-        if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
-        if (self.metask_catalog_state != .ready or
-            self.metask_catalog_generation == 0 or
-            command.expected_catalog_generation != self.metask_catalog_generation)
-            return .rejected(.generation_mismatch);
-        const current = self.registry.metaskIntent();
-        const current_revision = if (current) |value| value.selection_revision else 0;
-        if (command.expected_metask_selection_revision != current_revision)
-            return .rejected(.generation_mismatch);
-        const protocol = self.metask_catalog.modelProtocol(command.selection.model_id) orelse
-            return .rejected(.model_not_found);
-        if (!std.mem.eql(u8, command.selection.source_id, contract.metask_source_id) or
-            !self.metask_catalog.hasModel(command.selection.model_id))
-            return .rejected(.model_not_found);
-        const principal_ref = self.metask_catalog.ownerAccountId();
-        if (principal_ref.len == 0) return .rejected(.invalid_provider);
-        if (current) |value| {
-            if (std.mem.eql(u8, value.principal_ref, principal_ref) and
-                std.mem.eql(u8, value.model_id, command.selection.model_id) and
-                value.protocol == protocol and value.source_generation != 0)
-                return .acceptedResult();
-        }
-
-        var candidate = self.registry.clone() catch
-            return .rejected(.local_resource_exhausted);
-        defer candidate.deinit();
-        const same_authority = if (current) |value|
-            std.mem.eql(u8, value.principal_ref, principal_ref) and
-                value.protocol == protocol and value.source_generation != 0
-        else
-            false;
-        const source_generation = if (same_authority)
-            current.?.source_generation
-        else
-            self.freshGeneration(if (current) |value| value.source_generation else 0) catch
-                return .rejected(.local_resource_exhausted);
-        const metask_selection_revision = self.freshGeneration(current_revision) catch
-            return .rejected(.local_resource_exhausted);
-        const updates_default = candidate.metaskChangeUpdatesDefault(command.selection.model_id);
-        const default_selection_revision = if (updates_default)
-            self.freshGeneration(candidate.selection_revision) catch
-                return .rejected(.local_resource_exhausted)
-        else
-            null;
-        candidate.configureMetask(
-            principal_ref,
-            command.selection.model_id,
-            protocol,
-            source_generation,
-            metask_selection_revision,
-            default_selection_revision,
-        ) catch |err| return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
+    /// Best-effort memory of a confirmed interactive consumer choice. This
+    /// writes metadata only, without resolving credentials or execution.
+    pub fn rememberPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
+        const result = self.commitPreference(target);
+        self.preference_error = if (result.accepted) .none else .preference_not_saved;
+        return result;
     }
 
-    pub fn selectMetaskDefault(
-        self: *Runtime,
-        command: contract.SelectDefaultCommand,
-    ) contract.CommandResult {
+    fn commitPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
-        const intent = self.registry.metaskIntent() orelse
-            return .rejected(.invalid_provider);
-        if (command.expected_selection_revision != self.registry.selection_revision or
-            command.expected_source_generation != intent.source_generation or
-            command.expected_catalog_generation != self.metask_catalog_generation or
-            self.metask_catalog_state != .ready or
-            !std.mem.eql(u8, command.selection.source_id, contract.metask_source_id) or
-            !std.mem.eql(u8, command.selection.model_id, intent.model_id) or
-            !self.metask_catalog.ownsSourceSelection(
-                intent.principal_ref,
-                intent.model_id,
-            ))
-            return .rejected(.generation_mismatch);
         if (self.registry.defaultSelection()) |current| {
-            if (std.mem.eql(u8, current.source_id, command.selection.source_id) and
-                std.mem.eql(u8, current.model_id, command.selection.model_id))
-                return .acceptedResult();
+            if (std.mem.eql(u8, current.source_id, target.source_id) and std.mem.eql(u8, current.model_id, target.model_id)) return .acceptedResult();
         }
-        var candidate = self.registry.clone() catch
-            return .rejected(.local_resource_exhausted);
+        var candidate = self.registry.clone() catch return .rejected(.local_resource_exhausted);
         defer candidate.deinit();
-        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
-            return .rejected(.local_resource_exhausted);
-        candidate.selectMetaskDefault(selection_revision) catch |err|
-            return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
+        const revision = self.freshGeneration(candidate.selection_revision) catch return .rejected(.local_resource_exhausted);
+        candidate.rememberPreference(target, revision) catch |err| return .rejected(mapRegistryError(err));
+        const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err| return .rejected(mapRegistryError(err));
+        defer self.allocator.free(encoded);
+        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
+        return self.finishPreferenceCommit(&candidate, commitCanonical(self.allocator, store, encoded));
     }
 
-    /// Selects the global default by source-qualified model identity. Models
-    /// validates every supplied generation against its current projection;
-    /// callers never translate this command into provider-local mutations.
-    pub fn selectDefault(
-        self: *Runtime,
-        command: contract.SelectDefaultCommand,
-    ) contract.CommandResult {
-        self.assertMainThread();
-        if (command.selection.source_id.len == 0 or
-            command.selection.source_id.len > contract.Limits.provider_id_bytes or
-            command.selection.model_id.len == 0 or
-            command.selection.model_id.len > contract.Limits.model_id_bytes or
-            command.expected_source_generation == 0 or
-            command.expected_catalog_generation == 0)
-            return .rejected(.invalid_provider);
-        if (std.mem.eql(u8, command.selection.source_id, contract.metask_source_id))
-            return self.selectMetaskDefault(command);
-        if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        if (command.expected_selection_revision != self.registry.selection_revision)
-            return .rejected(.generation_mismatch);
-        const provider = for (self.registry.views()) |value| {
-            if (std.mem.eql(u8, value.id, command.selection.source_id))
-                break value;
-        } else return .rejected(.invalid_provider);
-        if (provider.source_generation != command.expected_source_generation or
-            provider.catalog_generation != command.expected_catalog_generation)
-            return .rejected(.generation_mismatch);
-        if (self.registry.defaultSelection()) |current| {
-            if (std.mem.eql(u8, current.source_id, command.selection.source_id) and
-                std.mem.eql(u8, current.model_id, command.selection.model_id))
-                return .acceptedResult();
-        }
-        var candidate = self.registry.clone() catch
-            return .rejected(.local_resource_exhausted);
-        defer candidate.deinit();
-        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
-            return .rejected(.local_resource_exhausted);
-        candidate.selectDefault(.{
-            .source_id = provider.id,
-            .expected_provider_revision = provider.provider_revision,
-        }, command.selection.model_id, selection_revision) catch |err|
-            return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
-    }
-
-    pub fn defaultBinding(self: *const Runtime) ?DefaultBinding {
-        self.assertMainThread();
-        return self.registry.defaultBinding();
-    }
-
-    pub fn defaultAuthority(self: *const Runtime) ?contract.DefaultSelectionAuthority {
-        self.assertMainThread();
-        const selection = self.registry.defaultSelection() orelse return null;
-        if (self.registry.metaskIntent()) |intent| {
-            if (std.mem.eql(u8, selection.source_id, contract.metask_source_id)) {
-                const protocol = intent.protocol orelse return null;
-                if (intent.source_generation == 0 or self.registry.selection_revision == 0)
-                    return null;
-                return .{
-                    .selection = selection,
-                    .source = .metask,
-                    .source_generation = intent.source_generation,
-                    .selection_revision = self.registry.selection_revision,
-                    .protocol = protocol,
-                };
-            }
-        }
-        const binding = self.registry.desiredDefaultBinding() orelse return null;
-        if (binding.source_generation == 0 or self.registry.selection_revision == 0)
-            return null;
-        return .{
-            .selection = selection,
-            .source = .custom_provider,
-            .source_generation = binding.source_generation,
-            .selection_revision = self.registry.selection_revision,
-            .protocol = binding.protocol,
-        };
-    }
-
-    pub fn defaultResolvable(self: *const Runtime) bool {
-        self.assertMainThread();
-        if (!self.store_healthy) return false;
-        const authority = self.defaultAuthority() orelse return false;
-        return switch (authority.source) {
-            .metask => blk: {
-                const intent = self.registry.metaskIntent() orelse break :blk false;
-                break :blk self.metask_catalog_state == .ready and
-                    self.metask_catalog.ownsSourceSelection(
-                        intent.principal_ref,
-                        intent.model_id,
-                    ) and self.metask_catalog.modelProtocol(intent.model_id) == intent.protocol;
-            },
-            .custom_provider => self.credential_vault != null and
-                self.registry.defaultBinding() != null,
-        };
+    fn finishPreferenceCommit(self: *Runtime, candidate: *registry_impl.Registry, outcome: CanonicalCommitOutcome) contract.CommandResult {
+        // Both possible canonical images have identical provider authority.
+        // Reject an unconfirmed preference without revoking unrelated execution.
+        if (outcome != .committed) return .rejected(.persistence_unavailable);
+        self.registry.replace(candidate);
+        return .acceptedResult();
     }
 
     pub fn metaskModelAvailable(
@@ -733,7 +529,7 @@ pub const Runtime = struct {
         protocol: contract.Protocol,
     ) bool {
         self.assertMainThread();
-        const intent = self.registry.metaskIntent() orelse return false;
+        const intent = self.registry.metaskSource() orelse return false;
         if (intent.source_generation == 0 or
             intent.source_generation != expected_source_generation)
             return false;
@@ -829,21 +625,11 @@ pub const Runtime = struct {
                         return .rejected(.local_resource_exhausted)
                 else
                     null;
-                const selection_revision = if (authority_changed and isDefaultProvider(&candidate, current.id))
-                    self.freshGeneration(candidate.selection_revision) catch
-                        return .rejected(.local_resource_exhausted)
-                else
-                    null;
-                candidate.update(value, provider_revision, source_generation, selection_revision) catch |err|
+                candidate.update(value, provider_revision, source_generation) catch |err|
                     return .rejected(mapRegistryError(err));
             },
             .remove => |value| {
-                const selection_revision = if (isDefaultProvider(&candidate, value.source_id))
-                    self.freshGeneration(candidate.selection_revision) catch
-                        return .rejected(.local_resource_exhausted)
-                else
-                    null;
-                candidate.remove(value, selection_revision) catch |err|
+                candidate.remove(value) catch |err|
                     return .rejected(mapRegistryError(err));
             },
             .test_model => |value| candidate.markTesting(value) catch |err|
@@ -865,20 +651,10 @@ pub const Runtime = struct {
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(current.catalog_generation) catch
                     return .rejected(.local_resource_exhausted);
-                const selection_revision = if (!std.mem.eql(
-                    u8,
-                    value.selection.model_id,
-                    value.replacement.id,
-                ) and isDefaultModel(&candidate, value.selection))
-                    self.freshGeneration(candidate.selection_revision) catch
-                        return .rejected(.local_resource_exhausted)
-                else
-                    null;
                 candidate.replaceCustomModel(
                     value,
                     provider_revision,
                     catalog_generation,
-                    selection_revision,
                 ) catch |err| return .rejected(mapRegistryError(err));
             },
             .remove_custom_model => |value| {
@@ -888,16 +664,10 @@ pub const Runtime = struct {
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(current.catalog_generation) catch
                     return .rejected(.local_resource_exhausted);
-                const selection_revision = if (isDefaultModel(&candidate, value.selection))
-                    self.freshGeneration(candidate.selection_revision) catch
-                        return .rejected(.local_resource_exhausted)
-                else
-                    null;
                 candidate.removeCustomModel(
                     value,
                     provider_revision,
                     catalog_generation,
-                    selection_revision,
                 ) catch |err| return .rejected(mapRegistryError(err));
             },
         }
@@ -944,9 +714,17 @@ pub const Runtime = struct {
             return .rejected(.persistence_unavailable);
         if (bytes_optional) |bytes| {
             defer self.allocator.free(bytes);
-            var restored = registry_impl.decode(self.allocator, bytes) catch |err| switch (err) {
-                error.OutOfMemory => return .rejected(.local_resource_exhausted),
-                else => return self.installEmptyRecovery(store),
+            var restored = registry_impl.decode(self.allocator, bytes) catch |err| {
+                if (err == error.OutOfMemory) return .rejected(.local_resource_exhausted);
+                if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
+                    store.quarantine(bytes) catch return .rejected(.persistence_unavailable);
+                    self.store_healthy = true;
+                    self.initializeEmptyStore();
+                    if (!self.store_healthy) return .rejected(.persistence_unavailable);
+                    self.clearMetaskRuntime(.needs_authentication, .none);
+                    return .acceptedResult();
+                }
+                return self.installEmptyRecovery(store);
             };
             defer restored.deinit();
             if (restored.reconcileInterruptedTests()) {
@@ -1044,15 +822,10 @@ pub const Runtime = struct {
             candidate.sourceGenerationForProvider(current.id) orelse
                 return .rejected(.provider_not_found),
         ) catch return .rejected(.local_resource_exhausted);
-        const selection_revision = if (isDefaultProvider(&candidate, current.id))
-            self.freshGeneration(candidate.selection_revision) catch
-                return .rejected(.local_resource_exhausted)
-        else
-            null;
         candidate.update(.{
             .selection = selection,
             .spec = definition.spec(endpoint),
-        }, provider_revision, source_generation, selection_revision) catch |err|
+        }, provider_revision, source_generation) catch |err|
             return .rejected(mapRegistryError(err));
         return self.commitCandidate(&candidate, true);
     }
@@ -1134,13 +907,7 @@ pub const Runtime = struct {
         var revoked = self.registry.clone() catch
             return .rejected(.local_resource_exhausted);
         defer revoked.deinit();
-        const clears_default = isDefaultProvider(&revoked, selection.source_id);
-        const selection_revision = if (clears_default)
-            self.freshGeneration(revoked.selection_revision) catch
-                return .rejected(.local_resource_exhausted)
-        else
-            null;
-        revoked.markCredentialMissing(selection, selection_revision) catch |err|
+        revoked.markCredentialMissing(selection) catch |err|
             return .rejected(mapRegistryError(err));
         const revoke_result = self.commitCandidate(&revoked, false);
         if (!revoke_result.accepted) return revoke_result;
@@ -1202,36 +969,6 @@ pub const Runtime = struct {
         );
     }
 
-    /// Resolves the current durable Models default without assigning a
-    /// Product binding generation. Product Control owns that installation
-    /// identity and may accept, replace, or destroy this candidate.
-    pub fn resolveDefault(self: *Runtime) !?contract.OwnedSourceCandidate {
-        self.assertMainThread();
-        if (!self.store_healthy) return null;
-        const selection = self.registry.defaultSelection() orelse return null;
-        if (self.registry.metaskIntent()) |intent| {
-            if (std.mem.eql(u8, selection.source_id, contract.metask_source_id)) {
-                if (!std.mem.eql(u8, selection.model_id, intent.model_id) or
-                    intent.protocol == null or intent.source_generation == 0 or
-                    self.metask_catalog_state != .ready or
-                    !self.metask_catalog.ownsSourceSelection(
-                        intent.principal_ref,
-                        intent.model_id,
-                    ) or self.metask_catalog.modelProtocol(intent.model_id) != intent.protocol)
-                    return null;
-                return self.resolveModel(
-                    selection,
-                    intent.source_generation,
-                    self.metask_catalog_generation,
-                );
-            }
-        }
-
-        const binding = self.registry.defaultBinding() orelse return null;
-        const provider = findProviderView(self.registry.views(), binding.provider_id) orelse return null;
-        return self.resolveModel(selection, binding.source_generation, provider.catalog_generation);
-    }
-
     /// Produces a complete owned execution candidate for an explicit model.
     /// A stale/unavailable target never falls back to the global selection.
     pub fn resolveModel(
@@ -1248,7 +985,7 @@ pub const Runtime = struct {
             };
         }
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
-        const binding: DefaultBinding = .{
+        const binding: ModelBinding = .{
             .provider_id = provider.id,
             .model_id = target.model_id,
             .protocol = protocol,
@@ -1267,7 +1004,7 @@ pub const Runtime = struct {
 
     fn resolveBindingCandidate(
         self: *Runtime,
-        binding: registry_impl.Registry.DefaultBinding,
+        binding: registry_impl.Registry.ModelBinding,
     ) !contract.OwnedSourceCandidate {
         const vault = self.credential_vault orelse return error.CredentialStoreUnavailable;
         var secret_storage: [contract.Limits.credential_bytes]u8 = undefined;
@@ -1335,6 +1072,14 @@ pub const Runtime = struct {
         };
         defer self.allocator.free(bytes);
         var restored = registry_impl.decode(self.allocator, bytes) catch {
+            if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
+                self.store.?.quarantine(bytes) catch {
+                    self.store_healthy = false;
+                    return;
+                };
+                self.initializeEmptyStore();
+                return;
+            }
             self.store_healthy = false;
             return;
         };
@@ -1374,23 +1119,16 @@ pub const Runtime = struct {
         self.registry.replace(&empty);
     }
 
-    fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
+    fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.ModelBinding) void {
         var candidate = self.registry.clone() catch {
             self.store_healthy = false;
             return;
         };
         defer candidate.deinit();
-        const selection_revision = if (isDefaultProvider(&candidate, binding.provider_id))
-            self.freshGeneration(candidate.selection_revision) catch {
-                self.store_healthy = false;
-                return;
-            }
-        else
-            null;
         candidate.markCredentialMissing(.{
             .source_id = binding.provider_id,
             .expected_provider_revision = binding.provider_revision,
-        }, selection_revision) catch {
+        }) catch {
             self.store_healthy = false;
             return;
         };
@@ -1445,7 +1183,7 @@ fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
     return switch (error_code) {
         .none => unreachable,
         .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable => .persistence_unavailable,
+        .persistence_unavailable, .preference_not_saved => .persistence_unavailable,
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,
@@ -1463,17 +1201,6 @@ fn findProviderView(
     for (views) |view|
         if (std.mem.eql(u8, view.id, provider_id)) return view;
     return null;
-}
-
-fn isDefaultProvider(registry: *const registry_impl.Registry, provider_id: []const u8) bool {
-    const selection = registry.defaultSelection() orelse return false;
-    return std.mem.eql(u8, selection.source_id, provider_id);
-}
-
-fn isDefaultModel(registry: *const registry_impl.Registry, model: contract.ModelRef) bool {
-    const selection = registry.defaultSelection() orelse return false;
-    return std.mem.eql(u8, selection.source_id, model.source_id) and
-        std.mem.eql(u8, selection.model_id, model.model_id);
 }
 
 const CanonicalCommitTestStore = struct {
@@ -1538,6 +1265,22 @@ test "canonical commit resolves only an exact outcome-unknown readback" {
             commitCanonical(std.testing.allocator, &store, "candidate-canonical"),
         );
         try std.testing.expectEqual(case.expected_reads, store.read_count);
+    }
+}
+
+test "unconfirmed preference commits reject memory without revoking unchanged source authority" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    try TestSupport.installMetaskDefault(&runtime, "principal", "synthetic-key", &.{.{ .id = "model-1", .display_name = "One" }}, "model-1", 1, 2, 3, 4);
+    for ([_]CanonicalCommitOutcome{ .not_committed, .unresolved }) |outcome| {
+        var candidate = try runtime.registry.clone();
+        defer candidate.deinit();
+        try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 5);
+        try std.testing.expect(!runtime.finishPreferenceCommit(&candidate, outcome).accepted);
+        try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
+        try std.testing.expectEqual(@as(u64, 3), runtime.view().selection_revision);
+        try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
+        try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
     }
 }
 
@@ -1782,8 +1525,8 @@ test "Models Runtime durably creates a Provider before its first model" {
         try std.testing.expectEqual(contract.CustomProviderState.configuring, provider.state);
         try std.testing.expectEqual(@as(usize, 0), provider.models.len);
         try std.testing.expect(vault.present);
-        try std.testing.expect(runtime.defaultAuthority() == null);
-        try std.testing.expect((try runtime.resolveDefault()) == null);
+        try std.testing.expect(runtime.view().default_selection == null);
+        try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
     }
 
     {
@@ -1796,7 +1539,7 @@ test "Models Runtime durably creates a Provider before its first model" {
         const providers = restored.views();
         try std.testing.expectEqual(@as(usize, 1), providers.len);
         try std.testing.expectEqual(@as(usize, 0), providers[0].models.len);
-        try std.testing.expect(restored.defaultAuthority() == null);
+        try std.testing.expect(restored.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
     }
 }
 
@@ -1931,25 +1674,15 @@ test "Models Runtime owns durable custom providers and source resolution" {
             provider.catalog_generation,
             .anthropic_messages,
         ));
-        try std.testing.expect(runtime.selectDefault(.{
-            .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-            .expected_selection_revision = runtime.view().selection_revision,
-            .expected_source_generation = provider.source_generation,
-            .expected_catalog_generation = provider.catalog_generation,
-        }).accepted);
-        const authority = runtime.defaultAuthority() orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(contract.Source.custom_provider, authority.source);
-        try std.testing.expectEqualStrings(TestVault.slot, authority.selection.source_id);
-        try std.testing.expectEqualStrings("gpt-5", authority.selection.model_id);
-        try std.testing.expect(authority.source_generation != 0);
-        try std.testing.expect(authority.selection_revision != 0);
-        var candidate = (try runtime.resolveDefault()) orelse
+        try std.testing.expect(runtime.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+        try std.testing.expectEqualStrings(TestVault.slot, runtime.view().default_selection.?.source_id);
+        try std.testing.expect(runtime.view().selection_revision != 0);
+        var candidate = (try TestSupport.resolveFixtureSelection(&runtime)) orelse
             return error.TestUnexpectedResult;
         defer candidate.deinit();
         try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
         try std.testing.expectEqual(contract.Protocol.openai_responses, candidate.input().target.protocol);
-        try std.testing.expectEqual(authority.source_generation, candidate.input().source_generation);
+        try std.testing.expectEqual(provider.source_generation, candidate.input().source_generation);
     }
 
     {
@@ -1961,7 +1694,7 @@ test "Models Runtime owns durable custom providers and source resolution" {
         }
         try std.testing.expectEqual(@as(usize, 1), restored.views().len);
         {
-            var candidate = (try restored.resolveDefault()) orelse
+            var candidate = (try TestSupport.resolveFixtureSelection(&restored)) orelse
                 return error.TestUnexpectedResult;
             defer candidate.deinit();
             try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
@@ -1970,11 +1703,11 @@ test "Models Runtime owns durable custom providers and source resolution" {
 
         const previous_selection_revision = restored.view().selection_revision;
         try TestVault.delete(&vault, TestVault.slot);
-        try std.testing.expect((try restored.resolveDefault()) == null);
+        try std.testing.expect((try TestSupport.resolveFixtureSelection(&restored)) == null);
         try std.testing.expect(restored.store_healthy);
-        try std.testing.expect(restored.defaultAuthority() == null);
-        try std.testing.expect(restored.view().default_selection == null);
-        try std.testing.expect(restored.view().selection_revision != previous_selection_revision);
+        try std.testing.expect(restored.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
+        try std.testing.expect(restored.view().default_selection != null);
+        try std.testing.expect(restored.view().selection_revision == previous_selection_revision);
         const missing = restored.views()[0];
         try std.testing.expectEqual(
             contract.CustomProviderCredentialStatus.missing,
@@ -1992,8 +1725,8 @@ test "Models Runtime owns durable custom providers and source resolution" {
         }
         try std.testing.expect(restarted.store_healthy);
         try std.testing.expectEqual(@as(usize, 1), restarted.views().len);
-        try std.testing.expect(restarted.defaultAuthority() == null);
-        try std.testing.expect(restarted.view().default_selection == null);
+        try std.testing.expect(restarted.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restarted.views()[0].source_generation, restarted.views()[0].catalog_generation) == null);
+        try std.testing.expect(restarted.view().default_selection != null);
         const missing = restarted.views()[0];
         try std.testing.expectEqual(
             contract.CustomProviderCredentialStatus.missing,
@@ -2016,13 +1749,7 @@ test "Models explicit resolution preserves the global default across sources" {
         runtime.deinit();
     }
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal", &.{.{ .id = "default-model", .display_name = "Default" }}));
-    const initial = runtime.view();
-    try std.testing.expect(runtime.selectDefault(.{
-        .selection = .{ .source_id = "metask", .model_id = "default-model" },
-        .expected_selection_revision = initial.selection_revision,
-        .expected_source_generation = initial.providers[0].source_generation,
-        .expected_catalog_generation = initial.providers[0].catalog_generation,
-    }).accepted);
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "default-model" }).accepted);
     const default_revision = runtime.view().selection_revision;
     try createTestProviderWithModel(&runtime, "custom-secret", .{
         .display_name = "Other connection",
@@ -2080,13 +1807,7 @@ test "Models explicit resolution uses the target Metask protocol and rejects sta
         \\{"object":"list","has_more":false,"data":[{"id":"default-model","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}},{"id":"other-model","object":"model","type":"model","capabilities":{"endpoints":{"responses":{"supported":true}}}}]}
     ;
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", response));
-    const initial = runtime.view();
-    try std.testing.expect(runtime.selectDefault(.{
-        .selection = .{ .source_id = "metask", .model_id = "default-model" },
-        .expected_selection_revision = initial.selection_revision,
-        .expected_source_generation = initial.providers[0].source_generation,
-        .expected_catalog_generation = initial.providers[0].catalog_generation,
-    }).accepted);
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "default-model" }).accepted);
     const view = runtime.view();
     const source_generation = view.providers[0].source_generation;
     const catalog_generation = view.providers[0].catalog_generation;
@@ -2100,7 +1821,7 @@ test "Models explicit resolution uses the target Metask protocol and rejects sta
     try std.testing.expectEqual(source_generation, candidate.input().source_generation);
     try std.testing.expectEqual(selection_revision, runtime.view().selection_revision);
     try std.testing.expectEqualStrings("default-model", runtime.view().default_selection.?.model_id);
-    try std.testing.expectEqual(contract.Protocol.anthropic_messages, runtime.defaultAuthority().?.protocol);
+    try std.testing.expectEqual(contract.Protocol.anthropic_messages, runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "default-model" }, source_generation, catalog_generation).?);
     try std.testing.expect((try runtime.resolveModel(target, source_generation +% 1, catalog_generation)) == null);
     try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation +% 1)) == null);
     try std.testing.expect((try runtime.resolveModel(target, 0, catalog_generation)) == null);
@@ -2162,13 +1883,7 @@ test "credential replacement revokes readiness before writing and restores fresh
         .expected_source_generation = initial.source_generation,
         .expected_catalog_generation = initial.catalog_generation,
     }, true).accepted);
-    const ready = runtime.views()[0];
-    try std.testing.expect(runtime.selectDefault(.{
-        .selection = .{ .source_id = TestVault.slot, .model_id = "model-1" },
-        .expected_selection_revision = runtime.view().selection_revision,
-        .expected_source_generation = ready.source_generation,
-        .expected_catalog_generation = ready.catalog_generation,
-    }).accepted);
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = TestVault.slot, .model_id = "model-1" }).accepted);
 
     vault.fail_store = true;
     const new_secret = "new-secret";
@@ -2183,7 +1898,7 @@ test "credential replacement revokes readiness before writing and restores fresh
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(failed_canonical);
     try std.testing.expect(std.mem.indexOf(u8, failed_canonical, new_secret) == null);
-    try std.testing.expect(runtime.view().default_selection == null);
+    try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
     const revoked = runtime.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.missing, revoked.credential_status);
     try std.testing.expectEqual(contract.CustomProviderState.configuring, revoked.state);
@@ -2247,12 +1962,9 @@ test "Models owns Metask catalog authority without changing global default" {
     const first = runtime.view();
     try std.testing.expectEqual(contract.CatalogState.ready, first.providers[0].catalog_state);
     try std.testing.expectEqualStrings("principal-1", first.providers[0].principal_ref);
-    try std.testing.expectEqualStrings("model-1", first.metask_selection.?.model_id);
     try std.testing.expect(first.providers[0].source_generation != 0);
-    try std.testing.expect(first.metask_selection_revision != 0);
     try std.testing.expect(first.default_selection == null);
     const first_source_generation = first.providers[0].source_generation;
-    const first_selection_revision = first.metask_selection_revision;
     const first_catalog_generation = first.providers[0].catalog_generation;
 
     const refreshed = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
@@ -2278,31 +1990,16 @@ test "Models owns Metask catalog authority without changing global default" {
     );
     const second = runtime.view();
     try std.testing.expect(first_source_generation != second.providers[0].source_generation);
-    try std.testing.expectEqual(first_selection_revision, second.metask_selection_revision);
     try std.testing.expect(first_catalog_generation != second.providers[0].catalog_generation);
 
-    try std.testing.expect(runtime.selectMetaskDefault(.{
-        .selection = .{
-            .source_id = "metask",
-            .model_id = "model-1",
-        },
-        .expected_selection_revision = second.selection_revision,
-        .expected_source_generation = second.providers[0].source_generation,
-        .expected_catalog_generation = second.providers[0].catalog_generation,
+    try std.testing.expect(runtime.rememberPreference(.{
+        .source_id = "metask",
+        .model_id = "model-1",
     }).accepted);
-    const default_authority = runtime.defaultAuthority() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(contract.Source.metask, default_authority.source);
-    try std.testing.expectEqualStrings(
-        "metask",
-        default_authority.selection.source_id,
-    );
-    try std.testing.expectEqualStrings("model-1", default_authority.selection.model_id);
-    try std.testing.expectEqual(second.providers[0].source_generation, default_authority.source_generation);
-    var first_candidate = (try runtime.resolveDefault()) orelse
+    var first_candidate = (try TestSupport.resolveFixtureSelection(&runtime)) orelse
         return error.TestUnexpectedResult;
     defer first_candidate.deinit();
-    var second_candidate = (try runtime.resolveDefault()) orelse
+    var second_candidate = (try TestSupport.resolveFixtureSelection(&runtime)) orelse
         return error.TestUnexpectedResult;
     defer second_candidate.deinit();
     try std.testing.expectEqualStrings(
@@ -2314,7 +2011,7 @@ test "Models owns Metask catalog authority without changing global default" {
         second_candidate.input().api_key,
     );
     try std.testing.expectEqual(
-        default_authority.source_generation,
+        second.providers[0].source_generation,
         second_candidate.input().source_generation,
     );
     try std.testing.expectEqual(
@@ -2333,9 +2030,9 @@ test "Models owns Metask catalog authority without changing global default" {
         unavailable.providers[0].catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
-    try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
-    try std.testing.expect(!runtime.defaultResolvable());
-    try std.testing.expect((try runtime.resolveDefault()) == null);
+    try std.testing.expectEqualStrings("model-1", unavailable.default_selection.?.model_id);
+    try std.testing.expect(!TestSupport.fixtureSelectionAvailable(&runtime));
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
 }
 
 test "Metask catalog drift keeps a tracked global default durable" {
@@ -2377,13 +2074,7 @@ test "Metask catalog drift keeps a tracked global default durable" {
                 &initial_completion_port,
             ),
         );
-        const initial_view = runtime.view();
-        try std.testing.expect(runtime.selectMetaskDefault(.{
-            .selection = .{ .source_id = "metask", .model_id = "model-1" },
-            .expected_selection_revision = initial_view.selection_revision,
-            .expected_source_generation = initial_view.providers[0].source_generation,
-            .expected_catalog_generation = initial_view.providers[0].catalog_generation,
-        }).accepted);
+        try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
         const previous_selection_revision = runtime.view().selection_revision;
 
         const refresh = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
@@ -2411,15 +2102,15 @@ test "Metask catalog drift keeps a tracked global default durable" {
 
         const drifted = runtime.view();
         try std.testing.expect(runtime.store_healthy);
-        try std.testing.expectEqualStrings("metask", drifted.metask_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-1", drifted.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("metask", drifted.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-1", drifted.default_selection.?.model_id);
         try std.testing.expectEqualStrings("metask", drifted.default_selection.?.source_id);
         try std.testing.expectEqualStrings("model-1", drifted.default_selection.?.model_id);
         try std.testing.expectEqual(previous_selection_revision, drifted.selection_revision);
         try std.testing.expectEqual(contract.CatalogState.ready, drifted.providers[0].catalog_state);
         try std.testing.expectEqualStrings("model-2", drifted.providers[0].models[0].id);
-        try std.testing.expect(!runtime.defaultResolvable());
-        try std.testing.expect((try runtime.resolveDefault()) == null);
+        try std.testing.expect(!TestSupport.fixtureSelectionAvailable(&runtime));
+        try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
         committed_selection_revision = drifted.selection_revision;
     }
 
@@ -2437,8 +2128,8 @@ test "Metask catalog drift keeps a tracked global default durable" {
             restored.providers[0].catalog_state,
         );
         try std.testing.expectEqual(@as(usize, 0), restored.providers[0].models.len);
-        try std.testing.expectEqualStrings("metask", restored.metask_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-1", restored.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("metask", restored.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-1", restored.default_selection.?.model_id);
         try std.testing.expectEqualStrings("metask", restored.default_selection.?.source_id);
         try std.testing.expectEqualStrings("model-1", restored.default_selection.?.model_id);
         try std.testing.expectEqual(committed_selection_revision, restored.selection_revision);
@@ -2468,22 +2159,60 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
 
     try std.testing.expect(runtime.store_healthy);
     const view = runtime.view();
-    try std.testing.expect(view.metask_selection == null);
     try std.testing.expect(view.default_selection == null);
     try std.testing.expectEqual(@as(usize, 0), view.custom_providers.len);
     const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }
 
+test "retired Models canonical is quarantined exactly before continuing with an empty store" {
+    const retired = "{\"schema\":2,\"metask\":{\"principal_ref\":\"old\",\"model_id\":\"disabled\",\"protocol\":\"anthropic_messages\",\"source_generation\":1,\"selection_revision\":2},\"default_selection\":{\"source_id\":\"metask\",\"model_id\":\"disabled\"},\"selection_revision\":3,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try writeTestFile(&tmp.dir, registry_impl.store_file_name, retired);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(root, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
+    try std.testing.expect(runtime.view().default_selection == null);
+    try std.testing.expectEqual(@as(u64, 0), runtime.view().providers[0].source_generation);
+    const current = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(current);
+    var decoded = try registry_impl.decode(std.testing.allocator, current);
+    defer decoded.deinit();
+    try std.testing.expect(decoded.defaultSelection() == null);
+    var dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true, .follow_symlinks = false });
+    defer dir.close(std.testing.io);
+    var it = dir.iterate();
+    var count: usize = 0;
+    while (try it.next(std.testing.io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".quarantine")) continue;
+        var file = try dir.openFile(std.testing.io, entry.name, .{});
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+        defer file.close(std.testing.io);
+        var bytes: [retired.len]u8 = undefined;
+        try std.testing.expectEqual(bytes.len, try file.readPositionalAll(std.testing.io, &bytes, 0));
+        try std.testing.expectEqualStrings(retired, &bytes);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
 test "Models bootstrap rejects damaged canonical shapes" {
     const inputs = [_][]const u8{
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"unknown\":true}",
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"unknown\":true}",
         "not-json",
     };
     for (inputs) |input| {
@@ -2522,7 +2251,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     try writeTestFile(
         &tmp.dir,
         registry_impl.store_file_name,
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
     );
 
     var vault: TestVault = .{};
@@ -2541,13 +2270,12 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     try std.testing.expect(runtime.store_healthy);
     try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
     try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
-    try std.testing.expect(runtime.view().metask_selection == null);
     try std.testing.expect(runtime.view().default_selection == null);
     const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }
@@ -2706,17 +2434,11 @@ test "successful empty Metask catalog preserves intent but removes all resolvabl
     try std.testing.expectEqual(@as(usize, 0), view.providers[0].models.len);
     try std.testing.expect(view.providers[0].catalog_generation != 4);
     try std.testing.expect(view.providers[0].source_generation != 0 and view.providers[0].source_generation != 1);
-    try std.testing.expectEqual(@as(u64, 2), view.metask_selection_revision);
     try std.testing.expectEqual(@as(u64, 3), view.selection_revision);
-    try std.testing.expectEqualStrings("model-1", view.metask_selection.?.model_id);
     try std.testing.expectEqualStrings("model-1", view.default_selection.?.model_id);
-    try std.testing.expect(!runtime.defaultResolvable());
-    try std.testing.expect((try runtime.resolveDefault()) == null);
-    try std.testing.expect(!runtime.configureMetaskSelection(.{
-        .selection = .{ .source_id = "metask", .model_id = "model-1" },
-        .expected_metask_selection_revision = view.metask_selection_revision,
-        .expected_catalog_generation = view.providers[0].catalog_generation,
-    }).accepted);
+    try std.testing.expectEqualStrings("model-1", view.default_selection.?.model_id);
+    try std.testing.expect(!TestSupport.fixtureSelectionAvailable(&runtime));
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
 }
 
 test "fixed image model resolves without user configuration alongside a Custom dialogue default" {
@@ -2746,12 +2468,7 @@ test "fixed image model resolves without user configuration alongside a Custom d
     };
     try std.testing.expect(runtime.submitCommand(.{ .test_model = probe }).accepted);
     try std.testing.expect(runtime.completeTest(probe, true).accepted);
-    try std.testing.expect(runtime.selectDefault(.{
-        .selection = probe.model,
-        .expected_selection_revision = 0,
-        .expected_source_generation = probe.expected_source_generation,
-        .expected_catalog_generation = probe.expected_catalog_generation,
-    }).accepted);
+    try std.testing.expect(runtime.rememberPreference(probe.model).accepted);
     const dialogue_revision = runtime.view().selection_revision;
     const catalog = test_image_catalog;
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-a", catalog));
@@ -2772,7 +2489,7 @@ test "fixed image model resolves without user configuration alongside a Custom d
     runtime.setMetaskAuthorizationUnavailable();
     try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareImageCandidate(input).rejected);
     try std.testing.expectEqualStrings("fresh-lease", candidate.input().bearer);
-    var dialogue = (try runtime.resolveDefault()).?;
+    var dialogue = (try TestSupport.resolveFixtureSelection(&runtime)).?;
     defer dialogue.deinit();
     try std.testing.expectEqualStrings("chat", dialogue.input().target.model);
     try std.testing.expectEqualStrings("custom-secret", dialogue.input().api_key);
@@ -2863,12 +2580,10 @@ test "first empty Metask catalog has no inferred selection" {
     try std.testing.expectEqual(contract.CatalogState.ready, view.providers[0].catalog_state);
     try std.testing.expectEqual(contract.ModelsError.no_models, view.providers[0].error_code);
     try std.testing.expect(view.providers[0].catalog_generation != 0);
-    try std.testing.expect(view.metask_selection == null);
     try std.testing.expect(view.default_selection == null);
-    try std.testing.expect(!runtime.defaultResolvable());
-    // A later populated catalog is still the first selection initialization.
+    try std.testing.expect(!TestSupport.fixtureSelectionAvailable(&runtime));
+    // A later populated catalog also leaves the starting preference unset.
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal-1", &.{.{ .id = "model-2", .display_name = "Model Two" }}));
-    try std.testing.expectEqualStrings("model-2", runtime.view().metask_selection.?.model_id);
     try std.testing.expect(runtime.view().default_selection == null);
 }
 
@@ -2916,17 +2631,10 @@ test "declared protocol refresh changes default authority and preserves old owne
         \\{"object":"list","has_more":false,"data":[{"id":"model-1","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}}]}
     ;
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-1", initial));
-    const initial_view = runtime.view();
-    try std.testing.expect(runtime.selectMetaskDefault(.{
-        .selection = .{ .source_id = "metask", .model_id = "model-1" },
-        .expected_selection_revision = initial_view.selection_revision,
-        .expected_source_generation = initial_view.providers[0].source_generation,
-        .expected_catalog_generation = initial_view.providers[0].catalog_generation,
-    }).accepted);
-    const old_source = runtime.defaultAuthority().?.source_generation;
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
+    const old_source = runtime.view().providers[0].source_generation;
     const old_selection = runtime.view().selection_revision;
-    const old_local_selection = runtime.view().metask_selection_revision;
-    var old_owned = (try runtime.resolveDefault()).?;
+    var old_owned = (try TestSupport.resolveFixtureSelection(&runtime)).?;
     defer old_owned.deinit();
 
     const replacement =
@@ -2935,27 +2643,24 @@ test "declared protocol refresh changes default authority and preserves old owne
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-1", replacement));
     const current = runtime.view();
     try std.testing.expectEqualStrings("model-1", current.default_selection.?.model_id);
-    try std.testing.expectEqual(old_local_selection, current.metask_selection_revision);
     try std.testing.expectEqual(old_selection, current.selection_revision);
-    try std.testing.expect(current.providers[0].source_generation != old_source);
-    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, runtime.defaultAuthority().?.protocol);
+    try std.testing.expectEqual(old_source, current.providers[0].source_generation);
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation).?);
     try std.testing.expect(!runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, old_source, current.providers[0].catalog_generation, .anthropic_messages));
     try std.testing.expect(runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation, .openai_chat_completions));
     try std.testing.expect(!runtime.metaskModelAvailable(null, .openai_chat_completions, "model-2"));
     try std.testing.expect(runtime.metaskModelAvailable(null, .openai_responses, "model-2"));
-    var new_owned = (try runtime.resolveDefault()).?;
+    var new_owned = (try TestSupport.resolveFixtureSelection(&runtime)).?;
     defer new_owned.deinit();
     try std.testing.expectEqual(contract.Protocol.openai_chat_completions, new_owned.input().target.protocol);
     try std.testing.expectEqualStrings(contract.metaskEndpoint(.openai_chat_completions).?, new_owned.input().target.base_url);
     try std.testing.expectEqual(contract.Protocol.anthropic_messages, old_owned.input().target.protocol);
     try std.testing.expectEqualStrings(contract.metaskEndpoint(.anthropic_messages).?, old_owned.input().target.base_url);
 
-    try std.testing.expect(runtime.configureMetaskSelection(.{
-        .selection = .{ .source_id = "metask", .model_id = "model-2" },
-        .expected_metask_selection_revision = current.metask_selection_revision,
-        .expected_catalog_generation = current.providers[0].catalog_generation,
-    }).accepted);
-    try std.testing.expectEqual(contract.Protocol.openai_responses, runtime.defaultAuthority().?.protocol);
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }).accepted);
+    var other = (try runtime.resolveModel(.{ .source_id = "metask", .model_id = "model-2" }, current.providers[0].source_generation, current.providers[0].catalog_generation)).?;
+    defer other.deinit();
+    try std.testing.expectEqual(contract.Protocol.openai_responses, other.input().target.protocol);
     try std.testing.expectEqualStrings("model-2", runtime.view().default_selection.?.model_id);
 }
 
@@ -3033,24 +2738,16 @@ test "Metask credential authority advances even when the selected catalog model 
             runtime.deinit();
         }
         try Refresh.run(&runtime, "synthetic-authority-a", initial);
-        const before = runtime.view();
-        try std.testing.expect(runtime.selectMetaskDefault(.{
-            .selection = .{ .source_id = "metask", .model_id = "selected" },
-            .expected_selection_revision = before.selection_revision,
-            .expected_source_generation = before.providers[0].source_generation,
-            .expected_catalog_generation = before.providers[0].catalog_generation,
-        }).accepted);
+        try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "selected" }).accepted);
         const source_a = runtime.view().providers[0].source_generation;
         const selection = runtime.view().selection_revision;
-        const intent_revision = runtime.view().metask_selection_revision;
         try Refresh.run(&runtime, "synthetic-authority-b", updated);
         const source_b = runtime.view().providers[0].source_generation;
         try std.testing.expect(source_b != 0 and source_b != source_a);
         try std.testing.expectEqual(selection, runtime.view().selection_revision);
-        try std.testing.expectEqual(intent_revision, runtime.view().metask_selection_revision);
-        try std.testing.expectEqualStrings("selected", runtime.view().metask_selection.?.model_id);
         try std.testing.expectEqualStrings("selected", runtime.view().default_selection.?.model_id);
-        try std.testing.expect((try runtime.resolveDefault()) == null);
+        try std.testing.expectEqualStrings("selected", runtime.view().default_selection.?.model_id);
+        try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
         if (!std.mem.eql(u8, updated, empty)) {
             var other = (try runtime.resolveModel(.{ .source_id = "metask", .model_id = "other" }, source_b, runtime.view().providers[0].catalog_generation)).?;
             defer other.deinit();
@@ -3063,7 +2760,7 @@ test "Metask credential authority advances even when the selected catalog model 
         defer std.testing.allocator.free(encoded);
         var decoded = try registry_impl.decode(std.testing.allocator, encoded);
         defer decoded.deinit();
-        try std.testing.expectEqual(source_b, decoded.metaskIntent().?.source_generation);
+        try std.testing.expectEqual(source_b, decoded.metaskSource().?.source_generation);
         try std.testing.expectEqualStrings("selected", decoded.defaultSelection().?.model_id);
         try Refresh.run(&runtime, "synthetic-authority-b", updated);
         try std.testing.expectEqual(source_b, runtime.view().providers[0].source_generation);

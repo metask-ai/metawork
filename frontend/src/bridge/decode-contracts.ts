@@ -285,6 +285,7 @@ const accountErrorCodes = [
 ] as const;
 const modelsErrorCodes = [
   "none",
+  "preference_not_saved",
   "authorization_unavailable",
   "persistence_unavailable",
   "catalog_unavailable",
@@ -1803,8 +1804,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
     "availability",
     "persistenceHealth",
     "providers",
-    "metaskSelection",
-    "metaskSelectionRevision",
     "defaultSelection",
     "selectionRevision",
     "operation",
@@ -1912,7 +1911,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
         errorCode: enumValue(
           provider.errorCode,
           `${itemPath}.errorCode`,
-          modelsErrorCodes,
+          modelsErrorCodes.filter((code) => code !== "preference_not_saved"),
         ),
         safeDiagnostic: stringValue(
           provider.safeDiagnostic,
@@ -1925,10 +1924,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
     new Set(providers.map((provider) => provider.id)).size !== providers.length
   )
     fail(`${path}.providers`, "provider identities must be unique");
-  const metaskSelection = decodeModelRef(
-    item.metaskSelection,
-    `${path}.metaskSelection`,
-  );
   const defaultSelection = decodeModelRef(
     item.defaultSelection,
     `${path}.defaultSelection`,
@@ -1947,11 +1942,6 @@ function decodeModels(value: unknown, path: string): ModelsView {
       ["ready", "recovery_required", "unavailable"] as const,
     ),
     providers,
-    metaskSelection,
-    metaskSelectionRevision: wireId(
-      item.metaskSelectionRevision,
-      `${path}.metaskSelectionRevision`,
-    ),
     defaultSelection,
     selectionRevision: wireId(
       item.selectionRevision,

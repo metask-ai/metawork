@@ -140,19 +140,7 @@ pub const WindowChromeControl = struct {
 };
 pub const WindowChromeDisconnect = struct { generation: []const u8 };
 pub const ExternalLinkOpen = struct { url: []const u8 };
-pub const ModelDefaultSelection = struct {
-    sourceId: []const u8,
-    modelId: []const u8,
-    expectedSelectionRevision: []const u8,
-    expectedSourceGeneration: []const u8,
-    expectedCatalogGeneration: []const u8,
-};
-pub const ConfigureMetaskSelection = struct {
-    sourceId: []const u8,
-    modelId: []const u8,
-    expectedMetaskSelectionRevision: []const u8,
-    expectedCatalogGeneration: []const u8,
-};
+
 pub const ModelCapabilities = struct {
     textInput: ?bool = null,
     audioInput: ?bool = null,

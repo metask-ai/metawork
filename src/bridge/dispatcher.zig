@@ -406,8 +406,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_open_recharge, .function = accountOpenRecharge },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
-            .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
-            .{ .name = commands.models_select_default, .function = selectModelsDefault },
             .{ .name = commands.custom_provider_create, .function = customProviderCreate },
             .{ .name = commands.builtin_provider_create, .function = builtinProviderCreate },
             .{ .name = commands.builtin_provider_update_base_url, .function = builtinProviderUpdateBaseUrl },
@@ -2671,80 +2669,6 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(
             output,
             host.resetStore(try handlers.parseWireId(parsed.value.expectedRevision)),
-        );
-    }
-
-    fn configureMetaskSelection(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.ConfigureMetaskSelection,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        if (parsed.value.sourceId.len == 0 or
-            parsed.value.sourceId.len > models_contract.Limits.provider_id_bytes or
-            parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
-            return error.InvalidBridgePayload;
-        const control = self.control orelse return error.DispatcherUnavailable;
-        return encodeExecutionResult(output, control.configureMetaskSelection(.{
-            .selection = .{
-                .source_id = parsed.value.sourceId,
-                .model_id = parsed.value.modelId,
-            },
-            .expected_metask_selection_revision = try handlers.parseWireId(
-                parsed.value.expectedMetaskSelectionRevision,
-            ),
-            .expected_catalog_generation = try handlers.parseWireId(
-                parsed.value.expectedCatalogGeneration,
-            ),
-        }));
-    }
-
-    fn selectModelsDefault(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.ModelDefaultSelection,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        if (parsed.value.sourceId.len == 0 or
-            parsed.value.sourceId.len > models_contract.Limits.provider_id_bytes or
-            parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
-            return error.InvalidBridgePayload;
-        const control = self.control orelse return error.DispatcherUnavailable;
-        return encodeExecutionResult(
-            output,
-            control.selectModelsDefault(.{
-                .selection = .{
-                    .source_id = parsed.value.sourceId,
-                    .model_id = parsed.value.modelId,
-                },
-                .expected_selection_revision = try handlers.parseWireId(
-                    parsed.value.expectedSelectionRevision,
-                ),
-                .expected_source_generation = try handlers.parseWireId(
-                    parsed.value.expectedSourceGeneration,
-                ),
-                .expected_catalog_generation = try handlers.parseWireId(
-                    parsed.value.expectedCatalogGeneration,
-                ),
-            }),
         );
     }
 
@@ -7484,7 +7408,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(
-        std.mem.indexOf(u8, empty_model, "\"handler_failed\"") != null,
+        std.mem.indexOf(u8, empty_model, "\"permission_denied\"") != null,
     );
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     const image_revision = workbench.currentRevision();

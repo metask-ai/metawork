@@ -112,7 +112,6 @@ function signedOut() {
   Object.assign(snapshot.models, {
     availability: "needs_authentication",
     defaultSelection: null,
-    metaskSelection: null,
     customProviders: [],
   });
   Object.assign(snapshot.models.providers[0], {
@@ -226,7 +225,7 @@ async function renderApp(
       calls.input++;
       throw new Error("Unexpected send");
     },
-    selectModelsDefault: async () => {
+    selectTaskModel: async () => {
       calls.select++;
       throw new Error("Unexpected selection");
     },
@@ -378,7 +377,6 @@ test("logout with retained official selection offers login after remount and pre
   const app = await renderApp(ctx, state, { locale: "zh-CN" });
   const next = signedOut();
   next.models.defaultSelection = selected;
-  next.models.metaskSelection = selected;
   state.account = next.account;
   state.models = next.models;
   state.newTaskAdmission = next.newTaskAdmission;
