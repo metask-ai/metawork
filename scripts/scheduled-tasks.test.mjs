@@ -407,7 +407,26 @@ test("starter templates hide Workspace configuration and submit target-free auto
   assert.equal(created.permissionProfile, "approval_required");
 });
 
-test("Text schedules use an Automatic Workspace without requiring a Manual Workspace", async () => {
+test("Text schedules use an Automatic Workspace without requiring a Manual Workspace", async (ctx) => {
+  // Select moves focus on an animation frame. Slow that frame explicitly so
+  // keyboard assertions cannot depend on how long concurrent suites take.
+  const frames = new Set();
+  ctx.mock.method(globalThis, "requestAnimationFrame", (callback) => {
+    const frame = setTimeout(() => {
+      frames.delete(frame);
+      callback(performance.now());
+    }, 75);
+    frames.add(frame);
+    return frame;
+  });
+  ctx.mock.method(globalThis, "cancelAnimationFrame", (frame) => {
+    clearTimeout(frame);
+    frames.delete(frame);
+  });
+  ctx.after(() => {
+    cleanup();
+    for (const frame of frames) clearTimeout(frame);
+  });
   const user = userEvent.setup({ document: dom.window.document });
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
@@ -452,7 +471,20 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
     { target: { value: "Summarize current work" } },
   );
   await user.click(screen.getByRole("combobox", { name: "Permissions" }));
-  await user.keyboard("{ArrowDown}{Enter}");
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        screen.getByRole("option", { name: "Request approval" }),
+    ),
+  );
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        screen.getByRole("option", { name: "Direct execution" }),
+    ),
+  );
+  await user.keyboard("{Enter}");
   assert.match(
     dialog.textContent,
     /skips routine MetaWork approval.*still stop the run and require attention/,
