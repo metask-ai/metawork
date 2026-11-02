@@ -156,6 +156,15 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
         attemptId: String(controls.attempts),
       };
     },
+    retryAccountRefresh: async () => {
+      controls.attempts++;
+      if (controls.invoke) return controls.invoke();
+      return {
+        accepted: true,
+        errorCode: "none",
+        attemptId: String(controls.attempts),
+      };
+    },
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
   render(
@@ -212,6 +221,34 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
     },
   };
 }
+
+test("dismissing a refresh scheduling failure keeps its live recovery action available", async (ctx) => {
+  const app = await setup(ctx, "refresh_schedule_failed");
+  Object.assign(app.snapshot.account, {
+    state: "authenticated",
+    accountId: "1",
+    displayName: "Fixture account",
+  });
+  await app.publish();
+  const user = await app.openAccount();
+  await user.click(screen.getByRole("button", { name: "Dismiss this notice" }));
+  assert.ok(!document.querySelector(".settings-page .feedback-notice"));
+  const retry = screen.getByRole("button", { name: "Retry sign-in refresh" });
+  assert.ok(
+    retry.closest(".settings-identity-row"),
+    "recovery belongs to the permanent Account action area",
+  );
+  app.controls.invoke = () => {
+    app.snapshot.account.errorCode = "none";
+    app.snapshot.account.safeDiagnostic = "";
+    return { accepted: true, errorCode: "none", attemptId: "retry-refresh" };
+  };
+  await user.click(retry);
+  await waitFor(() => assert.equal(app.controls.attempts, 1));
+  await waitFor(() =>
+    assert.ok(!screen.queryByRole("button", { name: "Retry sign-in refresh" })),
+  );
+});
 
 test("restored account result is local and silent; details collapse keeps focus and dismissal survives repeated snapshots", async (ctx) => {
   const app = await setup(ctx);

@@ -4582,24 +4582,6 @@ export default function App() {
                       ?.focus(),
                   );
                 }}
-                actions={
-                  entry.key === "account:operation" &&
-                  snapshot.account.errorCode === "refresh_schedule_failed" ? (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={bridgeUnavailable || accountBusy}
-                      onClick={() =>
-                        void runAccountCommand(() =>
-                          client.retryAccountRefresh(),
-                        )
-                      }
-                    >
-                      {t("account.retry_refresh")}
-                    </Button>
-                  ) : undefined
-                }
               />
             ))}
             models={snapshot.models}
@@ -4700,6 +4682,9 @@ export default function App() {
             }
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
+            }
+            onRetryRefresh={() =>
+              void runAccountCommand(() => client.retryAccountRefresh())
             }
             onRefreshAccountSummary={() =>
               void runAccountCommand(() => client.refreshAccountSummary())

@@ -34,7 +34,6 @@ const { accountFeedback } = await vite.ssrLoadModule(
 const { FeedbackNotice } = await vite.ssrLoadModule(
   "/src/components/ui/FeedbackNotice.tsx",
 );
-const { Button } = await vite.ssrLoadModule("/src/components/ui/button.tsx");
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -197,14 +196,6 @@ function renderSettings(account, models = readyModels, options = {}) {
             message: translate("en-US", feedback.id),
             diagnostic: feedback.diagnostic,
             detailsLabel: "Technical details",
-            actions:
-              account.errorCode === "refresh_schedule_failed"
-                ? createElement(
-                    Button,
-                    { onClick() {} },
-                    "Retry sign-in refresh",
-                  )
-                : undefined,
           })
         : null,
       models,

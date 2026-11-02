@@ -53,6 +53,7 @@ export function SettingsPage({
   onRemoveCustomModel,
   onTestCustomModel,
   onBeginLogin,
+  onRetryRefresh,
   onRefreshAccountSummary,
   onOpenRecharge,
   onLogout,
@@ -86,6 +87,7 @@ export function SettingsPage({
   ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
   onBeginLogin: () => void;
+  onRetryRefresh: () => void;
   onRefreshAccountSummary: () => void;
   onOpenRecharge: () => void;
   onLogout: () => void;
@@ -532,9 +534,16 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : !authenticated ||
-                    (account.errorCode !== "none" &&
-                      account.errorCode !== "refresh_schedule_failed") ? (
+                  ) : account.errorCode === "refresh_schedule_failed" ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={disabled || accountDisabled}
+                      onClick={onRetryRefresh}
+                    >
+                      {t("account.retry_refresh")}
+                    </Button>
+                  ) : !authenticated || account.errorCode !== "none" ? (
                     <Button
                       className="settings-identity-login"
                       variant="secondary"
