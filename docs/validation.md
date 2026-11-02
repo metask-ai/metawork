@@ -496,6 +496,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-WIN-FEEDBACK-LIFECYCLE-20261102
+
+Windows x64 的统一反馈生命周期验收见[绑定源码与 artifact 的机器证据](evidence/feedback-lifecycle-windows-20261102.json)。完整 Node 回归、正式检查、生产 Renderer/CSP 与隔离 automation Debug 构建通过；条件跳过项、反例及修复前后的回归由证据列明。反馈迁移层与按范围覆盖路径已移除，来源之间独立；对应交互合同见[反馈协调与生命周期](ui-design.md#44-反馈协调与生命周期)。
+
+真实 Windows WebView2 中，生产 App、组件与样式在隔离 profile、合成 BridgeClient 回复下验证目标 Run 停止待确认、后续轮次隔离、部分回复复制入口、空回复说明和历史动作范围；1440/390 px 明暗主题均核对简洁提示、低频纯文本诊断、Dialog 关闭后焦点返回、键盘收起、44 px 命中区及无横向溢出。关闭账号说明后仍可查看诊断并显式恢复，恢复与同步没有自动重发业务命令；窗口错误、未处理 rejection 和捕获的 console error 为空。历史分页与安全代次反例由对应真实 App/状态测试负责。
+
+证据仅证明记录 revision 的 Renderer 与 WebView 内容交互；不证明真实 Host 停止、Metask/OAuth/系统凭据故障恢复、系统键盘手势、安装分发或其他平台，也不替代 Native 业务测试图。临时测试入口、日志与截图的位置及摘要由机器证据拥有，后续源码或 artifact 变化需重新验证。
+
 ### E-WIN-FEEDBACK-REVIEW-20261102
 
 2026-11-02，Windows x64，Renderer runtime source `5f0010c2`。本轮四项评审反例均先在回归中失败，修复后通过：关闭刷新调度失败说明仍保留实时恢复入口；账号待确认不遮蔽新的错误或安全诊断；Skills 不接收 workspace 范围反馈且连接优先；未迁移来源超时在可信读取成功后退出命令栏，读取失败仅归连接。17 个相关 Renderer/Node suite 共 426 项通过；正式 `npm run check`、生产 Renderer/CSP、隔离 automation Debug 构建通过，Host、Bridge wire 与持久化未变。
