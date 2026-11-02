@@ -1,8 +1,8 @@
 # 附件限制与生命周期复盘方案
 
-日期：2026-10-31。状态：方案已实施并提交，本机验证及资源实测完成；完整 Node suite 与平台手势验收尚未闭合。关联：[Issue #76](https://github.com/shuzuan-org/metawork/issues/76)。
+日期：2026-10-31；收口复核：2026-11-02。状态：方案已实施，自评发现的基线入口与 debt 重试问题已修复；本机验证不代表 Windows、真实系统手势或全应用性能验收完成。关联：[Issue #76](https://github.com/shuzuan-org/metawork/issues/76)。
 
-本轮收窄方案已取得独立 APPROVE，Blocking findings 为 none；当前实现保留 128 条记录；macOS 实测与未闭合项见[验收证据](../evidence/attachment-limits-20261031.json)。本文不是 decision record，不替代现行合同。本轮重新区分代码事实、设计必要性与未验证假设，先修正已经证实的限制耦合，复用现有资源保护和生命周期。
+本轮收窄方案已取得独立 APPROVE，Blocking findings 为 none；当前实现保留 128 条记录；macOS 资源实测见[初验证据](../evidence/attachment-limits-20261031.json)，后续修复、验证结果及保留缺口见[收口证据](../evidence/attachment-closeout-20261102.json)。本文不是 decision record，不替代现行合同。本轮重新区分代码事实、设计必要性与未验证假设，先修正已经证实的限制耦合，复用现有资源保护和生命周期。
 
 ## 1. 方案结论与范围
 
@@ -163,7 +163,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 
 在正式 owner 测试、Bridge/Renderer fixture 与真实 lifecycle 分层观察；真实桌面另外验证 Windows 原报告、DOM/WebView2 与 New task 加号，macOS picker/Native 路径、两平台图片粘贴、公开 SDK codec 和 writer 取消。模拟不能替代手势和 codec，文本插话 Windows 脚本不能替代附件 vertical。
 
-执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。标准入口的完整 Native graph 通过；完整 Node suite 有 3 处失败，其中 2 处在旧基线稳定复现，另一处未复现且未归因。`npm run check`、受影响 suites 与完整 lifecycle 通过。
+执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。初验中未归因的权限选择测试，现已在旧基线的延迟帧条件下复现，并通过等待目标选项实际获得焦点修复；原有产品断言保留。当前仓库验证结果统一见收口证据；不以跳过用例、弱化 guard 或更改无关产品行为获得全绿。
 
 ## 8. 复盘与取舍
 
@@ -194,3 +194,5 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 实施分支为 `feat/attachment-message-limits`；TinyKG 根任务为 `1540`，子任务 `1541`–`1546` 分别跟踪基线、资源核心、Host、Renderer、验证与合同收口。每项结束时均检查是否可提交，并在 task-close 证据中记录决定。
 
 已提交方案、资源解耦、Host 准入、Renderer 和资源验收；本节随最后的合同收口提交。TinyKG 对最后一条 `1546 depends_on 1545` 返回 `CycleCheckUncertain`，未修改 guard 或替换关系绕过；实际等到 `1545` 完成后才认领收口任务。该依赖边的缺失是跟踪工具限制，不应宣称已成功写入。
+
+自评收口使用新的 TinyKG 根任务 `1570`，子任务 `1571`、`1572` 与 `1573` 跟踪基线产物准入、debt 取消重试及最终验证；最终验证依赖前两项。`d47827f2` 修复基线身份校验与证据生成，`7b6fb3ce` 补齐新版/旧协议在发布前后的饱和取消回归，并修复实际发现的 `cleanup_pending` 重试误报，`e904a09d` 独立修复权限测试的焦点竞态。每项均记录验证及提交决定；基线与测试修复不新增产品接口或改变资源配额。
