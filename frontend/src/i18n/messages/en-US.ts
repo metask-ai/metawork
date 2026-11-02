@@ -7,6 +7,26 @@ export const enUS = {
     "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.schedule_persistence_outcome_unknown":
     "The schedule update could not be confirmed. Open Scheduled tasks to recover it before trying again.",
+  "feedback.details": "Technical details",
+  "feedback.dismiss": "Dismiss this notice",
+  "feedback.open": "View feedback ({count})",
+  "feedback.account": "View account operation result",
+  "account.feedback.title": "Latest account operation result",
+  "account.feedback.sending": "Sending account request…",
+  "account.feedback.received":
+    "Account request received. Its outcome is awaiting current state confirmation.",
+  "account.feedback.unknown":
+    "The account operation outcome is not confirmed. Check the current account state before deciding what to do next.",
+  "account.feedback.rate_limited":
+    "The latest account request was rate limited. Try again later.",
+  "account.feedback.service_unavailable":
+    "The latest account request could not finish because Metask was unavailable at the time.",
+  "account.feedback.credential_read":
+    "Could not read the sign-in credentials saved on this device.",
+  "account.feedback.credential_write":
+    "Could not save the sign-in credentials on this device.",
+  "account.feedback.credential_delete":
+    "Could not remove the sign-in credentials from this device.",
   "run.model_error.category.authentication":
     "The model service could not verify your credentials.",
   "run.model_error.category.permission":

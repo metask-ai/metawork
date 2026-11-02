@@ -940,9 +940,10 @@ summary::-webkit-details-marker {
   font-weight: 760;
 }
 
-.settings-identity-login {
+.settings-identity-action {
   grid-column: -2 / -1;
   white-space: nowrap;
+  min-height: 44px;
 }
 
 .settings-identity-copy strong,
@@ -3308,7 +3309,7 @@ button.run-process-tool:hover {
     grid-template-columns: 44px minmax(0, 1fr);
   }
 
-  .settings-identity-login {
+  .settings-identity-action {
     grid-column: 1 / -1;
     width: 100%;
     min-height: 44px;
@@ -3753,6 +3754,86 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .commandbar-alert[open] > .commandbar-alert-content {
   display: block;
+}
+
+.feedback-list {
+  display: grid;
+  gap: 12px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+.feedback-list > button {
+  min-height: 44px;
+}
+
+.feedback-notice {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  font-size: var(--text-control);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.feedback-notice + .feedback-notice {
+  margin-top: 12px;
+}
+#settings-account > .feedback-notice {
+  margin-top: 16px;
+}
+.feedback-list > .feedback-notice {
+  margin-top: 0;
+}
+.feedback-notice-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.feedback-notice-heading > svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-content-warning);
+}
+.feedback-notice-heading > strong {
+  flex: 1;
+  font-weight: 600;
+}
+.feedback-notice[data-pending="true"] .feedback-notice-heading > svg {
+  color: var(--ui-content-secondary);
+}
+.feedback-notice > p {
+  margin: 8px 0 0;
+}
+.feedback-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.feedback-notice button {
+  min-width: 44px;
+  min-height: 44px;
+  height: auto;
+}
+.feedback-notice-details {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-label);
+  font-family: var(--font-mono);
+}
+.commandbar-alert-content .feedback-notice {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.commandbar-alert-content .feedback-notice + .feedback-notice {
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-border);
 }
 
 .app-columns {

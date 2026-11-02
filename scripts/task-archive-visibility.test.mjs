@@ -479,8 +479,42 @@ for (const committed of [true, false]) {
       await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
     }
     assert.equal(app.renames.length, 1);
+    assert.ok(
+      !document.querySelector(".commandbar-alert"),
+      "a legacy timeout stops occupying the command bar after trusted synchronization",
+    );
   });
 }
+
+test("legacy timeout synchronization failure belongs only to connection feedback", async (ctx) => {
+  const app = await renderApp(ctx);
+  const input = await app.openRename();
+  await app.user.clear(input);
+  await app.user.type(input, "Unconfirmed while offline");
+  await app.user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(app.renames.length, 1));
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+    throw new Error("fixture read unavailable");
+  });
+  await app.settleRename({
+    error: new BridgeCommandTimeoutError("metawork.tasks.rename", 10000),
+  });
+  await waitFor(
+    () =>
+      assert.match(
+        document.querySelector(".commandbar-alert summary")?.textContent ?? "",
+        /not synced/,
+      ),
+    { timeout: 7000 },
+  );
+  assert.equal(app.renames.length, 1);
+  fireEvent.click(document.querySelector(".commandbar-alert summary"));
+  assert.equal(
+    document.querySelectorAll(".commandbar-alert-content .feedback-notice")
+      .length,
+    1,
+  );
+});
 
 for (const patch of [
   null,

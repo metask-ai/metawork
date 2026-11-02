@@ -409,6 +409,14 @@ test("logout with retained official selection offers login after remount and pre
   assert.equal(app.calls.select, 0);
 });
 
+test("signed-out model guidance explains authorization without duplicating the recent Account error", () => {
+  const state = signedOut();
+  state.account.errorCode = "metask_service_unavailable";
+  assert.deepEqual(classify(state), { reason: "sign_in", action: "login" });
+  state.account.errorCode = "credential_store_read_failed";
+  assert.deepEqual(classify(state), { reason: "sign_in", action: "login" });
+});
+
 test("Host preparation, failures and default selection are not first-use setup", () => {
   const state = signedOut();
   state.account.state = "checking";

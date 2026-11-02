@@ -153,6 +153,7 @@ export function AppShell({
   attentionNotice,
   attentionContent,
   attentionBusy = false,
+  attentionAnnouncement,
   onSearch,
   left,
   rightPanel,
@@ -170,6 +171,7 @@ export function AppShell({
   attentionNotice: string | null;
   attentionContent?: ReactNode;
   attentionBusy?: boolean;
+  attentionAnnouncement?: { key: number; text: string } | null;
   onSearch: () => void;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
@@ -222,14 +224,25 @@ export function AppShell({
   });
   const attentionDetails = useRef<HTMLDetailsElement>(null);
   const attentionHadFocus = useRef(false);
+  const attentionFocusedElement = useRef<HTMLElement | null>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
-    if (!attentionNotice && attentionHadFocus.current) {
+    const focusedControlWasRemoved =
+      attentionFocusedElement.current !== null &&
+      !attentionFocusedElement.current.isConnected &&
+      document.activeElement === document.body;
+    if (
+      (!attentionNotice && attentionHadFocus.current) ||
+      focusedControlWasRemoved
+    ) {
       attentionHadFocus.current = false;
-      searchButton.current?.focus();
+      attentionFocusedElement.current = null;
+      if (attentionNotice)
+        attentionDetails.current?.querySelector("summary")?.focus();
+      else searchButton.current?.focus();
     }
-  }, [attentionNotice]);
+  }, [attentionNotice, attentionContent]);
 
   useLayoutEffect(() => {
     onTaskStageExposureChange?.(taskStageExposed);
@@ -404,6 +417,18 @@ export function AppShell({
           className="commandbar-alert-slot"
           data-native-window-drag-exclude=""
         >
+          <span
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <span key={attentionAnnouncement?.key ?? 0}>
+              {attentionAnnouncement === undefined
+                ? (attentionNotice ?? "")
+                : (attentionAnnouncement?.text ?? "")}
+            </span>
+          </span>
           <div
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}
@@ -425,29 +450,29 @@ export function AppShell({
             >
               <Icon name="sidebar-right" />
             </button>
-            <span
-              className="sr-only"
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {attentionNotice ?? ""}
-            </span>
+
             {attentionNotice && (
               <details
                 ref={attentionDetails}
                 className="commandbar-alert"
                 data-recovering={attentionBusy}
-                onFocusCapture={() => {
+                onFocusCapture={(event) => {
                   attentionHadFocus.current = true;
+                  attentionFocusedElement.current = event.target as HTMLElement;
                 }}
                 onBlurCapture={(event) => {
                   if (
                     !event.currentTarget.contains(
                       event.relatedTarget as Node | null,
                     )
-                  )
+                  ) {
                     attentionHadFocus.current = false;
+                    if (
+                      event.relatedTarget !== null ||
+                      attentionFocusedElement.current?.isConnected
+                    )
+                      attentionFocusedElement.current = null;
+                  }
                 }}
               >
                 <summary aria-label={attentionNotice}>

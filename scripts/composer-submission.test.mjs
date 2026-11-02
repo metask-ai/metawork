@@ -1997,9 +1997,16 @@ test("preference save failure is separate feedback and keeps valid creation and 
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   fixture.snapshot.models.errorCode = "preference_not_saved";
   await fixture.publish();
-  await screen.findByText(
-    "Your model preference could not be saved. This task is ready to use.",
-  );
+  const message =
+    "Your model preference could not be saved. This task is ready to use.";
+  const feedback = await screen.findByLabelText(message, {
+    selector: "summary",
+  });
+  fireEvent.click(feedback);
+  await screen.findByRole("region", { name: message });
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss this notice" }));
+  await fixture.publish();
+  assert.equal(screen.queryByLabelText(message, { selector: "summary" }), null);
   assert.equal(screen.getByRole("combobox", { name: "Model" }).disabled, false);
   fireEvent.change(fixture.textarea, {
     target: { value: "Send with the explicitly selected model" },
