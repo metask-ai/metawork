@@ -36,6 +36,8 @@ Product 模型错误的验证按 owner 分层：Agent/Task execution 验证 owne
 | architecture guard          | owner 依赖方向、禁止依赖、module graph、稳定 allowlist、catalog 一致性和 test graph 接线                                             |
 | probe / platform acceptance | candidate artifact、外部依赖事实、真实窗口、系统服务、签名和平台生命周期                                                             |
 
+Agent 生命周期验收须覆盖：cancel 与自然完成竞态，queued/active Run 与 compact 的关闭，WaitingUi、callback fatal 和多 Session shutdown；abort stale/too-late、compact abort 回执与实际终态不一致、terminal publication 与 cancel/snapshot、Executor claim 与 queued cancel；double close、duplicate response、Session 未静止时的 Runtime destroy，以及 diagnostic/release 的恰好一次释放。
+
 一个测试可以用多条断言证明同一个失败模式，但不能把独立失败模式塞进同一场景。同一合同可以在不同观察边界保留测试，例如纯状态转换与线程 quiescence；若 owner、失败模式和观察边界都相同，只保留一个权威失败点。删除疑似重复的并发或 lifecycle 测试前，应临时破坏对应不变量并确认保留侧会失败。
 
 源码扫描、文件存在性和关键词 guard 只能证明结构边界，不能替代产品行为、响应式布局、运行时顺序、真实平台或 shutdown 验收；architecture guard 也不得用测试数量代表覆盖充分性。一次性 probe 只在答案仍会改变 active contract、实现决策或验证 Gate 时保留；结论进入合同、持续回归或长期证据后，或者 active contract 已对所有可能结果安全且该问题不再控制任何决策时，应从 active tree 删除不再承担职责的资产。

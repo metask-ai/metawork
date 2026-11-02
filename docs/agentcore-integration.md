@@ -1,8 +1,5 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：消费 canonical AgentCore exact bundle；artifact identity 见各 target repository lock，target availability 与真实 vertical 结果见验证规范
-> 目标依赖：Metask AgentCore ABI v1；接受和安全消费规则见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)
-
 本文定义 MetaWork Agent 执行边界与 Metask AgentCore 之间的规范合同。Agent 与 Product 并列，Application 管理其生命周期，Product Control 直接消费其公共执行表面。顶层模块与故障域见 [高层架构](architecture.md)，Product owner 及其与 Agent 的协作见 [Product 架构](product-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，ABI 接受边界见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
@@ -17,37 +14,11 @@
 8. 当前 UI request 是同步调用，不伪装成 async suspend/resume；
 9. 进程模型变化不得改变 Renderer 看到的产品边界。
 
-## 2. Bundle 消费合同
+Goal/Team 不属于当前产品能力：Runtime 禁用 teams，Session 不传 team，不调度 Goal continuation，并在 Agent 消费边界拒绝 `goal_updated`；operation 中出现不合法的 `goal_conflict` 按合同失败处理。
 
-MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity 与 payload whitelist 由各 target repository lock 和 bundle manifest 定义，[AgentCore ABI v1 合同](agentcore-abi-v1.md)定义其接受规则；本文只定义 candidate、staging、build graph 和 Host 生命周期。
+## 2. 依赖与产品消费
 
-### target-specific 开发期 bootstrap
-
-- Metask AgentCore 独立构建并测试 target-specific bundle，candidate 来自本机上游构建的 target-specific bundle root（包括从精确 archive 解包并核验的 root）；
-- candidate probe 与 `stage-agentcore-bundle.mjs` 使用显式绝对 bundle root；正式 build/test/package 只消费 resolved target 对应的 `.agentcore/bundles/<target-id>` 及其中的官方 Zig package；
-- repository lock 按 target 保存完整 manifest，锁定 package/source、target、toolchain、ABI version/revision、root table size、link inputs 和所有 payload checksum；required surface 由 exact root 与 mandatory child table layout 定义，缺少对应 artifact 必须失败；
-- stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
-- staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；
-- 由于 Zig 会在执行 root build verification 前解析 staged path dependency，正式 `dev/check/test/build/package` 必须先运行轻量 `verify-staged-agentcore-bundle.mjs` preflight，给出明确的缺包或 lock mismatch 错误；Zig build-time verifier 仍负责最终 build correctness；
-- 常规 build/test/package 不访问 AgentCore 实现源码或外部 `zig-out`；
-- artifact 缺失、target 不匹配或 checksum 错误时明确失败；
-- 禁止 path/Git source dependency、源码复制、`latest`、版本范围、可变 tag 和 source fallback。
-
-stager 与 verifier 根据 manifest target 选择显式 target policy 和 exact lock，只接受 [ABI 消费合同](agentcore-abi-v1.md)定义的精确 manifest、revision 与 table layout。官方 SDK继续精确验证五个 mandatory child table。未知 target 必须失败；Linux 后续通过新增独立 policy/lock 接入，不提供 generic fallback。MetaWork 不保留任何旧 revision 的 function table、类型别名、兼容 parser 或 fallback。
-
-当前内部初步开发不实现 dependency resolver、content-addressed cache、artifact repository 或跨机器自动分发。这个限制意味着开发 checkout 需要本机 Metask AgentCore 构建输出；它是明确的开发期前提，不得伪装成公司发布方案。
-
-### candidate validation 与正式 Agent module
-
-candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 source-free discover/link/run。该 probe：
-
-- 只通过 bundle 的官方 `bindings/zig` package 消费 AgentCore；
-- 不能进入正式 Host target；
-- 不能成为产品状态映射或 UI JSON 解析实现；
-- 不能注册到 React/Native SDK 正式链路；
-- 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
-
-当前 bundle 还提供 Session prompt profile、per-Run context blocks、typed `prompt_manifest` 和 `describe.prompt`；Agent 使用固定 Session 产品身份 profile，并按下面定义的输入范围消费 Host 时间上下文；当前产品不开放用户 customization、不建立 Renderer 入口或持久投影，其 ABI 消费见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
+官方发布源、版本锁定、安装及升级验收统一见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。Agent 只消费官方 SDK；候选 probe 用于验证依赖，不进入正式 Host target，也不承担产品状态映射。SDK 能力的存在不自动开放 MetaWork 产品入口。
 
 公开 observation 的消费边界如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
@@ -84,28 +55,17 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 Application 组装低层模块；
 - Executor、queue 与 workers 归 Product Control 独占，Agent Runtime 不接收 Scheduler capability。持久 Scheduled Task 的 recurrence、触发游标、wall clock、timer、恢复和 occurrence admission 同样只归 Product Control；Application 只注入 store/timer/notification/tray 平台能力。到期后必须先创建真实 Task，再由同一 Executor 进入 Agent Run。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Product Control 提交 terminal facts；Session snapshot 不保存 Schedule 或 occurrence 历史结果。
 
-## 3. 当前协议表面
+## 3. 执行与恢复边界
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                                  |
-| ----------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                                  |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                              |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                                          |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                                          |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                                          |
-| `RunResult`       | Core → Host | status OK 时完整有效；两个 input counts 在所有已定义返回状态有效；checkpoint budget pre-admission status 另定义 budget 字段                       |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                                           |
-| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                                    |
-| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                                           |
-| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                                   |
-| Skill catalog     | 双向借用    | Runtime query 返回 opaque lease；Session create/idle update 同步借用并保留 Host 引用，最后一个引用释放时才调用 Core release                       |
-| Skill policy      | Host → Core | fresh create 与 idle update 提交完整 replacement；冷恢复为 null；同进程恢复使用原 pinned catalog 与精确默认拒绝 grant 集合，可按当前 ceiling 收缩 |
+SDK 定义 callback 的 borrowed identity/bytes、typed request/response、status/result、catalog 和 checkpoint。MetaWork 验证当前 Session/Run 归属并按本节管理执行及恢复；产品能力范围见[产品需求](requirements.md)。
 
-MetaWork 不调用 `UiBackend.poll()` 注入输入。Agent 对已开始的普通 Run 提供 typed `RunControlLease.submitInput`；generation、输入窗口与提交调用登记由同一 Session lock 校验，SDK 在锁外调用。只有 validated Core starting observation 才开放输入；关闭窗口与登记同锁，Run 收尾须等待已登记提交、callback 和 abort 静止后才能进行 checkpoint 或下一次 Core 操作。lease 只保证对象存活，不代替调用静止屏障。输入关联只保存有界 identity、receipt 与采纳事实，不保存稍后投递的文本。Product 的输入交互及后续 Run 准入由 Product 合同定义，Agent 不调度后续 Run；停止沿已有 abort 路径。
+MetaWork 不调用 `UiBackend.poll()` 注入输入。Agent 对已开始的普通 Run 提供 typed `RunControlLease.submitInput`；generation、输入窗口与提交调用登记由同一 Session lock 校验，SDK 在锁外调用。只有 validated Core starting observation 才开放输入；关闭窗口与登记同锁，Run 收尾须等待已登记提交、callback 和 abort 静止后才能进行 checkpoint 或下一次 Core 操作。lease 只保证对象存活，不代替调用静止屏障。输入关联只保存有界 identity、receipt 与采纳事实，不保存稍后投递的文本。
 
-当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle，但包含 checkpoint outcome、durable usage、required checkpoint bytes 与两个 budget stop。unknown status、stop reason、checkpoint outcome、result flag 或不一致组合在 Host validation 层 fail closed；Host 不能制造这些产品状态。
+提交仅在 OK 时读取并验证 receipt，官方定义的拒绝不改变或污染当前 Run；其他 status、无效 diagnostic 或不一致 receipt 按合同失败收口。`input_adopted` 必须匹配已登记 identity、严格递增 sequence 与非零 turn，可早于提交回执；所有已定义 Run 返回状态的 `input_accepted_count / input_adopted_count` 均须对账，已采纳输入必须是已接受输入的前缀，没有可信终态计数时不推断未采纳。Product 的输入交互及后续 Run 准入由 Product 合同定义，Agent 不调度后续 Run；停止沿已有 abort 路径。
 
-当前锁定合同的公开 Runtime/Session surface 包含 fresh create、checkpoint export/restore、Session description、typed Run/abort、manual compact、MCP catalog/selection、Runtime MCP configuration apply 与已列出的 mutation；相邻的独立 Completion surface 是 MetaWork-owned 能力，AgentCore ABI 不包含 Completion entry。Custom Provider probe 只创建短寿命 Completion，通过一次有界、可取消的 buffered HTTP 请求取得最终 JSON；watchdog 可以在线程外请求整次调用取消，调用与 watchdog 都返回后才能销毁 Completion。只有成功结果的 `end_turn` 表示连接成功，其他 stop reason 是 Completion 路径下的 provider rejection，不冒充 Session Run 的 turns/tool-calls 判定。`agent/mcp/connector.zig` 已建立 Host transport capability 到官方 `McpConnectorV1` 的唯一映射；每个 `McpServerV1` 携带由 Product Control canonical runtime descriptor 计算的非零、非 secret `configuration_fingerprint`。Runtime 线性接收完整 server descriptors、持有 adapters，并通过 `McpApi.applyConfiguration` 应用完整 replacement：Host 串行化 apply/refresh，验证 typed report，APPLIED 时交换当前 Servers owner并更新 registry generation；旧 Servers owner进入有界 retired 集合，只有 AgentCore retain 与 active connection 都归零后才回收，仍被既有 Session 使用的 owner 最迟由 Agent Runtime 销毁统一释放。产品不调用 `McpApi.updateSelection` 热替换既有 Session；Product Control 只用新 activation/selection更新后续新 Task 的 Admission Authority。Agent 不拥有 Desired Registry、Runtime Manifest、mutation transaction 或 Task admission。真实 MCP tool execution继续走既有 AgentCore Run；Renderer 不解码 AgentCore schema。 当前锁定合同的 `request_tool_stream` 是唯一 MCP `tools/call` callback；Host 把完整 response 从 byte zero 写入 borrowed sink，sink、取消、上限或 secret 校验失败均 fail closed。Session Host config 显式使用 ephemeral active-Run journal；durable journal 与 process-plugin/Host stream-tool authority当前均未开放。
+独立 Completion 的 Provider codec、probe 与取消合同见 [Completion 架构](completion-architecture.md)。
+
+`agent/mcp/connector.zig` 已建立 Host transport capability 到官方 `McpConnectorV1` 的唯一映射；每个 `McpServerV1` 携带由 Product Control canonical runtime descriptor 计算的非零、非 secret `configuration_fingerprint`。Runtime 线性接收完整 server descriptors、持有 adapters，并通过 `McpApi.applyConfiguration` 应用完整 replacement：Host 串行化 apply/refresh，使用非零 desired revision 并验证 typed report 的 disposition、desired/active revision 与 reserved fields；只有 APPLIED 转移 replacement ownership、交换当前 Servers owner 并更新 registry generation，SUPERSEDED 或 REJECTED 不得取得该 ownership；旧 Servers owner进入有界 retired 集合，只有 AgentCore retain 与 active connection 都归零后才回收，仍被既有 Session 使用的 owner 最迟由 Agent Runtime 销毁统一释放。产品不调用 `McpApi.updateSelection` 热替换既有 Session；Product Control 只用新 activation/selection更新后续新 Task 的 Admission Authority。Agent 不拥有 Desired Registry、Runtime Manifest、mutation transaction 或 Task admission。真实 MCP tool execution继续走既有 AgentCore Run；Renderer 不解码 AgentCore schema。 当前锁定合同的 `request_tool_stream` 是唯一 MCP `tools/call` callback；Host 把完整 response 从 byte zero 写入 borrowed sink，sink、取消、上限或 secret 校验失败均 fail closed。Session Host config 显式使用 ephemeral active-Run journal；durable journal 与 process-plugin/Host stream-tool authority当前均未开放。
 
 Agent 复制官方 MCP catalog 的 `fresh` 与 `ttl_remaining_ms` 作为产品无关 freshness fact；Session create 的官方 `mcp_not_refreshed` 与 `invalid_mcp_selection` 只在无返回 handle 的合法拒绝形态分别保留为 `McpNotRefreshed` 与 `InvalidMcpSelection`，供 Product 按普通 Task admission 合同收缩可选 MCP authority；不得将通用 Core failure 伪装成可恢复的 MCP 拒绝。Session restore 的 `mcp_not_refreshed` 只在空 report、无返回 handle且 cleanup 完整的合法拒绝形态保留为相同错误，其余非 ok/handle/report 组合仍 fail closed 为 ABI contract failure。
 
@@ -125,9 +85,7 @@ Agent-private STDIO/Streamable HTTP backend 只通过 Application 注入的 boun
 
 MetaWork MCP Host 工程接线不得改变上述协议 owner。正式 Runtime 以 canonical empty MCP configuration 创建；恢复出的 Desired 只在 Product Control 与 Application coordinator 就绪后构造 `McpRuntimeInput`，通过官方 `McpApi.applyConfiguration` 完整替换并执行 activation。empty create 后 apply 不是失败 fallback 或第二条 Runtime path，AgentCore `RuntimeApi.create` 仍只调用一次、plugin config 固定为 null，并在失败时终止 Application。Product Control preparation 只把 enabled、配置有效、connection-approved 且 credential/consent-ready 的 owned server input 线性转交 Agent；其他状态保留为 Product Control 产品事实与 Runtime Manifest absence proof。Add/Replace 在用户提交前不得连接网络、启动 child、读取 credential 或打开 browser；提交成功后 `testConnection` 可以对唯一目标构造短寿命候选 Runtime，真正执行 official refresh/activation。候选 Runtime 与正式 Runtime 使用同一 Agent owner/API 和同一有界 connector，实现不解析 MCP JSON-RPC；它最多一个 session，不创建产品 Session，不安装 Manifest/Admission，并在 completion/shutdown 后完整释放。`McpRuntimeInput` 以失败零消费、成功全接管的方式持有 backend owner、adapter、official descriptor、稳定 id→binding identity 与 allowlist。Activation 不包含 raw issue detail、schema、fingerprint、transport 或 credential。initial apply 前创建的 Session 同步复制 null MCP authority且不热替换；apply 完成后只有新 Session 取得新 selection。
 
-当前 canonical bundle 提供 `2026-07-28`、`2025-11-25` 与 `2025-06-18` negotiation policy、typed MCP auth/transport health、catalog/selection 与 tool execution，但不提供 OAuth discovery、PKCE、registration、browser/callback 或 token API。`automatic` 可以协商并 exact reopen 到三个 era 之一；这不构成对旧 AgentCore ABI revision 的兼容。Modern disposable probe 收到完整 HTTP 400 时，MetaWork 保留 status/body，AgentCore 才能判定是否进入 Classic；probe connection 永不升格或与 actual connection 共享 session。OAuth 缺口不要求 AgentCore ABI 扩展：OAuth 是 Streamable HTTP 在产生 preauthorized capability 前的 Host transport authorization，由 Product Control 持有产品状态、Application 执行标准 effect。Product Control 只有在目标 transport 的 approval/auth facts 完整且 secret 满足 Application-owned runtime limits 时才发布 `eligible`；Agent-owned HTTP backend 按成功 response 的 media type 严格分流 JSON 与 event-stream，对非 2xx body 只做有界原样收集，并把 response observation 交给 AgentCore，不解析 JSON-RPC identity 或 MCP 语义。
-
-Product Control 首个 Run 后的 Task 标题生成也只消费 Agent-owned 公共 Completion surface：它复用 Task admission 已固定的 ExecutionConfig，创建短寿命 Completion 并执行一次可取消的非流式请求；该元数据请求不创建新的 AgentCore Session、Run history 或 Conversation，失败只由 Product Control 执行本地标题回退。
+Modern disposable probe 收到完整 HTTP 400 时，MetaWork 保留 status/body，AgentCore 才能判定是否进入 Classic；probe connection 永不升格或与 actual connection 共享 session。OAuth 缺口不要求 AgentCore ABI 扩展：OAuth 是 Streamable HTTP 在产生 preauthorized capability 前的 Host transport authorization，由 Product Control 持有产品状态、Application 执行标准 effect。Product Control 只有在目标 transport 的 approval/auth facts 完整且 secret 满足 Application-owned runtime limits 时才发布 `eligible`；Agent-owned HTTP backend 按成功 response 的 media type 严格分流 JSON 与 event-stream，对非 2xx body 只做有界原样收集，并把 response observation 交给 AgentCore，不解析 JSON-RPC identity 或 MCP 语义。
 
 ## 4. Agent binding
 
@@ -160,8 +118,6 @@ AgentCore/tool thread
 - valid unknown observation 在 SDK 完成结构、ownership 和 byte-bound 校验后立即释放并忽略，不占用产品事件泵，不得传给 Renderer 或猜测为产品状态；
 - callback 不等待 WebView，也不调用 Session destroy 或 re-enter Run。
 
-初始验证先把正式 Host 连接到 FIFO bounded test sink，再替换为 per-Session/global count+bytes、control reserve 和 deadline 受限的 Event pump。当前正式 AgentCore→Product Control projection→Native SDK Bridge→React 垂直链路持续验证同步权限、Renderer reload、终态和异步 Session close；Agent 层另以固定 Runtime/Session allowlist 证明 AskUserQuestion 未向 MetaWork Agent 开放。持续回归要求见 [验证规范](validation.md)。
-
 ### UI request callback
 
 ```text
@@ -192,9 +148,9 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer wake 在有界重试后仍不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
 
-历史 revision 15 macOS canonical bundle 的 source-free probe 使用 realpath 后的同一 canonical Workspace，已证明以下外部事实：`accept_edits` 自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 和明确有副作用的 Bash 发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 same-profile checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。`auto` 对代表性 Write/Bash 仍请求，`dont_ask` 不请求但拒绝 effect。跨 `accept_edits ↔ full_access` restore 产生不可消费的 degraded report；MetaWork 必须销毁 candidate，不能据此实现 profile mutation。精确 artifact identity 只由对应 target lock 定义；替换 artifact 后必须重新取得行为证据。
+PermissionProfile 切换只通过官方 mutator；report、describe、policy generation 与实际权限 effect 的验证责任及平台差异见[验证规范](validation.md)，不从旧 artifact 的结果推导当前版本行为。
 
-PermissionProfile 的产品切换只通过上述官方 mutator；Core 原始跨 mode restore 能否成功，不授予 Product 另一条切换路径。source-free probe 必须独立验证 report、describe、policy generation 与恢复后的实际权限 effect，不把旧 artifact 的不可消费 report 固化为所有后续 artifact 的预期。平台差异必须保留为证据：Windows 上 `full_access` 对 `.git/config` 使用普通 built-in classification 并直接执行，不产生 macOS 上的 core-protected callback；`SHELL_SANDBOXED` 在 Session create 时以 `UnsupportedOs` 明确拒绝。MetaWork 两档都使用 `SHELL_UNRESTRICTED`，且产品从不把 profile 描述成 Sandbox；这些差异不改变当前产品映射，也不得被 UI 隐藏为虚假的跨平台同构。
+UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释放；unavailable 交由 Core 按工具语义失败，fatal 终止 Run。每个 Run 最多一个 active UI wait，等待没有 deadline，只由回答、cancel、close 或 shutdown 结束；stale、duplicate、错误 identity/type 的 response 必须拒绝。进程退出后的同步 wait 和 active Run 不恢复。
 
 ### Host tools
 
@@ -210,7 +166,7 @@ Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
 
-当前启用用于内部测试，不代表正式服务和新包发布验收完成。旧工具集合 checkpoint 必须通过 canonical bundle 的迁移验收；不合法的 report 继续 fail-closed，不以 SDK patch、checkpoint 改写或另一套旧工具 Runtime 绕过。迁移、真实服务与目标平台证据属于发布前条件，状态只由[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)维护。
+旧工具集合 checkpoint 的迁移、真实服务与目标平台验收以[验证规范](validation.md#generateimage-工具集合迁移的恢复缺口)为准；不合法的 report 继续 fail closed，不以 SDK patch、checkpoint 改写或另一套旧工具 Runtime 绕过。
 
 图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。
 
@@ -220,32 +176,7 @@ Run 没有可用图片配置时仍可执行普通对话；若模型调用图片�
 
 ## 5. Host envelope 与产品状态
 
-Host 可以在 AgentCore event 外增加产品路由 envelope：
-
-```json
-{
-  "workspaceId": "workspace-1",
-  "sessionId": "session-12",
-  "runId": "run-8",
-  "sequence": 318,
-  "event": {
-    "tool_start": {
-      "id": "toolu_123",
-      "name": "Bash",
-      "input": "{\"command\":\"zig build\"}"
-    }
-  }
-}
-```
-
-其中：
-
-- `event` 保持 AgentCore 语义，不复制为另一套 Agent event；
-- workspace/session/run ID 属于 MetaWork 产品路由；
-- `sequence` 是 Host 的单 Session/Run 传输序列；
-- Host 可以维护 `run.started/completed/stopped/failed/cancelled/interrupted/waiting_ui` 等产品生命周期状态；
-- envelope 必须保留 SDK 验证后的原始 stop code/reason；
-- Renderer view model 可以派生消息列表和工具卡片，但不能反向成为 AgentCore 协议来源。
+Agent 在 SDK-validated event 外附加 Workspace、Session、Run identity 和单 Session/Run sequence；event 保留原语义及已验证的 stop code/reason。Product 拥有生命周期和派生视图，Renderer wire 由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义，不另建 AgentCore 事件协议。
 
 ### Session 产品身份
 
@@ -288,7 +219,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；文本附件则在同一次 owned allocation 中加入固定的不可信资料声明、经校验的来源名称和字节长度，并与用户指令保持独立 `textPart`。全部输入通过官方 `textPart`、`imagePart` 和 `runMultimodal` 传入 Core，Product 的 Task 原件引用只是有界的不可信资料文本，路径指向保留的 Host-owned copy；Agent 按格式选择可用 Skill 或工具处理原件，文本可用既有 built-in Read/Grep 按需取内容。公共输入类型不暴露 SDK wire，也不增加 AgentCore ABI 或 Provider-specific document path。Provider 协议编码和 Core 模型媒体能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢弃媒体、自动重试或切换模型。
 
-单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
+单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
 Models 声明的图片输入能力必须随执行配置冻结，并在 Session create 与 restore 时由 Host 填入 canonical `SessionHostConfigV1.model_capabilities`；不得仅保留在模型目录或 Renderer metadata。声明只覆盖同一 source、protocol 和 endpoint 路由中已经可执行的模型，包含明确支持与不支持的模型；未知声明不伪造为支持。能力表按 canonical ABI 的数量、模型名与唯一性限制验证，不能静默截断。每个默认 execution 与 Task attachment 持有独立副本；默认能力表变化分配新的 execution generation，既有 Task 保持原副本；同一路由的 `set_model` 使用已安装的表，能力表变化通过既有 Session rebind/restore 安装，不热改在飞 Run。恢复使用当次已解析的路由声明，不根据历史 checkpoint 或模型名重建能力。此表是执行期事实，不新增持久化格式，也不授予工具权限。
 
@@ -296,14 +227,14 @@ Models 声明的图片输入能力必须随执行配置冻结，并在 Session c
 
 ### 每 Run 时间上下文
 
-日期采样、系统时区解析、日期文本和注入均由 AgentCore 拥有。Agent 只选择官方系统时间策略，不向 Runtime 注入时钟 callback，不通过 Application 或 Native SDK 取得日期与时区，不提供 Host context blocks。普通文本与多模态 Run 在 Core 开始执行时取得本轮日期；排队和恢复后的新 Run 同样重新采样，一个 Run 内的工具循环使用本轮快照。具体 wire 选择由 [ABI 消费合同](agentcore-abi-v1.md#3-abi-identity-与-function-table)定义。
+日期采样、系统时区解析、日期文本和注入均由 AgentCore 拥有。Agent 只选择官方系统时间策略，不向 Runtime 注入时钟 callback，不通过 Application 或 Native SDK 取得日期与时区，不提供 Host context blocks。普通文本与多模态 Run 在 Core 开始执行时取得本轮日期；排队和恢复后的新 Run 同样重新采样，一个 Run 内的工具循环使用本轮快照。Run 显式选择官方 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零，Host `context_blocks` 为 null、count 为零。
 
 Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统提示保持稳定；历史和 checkpoint 中旧 Run 的日期继续由 Core 消费，不由 Host 删除、重写或重放。Skill Run 按官方语义不携带日期 block，独立 Completion 和 manual compact 不建立 Host 日期注入。系统日期的产品范围见 [产品需求](requirements.md#54-agent-交互)，验证责任与已知缺口见 [验证规范](validation.md)。
 
 ### 每 Session 规则
 
 - 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；匹配 Run 的 abort 与文本 submitInput 是受调用静止屏障约束的并发控制调用；
-- Permission rule update 不得改变 Task-owned PermissionProfile；Task 创建后只允许 same-profile Run 与 restore；
+- Permission rule update 不得改变 Task-owned PermissionProfile；Run 与 restore 使用 Task 当前已提交的 profile，profile 切换遵循 [UI request callback](#ui-request-callback) 的独立 mutation 合同；
 - Session 已有 in-flight operation 时拒绝第二个 Run；追加文本只用匹配当前 Run 的 submitInput，不在当前同步调用期间再次调用 `session_run_input`；
 - run ID 单调且与 Session 绑定；
 - fresh/restore Session 可以分别接收 Product 提供的 Run、compact 与 UI request allocation floor；新 Run/compact id 必须严格大于各自 Product operation history 高水位，新 UI request id 必须严格大于 durable UI history 高水位，这些 floor 都不改变 checkpoint restore expectation；
@@ -315,9 +246,9 @@ Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统
 - callback context 与 Session handle 具有独立 lifetime guard；
 - Run 返回不等于可以立刻 free callback context，必须确认 callback refcount 为零。
 
-初始 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 AgentCore 实现源码，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
+Agent 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 AgentCore 实现源码，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
 
-正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI 等待没有 deadline：response、cancel、close 或 shutdown 之一在 callback 返回前收敛等待；人类决策不由 Host 过期。
+callback 的校验、owned copy 与同步 UI 等待统一遵循 [Agent binding](#4-agent-binding) 的合同。
 
 当前实现由 Product Control 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Product Control-owned job 放入自身 bounded Executor。`RunInput` 只有 Text、typed Skill 与上述 multimodal 三个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `SessionApi.runSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Product Control 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
@@ -344,7 +275,7 @@ Automatic Workspace 复用同一个 Agent Session workspace 合同，不形成 A
 
 Product Control 的 typed Skill admission 在 `Session.prepareRun` 前同时验证 pinned catalog revision、pinned selection revision、skill identity、enabled 状态、参数数量、UTF-8、Workspace/Task epoch 和容量。RunRecord 保存 admission 时的稳定 Skill 身份、invocation/display 与参数副本；disabled Skill 在进入 AgentCore 前以 `skill_unavailable` 拒绝，AgentCore 的五类 Skill rejection 继续映射为独立产品 cause，不 poison Session、不自动刷新和不重放用户动作。
 
-Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 `input.kind = text | skill | multimodal` 的 tagged payload，旧 `prompt` 字段必然解码失败；Skill input 同时携带 `catalogRevision + selectionRevision`，multimodal input 只携带可空文字与 Bridge connection-bound attachment token。`tasks.create` 必须显式传成对 nullable 的 `expectedSkillCatalogRevision + expectedSkillSelectionRevision`，Text/Multimodal 两者均为 `null`，Skill 两者均为选择时 revision。Workspace current catalog/selection、Task 执行绑定与 Run typed input 由同一 Product Control snapshot 投影；catalog Skill 条目同时携带 Core 提供的 `skillPolicyKey` 供逻辑草稿关联；Bridge 只严格解码、路由和编码，不解析 slash、归档或 AgentCore raw catalog。`workspaces.refreshSkillCatalog` 与 `tasks.refreshSkillCatalog` 保留主动重查与 idle binding 语义；交互输入的自动查询和绑定由 Product Control 在同一 Skill query/Session transaction 上协调，不由 Renderer 编排。`skills.setEnabled` 使用 Workspace epoch 与双 revision CAS 更新 Product Control policy；`skills.refreshCatalog` 更新顶层管理 catalog/inventory reconciliation，不改变 Task 或 Session binding。Skill preview/detail 只发布 Product Control 已做容量与内容边界处理的文本，file picker 返回的一次性 staged handle 和 Host-only physical path 都不得进入 snapshot。Import/export/reimport/uninstall mutation 沿同一 Dispatcher authority、expected generation/Workspace epoch 与 ProductDelivery resync 路径返回 typed result，不形成第二条执行路线。
+Skill 的产品准入、查询调度、管理事务与自动准备由 [Product Skill 合同](product-architecture.md#24-skill-authority-与本地资产)定义；命令、revision CAS、attachment token 与 Snapshot shape 由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。Agent 只接收已验证的 typed 输入，不消费 slash 字符串或管理资产路径。
 
 每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Product Control lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Product Control admission 时预留的 write-once terminal payload。Product Control executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已经归档也不得物理删除；Product Control 保留已受理的删除意图并在引用归零后完成事务；不存在只被测试消费的第二套公开 record-reference 协议。
 
@@ -382,22 +313,7 @@ Agent terminal disposition 为 poisoned 时，Product 也必须使用这条唯�
 - queued compact 由 Product Control 从 Executor 移除后调用 `cancelPreparedCompact` 并直接发布 pre-Core `aborted`；已由 Worker claim 的 compact 只登记 pending interruption 并通过 Agent typed cancellation 收口。两条路径都必须进入同一个 allocation-free、no-fail terminal commit，terminal 发布后才 release record references。
 - `Closed` tombstone 保留到 owner 显式 `releaseClosedSession`，以支持幂等 close 和事后 snapshot；释放后指针失效且 Host slot 才可复用。Host shutdown 开始后禁止单独 release，由统一 teardown 持有所有权。
 
-### 必测 race
-
-- cancel 与自然完成同时发生；
-- close queued Session；
-- close active Run；
-- close queued/active compact；
-- close while WaitingUi；
-- callback fatal 与用户 cancel 同时发生；
-- Host shutdown 多 Session；
-- abort 返回 stale/too-late；
-- accepted compact abort 返回 OK 但原 compact 返回非 aborted；
-- compact terminal publication 与 cancel/snapshot 同时发生；
-- Executor pop 与 queued compact cancel 同时发生；
-- double close / duplicate response；
-- runtime destroy while Session alive；
-- diagnostic/release callback 恰好一次。
+生命周期、并发 race 与 ownership 的验证归属和入口见[验证规范](validation.md#测试归属)。
 
 ## 7. TerminationSignal、TerminalResult 与错误传播
 
@@ -492,14 +408,9 @@ flowchart LR
     CORE --> COPY --> QUEUE --> PUMP --> PROJECT --> DELIVERY --> UI
 ```
 
-### 当前已测量并固定的维度
+### 队列预算
 
-- global queue count/bytes；
-- per-Session queue count/bytes；
-- maximum single event bytes；
-- control reserved capacity；
-- per-pump Session/event budget；
-- Product Control snapshot capacity/chunk bytes 与 revision retry budget。
+事件泵同时约束 global/per-Session count 与 bytes、单事件大小、control reserve 和每次 pump 的 Session/event budget；精确容量由实现和测试拥有。
 
 默认单事件预算必须容纳 canonical SDK 允许的完整单图 Base64 和有界 JSON envelope；global 与 per-Session byte budget 在扣除 control reserve 后也须可准入该事件，并保持有界、公平调度和 deadline。`Read` 的完整图片结果仍由 Core 用于模型输入；Product 只保留经过精确格式识别的读取摘要，不把 Base64 投影到 Tool 详情、Snapshot 或产品历史，也不改写 Core 的结果或 checkpoint。
 
@@ -524,53 +435,15 @@ flowchart LR
 
 按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 
-### 大 payload
-
-Native SDK 和真实事件大小已经测量；49,703-byte 真实 event 超过当前 8 KiB Host window-event budget，因此当前使用受限 Host-owned object reference：
-
-- opaque object ID；
-- Session/Run ownership；
-- count/byte/TTL 上限；
-- Renderer fetch 命令的来源和归属校验；
-- Session close、Run terminal、reload 和 shutdown 清理。
-
-禁止为了假想大对象先建设通用 blob service。
+Renderer 的 payload 容量、分块与清理由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义。
 
 ## 9. Renderer reload 与重连
 
-当前 baseline 只保证 WebView/Renderer reload 后从仍存活 Host 重建视图：
+Renderer 从仍存活的 Host canonical Product projection 重建视图，重连时仍待决的 UI request 保持原 Session/Run/request identity；reload 或 detach 不终止后台 Run，进程退出后不恢复 active Run。原始 CoreEvent 在 Product 完成 projection 后释放，credential 不进入 Snapshot。
 
-- Native SDK 的真实 push/poll 机制由 dev/prod smoke 验证；
-- Host 维护可生成当前 view snapshot 的产品状态；
-- 重连策略必须定义 snapshot/event 的大小上限、旧连接隔离和清理；
-- reload 期间仍 active 的同步 UI request 可以重新展示，但响应仍须绑定原 Session/Run/request；
-- Host/AgentCore 进程退出后不恢复 active Run；
-- snapshot 不包含 Provider credential。
+revision、Snapshot、连接隔离、容量与重试规则统一由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义。Agent 不参与视图范围和运输，不因读取范围改变事件接纳、Session identity 或终态 drain 屏障。
 
-Product Control revision 通知只在 revision 变化时发送，Renderer 合并并发 refresh；Host 发送失败时保留最新 revision 并由一次性 timer 重试，若 timer 也无法建立则立即使当前 event connection 失效，不能只记录日志后继续宣称可用。Renderer snapshot 拉取失败时保留目标 revision；每个 generation 的自动重试预算耗尽后停止请求、禁止产品 mutation 并等待用户显式恢复，不得把失败误记成已同步，也不得永久循环重试。
-
-正式 AgentCore 产品事件由 Product Control 在主线程从 Agent event pump 取出并完成 typed projection 后即释放，不把同一 raw `CoreEvent` 复制到 Renderer。产品 Renderer 的唯一数据面是 Product Control-owned revision + bounded snapshot；automation 只观察和驱动这条真实路径，不定义独立 Renderer transport。
-
-Renderer 的产品视图范围、revision、缓存、安全失效、读取 identity、运输容量和分块只由 [Renderer Bridge 合同](renderer-bridge-contract.md#2-productdelivery-与-snapshot-transport)定义。Agent 不参与 Renderer 范围选择和运输，不因读取范围变化改变 CoreEvent 接纳、Session identity 或终态 drain 屏障。
-
-不在验证 transport 前发明固定 `events.drain`、cursor 或轮询协议；最终机制必须以 Native SDK 事实和压力数据为依据。
-
-## 10. UI request 语义
-
-当前 ABI v1 只有同步 outcome：answered、unavailable、fatal。
-
-- answered response 由 SDK encoder 生成，并按照 bundle ownership 规则 release 恰好一次；
-- unavailable 表示当前 Host 无法回答，Core 按其工具语义安全失败；
-- fatal 表示 Host request pipeline 失败，Run 必须退出；
-- 每个 Run 同时最多一个 active UI wait；
-- UI 等待没有 deadline：等待只由 answered、cancel、close 或 shutdown 结束，Host 不得代替用户过期一个待决请求；
-- cancel、close、shutdown 唤醒 wait；
-- response 必须拒绝 stale、duplicate、错误 Session/Run 和错误类型；
-- 同步 wait crash 后不恢复，工具保持未执行，Run 标记 interrupted。
-
-未来 async pending/resume 必须独立定义 request identity、SuspendInfo、持久化、exactly-once tool execution、subagent 限制和 crash recovery；不能只在 React 中保存审批框。
-
-## 11. RunResult 与 StopReason
+## 10. RunResult 与 StopReason
 
 `session_run_input` 的处理顺序固定：
 
@@ -594,23 +467,27 @@ call ABI
 | `checkpoint_budget_exhausted` | stopped / resource_limit                                                                       |
 | `checkpoint_resource_limit`   | stopped / resource_limit                                                                       |
 
+每种 operation 按官方合同决定 result 的可读字段，不能从全局 status enum 推断合法性；已定义 Run 返回状态上的两个 input counts 均须验证。未知 status、其他 operation 的 status、未知 enum/flag 或跨字段矛盾均按 dependency contract failure 收口。
+
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 
 ABI status 的 `checkpoint_budget_required` 表示 Run 未 admission，Host 只读取其合同明确允许的 `checkpoint_outcome_code`、`result_flags`、`durable_usage_bytes` 和 `required_checkpoint_bytes`，并保持 Session 可重试；当前产品未开放 checkpoint 后自动重试，因此向 Product Control 失败收口。manual compact 与 idle Session Skill mutation 也分别按自己的 operation-specific status set 接受该 status，当前操作失败但不污染 Session；不能因为 status 属于 当前 SDK typed enum 就跨 operation 接受，也不能把某个 operation 的合法 status 当成 dependency contract failure。`resource_limit` 与 pre-admission `invalid_argument`、`busy`、`stale_run` 一样不污染 Session；一旦 Run 已 admission，`out_of_memory`、`core_error`、`callback_failed` 或 `internal_error` 会 poison Session。Host 在这些状态后拒绝新 Run 并要求关闭或重建 Task 的 AgentCore Session，不能提供虚假的原 Session retry。
 
 checkpoint export 与 Session describe 各自维护独立 disposition。export 中经 sink 本地原因交叉验证的 `checkpoint_io` 是可再生操作失败，保留旧 blob/descriptor 且 Session reusable；sink `FAILED` 用于 cancel 或普通 I/O 中止，`FATAL` 只用于 Host sink contract failure。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible` 与 `logical_session_conflict` 属于 restore 侧语义，不是 export 合法结果。describe 的 `invalid_argument`、`resource_limit`、`busy` 保持 reusable。两条路径的 `out_of_memory`、`core_error` 与 malformed OK 保守关闭 Session 后续 admission；这是上游未承诺失败后 Session 状态时的 MetaWork fail-closed 策略，不宣称为 ABI 保证。`checkpoint_budget_required` 不是 export/describe 的合法结果，出现时走显式 dependency contract failure。checkpoint generation 是 opaque `u64`，允许零值且不推断单调性。shutdown/cancel 只能在 chunk callback 边界请求 `CHECKPOINT_IO_FAILED`；已提交 terminal 产品结果不被 checkpoint 失败改写。
 
-Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 SHA-256。前两者必须与 export result 精确一致；当前锁定合同未定义 result `digest` 的算法，且真实 canonical bundle 输出与 byte SHA-256 不同，因此产品 content hash 只使用本地 sink 观测值，raw digest 不离开 Agent。该差异记录为上游合同缺口，而不是在 Product Control 复制或猜测算法。
+restore 的 checkpoint 损坏、不支持、不兼容、逻辑 Session 冲突或已验证 source I/O 失败只失败本次 candidate；malformed OK、report/expectation 不一致或合同违约必须销毁 candidate 并 fail closed。source callback 允许短读，Core 必须持续读取到 EOF。
+
+Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 SHA-256，前两者必须与 export result 精确一致。产品 content hash 使用本地 streamed bytes 的 SHA-256；SDK 的 opaque `digest` 不解释为内容哈希，也不离开 Agent。
 
 产品 checkpoint 上限由 Product Control 的 `checkpoint_export_limits` 唯一定义，须容纳已接纳输入的有界图片预览、原件引用与封装；附件完整原件不进入 checkpoint。命中任一上限只使本次 export 以可再生失败收口，不 poison Session；预算变化须有真实 export/restore 证据，长会话分布仍需持续采样，不得以放大上限替代证据。
 
 `stream_done` 只表示一次模型流结束，不等于整个 Run 完成。只有 ABI status 与 RunResult 映射完成后才能发布 terminal product state。
 
-## 12. Credential、Workspace 与工具安全
+## 11. Credential、Workspace 与工具安全
 
 ### Credential
 
-- Provider key 从 Host process environment 或受控配置读取；
+- credential 的取得、授权与续期由 Account/Product/Application owner 负责，Agent 只消费其交付的执行凭据；
 - composition 将 execution defaults 复制进 Product Control-owned process-local storage；该 storage 不进入 Task/Run canonical state，并在 Executor 与全部 workers quiesce 后清零；
 - Session fresh/restore 只在同步调用期借用输入，Host 临时副本在返回后清零；Core 内部副本按锁定 bundle 合同持有；
 - 不从 Renderer command 接收 key；
@@ -624,28 +501,23 @@ Agent 的 `updateCredential` 是官方 Session credential replacement 的唯一�
 
 ### Workspace
 
-- Host 直接发起原生目录选择，用户确认 Native picker 的结果即构成显式授权；Bridge 在同一 `workspaces.choose` 命令内签发并消费绑定 window、`ProductDelivery` connection generation 和该次 picker 结果的一次性 grant，不追加 trust 确认；
-- Renderer 只接收完成注册后的 Workspace identity，不得接收 grant、回传任意路径或提交 `trusted` boolean；Product Control 使用 grant 中的路径执行规范化与目录验证。grant 在 disconnect、拒绝、替换或首次消费后失效；
-- lifecycle API 只接收 Product Control 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
-- 当前 v1 只运行 Product Control 分配的 Automatic Workspace 或用户通过原生 picker 明确授权的 Manual Workspace；该选择建立路径 authority，不再追加“信任此工作区”产品状态；
-- 不以 `workspace_root` 字段存在为 strict security 证据；
-- symlink、路径逃逸、不存在写入目标、sandbox、process tree 和 TOCTOU 矩阵属于后续安全 Gate；
-- strict security 未完成前，UI 和文档不得宣称可以安全运行不可信 Workspace。
+Workspace 选择、一次性授权和 registry 事务由 [Product 架构](product-architecture.md#22-workspace-与-task-admission)及 [Renderer Bridge 合同](renderer-bridge-contract.md)拥有。Agent 只接收 Product 已授权、规范化的 Automatic 或 Manual Workspace 绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸。
+
+路径校验不构成 symlink/TOCTOU 或 strict sandbox 保证；严格安全能力与验收范围以[产品需求](requirements.md)和[验证规范](validation.md)为准。
 
 ### built-in tools
 
-- MetaWork Agent 固定开放 `Read / Write / Edit / Glob / Grep / Bash / BashOutput / KillShell / WebSearch / WebFetch`；`AskUserQuestion` 虽可由 bundle 提供，但不进入产品集合；
-- `src/agent/capabilities.zig` 是精确工具名与顺序的实现真源；Agent 将同一非空集合用于 Runtime 注册和 fresh/restore Session allowlist，公开 Session options 不允许调用方扩大或收窄；
-- Workbench 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力是外部上限，Agent 集合是产品化子集；
-- unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；Runtime `host_tool_count` 保持零；
+- `src/agent/capabilities.zig` 唯一定义 built-in 产品子集的精确工具名与顺序，`AskUserQuestion` 不开放；Agent 将同一非空集合用于 Runtime 注册和 fresh/restore Session allowlist，公开 Session options 不允许调用方扩大或收窄；
+- Workbench 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力只构成外部上限；
+- unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
-- 正式 Session 按 Task-owned profile 使用 `accept_edits + unrestricted` 或 `full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request。这是当前 `approval_required` compatibility baseline，不是 strict security 或产品级 Sandbox；
+- Session 使用 Task-owned PermissionProfile，映射及 mutation 规则见 [UI request callback](#ui-request-callback)；
 - 默认 Bash 是非交互 shell，不使用 PTY；
 - stdout/stderr/exit code 有界或通过后续对象引用展示。
 
-## 13. 反向控制
+## 12. 反向控制
 
 ### 当前有效路径
 
@@ -679,25 +551,8 @@ Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由
 
 当前 Run 插话只通过绑定 Run identity/generation 的 Agent 控制 lease 调用官方 submitInput，Core readiness、并发登记与收尾 barrier 遵守本合同的 Session 规则。Agent 不调度后续 Run；Product 负责有界原文、正常完成后确定未采纳输入的一次接续准入及取消，详见 [Product 架构](product-architecture.md)。安全历史、审批和响应丢失对账由该合同及 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。executor queued Run 仍按原 admission 工作，不能把该调度状态当成插话 readiness。
 
-## 14. Shell 边界
+## 13. Shell 边界
 
-`ShellPolicy` 只决定 AgentCore 如何提供 Bash 执行能力，不决定 MetaWork 是否询问用户。当前正式值 `.unrestricted` 表示获准的 Bash 不经过 AgentCore file sandbox；它不表示 root、不绕过操作系统授权，也不等于 `PermissionProfile.full_access`。当前 aarch64 macOS artifact probe 证明 `.disabled` 在 Bash 仍位于 Session allowlist 时以 `ShellToolDisabled` 拒绝建 Session，`.sandboxed` 允许 Bash 写 Workspace 内文件并阻止同一命令写向仓库中的 Workspace 外临时目录；这只是一个路径 effect 样本，不覆盖 symlink/TOCTOU、process tree、network、environment 或其他 target。官方 surface 存在这些值不代表 MetaWork 已产品化对应模式；完整安全矩阵完成前，Renderer 不得展示“沙箱”承诺，Product Control 也不得把该 enum 当作 Workspace trust level。
+`ShellPolicy` 只决定 AgentCore 的 Bash 执行方式；正式值 `.unrestricted` 不表示 root、不绕过 OS 授权，也不等于 `PermissionProfile.full_access`。Product 的审批模式与 Shell policy 分离，未开放的 SDK 模式不形成产品能力或 Sandbox 承诺。
 
-| 能力                         | 当前 Bash baseline |
-| ---------------------------- | ------------------ |
-| hidden non-interactive child | 使用               |
-| stdout/stderr capture        | 使用               |
-| exit code/timeout/cancel     | 必须验证           |
-| Terminal Emulator            | 不使用             |
-| PTY/ConPTY                   | 不使用             |
-| TTY-only programs            | 拒绝或明确报错     |
-
-未来如需交互式终端，应作为独立 `TerminalTool` 设计，不得重新成为 Agent 通信层。
-
-## 15. 进程模型
-
-独立测试进程已经完成同进程 fatal baseline 和最小 Worker harness。结果是同进程 fatal 会带走 Host 与全部进程内 Session；Worker crash 时 Host 与已有产品 snapshot 可继续存活，归属 active Run 进入 `interrupted/worker_disconnected`，危险工具不自动重放。因此后续正式方向选择单 AgentCore Worker。
-
-当前应用仍是同进程 bounded-executor prototype。正式 Worker 尚未实现，spike IPC 不是产品协议。后续必须单独定义版本化 transport、容量/backpressure、ownership、correlation、credential、disconnect 和 shutdown。当前 checkpoint restore 只证明同一桌面 Application 正常重启后可以显式重建 finalized Conversation attachment；它不意味着 Worker restart 已具备 in-flight Run、async pending、suspend/resume 或进程级 crash recovery。
-
-Renderer 始终只面对 Host 领域命令和产品 envelope，不直接绑定 Worker 或 AgentCore memory。
+Bash 使用隐藏的非交互子进程，有界捕获 stdout/stderr，并支持 exit code、timeout 与取消；不提供 Terminal Emulator、PTY/ConPTY，TTY-only 程序须拒绝或明确报错。平台行为与验收见[验证规范](validation.md)，进程及故障域见[高层架构](architecture.md#5-部署状态与故障域)。
