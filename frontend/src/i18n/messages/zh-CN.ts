@@ -252,10 +252,6 @@ export const zhCN: Record<MessageId, string> = {
   "operation.account": "更新 Metask 账号",
   "operation.execution": "更新模型配置",
   "operation.account_cancel": "取消 Metask 账号操作",
-  "command.timeout_reconciled":
-    "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",
-  "command.timeout_sync_failed":
-    "{operation}等待时间超出预期，且无法确认最新状态。请重新连接后再继续。",
   "workspace.label": "工作区",
   "workspace.select": "选择工作区",
   "workspace.add": "添加",

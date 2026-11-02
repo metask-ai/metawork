@@ -34,6 +34,9 @@ const { accountFeedback } = await vite.ssrLoadModule(
 const { FeedbackNotice } = await vite.ssrLoadModule(
   "/src/components/ui/FeedbackNotice.tsx",
 );
+const { DiagnosticDisclosure } = await vite.ssrLoadModule(
+  "/src/components/ui/DiagnosticDisclosure.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -193,11 +196,15 @@ function renderSettings(account, models = readyModels, options = {}) {
       account,
       accountFeedback: feedback
         ? createElement(FeedbackNotice, {
-            title: translate("en-US", "account.feedback.title"),
-            message: translate("en-US", feedback.id),
-            diagnostic: feedback.diagnostic,
-            detailsLabel: "Technical details",
+            title: translate("en-US", feedback.id),
           })
+        : null,
+      accountDiagnostics: feedback?.diagnostic
+        ? createElement(
+            DiagnosticDisclosure,
+            { label: "Account diagnostics" },
+            createElement("pre", null, feedback.diagnostic),
+          )
         : null,
       models,
       automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,

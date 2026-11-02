@@ -41,12 +41,10 @@ import {
   createFeedbackState,
   dismissFeedback,
   observeFeedback,
-  publishStatus,
   quietStatus,
   resetFeedback,
   selectCommandBarFeedback,
   settleFeedback,
-  statusVisibleInCommandBar,
   type FeedbackToken,
   type ShellStatus,
   type ShellRoute,
@@ -666,18 +664,6 @@ export default function App() {
     const next = update(feedbackRef.current);
     feedbackRef.current = next;
     setStatuses(next);
-  }
-  function setStatus(status: ShellStatus) {
-    const announce = statusVisibleInCommandBar(status, {
-      route,
-      settingsOpen,
-      workspaceId: composerWorkspaceId ?? null,
-      taskId: activeTask?.id ?? null,
-    });
-    updateFeedbackState((current) => {
-      const next = publishStatus(current, status);
-      return announce ? next : { ...next, announcement: current.announcement };
-    });
   }
   function beginOperationFeedback(source: string, audience: StatusAudience) {
     const started = beginFeedback(feedbackRef.current, source, {
@@ -3201,18 +3187,21 @@ export default function App() {
           return;
         }
       } catch (error) {
-        if (
-          await reconcileCommandTimeout(
-            error,
-            "operation.compact",
-            {
-              scope: "task",
-              taskId,
-            },
+        if (error instanceof BridgeCommandTimeoutError) {
+          settleOperationFeedback(
             feedbackToken,
-          )
-        )
+            attentionStatus(
+              "feedback.unconfirmed",
+              { scope: "task", taskId },
+              {
+                values: { operation: t("operation.compact") },
+                diagnostic: errorText(error),
+              },
+            ),
+          );
+          await refreshCommittedView();
           return;
+        }
         await refreshSnapshot().catch(() => undefined);
         settleOperationFeedback(
           feedbackToken,
@@ -3899,35 +3888,6 @@ export default function App() {
     await refreshCommittedView();
     return true;
   }
-  async function reconcileCommandTimeout(
-    error: unknown,
-    operation: MessageId,
-    audience: StatusAudience,
-    token?: FeedbackToken,
-  ) {
-    if (!(error instanceof BridgeCommandTimeoutError)) return false;
-    if (token)
-      settleOperationFeedback(
-        token,
-        attentionStatus("feedback.unconfirmed", audience, {
-          values: { operation: t(operation) },
-          diagnostic: errorText(error),
-        }),
-      );
-    try {
-      await refreshSnapshot();
-      // Preserve legacy replacement semantics; the caller checks business facts.
-      if (!token)
-        setStatus(
-          quietStatus("command.timeout_reconciled", audience, {
-            values: { operation: t(operation) },
-          }),
-        );
-    } catch {
-      // The connection owns sync failure; do not leave a second stale warning.
-    }
-    return true;
-  }
   const connectionShellStatus = statuses.entries.connection;
   const connectionFailure = connectionFailurePresentation(
     connectionShellStatus,
@@ -3981,12 +3941,7 @@ export default function App() {
         }
       : null,
   });
-  const commandBarFeedback = selectCommandBarFeedback(statuses, {
-    route,
-    settingsOpen,
-    workspaceId: composerWorkspaceId ?? null,
-    taskId: activeTask?.id ?? null,
-  });
+  const commandBarFeedback = selectCommandBarFeedback(statuses);
   if (
     connectionBusy &&
     connectionShellStatus &&

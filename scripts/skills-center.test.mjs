@@ -419,37 +419,21 @@ test("Skills route uses canonical management and Workspace enablement commands",
   assert.match(css, /\.skill-empty-state > button \{\s*min-width: 168px;/);
 });
 
-test("Skills route sees global Skill attention without leaking Task attention", () => {
+test("Skills and Task issues stay in their business contexts", () => {
   assert.equal(
-    statusVisibleInCommandBar(
-      {
-        id: "skills.catalog_refresh_failed",
-        tone: "attention",
-        audience: { scope: "skills" },
-      },
-      {
-        route: "skills",
-        settingsOpen: false,
-        workspaceId: "7",
-        taskId: "9",
-      },
-    ),
-    true,
+    statusVisibleInCommandBar({
+      id: "skills.catalog_refresh_failed",
+      tone: "attention",
+      audience: { scope: "skills" },
+    }),
+    false,
   );
   assert.equal(
-    statusVisibleInCommandBar(
-      {
-        id: "run.failed",
-        tone: "attention",
-        audience: { scope: "task", taskId: "9" },
-      },
-      {
-        route: "skills",
-        settingsOpen: false,
-        workspaceId: "7",
-        taskId: "9",
-      },
-    ),
+    statusVisibleInCommandBar({
+      id: "run.failed",
+      tone: "attention",
+      audience: { scope: "task", taskId: "9" },
+    }),
     false,
   );
 });

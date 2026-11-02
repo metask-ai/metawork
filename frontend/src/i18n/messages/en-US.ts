@@ -296,8 +296,7 @@ export const enUS = {
     "MetaWork could not open the Metask recharge page. Try again shortly.",
   "execution.command_rejected":
     "The model settings were not updated. Refresh and try again.",
-  "execution.command_failed":
-    "Model configuration result not yet confirmed",
+  "execution.command_failed": "Model configuration result not yet confirmed",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
@@ -307,10 +306,6 @@ export const enUS = {
   "operation.account": "Updating the Metask account",
   "operation.execution": "Updating model settings",
   "operation.account_cancel": "Cancelling the Metask account action",
-  "command.timeout_reconciled":
-    "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
-  "command.timeout_sync_failed":
-    "{operation} took longer than expected, and the latest state could not be confirmed. Reconnect before trying again.",
   "workspace.label": "Workspace",
   "workspace.select": "Select a workspace",
   "workspace.add": "Add",
@@ -951,8 +946,7 @@ export const enUS = {
   "run.started": "Work started.",
   "run.start_failed":
     "Work could not start. Check your connection and try again.",
-  "run.stop_failed":
-    "The stop request could not be confirmed",
+  "run.stop_failed": "The stop request could not be confirmed",
   "run.stop_unconfirmed": "Stop result not yet confirmed",
   "run.stop_requested":
     "Stop requested. Waiting for the current work to finish stopping…",

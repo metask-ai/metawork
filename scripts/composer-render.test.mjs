@@ -554,7 +554,9 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
   );
   assert.match(markup, /Release is ready/);
   assert.doesNotMatch(markup, /Read|Work completed/);
-  assert.match(renderCompletedSurface(""), /Work completed/);
+  const empty = renderCompletedSurface("");
+  assert.match(empty, /This turn returned no final response/);
+  assert.doesNotMatch(empty, /Work completed/);
 });
 
 test("pending UI follows the unified Assistant output without technical history", () => {

@@ -5,9 +5,9 @@ import test from "node:test";
 import {
   attentionStatus,
   createFeedbackState,
-  publishStatus,
+  observeFeedback,
   quietStatus,
-  selectCommandBarStatus,
+  selectCommandBarFeedback,
   statusVisibleInCommandBar,
 } from "../frontend/src/app/command-bar-status.ts";
 
@@ -362,108 +362,51 @@ test("a new Task draft is not mistaken for an in-flight Run", () => {
   assert.equal(isRunInFlight(task({ currentRunPhase: "queued" })), true);
 });
 
-test("command bar attention is explicit and cannot leak across product identity", () => {
-  const taskA = {
-    route: "workbench",
-    settingsOpen: false,
-    workspaceId: "ws-1",
-    taskId: "task-a",
-  };
-  const taskB = {
-    route: "workbench",
-    settingsOpen: false,
-    workspaceId: "ws-1",
-    taskId: "task-b",
-  };
-  const otherWorkspace = {
-    route: "workbench",
-    settingsOpen: false,
-    workspaceId: "ws-2",
-    taskId: null,
-  };
-  const settings = {
-    route: "skills",
-    settingsOpen: true,
-    workspaceId: "ws-1",
-    taskId: null,
-  };
-
-  assert.equal(
-    statusVisibleInCommandBar(
-      quietStatus("connection.connected", { scope: "connection" }),
-      taskA,
-    ),
-    false,
-  );
-  assert.equal(
-    statusVisibleInCommandBar(
-      attentionStatus("account.options_updated", { scope: "account" }),
-      settings,
-    ),
-    true,
-  );
-  const workspaceFailure = attentionStatus("mutation.transport_failed", {
+test("global attention keeps connection and account context while business failures remain local", () => {
+  const workspace = attentionStatus("workspace.selection_failed", {
     scope: "workspace",
     workspaceId: "ws-1",
   });
-  assert.equal(statusVisibleInCommandBar(workspaceFailure, taskA), true);
-  assert.equal(
-    statusVisibleInCommandBar(workspaceFailure, otherWorkspace),
-    false,
-  );
-  assert.equal(statusVisibleInCommandBar(workspaceFailure, settings), false);
   const taskFailure = attentionStatus("task.archive_failed", {
     scope: "task",
     taskId: "task-a",
   });
-  assert.equal(statusVisibleInCommandBar(taskFailure, taskA), true);
-  assert.equal(statusVisibleInCommandBar(taskFailure, taskB), false);
-  const concurrent = [
-    attentionStatus("task.archive_failed", {
-      scope: "task",
-      taskId: "task-a",
-    }),
-    quietStatus("task.archived_status", { scope: "task", taskId: "task-b" }),
-  ].reduce(publishStatus, createFeedbackState());
+  assert.equal(statusVisibleInCommandBar(workspace), false);
+  assert.equal(statusVisibleInCommandBar(taskFailure), false);
   assert.equal(
-    selectCommandBarStatus(concurrent, taskA)?.id,
-    "task.archive_failed",
-  );
-  assert.equal(selectCommandBarStatus(concurrent, taskB), null);
-  const recoveredWorkspace = publishStatus(
-    publishStatus(
-      createFeedbackState(),
-      attentionStatus("workspace.selection_failed", {
-        scope: "workspace",
-        workspaceId: null,
-      }),
+    statusVisibleInCommandBar(
+      quietStatus("connection.connected", { scope: "connection" }),
     ),
-    quietStatus("workspace.grant_confirmed", {
-      scope: "workspace",
-      workspaceId: "ws-1",
-    }),
+    false,
   );
-  assert.equal(selectCommandBarStatus(recoveredWorkspace, taskA), null);
-  assert.equal(
-    selectCommandBarStatus(recoveredWorkspace, otherWorkspace),
-    null,
+  let state = observeFeedback(
+    createFeedbackState(),
+    "task-archive:task-a",
+    "result",
+    { ...taskFailure, local: true },
   );
-
-  const mixedScope = [
+  state = observeFeedback(
+    state,
+    "account:operation",
+    "result",
     attentionStatus("account.command_failed", { scope: "account" }),
-    attentionStatus("run.stop_failed", {
-      scope: "task",
-      taskId: "task-a",
-    }),
-  ].reduce(publishStatus, createFeedbackState());
-  assert.equal(
-    selectCommandBarStatus(mixedScope, taskA)?.id,
-    "run.stop_failed",
   );
-  assert.equal(
-    selectCommandBarStatus(mixedScope, settings)?.id,
-    "account.command_failed",
+  state = observeFeedback(
+    state,
+    "connection",
+    "condition",
+    attentionStatus("connection.refresh_failed", { scope: "connection" }),
   );
+  assert.deepEqual(
+    selectCommandBarFeedback(state).map((entry) => entry.key),
+    ["connection", "account:operation"],
+  );
+  state = observeFeedback(state, "connection", "condition", null);
+  assert.deepEqual(
+    selectCommandBarFeedback(state).map((entry) => entry.key),
+    ["account:operation"],
+  );
+  assert.equal(state.entries["task-archive:task-a"].id, "task.archive_failed");
 });
 
 test("global search consumes only the current Host page and drops stale queries", () => {
