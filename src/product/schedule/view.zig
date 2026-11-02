@@ -68,9 +68,8 @@ fn writeItem(
     try text.writeJson(writer, binding.model_ref.source_id);
     writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, binding.model_ref.model_id);
-    writer.print("}},\"sourceGeneration\":\"{d}\",\"selectionRevision\":\"{d}\",\"protocol\":\"{s}\"}}", .{
+    writer.print("}},\"sourceGeneration\":\"{d}\",\"protocol\":\"{s}\"}}", .{
         binding.source_generation,
-        binding.selection_revision,
         @tagName(binding.protocol),
     }) catch return error.SnapshotTooLarge;
     writer.print(",\"permissionProfile\":\"{s}\",\"input\":{{\"kind\":\"text\",\"text\":", .{

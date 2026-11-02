@@ -4302,7 +4302,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "status",
     "modelRef",
     "sourceGeneration",
-    "selectionRevision",
     "protocol",
   ]);
   const bindingStatus = enumValue(
@@ -4319,10 +4318,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     sourceGeneration: positiveWireId(
       bindingRoot.sourceGeneration,
       `${path}.binding.sourceGeneration`,
-    ),
-    selectionRevision: positiveWireId(
-      bindingRoot.selectionRevision,
-      `${path}.binding.selectionRevision`,
     ),
     protocol: enumValue(
       bindingRoot.protocol,

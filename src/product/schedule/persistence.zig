@@ -480,7 +480,6 @@ const ItemWire = struct {
 const BindingWire = struct {
     model_ref: ModelRefWire,
     source_generation: u64,
-    selection_revision: u64,
     protocol: []const u8,
 };
 
@@ -619,7 +618,6 @@ fn decodeBinding(wire: BindingWire) Error!scheduled.Binding {
             .model_id = wire.model_ref.model_id,
         },
         .source_generation = wire.source_generation,
-        .selection_revision = wire.selection_revision,
         .protocol = parseEnum(scheduled.Protocol, wire.protocol) orelse
             return error.ScheduledTaskStoreCorrupt,
     };
@@ -686,9 +684,8 @@ fn encodeBinding(writer: *std.Io.Writer, binding: scheduled.Binding) !void {
     try jsonString(writer, binding.model_ref.source_id);
     try writer.writeAll(",\"model_id\":");
     try jsonString(writer, binding.model_ref.model_id);
-    try writer.print("}},\"source_generation\":{d},\"selection_revision\":{d},\"protocol\":", .{
+    try writer.print("}},\"source_generation\":{d},\"protocol\":", .{
         binding.source_generation,
-        binding.selection_revision,
     });
     try jsonString(writer, @tagName(binding.protocol));
     try writer.writeByte('}');
@@ -797,7 +794,6 @@ test "scheduled task store round trips bounded occurrence history" {
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
-            .selection_revision = 11,
             .protocol = .openai_chat_completions,
         },
         .permission_profile = .full_access,
@@ -817,7 +813,6 @@ test "scheduled task store round trips bounded occurrence history" {
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
-            .selection_revision = 11,
             .protocol = .openai_chat_completions,
         },
         .permission_profile = .approval_required,

@@ -5030,7 +5030,7 @@ pub const Dispatcher = struct {
         );
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.binding,
+            parsed.value.modelSelection,
             parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
@@ -5069,7 +5069,7 @@ pub const Dispatcher = struct {
         const expected_epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
-            parsed.value.binding,
+            parsed.value.modelSelection,
             parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
@@ -5662,26 +5662,18 @@ fn encodeTaskCreateResult(
 
 fn scheduledTaskDefinition(
     title: []const u8,
-    binding: handlers.ScheduledTaskBinding,
+    selection: ?handlers.NewTaskModelSelection,
     permission_profile_wire: []const u8,
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !product_control.ScheduledTaskDefinitionInput {
     return .{
         .title = title,
-        .binding = .{
-            .model_ref = .{
-                .source_id = binding.modelRef.sourceId,
-                .model_id = binding.modelRef.modelId,
-            },
-            .source_generation = try handlers.parseWireId(binding.sourceGeneration),
-            .selection_revision = try handlers.parseWireId(binding.selectionRevision),
-            .protocol = std.meta.stringToEnum(
-                models_contract.Protocol,
-                binding.protocol,
-            ) orelse
-                return error.InvalidBridgePayload,
-        },
+        .model_selection = if (selection) |value| .{
+            .target = .{ .source_id = value.targetModelRef.sourceId, .model_id = value.targetModelRef.modelId },
+            .expected_source_generation = try handlers.parseWireId(value.expectedSourceGeneration),
+            .expected_catalog_generation = try handlers.parseWireId(value.expectedCatalogGeneration),
+        } else null,
         .permission_profile = handlers.permissionProfile(permission_profile_wire) orelse
             return error.InvalidBridgePayload,
         .input = instruction,

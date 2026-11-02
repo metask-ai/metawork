@@ -561,7 +561,6 @@ export type ScheduledTaskRecurrence =
 export type ScheduledTaskBinding = {
   modelRef: ModelRef;
   sourceGeneration: string;
-  selectionRevision: string;
   protocol: Protocol;
 };
 export type ScheduledTaskStoredBinding = {
@@ -615,7 +614,7 @@ export type ScheduledTaskView = {
 };
 export type ScheduledTaskMutation = {
   title: string;
-  binding: ScheduledTaskBinding;
+  modelSelection: NewTaskModelSelectionIntent | null;
   permissionProfile: PermissionProfile;
   input: Extract<
     TaskRunInput,

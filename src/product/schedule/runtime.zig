@@ -91,8 +91,17 @@ fn bootstrapStore(
         persistence_capability.restored_bytes.?,
         limits,
     ) catch {
-        health.* = .corrupt;
-        return state.Store.init(allocator, limits);
+        var empty = try state.Store.init(allocator, limits);
+        errdefer empty.deinit();
+        const output = try allocator.alloc(u8, persistence.max_store_bytes);
+        defer allocator.free(output);
+        const bytes = try persistence.encode(output, &empty);
+        health.* = switch (persistence_capability.recover(bytes)) {
+            .committed => .ready,
+            .failed => .write_failed,
+            .outcome_unknown => .outcome_unknown,
+        };
+        return empty;
     };
 }
 
@@ -185,14 +194,24 @@ pub const Redaction = struct {
     }
 };
 
+pub const ModelBinding = state.Binding;
+pub const BindingAvailability = enum { ready, unavailable, invalid };
+
+/// Callback-scoped per-definition authority; never a global model binding.
 pub const ExecutionBinding = struct {
     available: bool,
-    model_ref: ?models_contract.ModelRef = null,
-    source_generation: u64 = 0,
-    selection_revision: u64 = 0,
-    protocol: ?Protocol = null,
     automatic_workspace_available: bool,
+    context: ?*anyopaque = null,
+    validate_fn: *const fn (?*anyopaque, ModelBinding) BindingAvailability = unavailableBinding,
+
+    fn status(self: ExecutionBinding, binding: ModelBinding) BindingAvailability {
+        return self.validate_fn(self.context, binding);
+    }
 };
+
+fn unavailableBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
+    return .unavailable;
+}
 
 const Due = struct {
     id: u64,
@@ -211,7 +230,6 @@ const Claim = struct {
     source_id: []u8,
     model_id: []u8,
     source_generation: u64,
-    selection_revision: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
 
@@ -250,7 +268,6 @@ pub const TaskLaunch = struct {
     input: []const u8,
     model_ref: models_contract.ModelRef,
     source_generation: u64,
-    selection_revision: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
 };
@@ -456,6 +473,7 @@ pub const Runtime = struct {
         var owned = true;
         defer if (owned) candidate.deinit();
         try candidate.update(id, expected_epoch, definition, current);
+        _ = reconcileBindingsInStore(&candidate, binding);
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -579,6 +597,12 @@ pub const Runtime = struct {
         return self.reconcileBindingsNoFail(binding, redaction);
     }
 
+    pub fn bindingAt(self: *Runtime, id: u64, expected_epoch: u64) Error!ModelBinding {
+        const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+        if (expected_epoch == 0 or item.epoch != expected_epoch) return error.ScheduledTaskEpochMismatch;
+        return item.bindingView();
+    }
+
     pub fn epoch(self: *Runtime, id: u64) Error!u64 {
         return (self.store.find(id) orelse return error.UnknownScheduledTask).epoch;
     }
@@ -601,7 +625,7 @@ pub const Runtime = struct {
             return null;
         }
         const current = self.timer.now() orelse return null;
-        const item = self.store.earliestDue() orelse return null;
+        const item = self.earliestReady(binding) orelse return null;
         const planned = item.next_run_at_unix_seconds orelse return null;
         if (planned > current) {
             _ = self.rearmNoFail(binding, redaction);
@@ -685,7 +709,6 @@ pub const Runtime = struct {
             .source_id = source_id,
             .model_id = model_id,
             .source_generation = current_binding.source_generation,
-            .selection_revision = current_binding.selection_revision,
             .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
         } };
@@ -840,7 +863,6 @@ pub const Runtime = struct {
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
-                .selection_revision = binding.selection_revision,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
             });
@@ -871,7 +893,6 @@ pub const Runtime = struct {
                 .model_id = claim.model_id,
             },
             .source_generation = claim.source_generation,
-            .selection_revision = claim.selection_revision,
             .protocol = claim.protocol,
             .permission_profile = claim.permission_profile,
         });
@@ -991,6 +1012,17 @@ pub const Runtime = struct {
         return redactStore(&self.store, redaction, additional_credential);
     }
 
+    fn earliestReady(self: *Runtime, authority: ExecutionBinding) ?*state.Item {
+        var earliest: ?*state.Item = null;
+        for (self.store.items) |*entry| {
+            const item = if (entry.*) |*value| value else continue;
+            if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
+                authority.status(item.bindingView()) != .ready) continue;
+            if (earliest == null or item.next_run_at_unix_seconds.? < earliest.?.next_run_at_unix_seconds.?) earliest = item;
+        }
+        return earliest;
+    }
+
     pub fn rearmNoFail(
         self: *Runtime,
         binding: ExecutionBinding,
@@ -999,7 +1031,7 @@ pub const Runtime = struct {
         self.timer.cancelCurrent();
         if (!self.background_available or self.persistence_health != .ready or
             !binding.available) return false;
-        const item = self.store.earliestDue() orelse return false;
+        const item = self.earliestReady(binding) orelse return false;
         const due = item.next_run_at_unix_seconds orelse return false;
         if (self.timer.armAt(due)) return false;
         var candidate = self.store.clone(self.allocator) catch return false;
@@ -1148,17 +1180,8 @@ fn reconcileBindingsInStore(
         // A temporarily unavailable execution catalog is an admission fact,
         // not a durable change to this schedule's captured binding.
         if (!binding.available) continue;
-        const current = item.bindingView();
-        const exact_model = if (binding.model_ref) |model_ref|
-            std.mem.eql(u8, current.model_ref.source_id, model_ref.source_id) and
-                std.mem.eql(u8, current.model_ref.model_id, model_ref.model_id)
-        else
-            false;
-        const reason: ?FailureReason = if (!exact_model or
-            current.source_generation != binding.source_generation or
-            current.selection_revision != binding.selection_revision or
-            binding.protocol == null or
-            current.protocol != binding.protocol.?)
+        const availability = binding.status(item.bindingView());
+        const reason: ?FailureReason = if (availability == .invalid)
             .execution_changed
         else if (!binding.automatic_workspace_available)
             .workspace_unavailable
@@ -1316,15 +1339,16 @@ fn testRedaction(context: *anyopaque) Redaction {
     };
 }
 
+fn validTestBinding(_: ?*anyopaque, binding: ModelBinding) BindingAvailability {
+    return if (binding.source_generation == 1 and binding.protocol == .anthropic_messages) .ready else .invalid;
+}
+
+fn invalidTestBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
+    return .invalid;
+}
+
 fn testBinding() ExecutionBinding {
-    return .{
-        .available = true,
-        .model_ref = .{ .source_id = "metask:test", .model_id = "model" },
-        .source_generation = 1,
-        .selection_revision = 1,
-        .protocol = .anthropic_messages,
-        .automatic_workspace_available = true,
-    };
+    return .{ .available = true, .automatic_workspace_available = true, .validate_fn = validTestBinding };
 }
 
 fn testDefinition(title: []const u8, input: []const u8) Definition {
@@ -1333,7 +1357,6 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
         .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "model" },
             .source_generation = 1,
-            .selection_revision = 1,
             .protocol = .anthropic_messages,
         },
         .permission_profile = .approval_required,
@@ -1345,7 +1368,7 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
 const retired_schedule_bytes =
     "{\"schema_version\":1,\"next_id\":8,\"items\":[{\"id\":7,\"epoch\":3,\"title\":\"Legacy schedule\",\"execution_generation\":19,\"execution_protocol\":\"anthropic_messages\",\"execution_model\":\"legacy-model\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":200},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":200,\"occurrences\":[]}]}";
 
-test "bootstrap rejects retired Schedule shapes without migration" {
+test "bootstrap quarantines retired Schedule shapes and continues with an empty current store" {
     var effects: TestEffects = .{ .restored_bytes = retired_schedule_bytes };
     var runtime = try Runtime.init(std.testing.allocator, .{
         .max_items = 2,
@@ -1356,9 +1379,10 @@ test "bootstrap rejects retired Schedule shapes without migration" {
     });
     defer runtime.deinit();
 
-    try std.testing.expectEqual(PersistenceHealth.corrupt, runtime.persistenceHealth());
+    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
     try std.testing.expectEqual(@as(usize, 0), effects.commits);
-    try std.testing.expect(runtime.persistenceRecoveryAvailable());
+    try std.testing.expectEqual(@as(usize, 1), effects.recoveries);
+    try std.testing.expect(!runtime.persistenceRecoveryAvailable());
     try std.testing.expect(testing.item(&runtime, 7) == null);
 }
 
@@ -1558,7 +1582,7 @@ test "attention requires editing while enable acknowledgements describe reconcil
     const id = try runtime.create(testDefinition("attention", "inspect"), testBinding(), redaction);
     try std.testing.expect(!try runtime.setEnabled(id, 1, false, testBinding(), redaction));
     var changed = testBinding();
-    changed.selection_revision += 1;
+    changed.validate_fn = invalidTestBinding;
     try std.testing.expect(!try runtime.setEnabled(id, 2, true, changed, redaction));
     const epoch = try runtime.epoch(id);
     try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.setEnabled(id, epoch, false, changed, redaction));
@@ -1569,29 +1593,17 @@ test "attention requires editing while enable acknowledgements describe reconcil
     try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
 }
 
-test "selection revision prevents default-binding ABA from launching" {
+test "environment refresh preserves each fixed binding without a global selection revision" {
     var effects: TestEffects = .{};
-    var runtime = try Runtime.init(std.testing.allocator, .{
-        .max_items = 1,
-        .max_projection_bytes = 4096,
-    }, .{
-        .timer = effects.timer(),
-        .persistence = effects.persistence(),
-    });
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 4096 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
-    const id = try runtime.create(
-        testDefinition("ABA", "inspect"),
-        testBinding(),
-        redaction,
-    );
-    var changed_binding = testBinding();
-    changed_binding.selection_revision = 3;
-    try std.testing.expect(runtime.refreshBindingNoFail(changed_binding, redaction));
+    const id = try runtime.create(testDefinition("stable", "inspect"), testBinding(), redaction);
+    try std.testing.expect(!runtime.refreshBindingNoFail(testBinding(), redaction));
     const item = testing.item(&runtime, id).?;
-    try std.testing.expect(!item.enabled);
-    try std.testing.expectEqual(Health.needs_attention, item.health);
-    try std.testing.expectEqual(FailureReason.execution_changed, item.failure_reason.?);
+    try std.testing.expect(item.enabled);
+    try std.testing.expectEqual(Health.ready, item.health);
+    try std.testing.expectEqual(@as(u64, 1), item.binding.source_generation);
 }
 
 test "temporary execution unavailability does not durably invalidate schedules" {
@@ -1889,4 +1901,65 @@ test "input continuation observes completion allocation failure even when persis
         }
     }
     try std.testing.expect(observed_allocation_failure);
+}
+
+test "an invalid plan cannot block a valid plan timer" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var invalid = testDefinition("invalid", "inspect");
+    invalid.binding.source_generation = 2;
+    const invalid_id = try runtime.create(invalid, testBinding(), redaction);
+    const valid_id = try runtime.create(testDefinition("valid", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    try std.testing.expect(runtime.refreshBindingNoFail(testBinding(), redaction));
+    try std.testing.expectEqual(Health.needs_attention, runtime.store.find(invalid_id).?.health);
+    try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(invalid_id).?.occurrence_count);
+    try std.testing.expectEqual(@as(usize, 1), runtime.store.find(valid_id).?.occurrence_count);
+    try std.testing.expectEqual(@as(u64, 42), runtime.store.find(valid_id).?.last_occurrence.?.task_id);
+}
+
+test "old Schedule canonical is quarantined before bootstrap installs the empty current store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var files: persistence.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    try files.commit(retired_schedule_bytes);
+    const old = (try files.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(old);
+    const Recover = struct {
+        fn apply(context: ?*anyopaque, bytes: []const u8) PersistenceCommit {
+            const store: *persistence.FileStore = @ptrCast(@alignCast(context.?));
+            store.recover(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
+            return .committed;
+        }
+    };
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .persistence = .{ .enabled = true, .context = &files, .restored_bytes = old, .recover_fn = Recover.apply } });
+    defer runtime.deinit();
+    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+    try std.testing.expect(runtime.store.find(7) == null);
+    const current = (try files.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(current);
+    var decoded = try persistence.decode(std.testing.allocator, current, .{ .max_items = 2, .max_projection_bytes = 8192 });
+    defer decoded.deinit();
+    try std.testing.expect(decoded.find(7) == null);
+    var dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true, .follow_symlinks = false });
+    defer dir.close(std.testing.io);
+    var it = dir.iterate();
+    var count: usize = 0;
+    while (try it.next(std.testing.io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".quarantine")) continue;
+        var file = try dir.openFile(std.testing.io, entry.name, .{});
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+        defer file.close(std.testing.io);
+        var bytes: [retired_schedule_bytes.len]u8 = undefined;
+        try std.testing.expectEqual(bytes.len, try file.readPositionalAll(std.testing.io, &bytes, 0));
+        try std.testing.expectEqualStrings(retired_schedule_bytes, &bytes);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

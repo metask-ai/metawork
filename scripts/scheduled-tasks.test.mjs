@@ -122,7 +122,6 @@ function scheduleSnapshot(overrides = {}) {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "old-model" },
         sourceGeneration: "1",
-        selectionRevision: "2",
         protocol: "anthropic_messages",
       },
       input: {
@@ -177,13 +176,10 @@ test("attention explains its cause and requires confirmation while deletion stay
     screen.getByRole("button", { name: "Delete schedule" }).disabled,
     false,
   );
-  assert.match(
-    document.body.textContent,
-    /Saving confirms the current model “fixture-model”/,
-  );
+  assert.equal(screen.getByRole("combobox", { name: "Model" }) != null, true);
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.ok(updated));
-  assert.equal(updated[2].binding.modelRef.modelId, "fixture-model");
+  assert.equal(updated[2].modelSelection, null);
   fireEvent.click(
     screen.getByRole("button", { name: /Review.*Review every line/ }),
   );
@@ -294,7 +290,6 @@ test("Scheduled tasks is a truthful independent management page", () => {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },
         sourceGeneration: "1",
-        selectionRevision: "3",
         protocol: "openai_chat_completions",
       },
       input: {
@@ -468,10 +463,11 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   assert.equal("workspaceId" in created, false);
   assert.equal(created.input.kind, "text");
   assert.equal(created.permissionProfile, "full_access");
-  assert.equal(created.binding.protocol, "anthropic_messages");
+  assert.equal(created.modelSelection.targetModelRef.modelId, "fixture-model");
+  assert.equal("protocol" in created.modelSelection, false);
 });
 
-test("schedule binding consumes installed protocol for Metask and custom sources", async () => {
+test("schedule selection submits exact source proof without consuming installed protocol", async () => {
   for (const source of ["metask", "custom"]) {
     for (const protocol of [
       "anthropic_messages",
@@ -520,9 +516,9 @@ test("schedule binding consumes installed protocol for Metask and custom sources
       assert.equal(save.disabled, false);
       fireEvent.click(save);
       await waitFor(() => assert.ok(created));
-      assert.equal(created.binding.protocol, protocol);
-      assert.equal(created.binding.sourceGeneration, "7");
-      assert.equal(created.binding.modelRef.sourceId, source);
+      assert.equal("protocol" in created.modelSelection, false);
+      assert.equal(created.modelSelection.expectedSourceGeneration, "7");
+      assert.equal(created.modelSelection.targetModelRef.sourceId, source);
       cleanup();
     }
   }
@@ -532,9 +528,10 @@ test("schedule binding consumes installed protocol for Metask and custom sources
   stale.capabilities.scheduledTaskPersistence = true;
   stale.capabilities.scheduledTaskPersistenceHealth = "ready";
   stale.newTaskAdmission.activeSelectionRevision = "999";
+  stale.newTaskAdmission.available = false;
   renderDom(scheduledElement(stale));
   fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
-  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, false);
 });
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
@@ -673,7 +670,6 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
     binding: {
       modelRef: { sourceId: "metask", modelId: "fixture-model" },
       sourceGeneration: "1",
-      selectionRevision: "3",
       protocol: "openai_chat_completions",
     },
     permissionProfile: "full_access",
@@ -707,4 +703,43 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
     expectedEpoch: "1",
     enabled: true,
   });
+});
+
+test("an invalid starting preference can be replaced without default admission", async () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.automaticWorkspaces = true;
+  snapshot.capabilities.scheduledTasks = true;
+  snapshot.capabilities.scheduledTaskPersistence = true;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
+  snapshot.models.defaultSelection = {
+    sourceId: "removed",
+    modelId: "disabled",
+  };
+  snapshot.newTaskAdmission.available = false;
+  let created = null;
+  renderDom(
+    scheduledElement(snapshot, {
+      onCreate: async (input) => {
+        created = input;
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  const candidate = snapshot.models.providers[0].models[0];
+  await user.click(
+    await screen.findByRole("option", {
+      name: candidate.displayName,
+      exact: true,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.ok(created));
+  assert.deepEqual(created.modelSelection.targetModelRef, {
+    sourceId: "metask",
+    modelId: candidate.id,
+  });
+  assert.equal("protocol" in created.modelSelection, false);
 });

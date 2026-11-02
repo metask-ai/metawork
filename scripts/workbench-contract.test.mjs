@@ -1439,7 +1439,6 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },
         sourceGeneration: "1",
-        selectionRevision: "3",
         protocol: "openai_chat_completions",
       },
       input: {
@@ -1482,6 +1481,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   const invalidBlocker = clone(blockerHistory);
   invalidBlocker.scheduledTasks[0].occurrences[1].reason = "capacity_reached";
   assert.throws(() => decodeWorkbenchSnapshot(invalidBlocker), /blocker Task/);
+
+  const retiredRevision = clone(scheduled);
+  retiredRevision.scheduledTasks[0].binding.selectionRevision = "3";
+  assert.throws(() => decodeWorkbenchSnapshot(retiredRevision));
 
   const retiredMigrationShape = clone(scheduled);
   retiredMigrationShape.scheduledTasks[0].enabled = false;
