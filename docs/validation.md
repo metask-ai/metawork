@@ -496,6 +496,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-WIN-FEEDBACK-FOUNDATION-20261102
+
+2026-11-02，Windows x64，Renderer runtime source `e00fa3028420fa3ec8ff4d6a4f111b56ae795fe9`。按 [反馈协调与生命周期](ui-design.md#44-反馈协调与生命周期) 验证连接状况与账号最近结果的协调。17 个受影响 Renderer/Node suite 共 421 项通过；正式 `npm run check` 通过 canonical AgentCore 0.13.0 ABI 1 revision 26、Renderer wire/typecheck 与严格 Native manifest 检查。正式 Renderer build/CSP 检查及隔离 automation Debug 构建通过，未改变 Host、Bridge wire 或持久化合同。
+
+同一 App、WorkbenchConnection、协调器、共享反馈组件与生产样式在隔离 Windows WebView2 测试入口中运行，业务回复由测试入口的 BridgeClient fixture 提供。1440 px 与 390 px 的明暗主题均验证详情原地展开、纯文本诊断、Enter 收起后保留焦点、44 px 命中区与无横向溢出；验证关闭后相同账号错误在新周期重现、同步失败只归连接、恢复后独立账号结果保留且不重放 mutation。实机发现的聚焦重试按钮被移除后焦点落到 body 已修复，并由 DOM 回归和 WebView 确认焦点回到剩余反馈入口。窗口错误、未处理 rejection 与测试捕获的 console error 均为空。
+
+证据为 `.zig-cache/feedback-webview-evidence/observations.json`、同目录四组主题/视口的普通与详情截图，以及 `.zig-cache/feedback-{final-tests,final-check,build,fixture-build,webview}.log`。观测 JSON 绑定 source revision、测试入口摘要、Native executable 和两套前端资源摘要；测试 fixture executable SHA-256 为 `05bf51883613c07dfd2b808a6e6a7ff9aff8bac481af5f402dd37f2d6e52bd03`。本证据仅覆盖 Renderer 与 WebView 内容交互，不证明真实 Metask/OAuth/系统凭据故障、系统键盘手势、安装分发或其他平台；本阶段未迁移任务终态及其他业务来源。
+
 ### E-MAC-UPDATE-REMINDER-20261027
 
 macOS arm64 的版本提醒已通过 Product/Control/Bridge 与实际 Renderer decoder 的关联回归，以及真实回环 HTTP 的 GET/HEAD、容量、重定向、超时和取消收口验证；同一 Application HTTP adapter 对官方 manifest 的实际 HTTPS GET 成功，匹配包的 HEAD 成功且未读取安装包正文。启用后台检查的隔离 ReleaseFast artifact 构建及 automation isolation 通过，automation 与后台检查同时启用的实际构建被明确拒绝。
