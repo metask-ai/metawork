@@ -3280,15 +3280,37 @@ pub const Runtime = struct {
             } }).accepted) return error.InvalidAutomationExecution;
         } else {
             const restored = view.custom_providers[0];
-            if (restored.credential_status != .missing or
-                !std.mem.eql(u8, restored.display_name, "Automation fixture") or
+            if (!std.mem.eql(u8, restored.display_name, "Automation fixture") or
                 restored.protocol != input.protocol or
                 !std.mem.eql(u8, restored.normalized_base_url, input.base_url) or
                 restored.models.len != 1 or
-                !std.mem.eql(u8, restored.models[0].id, input.model) or
+                !std.mem.eql(u8, restored.models[0].id, input.model))
+                return error.InvalidAutomationExecution;
+            // The automation vault is process-local. Resolve the exact fixture
+            // to discover a missing key instead of relying on default execution
+            // reconciliation to have touched this provider during bootstrap.
+            const restored_id = try self.allocator.dupe(u8, restored.id);
+            defer self.allocator.free(restored_id);
+            if (restored.credential_status == .ready) {
+                const candidate = self.custom_providers.resolveModel(
+                    .{ .source_id = restored_id, .model_id = input.model },
+                    restored.source_generation,
+                    restored.catalog_generation,
+                ) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidAutomationExecution,
+                };
+                if (candidate) |existing| {
+                    var owned = existing;
+                    owned.deinit();
+                    return error.InvalidAutomationExecution;
+                }
+            }
+            const current = self.modelsView().custom_providers[0];
+            if (current.credential_status != .missing or
                 !self.replaceCustomProviderCredential(input.credential, .{
-                    .source_id = restored.id,
-                    .expected_provider_revision = restored.provider_revision,
+                    .source_id = restored_id,
+                    .expected_provider_revision = current.provider_revision,
                 }).accepted) return error.InvalidAutomationExecution;
         }
 
@@ -15122,7 +15144,10 @@ test "automation installs one ordinary Custom Provider without publishing its cr
     try std.testing.expect(view.default_selection == null);
     try std.testing.expect(provider.source_generation != 0);
     try std.testing.expect(control.newTaskAdmissionView().available);
-    try std.testing.expectEqual(@as(u64, 0), control.executionGeneration());
+    // The model probe consumes an execution identity without installing any
+    // process-wide configuration or creating a Task.
+    try std.testing.expect(control.executionGeneration() != 0);
+    try std.testing.expectEqual(@as(usize, 0), control.task_runtime.taskCount());
 
     var snapshot_storage: [256 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
@@ -15218,7 +15243,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         try restored.startCustomProviders(directory, restored_vault.port());
         defer restored.stopCustomProviders();
         try std.testing.expectEqual(
-            models_contract.CustomProviderCredentialStatus.missing,
+            models_contract.CustomProviderCredentialStatus.ready,
             restored.modelsView().custom_providers[0].credential_status,
         );
 
@@ -15226,7 +15251,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         const view = restored.modelsView();
         try std.testing.expectEqual(@as(usize, 1), view.custom_providers.len);
         try std.testing.expectEqual(models_contract.CustomProviderState.ready, view.custom_providers[0].state);
-        try std.testing.expect(view.default_selection != null);
+        try std.testing.expect(view.default_selection == null);
         try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqualStrings(
             fixture.credential,
