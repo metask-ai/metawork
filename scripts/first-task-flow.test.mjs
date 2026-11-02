@@ -230,7 +230,12 @@ test("a shared creation rejection releases only after waiting messages settle", 
     f.session.submit(id, text(id), () => {}),
   );
   assert.equal(f.session.canReleaseAfterCreationRejection, false);
+  // The creation continuation clears its Promise before these submits resume.
+  const beforeMessagesSettle = f.creation.promise.then(() => {
+    assert.equal(f.session.canReleaseAfterCreationRejection, false);
+  });
   f.creation.resolve({ accepted: false, reason: "execution_unavailable" });
+  await beforeMessagesSettle;
   assert.ok(
     (await Promise.all(pending)).every(
       (result) => result.kind === "create_rejected",
