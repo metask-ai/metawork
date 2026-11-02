@@ -527,6 +527,7 @@ export function SettingsPage({
                   ) : null}
                   {account.canCancel ? (
                     <Button
+                      className="settings-identity-action"
                       variant="secondary"
                       size="sm"
                       disabled={cancelDisabled}
@@ -536,6 +537,7 @@ export function SettingsPage({
                     </Button>
                   ) : account.errorCode === "refresh_schedule_failed" ? (
                     <Button
+                      className="settings-identity-action"
                       variant="secondary"
                       size="sm"
                       disabled={disabled || accountDisabled}
@@ -545,7 +547,7 @@ export function SettingsPage({
                     </Button>
                   ) : !authenticated || account.errorCode !== "none" ? (
                     <Button
-                      className="settings-identity-login"
+                      className="settings-identity-action"
                       variant="secondary"
                       size="sm"
                       disabled={disabled || accountDisabled}

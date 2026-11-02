@@ -940,9 +940,10 @@ summary::-webkit-details-marker {
   font-weight: 760;
 }
 
-.settings-identity-login {
+.settings-identity-action {
   grid-column: -2 / -1;
   white-space: nowrap;
+  min-height: 44px;
 }
 
 .settings-identity-copy strong,
@@ -3308,7 +3309,7 @@ button.run-process-tool:hover {
     grid-template-columns: 44px minmax(0, 1fr);
   }
 
-  .settings-identity-login {
+  .settings-identity-action {
     grid-column: 1 / -1;
     width: 100%;
     min-height: 44px;
