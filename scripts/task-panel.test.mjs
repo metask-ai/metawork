@@ -6507,6 +6507,48 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
+test("App stop uncertainty survives successful reads and a new Run until its target is observed", async (ctx) => {
+  const f = await renderAppFixture(ctx, 1440, {
+    phase: "running",
+    terminal: null,
+    activity: { kind: "waiting_model" },
+  });
+  const { BridgeClient, BridgeCommandTimeoutError } = await vite.ssrLoadModule(
+    "/src/bridge/client.ts",
+  );
+  let calls = 0;
+  ctx.mock.method(BridgeClient.prototype, "stopTask", async () => {
+    calls++;
+    throw new BridgeCommandTimeoutError("metawork.tasks.stop", 10000);
+  });
+  await selectRecentTask(/First task/);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await screen.findByText("Stop result not yet confirmed");
+  assert.ok(document.querySelector(".commandbar-alert") === null);
+  const source = f.snapshot.tasks[0];
+  const stopped = structuredClone(source.runs[0]);
+  source.runs = [{ ...structuredClone(stopped), id: "99" }];
+  source.currentRunId = "99";
+  source.activeOperation = { kind: "run", id: "99" };
+  f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+  await act(async () => f.publish());
+  assert.ok(screen.getByText("Stop result not yet confirmed"));
+  Object.assign(stopped, {
+    phase: "completed",
+    terminal: terminal("completed"),
+    activity: null,
+    contentVersion: "2",
+  });
+  source.runs.unshift(stopped);
+  f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+  await act(async () => f.publish());
+  await waitFor(() =>
+    assert.ok(screen.queryByText("Stop result not yet confirmed") === null),
+  );
+  assert.ok(screen.queryByText("Work stopped") === null);
+  assert.equal(calls, 1);
+});
+
 function setRepeatedPermissionSource(source) {
   Object.assign(source.runs[0], {
     phase: "waiting_ui",
@@ -8403,20 +8445,13 @@ for (const outcome of ["committed", "timeout"]) {
     fireEvent.click(document.querySelector(".commandbar-alert > summary"));
     fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
     await waitFor(() =>
-      assert.ok(
-        document.querySelector('.commandbar-alert[data-recovering="false"]'),
-      ),
+      assert.ok(document.querySelector(".commandbar-alert") === null),
     );
-    const text = document.querySelector(
-      ".commandbar-alert > summary",
-    ).textContent;
-    assert.match(
-      text,
-      outcome === "committed"
-        ? /succeeded, but the latest state has not loaded/
-        : /latest state could not be confirmed/,
+    assert.ok(screen.getByText("Stop result not yet confirmed"));
+    assert.doesNotMatch(
+      document.querySelector(".task-stop-feedback").textContent,
+      /succeeded|checked the current Host state/,
     );
-    assert.doesNotMatch(text, /checked the current Host state/);
     assert.equal(calls, 1);
   });
 }

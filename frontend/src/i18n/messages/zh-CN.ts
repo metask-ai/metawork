@@ -824,6 +824,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",
   "run.stop_failed": "未能确认停止请求，请刷新后重试。",
+  "run.stop_unconfirmed": "停止结果尚未确认",
   "run.stop_requested": "已请求停止，等待当前工作结束…",
   "run.activity.unsynchronized": "状态尚未同步",
   "run.activity.requesting_stop": "正在请求停止…",

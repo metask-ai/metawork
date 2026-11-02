@@ -24,6 +24,10 @@ import {
 } from "react";
 import { AppShell } from "./AppShell.tsx";
 import {
+  TaskStopFeedbackController,
+  type TaskStopFeedback,
+} from "./task-stop-feedback.ts";
+import {
   documentHasAttention,
   subscribeDocumentAttention,
 } from "./document-attention.ts";
@@ -396,6 +400,10 @@ export default function App() {
   const [statuses, setStatuses] =
     useState<ShellStatusState>(createFeedbackState);
   const feedbackRef = useRef(statuses);
+  const [stopFeedback, setStopFeedback] = useState<TaskStopFeedback[]>([]);
+  const stopFeedbackController = useRef(
+    new TaskStopFeedbackController(setStopFeedback),
+  );
   const accountFeedbackRequest = useRef({
     serial: 0,
     awaitingSync: false,
@@ -707,6 +715,7 @@ export default function App() {
     );
   }
   function resetFeedbackContext() {
+    stopFeedbackController.current.reset();
     accountFeedbackRequest.current = {
       serial: accountFeedbackRequest.current.serial + 1,
       awaitingSync: false,
@@ -722,6 +731,9 @@ export default function App() {
     setAccountCancelBusy(false);
   }
   const snapshot = workbench.snapshot;
+  useEffect(() => {
+    stopFeedbackController.current.observe(snapshot);
+  }, [snapshot]);
   const deleteTarget =
     snapshot.taskIndex.find((task) => task.id === deleteTargetId) ?? null;
   useEffect(() => {
@@ -2972,40 +2984,54 @@ export default function App() {
   async function cancelRun() {
     if (bridgeUnavailable) return;
     const taskId = !newTaskDraftActive ? activeTask?.id : undefined;
-    const session = submissionSessions.current.get(
-      `${bridgeGenerationRef.current}:${composerDraftScope}`,
-    );
+    const scope = composerDraftScope;
+    const generation = bridgeGenerationRef.current;
+    const controller = stopFeedbackController.current;
+    if (controller.requesting(scope, taskId ?? null)) return;
+    const session = submissionSessions.current.get(`${generation}:${scope}`);
     if (!taskId && !session) return;
     if (taskId && cancelPendingTasks.current.has(taskId)) return;
     if (taskId) setCancelPendingForTask(taskId, true);
+    const token = controller.begin(
+      scope,
+      taskId
+        ? (latestSnapshotRef.current?.tasks.find(
+            (task) => task.id === taskId,
+          ) ?? null)
+        : null,
+      localSubmissionsRef.current
+        .filter(
+          (entry) =>
+            entry.scope === scope &&
+            entry.generation === generation &&
+            ["submitting", "accepted", "unknown"].includes(entry.state),
+        )
+        .map((entry) => entry.operationId),
+    );
+    const current = () => bridgeGenerationRef.current === generation;
+    const target = (id: string) => {
+      if (current()) controller.target(token, id);
+    };
     try {
+      let localOnly = false;
       try {
-        if (session) await session.stop();
+        if (session) ({ localOnly } = await session.stop(target));
         else if (taskId) await client.stopTask(taskId);
       } catch (error) {
-        const audience = taskId
-          ? { scope: "task" as const, taskId }
-          : { scope: "workspace" as const, workspaceId: composerWorkspaceId };
-        if (
-          await reconcileCommandTimeout(error, "operation.run_stop", audience)
-        )
-          return;
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus("run.stop_failed", audience, {
-            diagnostic: errorText(error),
-          }),
+        if (!current()) return;
+        controller.settle(
+          token,
+          error instanceof BridgeCommandTimeoutError ? "unknown" : "failed",
         );
+        await refreshSnapshot().catch(() => undefined);
         return;
       }
-      if (taskId)
-        await refreshAfterCommit("run.stop_requested", {
-          scope: "task",
-          taskId,
-        });
-      else await refreshSnapshot().catch(() => undefined);
+      if (!current()) return;
+      if (token.taskId && !localOnly) controller.settle(token, "awaiting");
+      else controller.retire(token);
+      await refreshSnapshot().catch(() => undefined);
     } finally {
-      if (taskId) setCancelPendingForTask(taskId, false);
+      if (current() && taskId) setCancelPendingForTask(taskId, false);
     }
   }
   async function compactTask() {
@@ -3883,8 +3909,29 @@ export default function App() {
   const pendingMessages = localReadingInputs.length ? (
     <>{localReadingInputs.map((item) => item.content)}</>
   ) : null;
+  const currentStopFeedback = stopFeedback.find((entry) =>
+    newTaskDraftActive
+      ? entry.scope === composerDraftScope
+      : entry.taskId === activeTask?.id,
+  );
   const composerFooter = (
     <>
+      {currentStopFeedback &&
+        !(
+          currentStopFeedback.phase === "requesting" &&
+          currentStopFeedback.runId === activeTask?.currentRunId &&
+          activeTask?.currentRunPhase
+        ) && (
+          <p className="projection-note task-stop-feedback" role="status">
+            {t(
+              currentStopFeedback.phase === "requesting"
+                ? "run.activity.requesting_stop"
+                : currentStopFeedback.phase === "failed"
+                  ? "run.stop_failed"
+                  : "run.stop_unconfirmed",
+            )}
+          </p>
+        )}
       {activeTask && (
         <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
@@ -4070,6 +4117,7 @@ export default function App() {
         }
         stopDisabled={
           bridgeUnavailable ||
+          currentStopFeedback?.phase === "requesting" ||
           Boolean(activeTask && activeTask.id in cancelPending) ||
           Boolean(
             activeTask?.currentRunPhase === "stopping" &&
@@ -4968,7 +5016,8 @@ export default function App() {
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
                 synchronized={!bridgeUnavailable}
                 requestingStop={Boolean(
-                  activeTask && activeTask.id in cancelPending,
+                  currentStopFeedback?.phase === "requesting" &&
+                  currentStopFeedback.runId === activeTask?.currentRunId,
                 )}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}

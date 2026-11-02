@@ -149,7 +149,8 @@ test("stop during creation cancels only earlier messages and precedes later send
   );
   assert.equal((await a).kind, "cancelled");
   f.receipts.get("B").resolve(accept("B"));
-  await Promise.all([stopping, b]);
+  const [stopped] = await Promise.all([stopping, b]);
+  assert.equal(stopped.localOnly, true);
 });
 test("definite rejection allows a new explicit creation while unknown creation never replays", async () => {
   for (const refused of [true, false]) {
@@ -210,11 +211,14 @@ test("stop immediately settles the local cancellation before delayed creation re
     () => {},
     () => cancelled++,
   );
-  const stopping = f.session.stop();
+  const targets = [];
+  const stopping = f.session.stop((id) => targets.push(id));
   assert.equal(cancelled, 1);
   assert.deepEqual(f.calls, []);
+  assert.deepEqual(targets, []);
   f.creation.resolve(created);
   await stopping;
   assert.equal((await a).kind, "cancelled");
   assert.equal(cancelled, 1);
+  assert.deepEqual(targets, ["9"]);
 });

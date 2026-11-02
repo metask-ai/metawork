@@ -953,6 +953,7 @@ export const enUS = {
     "Work could not start. Check your connection and try again.",
   "run.stop_failed":
     "The stop request could not be confirmed. Refresh and try again.",
+  "run.stop_unconfirmed": "Stop result not yet confirmed",
   "run.stop_requested":
     "Stop requested. Waiting for the current work to finish stopping…",
   "run.activity.unsynchronized": "Status not synchronized",
