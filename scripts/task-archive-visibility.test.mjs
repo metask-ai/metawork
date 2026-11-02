@@ -1189,3 +1189,43 @@ for (const kind of ["project", "task"])
       ),
     );
   });
+
+test("security reset releases Task operation admission and old archive replies cannot unlock or explain a newer request", async (ctx) => {
+  const app = await renderApp(ctx);
+  await app.invoke("3", "Archive");
+  const original = app.requests[0];
+  app.snapshot.securityEpoch = "2";
+  await app.publishTask("3", {});
+  const openArchive = async () => {
+    await waitFor(() => assert.ok(taskRows("3").length > 0));
+    fireEvent.contextMenu(taskRows("3")[0]);
+    return screen.findByRole("menuitem", { name: "Archive", exact: true });
+  };
+  const second = await openArchive();
+  await waitFor(() =>
+    assert.ok(
+      !second.disabled && second.getAttribute("aria-disabled") !== "true",
+    ),
+  );
+  await app.user.click(second);
+  await waitFor(() => assert.equal(app.requests.length, 2));
+  await act(async () =>
+    original.resolve({ error: new Error("old epoch archive failed") }),
+  );
+  const blocked = await openArchive();
+  await app.user.click(blocked);
+  assert.equal(app.requests.length, 2);
+  assert.ok(!document.body.textContent.includes("old epoch archive failed"));
+  assert.ok(!document.querySelector(".archive-notice"));
+  await app.user.keyboard("{Escape}");
+  await app.settle({ archived: false });
+  const available = await openArchive();
+  await waitFor(() =>
+    assert.ok(
+      !available.disabled && available.getAttribute("aria-disabled") !== "true",
+    ),
+  );
+  await app.user.click(available);
+  await waitFor(() => assert.equal(app.requests.length, 3));
+  await app.settle({ archived: false });
+});

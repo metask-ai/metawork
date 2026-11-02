@@ -751,6 +751,14 @@ export default function App() {
   }
   function resetFeedbackContext() {
     stopFeedbackController.current.reset();
+    taskPendingScopes.current.clear();
+    setTaskPending({});
+    setTaskArchiveErrors({});
+    setArchiveNotice(null);
+    setRenameEditor(null);
+    deleteDialogRevision.current++;
+    setDeleteTargetId(null);
+    setDeleteError(null);
     submissionSessions.current.clear();
     setLocalSubmissions((entries) =>
       entries.map((entry) =>
@@ -1973,7 +1981,6 @@ export default function App() {
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
         resetFeedbackContext();
-        setRenameEditor(null);
         latestSnapshotRef.current = null;
         setHistoryRequests({});
         taskReadingMemory.reading.clear();
@@ -1999,7 +2006,6 @@ export default function App() {
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           latestSnapshotRef.current = null;
-          setArchiveNotice(null);
           setApprovalRequests({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
@@ -2220,7 +2226,8 @@ export default function App() {
     });
     return true;
   }
-  function endTaskPendingOperation(scope: string) {
+  function endTaskPendingOperation(scope: string, epoch: number) {
+    if (epoch !== feedbackRef.current.epoch) return;
     taskPendingScopes.current.end(scope);
     setTaskPending((current) => {
       if (!(scope in current)) return current;
@@ -2596,7 +2603,7 @@ export default function App() {
         ),
       );
     } finally {
-      endTaskPendingOperation(scope);
+      endTaskPendingOperation(scope, feedbackToken.epoch);
     }
   }
   async function cancelAccountOperation() {
@@ -3216,7 +3223,7 @@ export default function App() {
       settleOperationFeedback(feedbackToken, null);
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope);
+      endTaskPendingOperation(scope, feedbackToken.epoch);
     }
   }
   function composerDraftFromRunInput(
@@ -3486,6 +3493,7 @@ export default function App() {
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "rename")) return;
+    const feedbackEpoch = feedbackRef.current.epoch;
     try {
       try {
         await client.renameTask(taskId, editor.draft.trim());
@@ -3515,7 +3523,7 @@ export default function App() {
       setRenameEditor((current) => (current === editor ? null : current));
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope);
+      endTaskPendingOperation(scope, feedbackEpoch);
     }
   }
   function publishArchiveResult(taskId: string, archived: boolean) {
@@ -3552,12 +3560,16 @@ export default function App() {
       scope: "task",
       taskId,
     });
+    const current = () => feedbackToken.epoch === feedbackRef.current.epoch;
     setTaskArchiveErrors((current) => ({ ...current, [taskId]: "" }));
     try {
       try {
         await client.setTaskArchived(task.id, archived);
+        if (!current()) return;
       } catch (error) {
+        if (!current()) return;
         if (await refreshAfterTimeout(error)) {
+          if (!current()) return;
           publishArchiveResult(taskId, archived);
           if (
             latestSnapshotRef.current?.taskIndex.find(
@@ -3592,6 +3604,7 @@ export default function App() {
             kind: "failed",
           });
         await refreshSnapshot().catch(() => undefined);
+        if (!current()) return;
         setTaskArchiveErrors((current) => ({
           ...current,
           [taskId]: t(archived ? "task.archive_failed" : "task.restore_failed"),
@@ -3607,10 +3620,11 @@ export default function App() {
         return;
       }
       await refreshCommittedView();
+      if (!current()) return;
       publishArchiveResult(taskId, archived);
       settleOperationFeedback(feedbackToken, null);
     } finally {
-      endTaskPendingOperation(scope);
+      endTaskPendingOperation(scope, feedbackToken.epoch);
     }
   }
   async function removeWorkspace(
@@ -3669,6 +3683,7 @@ export default function App() {
     const generation = bridgeGenerationRef.current;
     const current = () =>
       generation === bridgeGenerationRef.current &&
+      feedbackToken.epoch === feedbackRef.current.epoch &&
       dialogRevision === deleteDialogRevision.current;
     setDeleteError(null);
     try {
@@ -3703,7 +3718,7 @@ export default function App() {
       settleOperationFeedback(feedbackToken, null);
       await refreshCommittedView();
     } finally {
-      endTaskPendingOperation(scope);
+      endTaskPendingOperation(scope, feedbackToken.epoch);
     }
   }
   function selectSearchResult(result: SearchResult) {

@@ -848,94 +848,97 @@ export function TaskContent({
                   }
                 />
               )}
-              {presentation.showTerminalNotice && terminal && (
-                <Activity
-                  className={
-                    terminal.cause === "provider_failure"
-                      ? "run-terminal-activity"
+              <div className="run-terminal-feedback">
+                {presentation.showTerminalNotice && terminal && (
+                  <Activity
+                    className={
+                      terminal.cause === "provider_failure"
+                        ? "run-terminal-activity"
+                        : undefined
+                    }
+                    state={outcomeState(terminal.outcome)}
+                    label={terminalLabel}
+                    announce={
+                      isCurrent &&
+                      observedRunTerminals.current.get(
+                        `${task.id}:${run.id}`,
+                      ) === false
+                    }
+                    action={
+                      (isCurrent &&
+                        retryAvailable &&
+                        retryable(terminal.outcome)) ||
+                      settingsRecovery ? (
+                        <div className="run-terminal-actions">
+                          {onOpenSettings &&
+                            terminal.cause === "provider_failure" &&
+                            (terminal.modelError?.recovery ===
+                              "account_settings" ||
+                              terminal.modelError?.recovery ===
+                                "model_settings") && (
+                              <button
+                                className="ai-activity-retry focus-ring"
+                                data-primary="true"
+                                disabled={responseDisabled || !synchronized}
+                                onClick={() =>
+                                  onOpenSettings(
+                                    terminal.modelError?.recovery ===
+                                      "account_settings"
+                                      ? "account"
+                                      : "models",
+                                  )
+                                }
+                              >
+                                {t(
+                                  terminal.modelError.recovery ===
+                                    "account_settings"
+                                    ? "run.model_error.open_account"
+                                    : "run.model_error.open_models",
+                                )}
+                              </button>
+                            )}
+                          {isCurrent &&
+                            retryAvailable &&
+                            !settingsRecovery &&
+                            retryable(terminal.outcome) && (
+                              <button
+                                className="ai-activity-retry focus-ring"
+                                data-primary={
+                                  terminal.cause !== "provider_failure" ||
+                                  recovery === "prepare_retry"
+                                }
+                                title={
+                                  composerHasDraft
+                                    ? t("run.review_draft_help")
+                                    : t("run.retry_help")
+                                }
+                                onClick={() => onPrepareRetry(run.input)}
+                              >
+                                {composerHasDraft
+                                  ? t("run.review_draft")
+                                  : t("run.prepare_retry")}
+                              </button>
+                            )}
+                        </div>
+                      ) : undefined
+                    }
+                  />
+                )}
+                <RunDiagnostics
+                  key={`diagnostics:${task.id}:${run.id}`}
+                  run={run}
+                  composerHasDraft={composerHasDraft}
+                  onPrepareRetry={
+                    settingsRecovery &&
+                    isCurrent &&
+                    retryAvailable &&
+                    terminal &&
+                    retryable(terminal.outcome)
+                      ? () => onPrepareRetry(run.input)
                       : undefined
                   }
-                  state={outcomeState(terminal.outcome)}
-                  label={terminalLabel}
-                  announce={
-                    isCurrent &&
-                    observedRunTerminals.current.get(`${task.id}:${run.id}`) ===
-                      false
-                  }
-                  action={
-                    (isCurrent &&
-                      retryAvailable &&
-                      retryable(terminal.outcome)) ||
-                    settingsRecovery ? (
-                      <div className="run-terminal-actions">
-                        {onOpenSettings &&
-                          terminal.cause === "provider_failure" &&
-                          (terminal.modelError?.recovery ===
-                            "account_settings" ||
-                            terminal.modelError?.recovery ===
-                              "model_settings") && (
-                            <button
-                              className="ai-activity-retry focus-ring"
-                              data-primary="true"
-                              disabled={responseDisabled || !synchronized}
-                              onClick={() =>
-                                onOpenSettings(
-                                  terminal.modelError?.recovery ===
-                                    "account_settings"
-                                    ? "account"
-                                    : "models",
-                                )
-                              }
-                            >
-                              {t(
-                                terminal.modelError.recovery ===
-                                  "account_settings"
-                                  ? "run.model_error.open_account"
-                                  : "run.model_error.open_models",
-                              )}
-                            </button>
-                          )}
-                        {isCurrent &&
-                          retryAvailable &&
-                          !settingsRecovery &&
-                          retryable(terminal.outcome) && (
-                            <button
-                              className="ai-activity-retry focus-ring"
-                              data-primary={
-                                terminal.cause !== "provider_failure" ||
-                                recovery === "prepare_retry"
-                              }
-                              title={
-                                composerHasDraft
-                                  ? t("run.review_draft_help")
-                                  : t("run.retry_help")
-                              }
-                              onClick={() => onPrepareRetry(run.input)}
-                            >
-                              {composerHasDraft
-                                ? t("run.review_draft")
-                                : t("run.prepare_retry")}
-                            </button>
-                          )}
-                      </div>
-                    ) : undefined
-                  }
                 />
-              )}
-              <RunDiagnostics
-                key={`diagnostics:${task.id}:${run.id}`}
-                run={run}
-                composerHasDraft={composerHasDraft}
-                onPrepareRetry={
-                  settingsRecovery &&
-                  isCurrent &&
-                  retryAvailable &&
-                  terminal &&
-                  retryable(terminal.outcome)
-                    ? () => onPrepareRetry(run.input)
-                    : undefined
-                }
-              />
+              </div>
               {run.conversationCoverage === "excluded" && (
                 <p
                   className="projection-notice run-conversation-coverage-notice"

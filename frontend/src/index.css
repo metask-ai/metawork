@@ -10593,3 +10593,19 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-height: 44px;
   color: var(--ui-content-muted);
 }
+
+.run-terminal-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.run-terminal-feedback:empty {
+  display: none;
+}
+.run-terminal-feedback > .ai-activity {
+  flex: 1;
+  min-width: 0;
+}
+.run-terminal-feedback > .run-options {
+  flex-shrink: 0;
+}
