@@ -33,6 +33,7 @@ import {
 } from "./completion-receipt.ts";
 import {
   attentionStatus,
+  createFeedbackState,
   publishStatus,
   quietStatus,
   selectCommandBarStatus,
@@ -386,7 +387,7 @@ export default function App() {
   const fileChangeRequestsInFlight = useRef(new Set<string>());
   const [statuses, setStatuses] = useState<ShellStatusState>(() =>
     publishStatus(
-      {},
+      createFeedbackState(),
       quietStatus("connection.connecting", { scope: "connection" }),
     ),
   );
@@ -3605,7 +3606,7 @@ export default function App() {
     }
     return true;
   }
-  const connectionShellStatus = statuses.connection;
+  const connectionShellStatus = statuses.entries["legacy:connection"];
   const connectionFailure = connectionFailurePresentation(
     connectionShellStatus,
   );
