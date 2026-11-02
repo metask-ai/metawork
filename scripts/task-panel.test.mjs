@@ -3004,6 +3004,59 @@ test("Tool summary expands its exact inline details", async () => {
   assert.ok(screen.getByText("private input"));
 });
 
+test("restored terminal notices stay silent and only observed active-to-terminal transitions announce", () => {
+  const failed = task({
+    runs: [run({ phase: "failed", terminal: terminal("failed", "timeout") })],
+  });
+  const view = render(taskContentElement(failed));
+  assert.equal(
+    view.container.querySelector(".ai-activity").getAttribute("aria-live"),
+    null,
+  );
+  const active = task({
+    runs: [
+      run({
+        phase: "running",
+        terminal: null,
+        activity: { kind: "waiting_model" },
+      }),
+    ],
+  });
+  view.rerender(taskContentElement(active, "2"));
+  view.rerender(taskContentElement(failed, "3"));
+  assert.equal(
+    view.container.querySelector(".ai-activity").getAttribute("aria-live"),
+    "polite",
+  );
+  view.rerender(taskContentElement(structuredClone(failed), "4"));
+  assert.equal(
+    view.container.querySelector(".ai-activity").getAttribute("aria-live"),
+    null,
+  );
+});
+
+test("completed empty response has one compact explanation without a generic completion title", () => {
+  const value = task({
+    runs: [
+      run({
+        phase: "completed",
+        terminal: terminal("completed"),
+        output: {
+          commentary: [],
+          response: "",
+          responseKind: "final",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const html = renderTaskContent(value, "zh-CN");
+  assert.match(html, />本轮未返回回复</);
+  assert.doesNotMatch(html, />工作已完成</);
+});
+
 test("partial output and terminal failure render one composite notice", () => {
   const value = task({
     runs: [
@@ -3022,7 +3075,8 @@ test("partial output and terminal failure render one composite notice", () => {
     ],
   });
   const markup = renderTaskContent(value);
-  assert.match(markup, />Work failed before the response was complete</);
+  assert.match(markup, /Response incomplete\./);
+  assert.match(markup, /timed out/i);
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
   assert.ok(
@@ -3079,7 +3133,7 @@ test("provider failure notices explain impact without duplicating diagnostics", 
   });
   const absent = renderTaskContent(failedWithoutResponse);
   assert.match(absent, />Model service request failed</);
-  assert.match(absent, /No response was generated\./);
+  assert.doesNotMatch(absent, /No response was generated\./);
   assert.doesNotMatch(
     absent,
     /MetaWork did not receive additional diagnostics for this run\./,
@@ -3113,7 +3167,7 @@ test("provider failure notices explain impact without duplicating diagnostics", 
     ],
   });
   const withheld = renderTaskContent(partialWithWithheldDiagnostic);
-  assert.match(withheld, /response stopped before it was complete/);
+  assert.match(withheld, /Response incomplete\./);
   assert.doesNotMatch(withheld, /current security boundary/);
 
   for (const unsupportedGuess of [
@@ -3151,19 +3205,22 @@ test("provider failure details open for the exact historical Run", async () => {
   const value = task({ runs: [historical, current] });
 
   render(taskContentElement(value));
-  const summary = screen.getByText("View run details");
-  const diagnostics = summary.closest("details");
-  assert.equal(diagnostics.open, false);
+  const menu = screen.getByRole("button", { name: "Run actions" });
+  assert.ok(screen.queryByText("View run details") === null);
   assert.equal(screen.queryByText("historical-model"), null);
-  await user.click(summary);
-  assert.equal(diagnostics.open, true);
+  await user.click(menu);
+  await user.click(
+    await screen.findByRole("menuitem", { name: "View run details" }),
+  );
+  const diagnostics = screen.getByRole("dialog");
   assert.match(diagnostics.textContent, /cannot be shown here/);
   assert.match(diagnostics.textContent, /historical-model/);
   assert.match(diagnostics.textContent, /OpenAI Responses/);
   assert.match(diagnostics.textContent, /provider_failure/);
   assert.doesNotMatch(diagnostics.textContent, /fixture-model/);
-  await user.click(summary);
+  await user.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByText("historical-model"), null);
+  await waitFor(() => assert.ok(document.activeElement === menu));
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
 });
 
@@ -3206,19 +3263,24 @@ test("model error notices expose safe details and explicit settings without send
   );
   assert.deepEqual(opened, ["account"]);
   assert.equal(prepared.length, 0);
-  const summary = screen.getByText("View run details");
-  await user.click(summary);
+  await user.click(screen.getByRole("button", { name: "Run actions" }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: "View run details" }),
+  );
   assert.ok(screen.getByText(detail.message));
-  assert.equal(summary.closest("details").querySelector("img"), null);
+  assert.equal(screen.getByRole("dialog").querySelector("img"), null);
   assert.ok(screen.getByText("future-code"));
   assert.ok(screen.getByText("18446744073709551615 ms"));
   assert.ok(
     screen.getByText("MetaWork removed sensitive content from this detail."),
   );
   assert.ok(screen.getByText("No additional technical details were provided."));
-  await user.click(summary);
+  await user.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByText(detail.message), null);
-  await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+  await user.click(screen.getByRole("button", { name: "Run actions" }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Copy to input box" }),
+  );
   assert.equal(prepared.length, 1);
 });
 
@@ -3282,18 +3344,14 @@ test("model error categories explain the failure in both locales without exposin
           translate(locale, `run.model_error.category.${category}`),
         ),
       );
-      assert.ok(
-        notice.textContent.includes(
-          translate(locale, "run.provider_failure.no_response_title"),
-        ),
-      );
+      assert.equal(notice.querySelectorAll(".ai-activity-copy > p").length, 1);
       assert.equal(
         notice.textContent.includes("raw-error-hidden-until-open"),
         false,
       );
       assert.equal(
         notice.querySelectorAll(".run-terminal-detail > span").length,
-        1,
+        0,
       );
     }
   }
@@ -3358,25 +3416,20 @@ test("payment guidance matches the source and prioritizes settings without claim
           view.container.querySelectorAll(".run-terminal-activity").length,
           1,
         );
-        assert.ok(
-          notice.textContent.includes(
-            translate(
-              locale,
-              partial
-                ? "run.provider_failure.partial_title"
-                : "run.provider_failure.no_response_title",
-            ),
-          ),
+        const reason = translate(
+          locale,
+          "run.model_error.category.payment_required",
         );
         assert.ok(
           notice.textContent.includes(
-            translate(
-              locale,
-              source === "metask"
-                ? "run.model_error.recovery.account_payment"
-                : "run.model_error.recovery.provider_payment",
-            ),
+            partial
+              ? translate(locale, "run.terminal.partial_reason", { reason })
+              : reason,
           ),
+        );
+        assert.equal(
+          notice.querySelectorAll(".ai-activity-copy > p").length,
+          1,
         );
         assert.doesNotMatch(
           notice.textContent,
@@ -3396,14 +3449,24 @@ test("payment guidance matches the source and prioritizes settings without claim
               : "run.model_error.open_models",
           ),
         });
-        const retry = screen.getByRole("button", {
-          name: translate(locale, "run.prepare_retry"),
-        });
+        assert.ok(
+          screen.queryByRole("button", {
+            name: translate(locale, "run.prepare_retry"),
+          }) === null,
+        );
         assert.equal(settings.dataset.primary, "true");
-        assert.equal(retry.dataset.primary, "false");
         fireEvent.click(settings);
         assert.deepEqual(opened, [source === "metask" ? "account" : "models"]);
         assert.equal(prepared.length, 0);
+        fireEvent.keyDown(
+          screen.getByRole("button", {
+            name: translate(locale, "run.actions"),
+          }),
+          { key: "ArrowDown" },
+        );
+        const retry = await screen.findByRole("menuitem", {
+          name: translate(locale, "run.prepare_retry"),
+        });
         fireEvent.click(retry);
         assert.deepEqual(prepared, [value.runs[0].input]);
         if (partial) assert.ok(screen.getByText("Retained partial answer"));
@@ -3485,7 +3548,7 @@ test("tool records never assert successful effects and only retry advice promote
       );
       const notice = view.container.querySelector(".run-terminal-activity");
       assert.ok(
-        notice.textContent.includes("Review the earlier execution records"),
+        !notice.textContent.includes("Review the earlier execution records"),
       );
       assert.doesNotMatch(
         notice.textContent,
@@ -3533,7 +3596,10 @@ test("supplemental model errors retain the primary failure and do not offer acco
     screen.queryByRole("button", { name: "Open account settings" }),
     null,
   );
-  await user.click(screen.getByText("View run details"));
+  await user.click(screen.getByRole("button", { name: "Run actions" }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: "View run details" }),
+  );
   assert.ok(
     screen.getByText(
       "The following model error also occurred. The main reason this request ended is shown above.",
@@ -3558,25 +3624,22 @@ test("inline diagnostics stay absent for other failures and preserve safe exact 
     ],
   });
   render(taskContentElement(value));
-  const summary = screen.getByText("View run details");
-  const details = summary.closest("details");
+  const menu = screen.getByRole("button", { name: "Run actions" });
   const model = document.querySelector(".message-info-model");
   assert.equal(model.textContent, "<img src=x onerror=alert(1)>");
   assert.equal(model.querySelector("img"), null);
-  assert.ok(
-    within(details).queryByText("<img src=x onerror=alert(1)>") === null,
+  assert.ok(screen.queryByRole("dialog") === null);
+  menu.focus();
+  await user.click(menu);
+  await user.click(
+    await screen.findByRole("menuitem", { name: "View run details" }),
   );
-  summary.focus();
-  await user.click(summary);
-  assert.ok(summary.closest("details").open);
+  const details = screen.getByRole("dialog");
   assert.ok(screen.getByText("No additional technical details are available."));
   assert.ok(within(details).getByText("<img src=x onerror=alert(1)>"));
-  assert.ok(summary.closest("details").querySelector("img") === null);
-  await user.click(summary);
-  assert.ok(!summary.closest("details").open);
-  assert.ok(
-    within(details).queryByText("<img src=x onerror=alert(1)>") === null,
-  );
+  assert.ok(details.querySelector("img") === null);
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
   cleanup();
   for (const cause of [null, "tool_failure"]) {
     render(

@@ -1000,8 +1000,10 @@ export const enUS = {
     "Attachments are unavailable while MetaWork is closing.",
   "attachment.error.generic": "The selected files could not be added.",
   "run.terminal.completed": "Work completed",
-  "run.no_final_response":
-    "The work ended, but the Agent did not return a final response.",
+  "run.no_final_response": "This turn returned no final response",
+  "run.actions": "Run actions",
+  "run.terminal.partial_reason": "{reason} Response incomplete.",
+  "account.diagnostics": "Account diagnostics",
   "run.terminal.stopped": "Work stopped",
   "run.terminal.interrupted": "Work interrupted",
   "run.terminal.failed": "Work failed",

@@ -32,6 +32,7 @@ export function SettingsPage({
   archiveManagement,
   account,
   accountFeedback,
+  accountDiagnostics,
   models,
   automaticWorkspaceRoot,
   customProviderCapabilities,
@@ -61,6 +62,7 @@ export function SettingsPage({
   archiveManagement?: ArchivedTasksProps;
   account: AccountView;
   accountFeedback?: ReactNode;
+  accountDiagnostics?: ReactNode;
   models: ModelsView;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
   customProviderCapabilities: {
@@ -560,6 +562,7 @@ export function SettingsPage({
               </div>
 
               {accountFeedback}
+              {accountDiagnostics}
 
               {authenticated && (
                 <AccountUsageSummary

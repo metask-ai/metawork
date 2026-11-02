@@ -267,11 +267,14 @@ test("restored account result is local and silent; details collapse keeps focus 
     !document.querySelector(".feedback-notice-details"),
     "details must be collapsed",
   );
-  const details = screen.getByRole("button", { name: "Technical details" });
+  assert.ok(
+    screen.queryByRole("button", { name: "Technical details" }) === null,
+  );
+  const details = screen.getByText("Account diagnostics");
   await user.click(details);
-  assert.equal(details.getAttribute("aria-expanded"), "true");
+  assert.equal(details.closest("details").open, true);
   assert.equal(
-    document.getElementById(details.getAttribute("aria-controls")).textContent,
+    document.querySelector(".feedback-diagnostics pre").textContent,
     "request-id: example-safe-id\n<plain text>",
   );
   assert.ok(
@@ -300,6 +303,8 @@ test("restored account result is local and silent; details collapse keeps focus 
     !document.querySelector(".feedback-notice"),
     "notice must be absent",
   );
+  await user.click(screen.getByText("Account diagnostics"));
+  assert.ok(document.querySelector(".feedback-diagnostics pre"));
 });
 
 test("accepted account retry reopens the same coalesced error once and finishes the received display", async (ctx) => {
@@ -454,7 +459,7 @@ test("changed safe diagnostics resume recent-result observation even when the er
       /at the time/,
     ),
   );
-  await user.click(screen.getByRole("button", { name: "Technical details" }));
+  await user.click(screen.getByText("Account diagnostics"));
   assert.equal(
     document.querySelector(".feedback-notice-details").textContent,
     "changed safe diagnostic",
@@ -542,7 +547,7 @@ test("a new authoritative recent result removes the old account error without de
 test("security reset clears disclosure and dismissal; late accepted command cannot restore an old cycle", async (ctx) => {
   const app = await setup(ctx);
   const user = await app.openAccount();
-  await user.click(screen.getByRole("button", { name: "Technical details" }));
+  await user.click(screen.getByText("Account diagnostics"));
   let resolve;
   app.controls.invoke = () =>
     new Promise((done) => {

@@ -349,6 +349,15 @@ export function TaskContent({
   }) => ReactNode;
 }) {
   const { locale, t } = useI18n();
+  const observedRunTerminals = useRef(new Map<string, boolean>());
+  useEffect(() => {
+    observedRunTerminals.current = new Map(
+      task?.runs.map((run) => [
+        `${task.id}:${run.id}`,
+        run.terminal !== null,
+      ]) ?? [],
+    );
+  }, [task]);
   const viewport = useRef<HTMLDivElement>(null);
   const [localMemory] = useState(createTaskReadingMemory);
   const { reading, processDisclosure, toolDisclosure } = memory ?? localMemory;
@@ -685,28 +694,29 @@ export function TaskContent({
           const terminal = run.terminal;
           const modelError = terminal?.modelError;
           const recovery = modelError?.recovery;
-          let recoveryMessage: MessageId | undefined;
-          if (recovery && recovery !== "none") {
-            if (recovery === "account_settings") {
-              recoveryMessage =
-                modelError?.category === "payment_required"
-                  ? "run.model_error.recovery.account_payment"
-                  : "run.model_error.recovery.account_authentication";
-            } else if (
-              recovery === "model_settings" &&
-              modelError?.category === "authentication"
-            ) {
-              recoveryMessage =
-                "run.model_error.recovery.provider_authentication";
-            } else if (
-              recovery === "model_settings" &&
-              modelError?.category === "payment_required"
-            ) {
-              recoveryMessage = "run.model_error.recovery.provider_payment";
-            } else {
-              recoveryMessage = `run.model_error.recovery.${recovery}`;
-            }
-          }
+          const settingsRecovery =
+            terminal?.cause === "provider_failure" &&
+            (recovery === "account_settings" || recovery === "model_settings");
+          const reason =
+            terminal?.cause === "provider_failure"
+              ? t(
+                  modelError
+                    ? `run.model_error.category.${modelError.category}`
+                    : "run.provider_failure.title",
+                )
+              : terminal?.cause
+                ? t(`cause.${terminal.cause}`)
+                : null;
+          const terminalLabel = reason
+            ? run.output.responseKind === "partial"
+              ? t("run.terminal.partial_reason", { reason })
+              : reason
+            : terminal?.outcome === "completed" &&
+                run.output.responseKind !== "partial"
+              ? t("run.no_final_response")
+              : terminal
+                ? t(terminalMessage(run.output.responseKind, terminal.outcome))
+                : "";
           const responseCopyable = responseCopyEligible(run);
           const submittedTime = formatRunTimestamp(
             locale,
@@ -846,51 +856,17 @@ export function TaskContent({
                       : undefined
                   }
                   state={outcomeState(terminal.outcome)}
-                  label={t(
-                    terminal.cause === "provider_failure"
-                      ? terminal.modelError
-                        ? run.output.responseKind === "partial"
-                          ? "run.provider_failure.partial_title"
-                          : "run.provider_failure.no_response_title"
-                        : "run.provider_failure.title"
-                      : terminalMessage(
-                          run.output.responseKind,
-                          terminal.outcome,
-                        ),
-                  )}
-                  detail={
-                    terminal.cause === "provider_failure" ? (
-                      <span className="run-terminal-detail">
-                        <span>
-                          {t(
-                            terminal.modelError
-                              ? `run.model_error.category.${terminal.modelError.category}`
-                              : run.output.responseKind === "partial"
-                                ? "run.provider_failure.partial_impact"
-                                : "run.provider_failure.no_response_impact",
-                          )}
-                        </span>
-                        {recoveryMessage && <span>{t(recoveryMessage)}</span>}
-                        {run.tools.length > 0 && (
-                          <span>
-                            {t("run.provider_failure.review_tool_effects")}
-                          </span>
-                        )}
-                      </span>
-                    ) : terminal.cause ? (
-                      t(`cause.${terminal.cause}`)
-                    ) : terminal.outcome === "completed" &&
-                      run.output.responseKind !== "partial" ? (
-                      t("run.no_final_response")
-                    ) : undefined
+                  label={terminalLabel}
+                  announce={
+                    isCurrent &&
+                    observedRunTerminals.current.get(`${task.id}:${run.id}`) ===
+                      false
                   }
-                  announce={isCurrent}
                   action={
                     (isCurrent &&
                       retryAvailable &&
                       retryable(terminal.outcome)) ||
-                    terminal.cause === "provider_failure" ||
-                    terminal.modelError ? (
+                    settingsRecovery ? (
                       <div className="run-terminal-actions">
                         {onOpenSettings &&
                           terminal.cause === "provider_failure" &&
@@ -921,6 +897,7 @@ export function TaskContent({
                           )}
                         {isCurrent &&
                           retryAvailable &&
+                          !settingsRecovery &&
                           retryable(terminal.outcome) && (
                             <button
                               className="ai-activity-retry focus-ring"
@@ -940,12 +917,25 @@ export function TaskContent({
                                 : t("run.prepare_retry")}
                             </button>
                           )}
-                        <RunDiagnostics run={run} />
                       </div>
                     ) : undefined
                   }
                 />
               )}
+              <RunDiagnostics
+                key={`diagnostics:${task.id}:${run.id}`}
+                run={run}
+                composerHasDraft={composerHasDraft}
+                onPrepareRetry={
+                  settingsRecovery &&
+                  isCurrent &&
+                  retryAvailable &&
+                  terminal &&
+                  retryable(terminal.outcome)
+                    ? () => onPrepareRetry(run.input)
+                    : undefined
+                }
+              />
               {run.conversationCoverage === "excluded" && (
                 <p
                   className="projection-notice run-conversation-coverage-notice"

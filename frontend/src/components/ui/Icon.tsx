@@ -33,6 +33,7 @@ import {
   Search,
   Download,
   ExternalLink,
+  Ellipsis,
   Settings,
   ShieldCheck,
   Info,
@@ -47,6 +48,7 @@ import {
 } from "lucide-react";
 
 type IconName =
+  | "more"
   | "sidebar"
   | "minimize"
   | "maximize"
@@ -99,6 +101,7 @@ type IconName =
   | "sunrise";
 
 const icons: Record<IconName, LucideIcon> = {
+  more: Ellipsis,
   sidebar: PanelLeft,
   minimize: Minus,
   maximize: Square,

@@ -3090,11 +3090,6 @@ button.run-process-tool:hover {
   margin-top: 2px;
 }
 
-.run-terminal-detail {
-  display: grid !important;
-  gap: 3px;
-}
-
 .run-terminal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -9448,21 +9443,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-warning);
 }
 .run-diagnostics {
-  font-size: var(--text-micro);
-  color: var(--ui-content-muted);
-}
-.run-diagnostics {
-  max-width: 100%;
   min-width: 0;
-}
-.run-diagnostics[open] {
-  flex-basis: 100%;
-}
-.run-diagnostics summary {
-  cursor: pointer;
-  width: fit-content;
-  min-height: 44px;
-  padding-block: 12px;
+  overflow-wrap: anywhere;
 }
 .model-error-message {
   white-space: pre-wrap;
@@ -10594,4 +10576,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     right: 16px;
     bottom: 16px;
   }
+}
+/* Source diagnostics are separate from dismissible daily notices. */
+.feedback-diagnostics {
+  color: var(--ui-content-muted);
+  font-size: 12px;
+}
+.feedback-diagnostics > summary {
+  display: list-item;
+  min-height: 44px;
+  align-content: center;
+  width: fit-content;
+}
+.run-options {
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--ui-content-muted);
 }

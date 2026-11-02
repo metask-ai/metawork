@@ -59,6 +59,7 @@ import {
 } from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { FeedbackNotice } from "../components/ui/FeedbackNotice.tsx";
+import { DiagnosticDisclosure } from "../components/ui/DiagnosticDisclosure.tsx";
 import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
@@ -4634,9 +4635,7 @@ export default function App() {
             accountFeedback={accountFeedbackEntries.map((entry) => (
               <FeedbackNotice
                 key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}
-                title={t("account.feedback.title")}
-                message={t(entry.id, entry.values)}
-                diagnostic={entry.diagnostic}
+                title={t(entry.id, entry.values)}
                 detailsLabel={t("feedback.details")}
                 dismissLabel={t("feedback.dismiss")}
                 pending={entry.tone === "quiet"}
@@ -4652,6 +4651,25 @@ export default function App() {
                 }}
               />
             ))}
+            accountDiagnostics={
+              Object.values(statuses.entries).some(
+                (entry) =>
+                  entry?.audience.scope === "account" && entry.diagnostic,
+              ) ? (
+                <DiagnosticDisclosure
+                  label={t("account.diagnostics")}
+                  key={`${statuses.epoch}:${snapshot.account.accountId}`}
+                >
+                  {Object.values(statuses.entries).map((entry) =>
+                    entry?.audience.scope === "account" && entry.diagnostic ? (
+                      <pre className="feedback-notice-details" key={entry.key}>
+                        {entry.diagnostic}
+                      </pre>
+                    ) : null,
+                  )}
+                </DiagnosticDisclosure>
+              ) : null
+            }
             models={snapshot.models}
             automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
             customProviderCapabilities={{
@@ -4991,6 +5009,7 @@ export default function App() {
             pendingContent={pendingMessages}
             taskContent={
               <TaskContent
+                key={`${bridgeGeneration}:${snapshot.securityEpoch}:${snapshot.historyEpoch}`}
                 task={activeTask}
                 memory={taskReadingMemory}
                 history={{
@@ -5021,7 +5040,9 @@ export default function App() {
                 )}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}
-                retryAvailable={taskCanCompose && !taskOperationInFlight}
+                retryAvailable={
+                  !bridgeUnavailable && taskCanCompose && !taskOperationInFlight
+                }
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
