@@ -1372,7 +1372,6 @@ export default function App() {
   const composerRunInput = composerDraftToRunInput(currentComposerDraft);
   const newTaskModelState = newTaskModelSelectionState(
     snapshot.models,
-    snapshot.newTaskAdmission,
     newTaskRequestedModel,
   );
   const composerContentReady =

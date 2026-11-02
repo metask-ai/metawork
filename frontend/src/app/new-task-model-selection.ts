@@ -2,7 +2,6 @@ import type {
   ModelMetadata,
   ModelRef,
   ModelsView,
-  NewTaskAdmissionView,
   NewTaskModelSelectionIntent,
 } from "../bridge/contracts.ts";
 import type { Brand } from "../components/ui/BrandIcon.tsx";
@@ -44,7 +43,6 @@ function catalogModelVendor(modelId: string): Brand {
 
 export function newTaskModelSelectionState(
   models: ModelsView,
-  _admission: NewTaskAdmissionView,
   requested: ModelRef | null,
 ): NewTaskModelSelectionState {
   const selected = requested ?? models.defaultSelection;

@@ -467,7 +467,7 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   assert.equal("protocol" in created.modelSelection, false);
 });
 
-test("schedule selection submits exact source proof without consuming installed protocol", async () => {
+test("schedule selection submits exact source proof independently of generic New Task admission", async () => {
   for (const source of ["metask", "custom"]) {
     for (const protocol of [
       "anthropic_messages",
@@ -480,8 +480,6 @@ test("schedule selection submits exact source proof without consuming installed 
       snapshot.capabilities.scheduledTasks = true;
       snapshot.capabilities.scheduledTaskPersistence = true;
       snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
-      snapshot.newTaskAdmission.activeProtocol = protocol;
-      snapshot.newTaskAdmission.activeGeneration = "999";
       const provider = snapshot.models.providers[0];
       provider.sourceGeneration = "7";
       if (source === "custom") {
@@ -500,8 +498,6 @@ test("schedule selection submits exact source proof without consuming installed 
           sourceId: "custom",
           modelId: "fixture-model",
         };
-        snapshot.newTaskAdmission.activeModelRef =
-          snapshot.models.defaultSelection;
       }
       let created = null;
       renderDom(
@@ -527,8 +523,10 @@ test("schedule selection submits exact source proof without consuming installed 
   stale.capabilities.scheduledTasks = true;
   stale.capabilities.scheduledTaskPersistence = true;
   stale.capabilities.scheduledTaskPersistenceHealth = "ready";
-  stale.newTaskAdmission.activeSelectionRevision = "999";
-  stale.newTaskAdmission.available = false;
+  stale.newTaskAdmission = {
+    available: false,
+    reason: "workspace_unavailable",
+  };
   renderDom(scheduledElement(stale));
   fireEvent.click(screen.getByRole("button", { name: /Daily brief/ }));
   assert.equal(screen.getByRole("button", { name: "Save" }).disabled, false);

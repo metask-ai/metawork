@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { readFile, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,16 +27,15 @@ export async function runTaskArchiveVertical({
   const read = async (id) =>
     (await snapshot()).tasks.find((task) => task.id === id);
   async function create(title) {
-    const admission = (await snapshot()).newTaskAdmission;
+    const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
       workspace: {
         kind: "manual",
         workspaceId,
         expectedWorkspaceEpoch: workspaceEpoch,
       },
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: catalog.revision,
       expectedSkillSelectionRevision: catalog.selectionRevision,
       approvalMode: "manual",

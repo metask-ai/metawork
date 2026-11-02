@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import { readProbeProductState } from "./probe-product-state.mjs";
 import { readFixtureCheckpoint } from "./test-support/checkpoint-history.mjs";
 import { execFile, spawn } from "node:child_process";
@@ -993,12 +994,11 @@ desktopVertical: try {
   }
   if (builtinOfficeOnly) {
     const verifyNewTask = async (catalog) => {
-      const admission = (await snapshot()).newTaskAdmission;
+      const modelSnapshot = await snapshot();
       const created = await invokeBridge("metawork.tasks.create", {
         workspace: { kind: "manual", workspaceId, expectedWorkspaceEpoch },
-        expectedExecutionGeneration: admission.activeGeneration,
-        expectedSelectionRevision: admission.activeSelectionRevision,
-        modelSelection: null,
+
+        modelSelection: fixtureModelSelection(modelSnapshot),
         expectedSkillCatalogRevision: catalog.revision,
         expectedSkillSelectionRevision: catalog.selectionRevision,
         approvalMode: "full_access",
@@ -1214,22 +1214,15 @@ desktopVertical: try {
     );
     break desktopVertical;
   }
-  const currentAdmission = (await snapshot()).newTaskAdmission;
-  const expectedExecutionGeneration = currentAdmission.activeGeneration;
-  const expectedSelectionRevision = currentAdmission.activeSelectionRevision;
-  if (!isWireId(expectedExecutionGeneration))
-    throw new Error("snapshot omitted the current execution generation");
-  if (!isWireId(expectedSelectionRevision))
-    throw new Error("snapshot omitted the current selection revision");
+  const modelSnapshot = await snapshot();
   const createResult = await invokeBridge("metawork.tasks.create", {
     workspace: {
       kind: "manual",
       workspaceId,
       expectedWorkspaceEpoch,
     },
-    expectedExecutionGeneration,
-    expectedSelectionRevision,
-    modelSelection: null,
+
+    modelSelection: fixtureModelSelection(modelSnapshot),
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
     expectedSkillSelectionRevision: catalogSnapshot.catalog.selectionRevision,
     approvalMode: "manual",

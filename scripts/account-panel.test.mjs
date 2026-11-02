@@ -108,8 +108,7 @@ const unavailableModels = {
       safeDiagnostic: "",
     },
   ],
-  metaskSelection: null,
-  metaskSelectionRevision: "0",
+
   defaultSelection: null,
   selectionRevision: "0",
   operation: "idle",
@@ -142,8 +141,7 @@ const readyModels = {
       errorCode: "none",
     },
   ],
-  metaskSelection: { sourceId: "metask", modelId: "model-1" },
-  metaskSelectionRevision: "1",
+
   defaultSelection: { sourceId: "metask", modelId: "model-1" },
   selectionRevision: "1",
   errorCode: "none",

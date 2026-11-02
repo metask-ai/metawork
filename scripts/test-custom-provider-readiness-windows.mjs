@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import { readProbeProductState } from "./probe-product-state.mjs";
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -188,34 +189,10 @@ try {
   if (connected.item.state !== "ready")
     throw new Error("successful model test did not make the provider ready");
 
-  assertAcceptedIfPresent(
-    await invokeBridge("metawork.models.selectDefault", {
-      sourceId: configuredProvider.id,
-      modelId: model,
-      expectedSelectionRevision: connected.current.models.selectionRevision,
-      expectedSourceGeneration: configuredProvider.sourceGeneration,
-      expectedCatalogGeneration: configuredProvider.catalogGeneration,
-    }),
-    "Custom Provider default selection",
-  );
-  const selected = await poll(
-    async () => {
-      const current = await snapshot();
-      return current.models?.defaultSelection?.sourceId ===
-        configuredProvider.id &&
-        current.models?.defaultSelection?.modelId === model &&
-        current.newTaskAdmission?.activeModelRef?.sourceId ===
-          configuredProvider.id &&
-        current.newTaskAdmission?.available === true
-        ? current
-        : null;
-    },
-    commandTimeoutMs,
-    "selected Custom Provider",
-  );
+  const selected = connected.current;
   if (selected.account?.state !== "signed_out")
     throw new Error(
-      "selecting a custom model source changed Account identity state",
+      "configuring a custom model source changed Account identity state",
     );
 
   const workspaceIdsBefore = new Set(
@@ -272,11 +249,8 @@ try {
       workspaceId,
       expectedWorkspaceEpoch: workspaceReady.item.epoch,
     },
-    expectedExecutionGeneration:
-      workspaceReady.current.newTaskAdmission.activeGeneration,
-    expectedSelectionRevision:
-      workspaceReady.current.newTaskAdmission.activeSelectionRevision,
-    modelSelection: null,
+
+    modelSelection: fixtureModelSelection(workspaceReady.current),
     expectedSkillCatalogRevision: workspaceReady.catalog.revision,
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
     approvalMode: "manual",

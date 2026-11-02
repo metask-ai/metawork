@@ -38,15 +38,7 @@ function snapshot(revision, tasks = []) {
       safeDiagnostic: "",
       catalogGeneration: "0",
     },
-    newTaskAdmission: {
-      available: false,
-      reason: "none",
-      activeModelRef: null,
-      activeProtocol: null,
-      activeGeneration: "0",
-      activeSelectionRevision: "0",
-      state: "unavailable",
-    },
+    newTaskAdmission: { available: false, reason: "workspace_unavailable" },
     capabilities: {
       taskHistoryPersistence: false,
       conversationRecovery: false,
@@ -1127,7 +1119,7 @@ test("navigation during bootstrap follows the current scope without converting c
   await connection.stop();
 });
 
-test("committed model refresh follows history refills and completes the second CAS from the installed context", async () => {
+test("committed model refresh follows history refills and uses the latest Provider revision for the next model test", async () => {
   const reads = [],
     committed = [],
     published = [];
@@ -1157,13 +1149,13 @@ test("committed model refresh follows history refills and completes the second C
   reads[0].resolve({
     ...snapshot("1"),
     scope: reads[0].scope,
-    selectionRevision: "1",
+    providerRevision: "1",
   });
   await start;
   const command = (async () => {
     committed.push("configure");
     await connection.refresh();
-    committed.push(["selectDefault", current.selectionRevision]);
+    committed.push(["testModel", current.providerRevision]);
     finished = true;
   })();
   await flush();
@@ -1182,7 +1174,7 @@ test("committed model refresh follows history refills and completes the second C
   reads[1].resolve({
     ...snapshot("2"),
     scope: reads[1].scope,
-    selectionRevision: "2",
+    providerRevision: "2",
   });
   await flush();
   assert.equal(finished, false);
@@ -1190,10 +1182,10 @@ test("committed model refresh follows history refills and completes the second C
   reads[2].resolve({
     ...snapshot("3"),
     scope: reads[2].scope,
-    selectionRevision: "3",
+    providerRevision: "3",
   });
   await Promise.all([command, refill]);
-  assert.deepEqual(committed, ["configure", ["selectDefault", "3"]]);
+  assert.deepEqual(committed, ["configure", ["testModel", "3"]]);
   assert.deepEqual(
     published.map((view) => view.revision),
     ["1", "3"],

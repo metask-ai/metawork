@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 
 // Real Product/Bridge/Core integration; fixture model replies do not claim
@@ -21,13 +22,12 @@ export async function runApprovalModeVertical({
   const observations = [];
   const readTask = async (id) =>
     (await snapshot()).tasks.find((task) => task.id === id);
-  const admission = (await snapshot()).newTaskAdmission;
+  const modelSnapshot = await snapshot();
   const create = async (workspace, title) => {
     const result = await invoke("metawork.tasks.create", {
       workspace,
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: null,
       expectedSkillSelectionRevision: null,
       approvalMode: "manual",
