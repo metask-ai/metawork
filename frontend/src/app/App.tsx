@@ -2606,6 +2606,12 @@ export default function App() {
       },
     );
     if (bridgeGenerationRef.current !== generation) return;
+    if (
+      result.kind === "create_rejected" &&
+      session.canReleaseAfterCreationRejection &&
+      submissionSessions.current.get(key) === session
+    )
+      submissionSessions.current.delete(key);
     const state =
       result.kind === "accepted"
         ? "accepted"

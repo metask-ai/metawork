@@ -180,6 +180,7 @@ async function renderSubmissionApp(
   let revision;
   let resolveRun;
   const createResolvers = [];
+  const createRequests = [];
   const running = new Promise((resolve) => {
     resolveRun = resolve;
   });
@@ -201,8 +202,9 @@ async function renderSubmissionApp(
     disconnect: async () => {},
     ping: async () => {},
     fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
-    createTask: () => {
+    createTask: (...args) => {
       creations += 1;
+      createRequests.push(args);
       return new Promise((resolve) => createResolvers.push(resolve));
     },
     cancel: async (taskId, runId) => {
@@ -269,6 +271,7 @@ async function renderSubmissionApp(
     operationIds,
     cancellations,
     creations: () => creations,
+    createRequests,
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       await act(async () =>
@@ -649,6 +652,83 @@ test("App first accepted send clears its original version after Task handoff wit
   await user.type(fixture.textarea, "follow-up");
   assert.equal(fixture.textarea.value, "follow-up");
 });
+
+for (const catalogFirst of [true, false]) {
+  test(`App reselects a disabled model after creation rejection with catalog ${catalogFirst ? "before" : "after"} the reply`, async (ctx) => {
+    const fixture = await renderSubmissionApp(ctx, { newTask: true });
+    const user = userEvent.setup({ document });
+    const provider = fixture.snapshot.models.providers[0];
+    const original = provider.models[0];
+    provider.models.push({
+      ...original,
+      id: "replacement",
+      displayName: "Replacement model",
+    });
+    await fixture.publish();
+    await user.type(fixture.textarea, "Original instruction{Enter}");
+    await waitFor(() => assert.equal(fixture.creations(), 1));
+
+    const disableModel = async () => {
+      provider.models = provider.models.filter(
+        (model) => model.id !== original.id,
+      );
+      provider.catalogGeneration = String(
+        BigInt(provider.catalogGeneration) + 1n,
+      );
+      Object.assign(fixture.snapshot.newTaskAdmission, {
+        available: false,
+        reason: "invalid_candidate",
+        activeModelRef: null,
+        activeProtocol: null,
+        activeGeneration: "0",
+        activeSelectionRevision: "0",
+        state: "unavailable",
+      });
+      await fixture.publish();
+    };
+    if (catalogFirst) await disableModel();
+    await fixture.rejectCreation("execution_unavailable");
+    if (!catalogFirst) await disableModel();
+
+    const selector = await screen.findByRole("combobox", { name: "Model" });
+    await waitFor(() => assert.equal(selector.textContent, original.id));
+    assert.equal(selector.disabled, false);
+    assert.equal(
+      screen.getByRole("combobox", { name: "Switch workspace" }).disabled,
+      false,
+    );
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+    assert.ok(screen.getByText("Original instruction"));
+    assert.equal(fixture.inputs.length, 0);
+    assert.equal(fixture.creations(), 1);
+
+    await user.click(selector);
+    await user.click(
+      await screen.findByRole("option", { name: "Replacement model" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+    assert.equal(fixture.textarea.value, "Original instruction");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => assert.equal(fixture.creations(), 2));
+    assert.deepEqual(fixture.createRequests[1], [
+      { kind: "automatic" },
+      "0",
+      "0",
+      {
+        targetModelRef: { sourceId: provider.id, modelId: "replacement" },
+        expectedSourceGeneration: provider.sourceGeneration,
+        expectedCatalogGeneration: provider.catalogGeneration,
+      },
+      null,
+      null,
+      "auto_review",
+    ]);
+    await fixture.created(fixture.task, 1);
+    await waitFor(() => assert.equal(fixture.inputs.length, 1));
+    assert.equal(fixture.inputs[0][2].text, "Original instruction");
+    await fixture.settle();
+  });
+}
 
 test("App new Task lists all Providers while existing Tasks preserve their source and actual Run model", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
