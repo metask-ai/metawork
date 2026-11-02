@@ -42,6 +42,7 @@ import {
   resetFeedback,
   selectCommandBarFeedback,
   settleFeedback,
+  statusVisibleInCommandBar,
   type FeedbackToken,
   type ShellStatus,
   type ShellRoute,
@@ -650,7 +651,16 @@ export default function App() {
     setStatuses(next);
   }
   function setStatus(status: ShellStatus) {
-    updateFeedbackState((current) => publishStatus(current, status));
+    const announce = statusVisibleInCommandBar(status, {
+      route,
+      settingsOpen,
+      workspaceId: composerWorkspaceId ?? null,
+      taskId: activeTask?.id ?? null,
+    });
+    updateFeedbackState((current) => {
+      const next = publishStatus(current, status);
+      return announce ? next : { ...next, announcement: current.announcement };
+    });
   }
   function observeAccountFeedback(
     account: WorkbenchSnapshot["account"],
