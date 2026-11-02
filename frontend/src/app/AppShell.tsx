@@ -224,14 +224,25 @@ export function AppShell({
   });
   const attentionDetails = useRef<HTMLDetailsElement>(null);
   const attentionHadFocus = useRef(false);
+  const attentionFocusedElement = useRef<HTMLElement | null>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
-    if (!attentionNotice && attentionHadFocus.current) {
+    const focusedControlWasRemoved =
+      attentionFocusedElement.current !== null &&
+      !attentionFocusedElement.current.isConnected &&
+      document.activeElement === document.body;
+    if (
+      (!attentionNotice && attentionHadFocus.current) ||
+      focusedControlWasRemoved
+    ) {
       attentionHadFocus.current = false;
-      searchButton.current?.focus();
+      attentionFocusedElement.current = null;
+      if (attentionNotice)
+        attentionDetails.current?.querySelector("summary")?.focus();
+      else searchButton.current?.focus();
     }
-  }, [attentionNotice]);
+  }, [attentionNotice, attentionContent]);
 
   useLayoutEffect(() => {
     onTaskStageExposureChange?.(taskStageExposed);
@@ -445,16 +456,23 @@ export function AppShell({
                 ref={attentionDetails}
                 className="commandbar-alert"
                 data-recovering={attentionBusy}
-                onFocusCapture={() => {
+                onFocusCapture={(event) => {
                   attentionHadFocus.current = true;
+                  attentionFocusedElement.current = event.target as HTMLElement;
                 }}
                 onBlurCapture={(event) => {
                   if (
                     !event.currentTarget.contains(
                       event.relatedTarget as Node | null,
                     )
-                  )
+                  ) {
                     attentionHadFocus.current = false;
+                    if (
+                      event.relatedTarget !== null ||
+                      attentionFocusedElement.current?.isConnected
+                    )
+                      attentionFocusedElement.current = null;
+                  }
                 }}
               >
                 <summary aria-label={attentionNotice}>

@@ -385,11 +385,20 @@ test("independent account result remains accessible alongside a connection failu
   );
   assert.ok(screen.getByRole("button", { name: "Retry syncing" }));
   app.controls.failRead = false;
-  fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
+  const retry = screen.getByRole("button", { name: "Retry syncing" });
+  act(() => retry.focus());
+  fireEvent.click(retry);
   await waitFor(() =>
     assert.equal(
       document.querySelector(".commandbar-alert summary")?.textContent,
       "View account operation result",
+    ),
+  );
+  await waitFor(() =>
+    assert.ok(
+      document.activeElement ===
+        document.querySelector(".commandbar-alert summary"),
+      "removing the focused retry returns focus to the remaining feedback entry",
     ),
   );
 });

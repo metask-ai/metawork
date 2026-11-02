@@ -3780,6 +3780,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .feedback-notice + .feedback-notice {
   margin-top: 12px;
 }
+#settings-account > .feedback-notice {
+  margin-top: 16px;
+}
 .feedback-list > .feedback-notice {
   margin-top: 0;
 }
