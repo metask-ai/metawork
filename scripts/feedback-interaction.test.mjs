@@ -404,6 +404,64 @@ test("a successful snapshot cannot confirm a timed out account mutation or repla
   assert.equal(app.controls.attempts, 1);
 });
 
+test("an unconfirmed command cannot hide a later Account rejection in the same generation", async (ctx) => {
+  const app = await setup(ctx, "none");
+  await app.openAccount();
+  app.controls.invoke = () => {
+    throw new BridgeCommandTimeoutError("metawork.account.login", 10);
+  };
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with Metask" }));
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".feedback-notice")?.textContent ?? "",
+      /outcome is not confirmed/,
+    ),
+  );
+  app.snapshot.account.errorCode = "metask_unauthorized";
+  app.snapshot.account.safeDiagnostic = "new safe rejection";
+  await app.publish();
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".feedback-notice")?.textContent ?? "",
+      /rejected.*credential/i,
+    ),
+  );
+  assert.doesNotMatch(
+    document.querySelector(".feedback-notice").textContent,
+    /outcome is not confirmed/,
+  );
+  assert.equal(app.controls.attempts, 1);
+});
+
+test("changed safe diagnostics resume recent-result observation even when the error code repeats", async (ctx) => {
+  const app = await setup(ctx);
+  const user = await app.openAccount();
+  app.controls.invoke = () => {
+    throw new BridgeCommandTimeoutError("metawork.account.login", 10);
+  };
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with Metask" }));
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".feedback-notice")?.textContent ?? "",
+      /outcome is not confirmed/,
+    ),
+  );
+  app.snapshot.account.safeDiagnostic = "changed safe diagnostic";
+  await app.publish();
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".feedback-notice")?.textContent ?? "",
+      /at the time/,
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: "Technical details" }));
+  assert.equal(
+    document.querySelector(".feedback-notice-details").textContent,
+    "changed safe diagnostic",
+  );
+  assert.equal(app.controls.attempts, 1);
+});
+
 test("independent account result remains accessible alongside a connection failure", async (ctx) => {
   const app = await setup(ctx);
   app.controls.failRead = true;

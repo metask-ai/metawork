@@ -399,7 +399,7 @@ export default function App() {
   const accountFeedbackRequest = useRef({
     serial: 0,
     awaitingSync: false,
-    unknown: false,
+    unknown: null as { observation: string | null } | null,
     observed: false,
     attemptId: null as string | null,
     lastObservation: null as string | null,
@@ -667,15 +667,22 @@ export default function App() {
     announce: boolean,
     force = false,
   ) {
-    if (
-      accountFeedbackRequest.current.awaitingSync ||
-      accountFeedbackRequest.current.unknown
-    )
-      return;
+    if (accountFeedbackRequest.current.awaitingSync) return;
     const observation = JSON.stringify([
       account.errorCode,
       account.safeDiagnostic,
     ]);
+    const unknown = accountFeedbackRequest.current.unknown;
+    if (unknown) {
+      if (unknown.observation === null) {
+        unknown.observation = observation;
+        return;
+      }
+      if (unknown.observation === observation) return;
+      // A changed recent fact is observable without attributing it to this request.
+      accountFeedbackRequest.current.unknown = null;
+      force = true;
+    }
     if (
       !force &&
       accountFeedbackRequest.current.lastObservation === observation
@@ -703,7 +710,7 @@ export default function App() {
     accountFeedbackRequest.current = {
       serial: accountFeedbackRequest.current.serial + 1,
       awaitingSync: false,
-      unknown: false,
+      unknown: null,
       observed: false,
       attemptId: null,
       lastObservation: null,
@@ -2191,7 +2198,7 @@ export default function App() {
       request === accountFeedbackRequest.current.serial &&
       epoch === feedbackRef.current.epoch;
     accountFeedbackRequest.current.awaitingSync = true;
-    accountFeedbackRequest.current.unknown = false;
+    accountFeedbackRequest.current.unknown = null;
     let token: FeedbackToken;
     function startCycle(id: ShellStatus["id"]) {
       const started = beginFeedback(
@@ -2248,7 +2255,15 @@ export default function App() {
     } catch {
       if (!current()) return false;
       accountFeedbackRequest.current.awaitingSync = false;
-      accountFeedbackRequest.current.unknown = true;
+      const observedAccount = latestSnapshotRef.current?.account;
+      accountFeedbackRequest.current.unknown = {
+        observation: observedAccount
+          ? JSON.stringify([
+              observedAccount.errorCode,
+              observedAccount.safeDiagnostic,
+            ])
+          : accountFeedbackRequest.current.lastObservation,
+      };
       updateFeedbackState((state) =>
         settleFeedback(
           state,
