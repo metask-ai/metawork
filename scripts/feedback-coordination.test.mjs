@@ -12,6 +12,7 @@ import {
   resetFeedback,
   selectCommandBarFeedback,
   settleFeedback,
+  statusVisibleInCommandBar,
 } from "../frontend/src/app/command-bar-status.ts";
 
 const context = {
@@ -23,6 +24,43 @@ const context = {
 const account = attentionStatus("account.command_failed", { scope: "account" });
 const connection = attentionStatus("connection.refresh_failed", {
   scope: "connection",
+});
+
+test("Skills excludes workspace feedback from candidates and announcements while connection stays first", () => {
+  const workspace = attentionStatus("workspace.selection_failed", {
+    scope: "workspace",
+    workspaceId: null,
+  });
+  let state = publishStatus(createFeedbackState(), workspace);
+  state = publishStatus(
+    state,
+    attentionStatus("workspace.selection_failed", {
+      scope: "workspace",
+      workspaceId: "w1",
+    }),
+  );
+  state = observeFeedback(state, "connection", "condition", connection);
+  state = publishStatus(
+    state,
+    attentionStatus("skill.import_failed", { scope: "skills" }),
+  );
+  state = observeFeedback(state, "account", "result", account);
+  const skills = { ...context, route: "skills" };
+  assert.deepEqual(
+    selectCommandBarFeedback(state, skills).map((entry) => entry.key),
+    ["connection", "legacy:skills", "account"],
+  );
+  assert.equal(statusVisibleInCommandBar(workspace, skills), false);
+  assert.deepEqual(
+    selectCommandBarFeedback(state, { ...skills, settingsOpen: true }).map(
+      (entry) => entry.key,
+    ),
+    ["connection", "account"],
+  );
+  assert.deepEqual(
+    selectCommandBarFeedback(state, context).map((entry) => entry.key),
+    ["connection", "legacy:workspace:w1", "legacy:workspace:*", "account"],
+  );
 });
 
 test("connection recovery retires only its condition, not an independent account result", () => {

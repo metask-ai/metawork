@@ -206,11 +206,28 @@ export function dismissFeedback(
   };
 }
 
+function commandBarScopes(context: ShellStatusContext): string[] {
+  return context.settingsOpen
+    ? ["connection", "execution", "account"]
+    : context.route === "skills"
+      ? ["connection", "skills", "execution", "account"]
+      : [
+          "connection",
+          `task:${context.taskId}`,
+          `workspace:${context.workspaceId}`,
+          "workspace:*",
+          "execution",
+          "account",
+        ];
+}
+
 export function statusVisibleInCommandBar(
   status: ShellStatus,
   context: ShellStatusContext,
 ): boolean {
   if (status.tone !== "attention") return false;
+  if (!commandBarScopes(context).includes(statusKey(status.audience)))
+    return false;
   if (status.audience.scope === "connection") return true;
   if (status.audience.scope === "account") return true;
   if (status.audience.scope === "execution") return true;
@@ -240,18 +257,7 @@ export function selectCommandBarFeedback(
   state: ShellStatusState,
   context: ShellStatusContext,
 ): FeedbackEntry[] {
-  const scopes = context.settingsOpen
-    ? ["connection", "execution", "account"]
-    : context.route === "skills"
-      ? ["connection", "skills", "execution", "account"]
-      : [
-          "connection",
-          `task:${context.taskId}`,
-          `workspace:${context.workspaceId}`,
-          "workspace:*",
-          "execution",
-          "account",
-        ];
+  const scopes = commandBarScopes(context);
   return Object.values(state.entries)
     .filter(
       (entry): entry is FeedbackEntry =>
