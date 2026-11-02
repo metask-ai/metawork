@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AccountView,
   ModelsView,
@@ -12,7 +12,6 @@ import {
   type SelectionMenuOption,
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
-import { accountErrorText } from "../../i18n/account-error.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
@@ -32,6 +31,7 @@ type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
   account,
+  accountFeedback,
   models,
   automaticWorkspaceRoot,
   customProviderCapabilities,
@@ -53,13 +53,13 @@ export function SettingsPage({
   onRemoveCustomModel,
   onTestCustomModel,
   onBeginLogin,
-  onRetryRefresh,
   onRefreshAccountSummary,
   onOpenRecharge,
   onLogout,
 }: {
   archiveManagement?: ArchivedTasksProps;
   account: AccountView;
+  accountFeedback?: ReactNode;
   models: ModelsView;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
   customProviderCapabilities: {
@@ -86,7 +86,6 @@ export function SettingsPage({
   ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
   onBeginLogin: () => void;
-  onRetryRefresh: () => void;
   onRefreshAccountSummary: () => void;
   onOpenRecharge: () => void;
   onLogout: () => void;
@@ -549,31 +548,7 @@ export function SettingsPage({
                 </div>
               </div>
 
-              {account.errorCode !== "none" &&
-                account.errorCode !== "user_cancelled" && (
-                  <div className="settings-error" role="alert">
-                    <Icon name="warning" />
-                    <span className="settings-error-copy">
-                      <strong>{t("account.action_failed")}</strong>
-                      <span>{accountErrorText(account.errorCode, t)}</span>
-                      {account.safeDiagnostic && (
-                        <span className="settings-error-diagnostic">
-                          {account.safeDiagnostic}
-                        </span>
-                      )}
-                    </span>
-                    {account.errorCode === "refresh_schedule_failed" && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={disabled || accountDisabled}
-                        onClick={onRetryRefresh}
-                      >
-                        {t("account.retry_refresh")}
-                      </Button>
-                    )}
-                  </div>
-                )}
+              {accountFeedback}
 
               {authenticated && (
                 <AccountUsageSummary

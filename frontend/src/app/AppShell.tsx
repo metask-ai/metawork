@@ -153,6 +153,7 @@ export function AppShell({
   attentionNotice,
   attentionContent,
   attentionBusy = false,
+  attentionAnnouncement,
   onSearch,
   left,
   rightPanel,
@@ -170,6 +171,7 @@ export function AppShell({
   attentionNotice: string | null;
   attentionContent?: ReactNode;
   attentionBusy?: boolean;
+  attentionAnnouncement?: { key: number; text: string } | null;
   onSearch: () => void;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
@@ -404,6 +406,18 @@ export function AppShell({
           className="commandbar-alert-slot"
           data-native-window-drag-exclude=""
         >
+          <span
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <span key={attentionAnnouncement?.key ?? 0}>
+              {attentionAnnouncement === undefined
+                ? (attentionNotice ?? "")
+                : (attentionAnnouncement?.text ?? "")}
+            </span>
+          </span>
           <div
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}
@@ -425,14 +439,7 @@ export function AppShell({
             >
               <Icon name="sidebar-right" />
             </button>
-            <span
-              className="sr-only"
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {attentionNotice ?? ""}
-            </span>
+
             {attentionNotice && (
               <details
                 ref={attentionDetails}
