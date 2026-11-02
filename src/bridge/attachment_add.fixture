@@ -57,5 +57,19 @@
       "mode": "native_paths",
       "maxChunkBytes": "131072"
     }
+  },
+  "beginWithRemainingFiles": {
+    "generation": "1",
+    "batchId": "3",
+    "source": {
+      "kind": "file_bytes",
+      "files": [
+        {
+          "name": "archive.zip",
+          "sizeBytes": "3"
+        }
+      ]
+    },
+    "remainingFiles": 1
   }
 }

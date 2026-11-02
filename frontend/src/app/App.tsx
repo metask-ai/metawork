@@ -123,6 +123,7 @@ import {
   newTaskDraftStorageId,
   prepareRetryDraft,
   prepareOutputEditDraft,
+  remainingAttachmentFiles,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
 import {
@@ -2656,7 +2657,22 @@ export default function App() {
     const targetId = newTaskDraftActive
       ? newTaskDraftId
       : (activeTask?.id ?? null);
-    if (!target.currentDraft(targetId)) return;
+    const requestedDraft = target.currentDraft(targetId);
+    if (!requestedDraft) return;
+    const maxFiles = snapshot.capabilities.attachments.maxFiles;
+    const remainingFiles = remainingAttachmentFiles(requestedDraft, maxFiles);
+    const selectedCount = input
+      ? "files" in input
+        ? input.files.length
+        : input.paths.length
+      : null;
+    if (
+      remainingFiles === 0 ||
+      (selectedCount !== null && selectedCount > remainingFiles)
+    ) {
+      setAttachmentError("too_many_files");
+      return;
+    }
     let add: AttachmentAddOperation;
     try {
       add = client.createAttachmentAdd(async () => {
@@ -2664,7 +2680,7 @@ export default function App() {
         taskDrafts.invalidateAttachments();
         newTaskDrafts.invalidateAttachments();
         await retryViewSynchronization(true, requestedGeneration);
-      });
+      }, remainingFiles);
     } catch (error) {
       setAttachmentError(errorText(error));
       return;
@@ -2706,6 +2722,18 @@ export default function App() {
           composerDraftScopeRef.current === requestedScope
         )
           setAttachmentError("cleanup_failed");
+        return;
+      }
+      if (
+        result.attachments.length > remainingAttachmentFiles(current, maxFiles)
+      ) {
+        const cleanup = await add.cancel();
+        if (currentOperation())
+          setAttachmentError(
+            cleanup.status === "cleanup_failed"
+              ? "cleanup_failed"
+              : "too_many_files",
+          );
         return;
       }
       const next: ComposerDraft = {

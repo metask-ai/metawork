@@ -820,7 +820,7 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.error.input_busy": "文件仍在处理中，请稍后再添加。",
   "attachment.error.input_unavailable": "当前无法添加文件。",
   "attachment.error.cleanup_failed":
-    "部分未发送文件未能清理；可稍后重新添加，已有草稿仍保留。",
+    "附件清理未完成，部分资源仍被占用。请稍后重试。",
   "attachment.cancel": "取消添加",
   "attachment.error.invalid_transfer": "文件添加未完成，请重新添加。",
   "attachment.error.stale_transfer": "本次文件添加已失效，请重新添加。",
@@ -838,8 +838,9 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.error.unsupported_type": "所选文件为空、无效或无法解码为图片。",
   "attachment.error.file_too_large":
     "所选文件超过单文件大小上限（{limit} MB）。",
-  "attachment.error.too_many_files": "最多可添加 8 个文件。",
-  "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",
+  "attachment.error.too_many_files": "每条消息最多添加 8 个附件。",
+  "attachment.error.staging_capacity":
+    "附件资源暂时不足，本次未添加。请稍后重试。",
   "attachment.error.read_failed": "无法读取所选文件中的某个文件。",
   "attachment.error.file_changed": "添加期间文件发生了变化，请重新选择。",
   "attachment.error.shutting_down": "MetaWork 正在关闭，暂时无法添加附件。",

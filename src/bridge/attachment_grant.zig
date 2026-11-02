@@ -1,7 +1,9 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 
-pub const max_grants: usize = 8;
+const product_control = @import("metawork_product_control");
+pub const max_batch_files = product_control.max_attachment_batch_files;
+pub const capacity = product_control.attachment_record_capacity;
 pub const token_bytes: usize = 24;
 pub const token_text_bytes: usize = token_bytes * 2;
 
@@ -28,7 +30,7 @@ pub const Error = error{
 /// Bridge-owned authority for Product staging identities. Tokens are random,
 /// connection/window-bound, and never expose the monotonic Product identity.
 pub const State = struct {
-    slots: [max_grants]?Grant = @splat(null),
+    slots: [capacity]?Grant = @splat(null),
 
     pub fn issueBatch(
         self: *State,
@@ -40,7 +42,7 @@ pub const State = struct {
         random_fn: *const fn (?*anyopaque, []u8) bool,
     ) Error![]const Issued {
         if (generation == 0 or window_id == 0) return error.InvalidAuthority;
-        if (attachment_ids.len == 0 or attachment_ids.len > max_grants or
+        if (attachment_ids.len == 0 or attachment_ids.len > max_batch_files or
             output.len < attachment_ids.len or self.freeCount() < attachment_ids.len)
             return error.Capacity;
         var created: usize = 0;
@@ -84,7 +86,7 @@ pub const State = struct {
         window_id: native_sdk.platform.WindowId,
         output: []u64,
     ) Error![]const u64 {
-        if (tokens.len == 0 or tokens.len > max_grants or output.len < tokens.len)
+        if (tokens.len == 0 or tokens.len > max_batch_files or output.len < tokens.len)
             return error.Capacity;
         for (tokens, 0..) |token, index| {
             for (tokens[0..index]) |previous|
@@ -125,14 +127,12 @@ pub const State = struct {
         return grant.attachment_id;
     }
 
-    pub fn takeAll(self: *State, output: []u64) []const u64 {
+    pub fn takeAll(self: *State, output: *[capacity]u64) []const u64 {
         var count: usize = 0;
         for (&self.slots) |*slot| {
             const grant = slot.* orelse continue;
-            if (count < output.len) {
-                output[count] = grant.attachment_id;
-                count += 1;
-            }
+            output[count] = grant.attachment_id;
+            count += 1;
             slot.* = null;
         }
         return output[0..count];
@@ -150,17 +150,21 @@ pub const State = struct {
         for (ids) |id| self.slots[self.findId(id).?].?.receive_batch_id = batch_id;
     }
 
-    pub fn takeReceiveBatch(self: *State, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64, output: []u64) []const u64 {
+    pub fn receiveBatchIds(self: *const State, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64, output: []u64) []const u64 {
         var count: usize = 0;
-        for (&self.slots) |*slot| {
-            const grant = slot.* orelse continue;
+        for (self.slots) |slot| {
+            const grant = slot orelse continue;
             if (grant.generation != generation or grant.window_id != window_id or grant.receive_batch_id != batch_id) continue;
             std.debug.assert(count < output.len);
             output[count] = grant.attachment_id;
             count += 1;
-            slot.* = null;
         }
         return output[0..count];
+    }
+
+    pub fn discard(self: *State, id: u64) void {
+        const index = self.findId(id) orelse return;
+        self.slots[index] = null;
     }
 
     fn emptyIndex(self: *const State) ?usize {
@@ -255,9 +259,9 @@ test "attachment grant teardown drains every staged Product identity" {
     var random = Random{};
     var issued_storage: [2]Issued = undefined;
     _ = try state.issueBatch(9, 2, &.{ 31, 32 }, &issued_storage, &random, Random.fill);
-    var drained: [max_grants]u64 = undefined;
+    var drained: [capacity]u64 = undefined;
     try std.testing.expectEqualSlices(u64, &.{ 31, 32 }, state.takeAll(&drained));
-    try std.testing.expectEqual(@as(usize, max_grants), state.freeCount());
+    try std.testing.expectEqual(@as(usize, capacity), state.freeCount());
 }
 
 test "batch cancellation excludes consumed grants and other batches or connections" {
@@ -277,9 +281,36 @@ test "batch cancellation excludes consumed grants and other batches or connectio
     state.tagReceiveBatch(&.{ 10, 11 }, 1);
     state.tagReceiveBatch(&.{12}, 2);
     state.consume(&.{issued[0].token}, 2, 3);
-    var ids: [max_grants]u64 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), state.takeReceiveBatch(1, 3, 1, &ids).len);
-    try std.testing.expectEqual(@as(usize, 0), state.takeReceiveBatch(2, 4, 1, &ids).len);
-    try std.testing.expectEqualSlices(u64, &.{11}, state.takeReceiveBatch(2, 3, 1, &ids));
+    var ids: [max_batch_files]u64 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), state.receiveBatchIds(1, 3, 1, &ids).len);
+    try std.testing.expectEqual(@as(usize, 0), state.receiveBatchIds(2, 4, 1, &ids).len);
+    try std.testing.expectEqualSlices(u64, &.{11}, state.receiveBatchIds(2, 3, 1, &ids));
     try std.testing.expectEqualSlices(u64, &.{12}, try state.resolve(&.{issued[2].token}, 2, 3, &ids));
+}
+
+test "grant stock holds many message batches and disconnect drains all identities" {
+    const Random = struct {
+        next: u8 = 1,
+        fn fill(context: ?*anyopaque, output: []u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memset(output, self.next);
+            self.next += 1;
+            return true;
+        }
+    };
+    var state: State = .{};
+    var random = Random{};
+    var issued: [max_batch_files + 1]Issued = undefined;
+    var all_ids: [capacity]u64 = undefined;
+    for (&all_ids, 0..) |*id, index| id.* = index + 1;
+    for (0..capacity / max_batch_files) |batch| {
+        const start = batch * max_batch_files;
+        _ = try state.issueBatch(1, 3, all_ids[start..][0..max_batch_files], &issued, &random, Random.fill);
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.freeCount());
+    try std.testing.expectError(error.Capacity, state.issueBatch(1, 3, &.{999}, &issued, &random, Random.fill));
+    var drained: [capacity]u64 = undefined;
+    try std.testing.expectEqualSlices(u64, &all_ids, state.takeAll(&drained));
+    try std.testing.expectEqual(@as(usize, capacity), state.freeCount());
+    try std.testing.expectError(error.Capacity, state.issueBatch(1, 3, all_ids[0 .. max_batch_files + 1], &issued, &random, Random.fill));
 }

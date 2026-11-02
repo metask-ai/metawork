@@ -5,8 +5,11 @@ pub const FileStore = store.FileStore;
 pub const Format = enum { png, jpeg, webp };
 pub const Kind = enum { file, image };
 pub const State = enum { input_reserved, ready, borrowed, cleanup_pending, task_owned, task_cleanup_pending };
+pub const max_files_per_message: usize = 8;
+pub const record_capacity: usize = 128;
 pub const Limits = struct {
     max_files: usize,
+    max_records: usize = record_capacity,
     max_display_name_bytes: usize,
     max_file_bytes: usize,
     max_staged_bytes: usize,
@@ -80,10 +83,10 @@ pub const Runtime = struct {
     next_receive_id: u64 = 1,
     preparing: ?u64 = null,
     pub fn init(allocator: std.mem.Allocator, limits: Limits, file_store: ?*FileStore, images: ImagePreparation, archive_tool: ?ArchiveTool) Error!Runtime {
-        if (limits.max_files == 0 or limits.max_display_name_bytes == 0 or limits.max_file_bytes == 0 or limits.max_staged_bytes == 0) return error.InvalidLimits;
+        if (limits.max_files == 0 or limits.max_records < limits.max_files or limits.max_records > record_capacity or limits.max_display_name_bytes == 0 or limits.max_file_bytes == 0 or limits.max_staged_bytes == 0) return error.InvalidLimits;
         const archive_description = if (archive_tool) |tool| try tool.describe(allocator) else null;
         errdefer if (archive_description) |description| allocator.free(description);
-        const slots = try allocator.alloc(?Entry, limits.max_files);
+        const slots = try allocator.alloc(?Entry, limits.max_records);
         @memset(slots, null);
         return .{ .allocator = allocator, .limits = limits, .file_store = file_store, .images = images, .archive_description = archive_description, .slots = slots };
     }
@@ -110,7 +113,6 @@ pub const Runtime = struct {
     fn reserve(self: *Runtime, files: []const ReceiveFile, initialize: bool, prepared_id: ?u64) Error!u64 {
         const fs = self.file_store orelse return error.StagingCapacity;
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
-        if (prepared_id == null) _ = self.retryCleanup();
         if (files.len == 0) return error.EmptyBatch;
         if (files.len > self.limits.max_files) return error.TooManyFiles;
         if (prepared_id == null and self.next_receive_id == 0) return error.IdentityExhausted;
@@ -121,6 +123,7 @@ pub const Runtime = struct {
             if (file.size_bytes > self.limits.max_file_bytes) return error.FileTooLarge;
             total = std.math.add(usize, total, file.size_bytes) catch return error.StagingCapacity;
         }
+        _ = self.retryCleanup();
         if (self.freeSlotCount() < files.len or total > self.limits.max_staged_bytes - self.used_bytes) {
             const debt = self.cleanupDebt();
             if (self.freeSlotCount() + debt.count >= files.len and total <= self.limits.max_staged_bytes - (self.used_bytes - debt.bytes)) return error.CleanupFailed;
@@ -166,11 +169,6 @@ pub const Runtime = struct {
     }
     pub fn beginPreparing(self: *Runtime) Error!u64 {
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
-        _ = self.retryCleanup();
-        if (self.freeSlotCount() == 0 or self.used_bytes == self.limits.max_staged_bytes) {
-            if (self.cleanupDebt().count != 0) return error.CleanupFailed;
-            return error.StagingCapacity;
-        }
         if (self.next_receive_id == 0) return error.IdentityExhausted;
         const id = self.next_receive_id;
         self.next_receive_id +%= 1;
@@ -378,6 +376,7 @@ pub const Runtime = struct {
     pub fn releaseChecked(self: *Runtime, id: u64) Error!bool {
         const index = self.findIndex(id) orelse return false;
         const entry = &self.slots[index].?;
+        if (entry.state == .cleanup_pending) return error.CleanupFailed;
         if (entry.state != .ready) return false;
         if (!self.destroyEntry(entry, false)) return error.CleanupFailed;
         self.slots[index] = null;
@@ -550,6 +549,7 @@ pub fn detectFormat(bytes: []const u8) ?Format {
 fn testLimits() Limits {
     return .{
         .max_files = 4,
+        .max_records = 4,
         .max_display_name_bytes = 64,
         .max_file_bytes = 64,
         .max_staged_bytes = 160,
@@ -964,4 +964,90 @@ test "Task retained originals keep their quota and only undelivered ownership pe
             try std.testing.expectEqualStrings("original", &bytes);
         } else try std.testing.expectError(error.ReadFailed, fixture.store.read(original, 0, &bytes));
     }
+}
+
+test "message batches share a larger fixed stock without changing byte or borrow limits" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var limits = testLimits();
+    limits.max_files = 2;
+    limits.max_records = 5;
+    limits.max_staged_bytes = 5;
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var descriptors: [3]Descriptor = undefined;
+    var ids: [5]u64 = undefined;
+    for (0..2) |batch| {
+        const ready = try runtime.stageBatch(&.{ .{ .display_name = "a", .bytes = "x" }, .{ .display_name = "b", .bytes = "x" } }, &descriptors);
+        for (ready, 0..) |entry, index| ids[batch * 2 + index] = entry.id;
+    }
+    try std.testing.expectEqual(@as(usize, 4), runtime.used_bytes);
+    try std.testing.expectError(error.TooManyFiles, runtime.stageBatch(&.{ .{ .display_name = "a", .bytes = "x" }, .{ .display_name = "b", .bytes = "x" }, .{ .display_name = "c", .bytes = "x" } }, &descriptors));
+    const next = try runtime.stageBatch(&.{.{ .display_name = "c", .bytes = "x" }}, &descriptors);
+    ids[4] = next[0].id;
+    try std.testing.expectError(error.StagingCapacity, runtime.beginReceive(&.{.{ .display_name = "d", .size_bytes = 1 }}));
+    var parts: [3]BorrowedPart = undefined;
+    var indices: [3]usize = undefined;
+    try std.testing.expectError(error.TooManyFiles, runtime.borrow(ids[0..3], &parts, &indices, 42));
+    var borrow = try runtime.borrow(ids[0..2], &parts, &indices, 42);
+    borrow.retainForTask();
+    try std.testing.expectEqual(@as(usize, 5), runtime.used_bytes);
+    try runtime.settleTaskInput(ids[0], 42, false);
+    try std.testing.expectEqual(@as(usize, 4), runtime.used_bytes);
+    _ = try runtime.stageBatch(&.{.{ .display_name = "d", .bytes = "x" }}, &descriptors);
+    try runtime.settleTaskInput(ids[1], 42, true);
+    try std.testing.expectEqual(@as(usize, 4), runtime.used_bytes);
+}
+
+test "more than one message of failed deletions remains charged until physical cleanup" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var limits = testLimits();
+    limits.max_files = 2;
+    limits.max_records = 12;
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var blockers: [10][80]u8 = undefined;
+    var lengths: [10]usize = undefined;
+    for (&blockers, &lengths) |*buffer, *len| {
+        var output: [1]Descriptor = undefined;
+        const ready = try runtime.stageBatch(&.{.{ .display_name = "a", .bytes = "x" }}, &output);
+        const id = ready[0].id;
+        const file = runtime.slots[runtime.findIndex(id).?].?.file;
+        const relative = try std.fmt.bufPrint(buffer, "0/{s}.{s}", .{ file.name, file.extension.slice() });
+        len.* = relative.len;
+        try fixture.store.deleteChecked(file);
+        try fixture.store.root.createDir(std.testing.io, relative, .default_dir);
+        try std.testing.expectError(error.CleanupFailed, runtime.releaseChecked(id));
+        try std.testing.expectError(error.CleanupFailed, runtime.releaseChecked(id));
+    }
+    try std.testing.expectEqual(@as(usize, 10), runtime.cleanupDebt().count);
+    try std.testing.expectEqual(@as(usize, 10), runtime.used_bytes);
+    for (blockers, lengths) |buffer, len| try fixture.store.root.deleteDir(std.testing.io, buffer[0..len]);
+    try std.testing.expect(runtime.retryCleanup());
+    try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+    try std.testing.expectEqual(@as(usize, 12), runtime.freeSlotCount());
+}
+
+test "preparing does not reject full resources or retry cleanup before selection" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var limits = testLimits();
+    limits.max_staged_bytes = 1;
+    var runtime = try Runtime.init(std.testing.allocator, limits, &fixture.store, .{}, null);
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    const ready = try runtime.stageBatch(&.{.{ .display_name = "a", .bytes = "x" }}, &output);
+    const old_id = ready[0].id;
+    const id = try runtime.beginPreparing();
+    try std.testing.expectEqual(@as(usize, 1), runtime.used_bytes);
+    try std.testing.expectError(error.InputBusy, runtime.beginPreparing());
+    try std.testing.expect(runtime.cancelPreparing(id));
+    const next = try runtime.beginPreparing();
+    try std.testing.expectError(error.StagingCapacity, runtime.reservePrepared(next, &.{.{ .display_name = "b", .size_bytes = 1 }}));
+    try std.testing.expect(runtime.preparing == null);
+    try std.testing.expect(runtime.release(old_id));
+    const retry = try runtime.beginPreparing();
+    try runtime.reservePrepared(retry, &.{.{ .display_name = "b", .size_bytes = 1 }});
+    try std.testing.expect(try runtime.cancelReceiveChecked(retry));
 }

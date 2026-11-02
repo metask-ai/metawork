@@ -47,6 +47,19 @@ const JsonRunLimit = struct {
         return .{ .value = try std.fmt.parseInt(u8, text, 10) };
     }
 };
+const JsonU32 = struct {
+    value: u32,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        if (try source.peekNextTokenType() != .number) return error.UnexpectedToken;
+        const token = try source.nextAllocMax(allocator, .alloc_always, options.max_value_len.?);
+        const text = switch (token) {
+            .number, .allocated_number => |value| value,
+            else => return error.UnexpectedToken,
+        };
+        for (text) |byte| if (byte < '0' or byte > '9') return error.UnexpectedToken;
+        return .{ .value = try std.fmt.parseInt(u32, text, 10) };
+    }
+};
 const JsonManagement = struct {
     value: @FieldType(product_control.ViewRequest, "management"),
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
@@ -493,6 +506,7 @@ pub const AttachmentReceiveBegin = struct {
 pub const AttachmentAddBegin = struct {
     generation: []const u8,
     batchId: []const u8,
+    remainingFiles: JsonU32 = .{ .value = product_control.max_attachment_batch_files },
     source: struct {
         kind: enum { picker, native_paths, file_bytes },
         paths: ?[]const []const u8 = null,
@@ -1254,4 +1268,22 @@ test "Skill import payloads accept only typed target and exact preparation confi
         "{\"previewId\":\"7\",\"preparationRevision\":\"2\",\"confirmation\":\"update\",\"sourcePath\":\"/tmp/source\"}",
         "{\"previewId\":\"7\",\"preparationRevision\":2,\"confirmation\":\"update\"}",
     }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillInstall, payload));
+}
+
+test "attachment remainingFiles is optional and accepts only JSON u32 integer literals" {
+    var old = try parsePayload(AttachmentAddBegin, "{\"generation\":\"1\",\"batchId\":\"2\",\"source\":{\"kind\":\"picker\"}}");
+    defer old.deinit();
+    try std.testing.expectEqual(product_control.max_attachment_batch_files, old.value.remainingFiles.value);
+    for ([_][]const u8{ "0", "1", "8", "4294967295" }) |value| {
+        var buffer: [256]u8 = undefined;
+        const input = try std.fmt.bufPrint(&buffer, "{{\"generation\":\"1\",\"batchId\":\"2\",\"remainingFiles\":{s},\"source\":{{\"kind\":\"picker\"}}}}", .{value});
+        var parsed = try parsePayload(AttachmentAddBegin, input);
+        defer parsed.deinit();
+        try std.testing.expectEqual(try std.fmt.parseInt(u32, value, 10), parsed.value.remainingFiles.value);
+    }
+    for ([_][]const u8{ "null", "-1", "1.0", "1e0", "\"1\"", "true", "4294967296" }) |value| {
+        var buffer: [256]u8 = undefined;
+        const input = try std.fmt.bufPrint(&buffer, "{{\"generation\":\"1\",\"batchId\":\"2\",\"remainingFiles\":{s},\"source\":{{\"kind\":\"picker\"}}}}", .{value});
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(AttachmentAddBegin, input));
+    }
 }

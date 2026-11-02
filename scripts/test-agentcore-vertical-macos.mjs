@@ -47,6 +47,11 @@ import {
   runOfficeDeliveryHostProbe,
 } from "./output-delivery-vertical.mjs";
 
+import {
+  runAttachmentCapacityVertical,
+  verifyAttachmentBaselineArtifact,
+} from "./attachment-capacity-vertical.mjs";
+
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const [targetId] = process.argv.slice(2);
@@ -117,6 +122,15 @@ const windowsClipboardProbeScript = path.join(
 // This harness owns the artifact it drives. run-agentcore-vertical-windows.mjs
 // builds the same artifact before importing this module and sets the flag so
 // the automation Debug build does not run twice.
+const attachmentBaseline =
+  process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1"
+    ? await verifyAttachmentBaselineArtifact({
+        prebuilt: process.env.METAWORK_VERTICAL_PREBUILT,
+        binary: process.env.METAWORK_TEST_APP_BINARY ? binary : null,
+        cwd: process.env.METAWORK_TEST_APP_CWD,
+        expectedSha256: process.env.METAWORK_ATTACHMENT_BASELINE_SHA256,
+      })
+    : null;
 if (!process.env.METAWORK_VERTICAL_PREBUILT)
   await buildAutomationDebugArtifact(root, bundleOptions);
 const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
@@ -442,6 +456,9 @@ let exitState = null;
 let lastCheckpointObservation = null;
 let app;
 let exited;
+const attachmentCapacityOnly =
+  process.env.METAWORK_ATTACHMENT_CAPACITY_ONLY === "1" ||
+  process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1";
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
 const skillAutoRefreshOnly =
   process.env.METAWORK_SKILL_AUTO_REFRESH_ONLY === "1";
@@ -469,6 +486,24 @@ if (
   (activeInputOnly || outputOnly || builtinOfficeOnly || taskArchiveOnly)
 )
   throw new Error("Approval-only verification cannot combine other scopes");
+if (
+  attachmentCapacityOnly &&
+  (process.platform !== "darwin" ||
+    [
+      taskArchiveOnly,
+      skillAutoRefreshOnly,
+      activeInputOnly,
+      outputOnly,
+      builtinOfficeOnly,
+      approvalOnly,
+      process.env.METAWORK_SCHEDULE_ONLY === "1",
+      process.env.METAWORK_MCP_ONLY === "1",
+      process.env.METAWORK_MODEL_SWITCH_ONLY === "1",
+    ].some(Boolean))
+)
+  throw new Error(
+    "Attachment capacity verification requires its own macOS scope",
+  );
 startApplication();
 
 desktopVertical: try {
@@ -546,7 +581,8 @@ desktopVertical: try {
     !outputOnly &&
     !builtinOfficeOnly &&
     !approvalOnly &&
-    !taskArchiveOnly
+    !taskArchiveOnly &&
+    !attachmentCapacityOnly
   ) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
@@ -592,6 +628,46 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (attachmentCapacityOnly) {
+    const catalog = await poll(
+      async () => {
+        const current = (await snapshot()).workspaces.find(
+          (item) => item.id === workspaceId,
+        )?.skillCatalog;
+        return current?.availability === "ready" ||
+          current?.availability === "degraded"
+          ? current
+          : null;
+      },
+      commandTimeoutMs,
+      "attachment capacity Workspace catalog",
+    );
+    await runAttachmentCapacityVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      pid: app.pid,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      workspaceRoot: canonicalWorkspace,
+      catalog,
+      evidenceDir: join(root, ".zig-cache", "attachment-issue76", "desktop"),
+      pngFixture: largePngFixture,
+      maxOriginalPath: attachmentPngPath,
+      baselineOnly: process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1",
+      artifact: attachmentBaseline ?? {
+        path: await realpath(binary),
+        sha256: createHash("sha256")
+          .update(await readFile(binary))
+          .digest("hex"),
+      },
+    });
+    await stopApplication("attachment capacity verification complete");
+    break desktopVertical;
+  }
+
   if (taskArchiveOnly) {
     const catalog = await poll(
       async () => {

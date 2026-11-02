@@ -131,7 +131,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
 };
 
 const default_attachment_file_bytes: usize = 100_000_000;
-const default_attachment_count: usize = 8;
+const default_attachment_count: usize = product_attachment.max_files_per_message;
 
 pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
     return switch (err) {
@@ -1420,6 +1420,7 @@ pub const Runtime = struct {
             limits.max_skill_arguments == 0 or
             limits.max_task_title_bytes == 0 or
             limits.max_attachments_per_draft == 0 or
+            limits.max_attachments_per_draft > default_attachment_count or
             limits.max_attachments_per_draft >= lifecycle.multimodal_input_limits.max_parts or
             limits.max_attachment_display_name_bytes == 0 or
             limits.max_attachment_file_bytes == 0 or

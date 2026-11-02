@@ -809,7 +809,7 @@ Task 决定同步插话或等待下一轮，不使用 `UiBackend.poll()`。Rende
 
 ### 8.2 文件附件
 
-Composer 工具带在模型控件之前提供一个使用加号图标、带可访问名称与 tooltip 的“添加文件”按钮，与模型控件等高并在工具带内垂直居中，使用系统原生多选文件选择器并接受普通文件；用户也可以把操作系统文件拖入当前包含可编辑 Composer 的窗口，拖入时只在输入框范围显示克制的强调轮廓和“拖放文件以添加”提示。picker、拖放与普通 Composer 的图片粘贴只是文件接收入口，之后必须复用相同的附件 staging、结果和草稿；不提供 WebView file input。处理期间只允许一个添加操作，禁止再次添加和发送，文字仍可编辑；所有来源使用同一种添加操作；处理时按钮提供“取消添加”，取消请求发出后显示“正在取消添加”并禁用重复操作，直到 Host 确认 writer 静止及清理结果。原生 picker 仍由系统取消；窗口 scope 失效时撤销候选 authority，忽略迟到的 picker 结果。整批成功且当前 scope/generation 的草稿同步确认提交后才显示 chip；已移交附件不会被旧操作清理。取消保留已有草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip；清理失败明确说明残留，取消结果未知立即恢复连接并清除该连接未发送附件，保留文字和重新选择提示。离开当前 Composer scope 或关闭接收界面取消尚未移交草稿的操作；操作 identity 必须避免切换离开再返回后接纳迟到结果，已经 ready 的附件仍按下文规则保留。
+Composer 工具带在模型控件之前提供一个使用加号图标、带可访问名称与 tooltip 的“添加文件”按钮，与模型控件等高并在工具带内垂直居中，使用系统原生多选文件选择器并接受普通文件；用户也可以把操作系统文件拖入当前包含可编辑 Composer 的窗口，拖入时只在输入框范围显示克制的强调轮廓和“拖放文件以添加”提示。picker、拖放与普通 Composer 的图片粘贴只是文件接收入口，之后必须复用相同的附件 staging、结果和草稿；不提供 WebView file input。添加前按当前草稿累计校验消息数量，已知超量时不读取文件或打开选择器；picker 返回后由 Host 在复制前校验剩余名额。超量整批拒绝并保留原内容，资源不足与清理失败分别提示，不推测用户应删除哪个草稿。处理期间只允许一个添加操作，禁止再次添加和发送，文字仍可编辑；所有来源使用同一种添加操作；处理时按钮提供“取消添加”，取消请求发出后显示“正在取消添加”并禁用重复操作，直到 Host 确认 writer 静止及清理结果。原生 picker 仍由系统取消；窗口 scope 失效时撤销候选 authority，忽略迟到的 picker 结果。整批成功且当前 scope/generation 的草稿同步确认提交后才显示 chip；已移交附件不会被旧操作清理。取消保留已有草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip；清理失败明确说明残留，取消结果未知立即恢复连接并清除该连接未发送附件，保留文字和重新选择提示。离开当前 Composer scope 或关闭接收界面取消尚未移交草稿的操作；操作 identity 必须避免切换离开再返回后接纳迟到结果，已经 ready 的附件仍按下文规则保留。
 
 图片粘贴只绑定普通 Composer 文本框，不接管 Skill 参数、其他表单或整个窗口。用户通过系统粘贴动作交付的 `image/*` File 按事件顺序作为同一批附件追加，保留已有文字和附件；类型、大小与格式仍以[产品附件准入](requirements.md#53-task)为准，不按 MIME 建立另一套可信分类或格式承诺，不自动转码。没有图片 File 时保留原生文字粘贴、选区替换与撤销；有图片时同步接管默认动作，不插入同次剪贴板附带的 HTML 或文字表示，不解析 HTML 或获取 URL。未命名 File 使用中性显示名；不按名称或内容自动去重，不自动发送。输入框可编辑但附件正忙或当前不能添加时，在现有附件反馈区域明确说明原因，不排队或静默丢弃；禁用输入框不接管粘贴。异步添加完成时合并最新草稿，不能覆盖处理中输入的文字。
 
@@ -819,7 +819,7 @@ ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校
 
 Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)接纳的非图片文件以“文件”展示并可与图片混合发送；草稿只要含非图片文件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。空文件、超限或无法解码的已识别图片在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
-附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
+附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。普通 Composer 提交会话捕获本次附件与文字后清空所属草稿，后续编辑成为独立草稿，不等待实际 Run 启动。New task 创建期间沿用同一有界提交会话，取得 Task identity 后按序交付；旧回执只结算原提交，不清除新草稿。timeout 先 resync snapshot，不自动重放或恢复已消费 token；接收和原件结算见 [Product 附件合同](product-architecture.md#26-文件-attachment-staging)。
 
 图片模型输入可以经过缩放和 PNG 转码，原件仍完整保留；其他文件由 Agent 按需选择工具或 Skill 处理本地原件。内部预览、引用和上下文预算不作为附件类型的另一套文件大小上限展示。
 

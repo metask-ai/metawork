@@ -1,0 +1,143 @@
+{
+  "date": "2026-11-02",
+  "issue": "https://github.com/shuzuan-org/metawork/issues/76",
+  "branch": "feat/attachment-message-limits",
+  "testedCommit": "e904a09d15cfea5c8a30c388133332b66d1f0d88",
+  "priorEvidence": "attachment-limits-20261031.json",
+  "canonicalCore": "0.13.0-dev+723af0baee8d ABI 1 revision 26",
+  "tools": {
+    "node": "24.21.0",
+    "zig": "0.16.0",
+    "platform": "darwin-arm64"
+  },
+  "commits": {
+    "baselineAdmission": "d47827f2278f560f25651099cebe5514abb94ecf",
+    "cleanupRetry": "7b6fb3ce9ef39328aaa72c758408bd5731bafad5",
+    "scheduleFocusTest": "e904a09d15cfea5c8a30c388133332b66d1f0d88"
+  },
+  "sourceSha256": {
+    "scripts/attachment-capacity-vertical.mjs": "dba1c31bde592e8a4dfea076ee488ab68b5d22d0acb545d9bb2f14a9dbdb1333",
+    "scripts/attachment-capacity.test.mjs": "b9a11ee9cdfae56d5b3af1bfc42b74085a34f7e9648cd958a81328368010c304",
+    "scripts/test-agentcore-vertical-macos.mjs": "fd4fe815a35cec6aaffd2d0dd0642dcbf22871700ced1862f33afb8ba4b57063",
+    "scripts/scheduled-tasks.test.mjs": "5a271ca58451450e97a810f19d7719ddad4e85f103f7effb950a90b997988780",
+    "src/product/attachment.zig": "b9c439b065ca39aa433ee376a65cb6505a886226c6b1619c47bed59309cae155",
+    "src/bridge/dispatcher.zig": "c459a50454d3ec8f648d1d6cfbe3f8f1f58db30b54e7850660ea8bcbc495bbf8"
+  },
+  "reviewFindings": [
+    {
+      "finding": "Baseline-only mode could build the candidate and label it as the original executable.",
+      "resolution": "Require explicit prebuilt=1, executable, isolated cwd and frozen expected SHA-256 before build/launch; compare the file digest and record the actual path/digest. Also require the original eight-record saturation behavior.",
+      "verification": "Missing inputs, mismatch/replaced executable and a larger pool reject; real frozen baseline passes."
+    },
+    {
+      "finding": "The debt saturation unit test did not exercise cancellation and retry through Product/Bridge.",
+      "observedDefect": "With association saturation, the first failed deletion retains its grant. A repeated cancel previously saw releaseChecked return false for cleanup_pending, discarded the grant and incorrectly returned cleaned.",
+      "resolution": "releaseChecked continues returning CleanupFailed for cleanup_pending until explicit physical cleanup succeeds. Task-owned and borrowed protections remain unchanged.",
+      "verification": "Unified and legacy cancellation, each before and after grant publication: repeated saturated cancel retains the original association and charge; after a slot opens, tracked debt still reports failure; after physical cleanup, cancel reports released=false and no live debt remains.",
+      "injectionBoundary": "The test deliberately fills association slots with repeated references to one live Product debt, violating the normal one-debt-per-record invariant to reach the defensive saturation path."
+    }
+  ],
+  "scheduleFailureDiagnosis": {
+    "test": "Text schedules use an Automatic Workspace without requiring a Manual Workspace",
+    "baselineCommit": "fc64c489fd5d23bfc7d895304e95aaca04783033",
+    "controlledReproduction": "With a 75 ms animation-frame delay, both the baseline and pre-fix test fail with the unchanged approval description. ArrowDown/Enter did not wait for Select to move focus.",
+    "fix": "The test waits for the selected option focus, then ArrowDown, then the target option focus before Enter. The 75 ms delay remains in the regression. Product code and all submission/permission assertions are unchanged.",
+    "result": "Focused delayed-frame regression and full Node run pass this test."
+  },
+  "checks": [
+    {
+      "command": "npm run check",
+      "result": "passed"
+    },
+    {
+      "command": "zig build test-attachments -Dtarget=aarch64-macos",
+      "result": "passed",
+      "scope": "Product resource owner, I/O lane and filtered Product Control/Bridge roots, including all four saturation/cancel cases"
+    },
+    {
+      "command": "node --test scripts/attachment-capacity.test.mjs scripts/agentcore-vertical.test.mjs scripts/attachment-receive.test.mjs scripts/attachment-removal.test.mjs",
+      "result": "passed",
+      "tests": 47
+    },
+    {
+      "command": "node --test --test-name-pattern='Text schedules use an Automatic Workspace' scripts/scheduled-tasks.test.mjs",
+      "result": "passed",
+      "tests": 1,
+      "animationFrameDelayMs": 75
+    },
+    {
+      "command": "npm test",
+      "result": "failed",
+      "exitCode": 1,
+      "node": {
+        "tests": 1089,
+        "passed": 1085,
+        "failed": 2,
+        "skipped": 2
+      },
+      "native": {
+        "result": "passed",
+        "steps": 247,
+        "passedSteps": 247,
+        "tests": 1661,
+        "passed": 1652,
+        "skipped": 9
+      },
+      "failureScope": "Only the two previously baseline-reproduced Node failures listed below remain."
+    },
+    {
+      "command": "Prettier check of changed scripts, Zig fmt check and git diff --check",
+      "result": "passed"
+    }
+  ],
+  "baselineProbe": {
+    "at": "2026-11-02T01:21:46.295Z",
+    "artifact": {
+      "path": "/Users/zogien/Projects/metawork/.zig-cache/attachment-issue76/baseline-app/bin/metawork",
+      "sha256": "65ef5bbb41abe29f65424322c17e6639b281d8fa8940bc7ef9a06bcd2af78bf2"
+    },
+    "baselineCommit": "fc64c489fd5d23bfc7d895304e95aaca04783033",
+    "prebuilt": "1",
+    "expectedSha256": "65ef5bbb41abe29f65424322c17e6639b281d8fa8940bc7ef9a06bcd2af78bf2",
+    "result": "passed: eight small PNGs ready, ninth rejected with staging_capacity, cleanup completed",
+    "scope": "Real isolated macOS Host/native_paths/store/public SDK codec. This follow-up validates baseline admission and saturation, not a fresh full-capacity memory qualification."
+  },
+  "remainingRepositoryFailures": [
+    {
+      "test": "Renderer modules preserve the approved dependency direction",
+      "detail": "ModelSelector.tsx reaches into feature models",
+      "baseline": "Previously reproduced in both focused and full baseline Node runs; guard unchanged."
+    },
+    {
+      "test": "attention explains its cause and requires confirmation while deletion stays available",
+      "detail": "Expected default-model wording differs from current model/connection wording.",
+      "baseline": "Previously reproduced in both focused and full baseline Node runs; assertion and product wording unchanged."
+    }
+  ],
+  "logSha256": {
+    "affected.log": "1bfa6dcf17ad19b342db1bb03bcb5a977462b2e835ac9983012e7a8faf80a07f",
+    "baseline-desktop.log": "21ead088157fffda19c0337bc5df28c6db33d532215c9f25936b6ad4bec4c344",
+    "baseline-tests.log": "1e8a6c76497baa74d877b330bf40d8c1b90903329ede465c92976ce8fc72d7b9",
+    "check.log": "5d4c342d0b5fa6b2877235d88401d078dccb6ba5e529780fb0a4968b42ac205f",
+    "debt.log": "942dc5534dfccddf728366c1ae1d8986a87bcb9dc4373e0e1bf75df5573b75bc",
+    "repository.log": "d83e082802e0d87baa580934b5c575438b7240f15159828a6ad4d2da1b48bbfe",
+    "schedule-fixed.log": "d6acb86ebf329d58f859d2d244acdbdbc4d0cfe1cd7f791ac8b47dd09aef28ce",
+    "schedule-frame-baseline.log": "fa2fab21df85ddeeede6b3a1faf3d37706b71c3d578892c03f612ca116f283bc",
+    "schedule-frame-current.log": "ecbd213fd4f3a1b1a36c2e95ce30c8666e3b6e8f259e19405fd75be7632e4c66",
+    "schedule-frame-wait.log": "271ee2b3d62474135397db56bf65cd8e6ad741fa111135b9dec9772e72aa8a51"
+  },
+  "localLogDirectory": ".zig-cache/attachment-issue76/closeout",
+  "tinykg": {
+    "root": 1570,
+    "children": [1571, 1572, 1573],
+    "dependencies": {
+      "1573": [1571, 1572]
+    }
+  },
+  "openAcceptance": [
+    "Windows original issue reproduction and WebView2 DOM/New task behavior.",
+    "Actual system picker, OS drag/drop and image-paste gestures on both platforms.",
+    "Whole-application memory and responsiveness acceptance; prior Host RSS observations do not qualify this or independently finalize the 128-record parameter."
+  ],
+  "result": "Both self-review findings and the previously unexplained Node failure are closed locally, including the actual cleanup retry defect. The full repository command is not green; existing guard failures and platform/performance acceptance remain explicit. No issue closure, push or release is claimed."
+}
