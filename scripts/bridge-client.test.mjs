@@ -843,8 +843,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
         workspaceId: "7",
         expectedWorkspaceEpoch: "29",
       },
-      "23",
-      "27",
       {
         targetModelRef: { sourceId: "metask", modelId: "model-4" },
         expectedSourceGeneration: "31",
@@ -936,8 +934,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           workspaceId: "7",
           expectedWorkspaceEpoch: "29",
         },
-        expectedExecutionGeneration: "23",
-        expectedSelectionRevision: "27",
         modelSelection: {
           targetModelRef: { sourceId: "metask", modelId: "model-4" },
           expectedSourceGeneration: "31",

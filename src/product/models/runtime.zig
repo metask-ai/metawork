@@ -15,6 +15,10 @@ pub const StartError = error{
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn clearFixturePreference(runtime: *Runtime) void {
+        _ = runtime.registry.clearDefault(runtime.registry.selection_revision + 1);
+    }
+
     pub fn refreshMetaskCatalog(
         runtime: *Runtime,
         principal_ref: []const u8,

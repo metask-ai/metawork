@@ -944,9 +944,7 @@ export class BridgeClient {
   }
   async createTask(
     workspace: TaskWorkspaceIntent,
-    expectedExecutionGeneration: string,
-    expectedSelectionRevision: string,
-    modelSelection: NewTaskModelSelectionIntent | null,
+    modelSelection: NewTaskModelSelectionIntent,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     approvalMode: ApprovalMode,
@@ -954,8 +952,6 @@ export class BridgeClient {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
         workspace,
-        expectedExecutionGeneration,
-        expectedSelectionRevision,
         modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,

@@ -688,13 +688,8 @@ for (const catalogFirst of [true, false]) {
         BigInt(provider.catalogGeneration) + 1n,
       );
       Object.assign(fixture.snapshot.newTaskAdmission, {
-        available: false,
-        reason: "invalid_candidate",
-        activeModelRef: null,
-        activeProtocol: null,
-        activeGeneration: "0",
-        activeSelectionRevision: "0",
-        state: "unavailable",
+        available: true,
+        reason: "none",
       });
       await fixture.publish();
     };
@@ -724,8 +719,6 @@ for (const catalogFirst of [true, false]) {
     await waitFor(() => assert.equal(fixture.creations(), 2));
     assert.deepEqual(fixture.createRequests[1], [
       { kind: "automatic" },
-      "0",
-      "0",
       {
         targetModelRef: { sourceId: provider.id, modelId: "replacement" },
         expectedSourceGeneration: provider.sourceGeneration,
@@ -784,7 +777,7 @@ test("App creation retry captures another source and the newly selected Workspac
   );
   await user.type(fixture.textarea, "Selected official model{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 1));
-  assert.equal(fixture.createRequests[0][3].targetModelRef.sourceId, "metask");
+  assert.equal(fixture.createRequests[0][1].targetModelRef.sourceId, "metask");
   await fixture.rejectCreation("stale_catalog");
 
   fixture.snapshot.models.providers[0].models = [];
@@ -813,7 +806,6 @@ test("App creation retry captures another source and the newly selected Workspac
       ],
     },
   ];
-  fixture.snapshot.newTaskAdmission.available = false;
   fixture.snapshot.workspaces[0].epoch = "2";
   await fixture.publish();
   await user.click(await screen.findByRole("combobox", { name: "Model" }));
@@ -829,8 +821,6 @@ test("App creation retry captures another source and the newly selected Workspac
       workspaceId: fixture.snapshot.workspaces[0].id,
       expectedWorkspaceEpoch: "2",
     },
-    fixture.snapshot.newTaskAdmission.activeGeneration,
-    fixture.snapshot.newTaskAdmission.activeSelectionRevision,
     {
       targetModelRef: {
         sourceId: "custom-replacement",
@@ -1141,7 +1131,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   await waitFor(() => assert.equal(fixture.creations(), 1));
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
   assert.deepEqual(
-    BridgeClient.prototype.createTask.mock.calls[0].arguments[3],
+    BridgeClient.prototype.createTask.mock.calls[0].arguments[1],
     {
       targetModelRef: { sourceId: "metask", modelId: "glm-5.3-flash" },
       expectedSourceGeneration: provider.sourceGeneration,
@@ -1258,7 +1248,7 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   await user.type(fixture.textarea, "Use my custom Provider{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 2));
   assert.deepEqual(
-    BridgeClient.prototype.createTask.mock.calls[1].arguments[3],
+    BridgeClient.prototype.createTask.mock.calls[1].arguments[1],
     {
       targetModelRef: { sourceId: "cc", modelId: "gpt-5.6-sol" },
       expectedSourceGeneration: "23",
@@ -1894,4 +1884,100 @@ test("App lets a historical Task without intent explicitly choose any ready sour
   assert.equal(fixture.creations(), 0);
   assert.equal(fixture.inputs.length, 0);
   assert.equal(fixture.textarea.value, "Keep this draft");
+});
+
+test("App schedule_persistence_failed preserves later edits and permits one explicit retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  for (const text of [
+    "First rejected instruction",
+    "Second rejected instruction",
+  ]) {
+    fireEvent.change(fixture.textarea, { target: { value: text } });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  }
+  assert.equal(fixture.creations(), 1);
+  await user.type(fixture.textarea, "Newer unsent draft");
+  await fixture.rejectCreation("schedule_persistence_failed");
+  const selector = await screen.findByRole("combobox", { name: "Model" });
+  assert.equal(selector.disabled, false);
+  assert.ok(screen.getByText("First rejected instruction"));
+  assert.ok(screen.getByText("Second rejected instruction"));
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(document.activeElement, fixture.textarea);
+  await user.click(
+    screen.getAllByRole("button", { name: "Copy to input box" })[0],
+  );
+  assert.equal(fixture.textarea.value, "Newer unsent draft");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "Newer unsent draft");
+  await fixture.settle();
+});
+
+test("App schedule_persistence_unavailable preserves later edits and permits one explicit retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  for (const text of [
+    "First rejected instruction",
+    "Second rejected instruction",
+  ]) {
+    fireEvent.change(fixture.textarea, { target: { value: text } });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  }
+  assert.equal(fixture.creations(), 1);
+  await user.type(fixture.textarea, "Newer unsent draft");
+  await fixture.rejectCreation("schedule_persistence_unavailable");
+  const selector = await screen.findByRole("combobox", { name: "Model" });
+  assert.equal(selector.disabled, false);
+  assert.ok(screen.getByText("First rejected instruction"));
+  assert.ok(screen.getByText("Second rejected instruction"));
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(document.activeElement, fixture.textarea);
+  await user.click(
+    screen.getAllByRole("button", { name: "Copy to input box" })[0],
+  );
+  assert.equal(fixture.textarea.value, "Newer unsent draft");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "Newer unsent draft");
+  await fixture.settle();
+});
+
+test("App schedule_persistence_outcome_unknown preserves later edits and permits one explicit retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  for (const text of [
+    "First rejected instruction",
+    "Second rejected instruction",
+  ]) {
+    fireEvent.change(fixture.textarea, { target: { value: text } });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  }
+  assert.equal(fixture.creations(), 1);
+  await user.type(fixture.textarea, "Newer unsent draft");
+  await fixture.rejectCreation("schedule_persistence_outcome_unknown");
+  const selector = await screen.findByRole("combobox", { name: "Model" });
+  assert.equal(selector.disabled, false);
+  assert.ok(screen.getByText("First rejected instruction"));
+  assert.ok(screen.getByText("Second rejected instruction"));
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(document.activeElement, fixture.textarea);
+  await user.click(
+    screen.getAllByRole("button", { name: "Copy to input box" })[0],
+  );
+  assert.equal(fixture.textarea.value, "Newer unsent draft");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "Newer unsent draft");
+  await fixture.settle();
 });

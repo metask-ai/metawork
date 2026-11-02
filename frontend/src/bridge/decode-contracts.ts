@@ -318,16 +318,10 @@ const protocols = [
   "openai_chat_completions",
   "gemini_native",
 ] as const;
-const newTaskAdmissionStates = ["unavailable", "ready", "replacing"] as const;
 const newTaskAdmissionReasons = [
   "none",
-  "custom_provider_persistence_unavailable",
-  "credential_unavailable",
-  "invalid_candidate",
-  "resource_exhausted",
-  "schedule_persistence_unavailable",
-  "schedule_persistence_failed",
-  "schedule_persistence_outcome_unknown",
+  "shutting_down",
+  "workspace_unavailable",
 ] as const;
 const customProviderProtocols = [
   "openai_responses",
@@ -393,8 +387,10 @@ const scheduledTaskFailureReasons = [
   "permission_required",
 ] as const;
 const taskCreateReasons = [
-  "execution_changed",
   "execution_unavailable",
+  "schedule_persistence_unavailable",
+  "schedule_persistence_failed",
+  "schedule_persistence_outcome_unknown",
   "workspace_changed",
   "workspace_unavailable",
   "workspace_removing",
@@ -1977,57 +1973,16 @@ function decodeNewTaskAdmission(
   value: unknown,
   path: string,
 ): NewTaskAdmissionView {
-  const item = object(value, path, [
-    "available",
-    "reason",
-    "activeModelRef",
-    "activeProtocol",
-    "activeGeneration",
-    "activeSelectionRevision",
-    "state",
-  ]);
-  const state = enumValue(item.state, `${path}.state`, newTaskAdmissionStates);
-  const activeModelRef = decodeModelRef(
-    item.activeModelRef,
-    `${path}.activeModelRef`,
-  );
-  const activeGeneration = wireId(
-    item.activeGeneration,
-    `${path}.activeGeneration`,
-  );
-  const activeProtocol = nullableEnum(
-    item.activeProtocol,
-    `${path}.activeProtocol`,
-    protocols,
-  );
-  if ((activeModelRef === null) !== (activeProtocol === null))
-    fail(path, "active model and protocol must be present together");
-  const activeSelectionRevision = wireId(
-    item.activeSelectionRevision,
-    `${path}.activeSelectionRevision`,
-  );
+  const item = object(value, path, ["available", "reason"]);
   const available = booleanValue(item.available, `${path}.available`);
-  if ((activeModelRef === null) !== (activeGeneration === "0"))
-    fail(path, "active model and generation must be present together");
-  if (activeModelRef === null && activeSelectionRevision !== "0")
-    fail(path, "an absent active model cannot publish a selection revision");
-  if (state === "unavailable" && activeModelRef !== null)
-    fail(path, "an unavailable admission cannot publish an active model");
-  if (state === "ready" && activeModelRef === null)
-    fail(path, "a ready admission requires an active model");
-  if (state === "replacing" && available)
-    fail(path, "a replacing admission cannot admit new Tasks");
-  if (available && state !== "ready")
-    fail(path, "Task admission requires ready installed authority");
-  return {
-    available,
-    reason: enumValue(item.reason, `${path}.reason`, newTaskAdmissionReasons),
-    activeModelRef,
-    activeProtocol,
-    activeGeneration,
-    activeSelectionRevision,
-    state,
-  };
+  const reason = enumValue(
+    item.reason,
+    `${path}.reason`,
+    newTaskAdmissionReasons,
+  );
+  if (available !== (reason === "none"))
+    fail(path, "available admission must have no blocking reason");
+  return { available, reason };
 }
 function decodePresentationAnchor(value: unknown, path: string) {
   const item = object(value, path, ["afterOutputCount", "presentationOrder"]);

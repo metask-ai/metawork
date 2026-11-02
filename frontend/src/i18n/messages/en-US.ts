@@ -1,4 +1,10 @@
 export const enUS = {
+  "mutation.reason.schedule_persistence_unavailable":
+    "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.schedule_persistence_failed":
+    "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.schedule_persistence_outcome_unknown":
+    "The schedule update could not be confirmed. Open Scheduled tasks to recover it before trying again.",
   "run.model_error.category.authentication":
     "The model service could not verify your credentials.",
   "run.model_error.category.permission":

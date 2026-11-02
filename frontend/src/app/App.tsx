@@ -1394,8 +1394,7 @@ export default function App() {
       `${bridgeGenerationRef.current}:${composerDraftScope}`,
     );
   const canCreateTask =
-    (snapshot.newTaskAdmission.available ||
-      newTaskModelState.intent !== null) &&
+    snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
     newTaskModelState.valid;
   const canSubmit =
@@ -1456,10 +1455,7 @@ export default function App() {
           account: snapshot.account,
           models: snapshot.models,
           admission: snapshot.newTaskAdmission,
-          selected:
-            newTaskRequestedModel ??
-            snapshot.newTaskAdmission.activeModelRef ??
-            snapshot.models.defaultSelection,
+          selected: newTaskRequestedModel ?? snapshot.models.defaultSelection,
           valid: newTaskModelState.valid,
           hasReadyModels,
           customProvidersAvailable,
@@ -1522,6 +1518,7 @@ export default function App() {
       (snapshot.account.errorCode !== "none" &&
         snapshot.account.errorCode !== "user_cancelled") ||
       snapshot.models.customProviders.length > 0 ||
+      snapshot.capabilities.scheduledTaskRecoveryAvailable ||
       newTaskRequestedModel !== null ||
       (setupNotice?.action !== "start" && setupNotice?.action !== "login")
     )
@@ -1545,6 +1542,7 @@ export default function App() {
     snapshot.account.state,
     snapshot.account.errorCode,
     snapshot.models.customProviders.length,
+    snapshot.capabilities.scheduledTaskRecoveryAvailable,
     newTaskRequestedModel,
     setupNotice?.action,
   ]);
@@ -2517,6 +2515,7 @@ export default function App() {
     const audience = attachmentAudience.current;
     let session = submissionSessions.current.get(key);
     if (!session) {
+      if (!taskId && !newTaskModelState.intent) return;
       session = new TaskSubmissionSession({
         taskId,
         current: () => bridgeGenerationRef.current === generation,
@@ -2531,9 +2530,7 @@ export default function App() {
                   expectedWorkspaceEpoch: composerWorkspace.epoch,
                 }
               : { kind: "automatic" },
-            snapshot.newTaskAdmission.activeGeneration,
-            snapshot.newTaskAdmission.activeSelectionRevision,
-            newTaskModelState.intent,
+            newTaskModelState.intent!,
             input.kind === "skill" ? input.catalogRevision : null,
             input.kind === "skill" ? input.selectionRevision : null,
             newTaskApprovalMode,

@@ -1,5 +1,11 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "mutation.reason.schedule_persistence_unavailable":
+    "定时任务存储不可用，请先在定时任务页恢复后再重试。",
+  "mutation.reason.schedule_persistence_failed":
+    "定时任务存储更新失败，请先在定时任务页恢复后再重试。",
+  "mutation.reason.schedule_persistence_outcome_unknown":
+    "定时任务更新结果尚未确认，请先在定时任务页恢复后再重试。",
   "run.model_error.category.authentication": "模型服务验证身份失败。",
   "run.model_error.category.permission": "模型服务未授予这次请求所需的权限。",
   "run.model_error.category.payment_required": "模型服务返回了付款相关错误。",

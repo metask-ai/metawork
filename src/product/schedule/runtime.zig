@@ -974,6 +974,22 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Installed credentials were durably scrubbed before admission and every
+    /// later Schedule write scans live owners. A clean store needs no new I/O;
+    /// a dirty store must commit before its last protecting owner can leave.
+    pub fn prepareCredentialRelease(self: *Runtime, credential: []const u8, redaction: Redaction) bool {
+        if (credential.len == 0) return true;
+        const dirty = for (self.store.items) |entry| {
+            const item = entry orelse continue;
+            if (std.mem.indexOf(u8, item.title, credential) != null or
+                std.mem.indexOf(u8, item.input.borrowed(), credential) != null or
+                std.mem.indexOf(u8, item.bindingView().model_ref.model_id, credential) != null) break true;
+        } else false;
+        if (!dirty) return true;
+        _ = self.prepareCredentialRedaction(credential, redaction) catch return false;
+        return true;
+    }
+
     pub fn prepareCredentialRedaction(
         self: *Runtime,
         additional_credential: []const u8,
@@ -1363,6 +1379,36 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
         .input = input,
         .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
     };
+}
+
+test "credential release retains its protecting owner until a dirty Schedule commits" {
+    const Scrub = struct {
+        fn redact(_: *anyopaque, projection: MutableProjection, secret: []const u8) bool {
+            if (secret.len == 0) return false;
+            var changed = false;
+            for ([_][]u8{ projection.title, projection.binding_model, projection.input }) |text| {
+                while (std.mem.indexOf(u8, text, secret)) |offset| {
+                    @memset(text[offset..][0..secret.len], '*');
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+    };
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const id = try runtime.create(testDefinition("late-secret", "inspect"), testBinding(), testRedaction(&effects));
+    const redaction: Redaction = .{ .context = &effects, .redact_fn = Scrub.redact, .contains_fn = noCredential };
+    effects.commit_result = .failed;
+    try std.testing.expect(!runtime.prepareCredentialRelease("late-secret", redaction));
+    try std.testing.expectEqualStrings("late-secret", runtime.store.find(id).?.title);
+    // A clean credential can leave even when unrelated persistence is down.
+    try std.testing.expect(runtime.prepareCredentialRelease("other-secret", redaction));
+    runtime.persistence_health = .ready;
+    effects.commit_result = .committed;
+    try std.testing.expect(runtime.prepareCredentialRelease("late-secret", redaction));
+    try std.testing.expect(std.mem.indexOf(u8, runtime.store.find(id).?.title, "late-secret") == null);
 }
 
 const retired_schedule_bytes =

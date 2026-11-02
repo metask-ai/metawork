@@ -165,12 +165,7 @@ export const initialWorkbenchState: WorkbenchState = {
     },
     newTaskAdmission: {
       available: false,
-      reason: "none",
-      activeModelRef: null,
-      activeProtocol: null,
-      activeGeneration: "0",
-      activeSelectionRevision: "0",
-      state: "unavailable",
+      reason: "workspace_unavailable",
     },
     skillCatalog: {
       availability: "uninitialized",

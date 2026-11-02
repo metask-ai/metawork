@@ -14,16 +14,8 @@ export type ModelsCatalogState =
   | "ready"
   | "failed"
   | "unavailable";
-export type NewTaskAdmissionState = "unavailable" | "ready" | "replacing";
 export type NewTaskAdmissionReason =
-  | "none"
-  | "custom_provider_persistence_unavailable"
-  | "credential_unavailable"
-  | "invalid_candidate"
-  | "resource_exhausted"
-  | "schedule_persistence_unavailable"
-  | "schedule_persistence_failed"
-  | "schedule_persistence_outcome_unknown";
+  "none" | "shutting_down" | "workspace_unavailable";
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -262,11 +254,6 @@ export type ModelsView = {
 export type NewTaskAdmissionView = {
   available: boolean;
   reason: NewTaskAdmissionReason;
-  activeModelRef: ModelRef | null;
-  activeProtocol: Protocol | null;
-  activeGeneration: string;
-  activeSelectionRevision: string;
-  state: NewTaskAdmissionState;
 };
 export type AccountCommandResult = {
   accepted: boolean;
@@ -1804,8 +1791,10 @@ export type McpConnectionTestResult = {
     | "unavailable";
 };
 export type TaskCreateReason =
-  | "execution_changed"
   | "execution_unavailable"
+  | "schedule_persistence_unavailable"
+  | "schedule_persistence_failed"
+  | "schedule_persistence_outcome_unknown"
   | "workspace_changed"
   | "workspace_unavailable"
   | "workspace_removing"

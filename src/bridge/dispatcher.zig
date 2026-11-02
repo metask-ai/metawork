@@ -3309,28 +3309,12 @@ pub const Dispatcher = struct {
                 .expected_epoch = workspace_epoch,
             } };
         } else return error.InvalidBridgePayload;
-        const execution_generation = try handlers.parseWireId(
-            parsed.value.expectedExecutionGeneration,
-        );
-        const selection_revision = try handlers.parseWireId(
-            parsed.value.expectedSelectionRevision,
-        );
-        const model_selection: ?product_control.NewTaskModelSelectionInput =
-            if (parsed.value.modelSelection) |selection|
-                .{
-                    .target = .{
-                        .source_id = selection.targetModelRef.sourceId,
-                        .model_id = selection.targetModelRef.modelId,
-                    },
-                    .expected_source_generation = try handlers.parseWireId(
-                        selection.expectedSourceGeneration,
-                    ),
-                    .expected_catalog_generation = try handlers.parseWireId(
-                        selection.expectedCatalogGeneration,
-                    ),
-                }
-            else
-                null;
+        const selection = parsed.value.modelSelection;
+        const model_selection: product_control.NewTaskModelSelectionInput = .{
+            .target = .{ .source_id = selection.targetModelRef.sourceId, .model_id = selection.targetModelRef.modelId },
+            .expected_source_generation = try handlers.parseWireId(selection.expectedSourceGeneration),
+            .expected_catalog_generation = try handlers.parseWireId(selection.expectedCatalogGeneration),
+        };
         if (parsed.value.expectedSkillCatalogRevision) |revision|
             if (revision.len == 0) return error.InvalidBridgePayload;
         if ((parsed.value.expectedSkillCatalogRevision == null) !=
@@ -3344,15 +3328,7 @@ pub const Dispatcher = struct {
         const approval_mode = handlers.approvalMode(
             parsed.value.approvalMode,
         ) orelse return error.InvalidBridgePayload;
-        const task_id = workbench.createTaskForWorkspace(
-            workspace_request,
-            execution_generation,
-            selection_revision,
-            model_selection,
-            parsed.value.expectedSkillCatalogRevision,
-            skill_selection_revision,
-            .{ .interactive = approval_mode },
-        ) catch |err| {
+        const task_id = workbench.createTaskForWorkspace(workspace_request, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode }) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null);
             return err;
@@ -5356,8 +5332,10 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.SessionReleasing => "session_releasing",
         error.SessionReleaseFailed => "session_close_failed",
         error.SessionCapacity => "session_capacity",
-        error.ExecutionGenerationMismatch => "execution_changed",
         error.ExecutionUnavailable, error.ExecutionInUse => "execution_unavailable",
+        error.ScheduledTaskPersistenceUnavailable => "schedule_persistence_unavailable",
+        error.ScheduledTaskPersistenceFailed => "schedule_persistence_failed",
+        error.ScheduledTaskPersistenceOutcomeUnknown => "schedule_persistence_outcome_unknown",
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => "workspace_unavailable",
         error.WorkspaceRemovalInProgress => "workspace_removing",
@@ -7616,7 +7594,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"99\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -7627,11 +7605,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(
         u8,
         rejected_create,
-        "\"reason\":\"execution_changed\"",
+        "\"reason\":\"model_selection_changed\"",
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"modelSelection\":{\"targetModelRef\":{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
         source,
         &response,
     );
@@ -7644,7 +7622,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
@@ -8190,7 +8168,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
     try fixture.installProductControlExecution(&control);
     var input = fixture.productControlTaskInput();
     input.approval_mode = .manual;
-    const task_id = try control.createTask(input);
+    const task_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
     _ = try control.runTask(task_id, .{ .text = "initial" });
     try fixture.waitProductControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
     var dispatcher = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{
@@ -8490,6 +8468,9 @@ test "Product view Session pressure rejection fixture preserves exact reason and
     try std.testing.expectEqualStrings("session_releasing", taskCreateRejection(error.SessionReleasing).?);
     try std.testing.expectEqualStrings("session_close_failed", taskRestoreRejection(error.SessionReleaseFailed).?);
     try std.testing.expectEqualStrings("session_capacity", taskCreateRejection(error.SessionCapacity).?);
+    try std.testing.expectEqualStrings("schedule_persistence_failed", taskCreateRejection(error.ScheduledTaskPersistenceFailed).?);
+    try std.testing.expectEqualStrings("schedule_persistence_unavailable", taskCreateRejection(error.ScheduledTaskPersistenceUnavailable).?);
+    try std.testing.expectEqualStrings("schedule_persistence_outcome_unknown", taskCreateRejection(error.ScheduledTaskPersistenceOutcomeUnknown).?);
     try std.testing.expect(taskCreateRejection(error.TaskBusy) == null);
 }
 

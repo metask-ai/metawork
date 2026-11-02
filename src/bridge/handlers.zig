@@ -395,9 +395,7 @@ pub const NewTaskModelSelection = struct {
 };
 pub const TaskCreate = struct {
     workspace: TaskWorkspaceIntent,
-    expectedExecutionGeneration: []const u8,
-    expectedSelectionRevision: []const u8,
-    modelSelection: ?NewTaskModelSelection,
+    modelSelection: NewTaskModelSelection,
     expectedSkillCatalogRevision: ?[]const u8,
     expectedSkillSelectionRevision: ?[]const u8,
     approvalMode: []const u8,
@@ -895,13 +893,13 @@ test "dropped attachment paths use one exact bounded payload" {
 
 test "Task creation requires explicit nullable model and skill selections" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":null,"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-1"},"expectedSourceGeneration":"3","expectedCatalogGeneration":"4"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
-    try std.testing.expect(text.value.modelSelection == null);
-    try std.testing.expectEqualStrings("4", text.value.expectedSelectionRevision);
+    try std.testing.expectEqualStrings("model-1", text.value.modelSelection.targetModelRef.modelId);
+    try std.testing.expectEqualStrings("4", text.value.modelSelection.expectedCatalogGeneration);
     try std.testing.expectEqual(
         product_control.ApprovalMode.manual,
         approvalMode(text.value.approvalMode).?,
@@ -909,24 +907,24 @@ test "Task creation requires explicit nullable model and skill selections" {
     try std.testing.expect(permissionProfile("full_access") != null);
     try std.testing.expect(permissionProfile("accept_edits") == null);
     var selected = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"automatic"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
+        \\{"workspace":{"kind":"automatic"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
     );
     defer selected.deinit();
     try std.testing.expectEqualStrings(
         "metask",
-        selected.value.modelSelection.?.targetModelRef.sourceId,
+        selected.value.modelSelection.targetModelRef.sourceId,
     );
     try std.testing.expectEqualStrings(
         "model-2",
-        selected.value.modelSelection.?.targetModelRef.modelId,
+        selected.value.modelSelection.targetModelRef.modelId,
     );
     try std.testing.expectEqualStrings(
         "5",
-        selected.value.modelSelection.?.expectedSourceGeneration,
+        selected.value.modelSelection.expectedSourceGeneration,
     );
     try std.testing.expectEqualStrings(
         "6",
-        selected.value.modelSelection.?.expectedCatalogGeneration,
+        selected.value.modelSelection.expectedCatalogGeneration,
     );
     try std.testing.expectError(
         error.InvalidBridgePayload,

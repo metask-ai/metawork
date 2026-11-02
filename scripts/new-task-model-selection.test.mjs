@@ -54,6 +54,7 @@ const metadata = {
 function metaskModels() {
   return {
     availability: "ready",
+    persistenceHealth: "ready",
     providers: [
       {
         id: "metask",
@@ -82,7 +83,7 @@ function admission(activeModelRef) {
   };
 }
 
-test("a new Task starts from the active default without emitting an override", () => {
+test("a new Task resolves its starting preference into an explicit source-qualified target", () => {
   const state = newTaskModelSelectionState(
     metaskModels(),
     admission({ sourceId: "metask", modelId: "model-1" }),
@@ -96,7 +97,11 @@ test("a new Task starts from the active default without emitting an override", (
     modelOptionId({ sourceId: "metask", modelId: "model-1" }),
   );
   assert.equal(state.selectedModelLabel, "Model one");
-  assert.equal(state.intent, null);
+  assert.deepEqual(state.intent, {
+    targetModelRef: { sourceId: "metask", modelId: "model-1" },
+    expectedSourceGeneration: "7",
+    expectedCatalogGeneration: "11",
+  });
   assert.ok(state.options.every((option) => option.vendor === "custom"));
   assert.deepEqual(
     state.options.map((option) => option.selectionId),
@@ -239,6 +244,7 @@ test("model labels show only the model name even when a catalog or source is una
 test("a ready custom source can select another model for only the new Task", () => {
   const models = {
     availability: "ready",
+    persistenceHealth: "ready",
     providers: [],
     metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "custom-1" },
@@ -401,6 +407,7 @@ test("a new Task lists all ready Providers regardless of the default or draft so
     metask.options.map((option) => option.displayName),
     ["Model one", "Model two", "gpt-5.6-sol"],
   );
+  models.defaultSelection = { sourceId: "cc", modelId: "gpt-5.6-sol" };
   const custom = newTaskModelSelectionState(
     models,
     admission({ sourceId: "cc", modelId: "gpt-5.6-sol" }),

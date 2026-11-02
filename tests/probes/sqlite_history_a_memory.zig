@@ -114,6 +114,9 @@ const Restore = struct {
         text.* = .{};
     }
     fn redact(_: *anyopaque, _: []const u8) void {}
+    fn prepareRelease(_: *anyopaque, _: []const u8) bool {
+        return true;
+    }
     fn projection(s: *@This(), l: history.Limits) history.RestoreProjection {
         return .{ .context = s, .allocator = s.allocator, .limits = l, .copy_fn = copy, .alloc_fn = alloc, .append_text_fn = append, .free_fn = free, .free_text_fn = freeText, .reserve_bytes_fn = reserve, .release_bytes_fn = release };
     }
@@ -168,7 +171,7 @@ test "stage A actual history memory" {
     var restore: Restore = .{ .allocator = counter.allocator(), .budget = c.budget_bytes };
     var runtime = try task_runtime.Runtime.init(counter.allocator(), c.tasks);
     defer {
-        runtime.deinitTasks(.{ .context = &restore, .redact_all_fn = Restore.redact, .release_projection_bytes_fn = Restore.release });
+        runtime.deinitTasks(.{ .context = &restore, .redact_all_fn = Restore.redact, .prepare_credential_release_fn = Restore.prepareRelease, .release_projection_bytes_fn = Restore.release });
         runtime.deinitStorage();
         std.debug.assert(counter.current == 0 and restore.charged == 0);
     }
@@ -237,7 +240,7 @@ test "stage A per-field legal SQL representation counterexample" {
     var restore: Restore = .{ .allocator = counter.allocator(), .budget = c.budget_bytes };
     var runtime = try task_runtime.Runtime.init(counter.allocator(), 1);
     defer {
-        runtime.deinitTasks(.{ .context = &restore, .redact_all_fn = Restore.redact, .release_projection_bytes_fn = Restore.release });
+        runtime.deinitTasks(.{ .context = &restore, .redact_all_fn = Restore.redact, .prepare_credential_release_fn = Restore.prepareRelease, .release_projection_bytes_fn = Restore.release });
         runtime.deinitStorage();
         std.debug.assert(counter.current == 0 and restore.charged == 0);
     }
