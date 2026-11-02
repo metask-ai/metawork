@@ -108,3 +108,35 @@ test("missing Task or Run and repeated successful reads are not stop evidence", 
     assert.equal(f.entries()[0].phase, "awaiting");
   }
 });
+
+test("an exact scoped Run manifest settles stop uncertainty even when its body is outside the loaded history page", () => {
+  for (const phase of [
+    "stopping",
+    "completed",
+    "failed",
+    "interrupted",
+    "stopped",
+    "cancelled",
+  ]) {
+    const f = setup();
+    const token = f.controller.begin("task:t1", task([run("r1")]), []);
+    f.controller.settle(token, "unknown");
+    const other = { ...task([run("r1", phase)]), id: "t2" };
+    f.controller.observe({
+      tasks: [other],
+      taskPage: { task: other, runManifest: [run("r1", phase)] },
+    });
+    assert.equal(f.entries().length, 1);
+    const page = task([run("r2")]);
+    f.controller.observe({
+      tasks: [page],
+      taskPage: { task: page, runManifest: [run("r2", phase)] },
+    });
+    assert.equal(f.entries().length, 1);
+    f.controller.observe({
+      tasks: [page],
+      taskPage: { task: page, runManifest: [run("r1", phase), run("r2")] },
+    });
+    assert.deepEqual(f.entries(), [], phase);
+  }
+});

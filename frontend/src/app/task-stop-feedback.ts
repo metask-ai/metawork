@@ -93,7 +93,14 @@ export class TaskStopFeedbackController {
           changed = true;
         }
       }
-      const run = task.runs.find((candidate) => candidate.id === entry.runId);
+      const manifest =
+        snapshot.taskPage?.task.id === task.id
+          ? snapshot.taskPage.runManifest.find(
+              (candidate) => candidate.id === entry.runId,
+            )
+          : undefined;
+      const run =
+        manifest ?? task.runs.find((candidate) => candidate.id === entry.runId);
       const compact = task.compacts.find(
         (candidate) => candidate.operationId === entry.compactId,
       );
