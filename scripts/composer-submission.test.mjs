@@ -178,8 +178,11 @@ async function renderSubmissionApp(
   task.skillCatalog.availability = "unavailable";
   snapshot.tasks = newTask ? [] : [task];
   let revision;
+  let rejectRevision;
+  let connectionGeneration = 0;
   let resolveRun;
   const createResolvers = [];
+  const createRejectors = [];
   const createRequests = [];
   const running = new Promise((resolve) => {
     resolveRun = resolve;
@@ -194,18 +197,22 @@ async function renderSubmissionApp(
     onShortcut: () => () => {},
     onHostSignal: () => () => {},
     onTaskOpen: () => () => {},
-    onWorkbenchRevision: (callback) => {
+    onWorkbenchRevision: (callback, reject) => {
       revision = callback;
+      rejectRevision = reject;
       return () => {};
     },
-    connect: async () => "1",
+    connect: async () => String(++connectionGeneration),
     disconnect: async () => {},
     ping: async () => {},
     fetchSnapshot: async (scope) => productStateFixture(snapshot, scope),
     createTask: (...args) => {
       creations += 1;
       createRequests.push(args);
-      return new Promise((resolve) => createResolvers.push(resolve));
+      return new Promise((resolve, reject) => {
+        createResolvers.push(resolve);
+        createRejectors.push(reject);
+      });
     },
     cancel: async (taskId, runId) => {
       cancellations.push([taskId, runId]);
@@ -272,6 +279,9 @@ async function renderSubmissionApp(
     cancellations,
     creations: () => creations,
     createRequests,
+    connectionGeneration: () => connectionGeneration,
+    failRevision: async () =>
+      act(async () => rejectRevision(new Error("malformed revision"))),
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       await act(async () =>
@@ -297,6 +307,8 @@ async function renderSubmissionApp(
           ...(blockingTaskId ? { blockingTaskId } : {}),
         }),
       ),
+    loseCreationReply: async (index = 0) =>
+      act(async () => createRejectors[index](new Error("creation reply lost"))),
     settle: async (result = { accepted: true }) =>
       act(async () => resolveRun(result)),
   };
@@ -386,8 +398,8 @@ test("App image paste shares staging, rejects overlapping paste and sends the la
   await fixture.settle();
 });
 
-async function renderPendingPasteApp(ctx) {
-  const fixture = await renderSubmissionApp(ctx);
+async function renderPendingPasteApp(ctx, options) {
+  const fixture = await renderSubmissionApp(ctx, options);
   fixture.snapshot.capabilities.attachments.enabled = true;
   await fixture.publish();
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
@@ -729,6 +741,292 @@ for (const catalogFirst of [true, false]) {
     await fixture.settle();
   });
 }
+
+test("App shared creation rejection preserves later edits and permits one explicit retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  for (const text of [
+    "First rejected instruction",
+    "Second rejected instruction",
+  ]) {
+    fireEvent.change(fixture.textarea, { target: { value: text } });
+    fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  }
+  assert.equal(fixture.creations(), 1);
+  await user.type(fixture.textarea, "Newer unsent draft");
+  await fixture.rejectCreation("execution_unavailable");
+  const selector = await screen.findByRole("combobox", { name: "Model" });
+  assert.equal(selector.disabled, false);
+  assert.ok(screen.getByText("First rejected instruction"));
+  assert.ok(screen.getByText("Second rejected instruction"));
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(document.activeElement, fixture.textarea);
+  await user.click(
+    screen.getAllByRole("button", { name: "Copy to input box" })[0],
+  );
+  assert.equal(fixture.textarea.value, "Newer unsent draft");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "Newer unsent draft");
+  await fixture.settle();
+});
+
+test("App creation retry captures another source and the newly selected Workspace", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  const model = fixture.snapshot.models.providers[0].models[0];
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: model.displayName }),
+  );
+  await user.type(fixture.textarea, "Selected official model{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  assert.equal(fixture.createRequests[0][3].targetModelRef.sourceId, "metask");
+  await fixture.rejectCreation("stale_catalog");
+
+  fixture.snapshot.models.providers[0].models = [];
+  fixture.snapshot.models.providers[0].errorCode = "no_models";
+  fixture.snapshot.models.customProviders = [
+    {
+      id: "custom-replacement",
+      builtinProviderId: null,
+      displayName: "Custom",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://custom.example.com/v1/messages",
+      state: "ready",
+      credentialStatus: "ready",
+      enabled: true,
+      providerRevision: "2",
+      sourceGeneration: "23",
+      catalogGeneration: "29",
+      models: [
+        {
+          ...model,
+          id: "custom-model",
+          displayName: "Custom replacement",
+          ready: true,
+          testStatus: "connected",
+        },
+      ],
+    },
+  ];
+  fixture.snapshot.newTaskAdmission.available = false;
+  fixture.snapshot.workspaces[0].epoch = "2";
+  await fixture.publish();
+  await user.click(await screen.findByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Custom replacement" }),
+  );
+  await selectManualSubmissionWorkspace(user);
+  await user.type(fixture.textarea, "Use new configuration{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  assert.deepEqual(fixture.createRequests[1], [
+    {
+      kind: "manual",
+      workspaceId: fixture.snapshot.workspaces[0].id,
+      expectedWorkspaceEpoch: "2",
+    },
+    fixture.snapshot.newTaskAdmission.activeGeneration,
+    fixture.snapshot.newTaskAdmission.activeSelectionRevision,
+    {
+      targetModelRef: {
+        sourceId: "custom-replacement",
+        modelId: "custom-model",
+      },
+      expectedSourceGeneration: "23",
+      expectedCatalogGeneration: "29",
+    },
+    null,
+    null,
+    "auto_review",
+  ]);
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "Use new configuration");
+  await fixture.settle();
+});
+
+test("App unknown creation retains identity and never implicitly creates another Task", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Unknown first instruction{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await fixture.loseCreationReply();
+  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
+  assert.ok(document.querySelector(".composer-model-readonly"));
+  await user.type(fixture.textarea, "Later explicit instruction{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByText("Later explicit instruction")),
+  );
+  assert.equal(fixture.creations(), 1);
+  assert.equal(fixture.inputs.length, 0);
+  assert.ok(screen.getByText("Unknown first instruction"));
+});
+
+test("App old creation rejection cannot unlock a newer pending creation", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  const original = fixture.snapshot.models.providers[0].models[0];
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: original.displayName }),
+  );
+  await user.type(fixture.textarea, "Old pending creation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await screen.findByRole("combobox", { name: "Model" });
+  await user.type(fixture.textarea, "New pending creation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await user.type(fixture.textarea, "Draft after new creation");
+  await fixture.rejectCreation("execution_unavailable", undefined, 0);
+  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
+  assert.equal(fixture.textarea.value, "Draft after new creation");
+  assert.equal(document.activeElement, fixture.textarea);
+  assert.equal(fixture.creations(), 2);
+  await fixture.created(fixture.task, 1);
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "New pending creation");
+  assert.equal(fixture.textarea.value, "Draft after new creation");
+  await fixture.settle();
+});
+
+test("App send rejection keeps the created Task identity for a later send", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "First send{Enter}");
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle({ accepted: false, reason: "capacity_reached" });
+  await user.type(fixture.textarea, "Later send{Enter}");
+  await waitFor(() => assert.equal(fixture.inputs.length, 2));
+  assert.equal(fixture.creations(), 1);
+  assert.ok(
+    fixture.targets.every((target) => target.taskId === fixture.task.id),
+  );
+});
+
+test("App rejected creation restores attachment text without reusing staged tokens", async (ctx) => {
+  const fixture = await renderPendingPasteApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Instruction with attachment");
+  await fixture.begin();
+  await fixture.finish();
+  await screen.findByText(fixture.attachment.displayName);
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await fixture.rejectCreation("execution_unavailable");
+  await screen.findByRole("combobox", { name: "Model" });
+  await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+  assert.equal(fixture.textarea.value, "Instruction with attachment");
+  assert.ok(screen.getByText(/Add them again before sending/));
+  assert.equal(fixture.additions(), 1);
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.created(fixture.task, 1);
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.inputs[0][2], {
+    kind: "text",
+    text: "Instruction with attachment",
+  });
+  await fixture.settle();
+});
+
+test("App cancelled creation can reselect only after Host definitively rejects it", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Cancel before creation reply{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await user.click(screen.getByRole("button", { name: "Stop task" }));
+  await screen.findByText("Stopped");
+  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
+  await fixture.rejectCreation("execution_unavailable");
+  const selector = await screen.findByRole("combobox", { name: "Model" });
+  assert.equal(selector.disabled, false);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("App releases rejected identity before the follow-up Snapshot finishes", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Reject with delayed refresh{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let releaseRead;
+  const delayed = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async (scope) => {
+    await delayed;
+    return productStateFixture(fixture.snapshot, scope);
+  });
+  try {
+    await fixture.rejectCreation("execution_unavailable");
+    const selector = await screen.findByRole("combobox", { name: "Model" });
+    assert.equal(selector.disabled, false);
+    assert.equal(fixture.creations(), 1);
+    assert.equal(fixture.inputs.length, 0);
+  } finally {
+    await act(async () => releaseRead());
+  }
+});
+
+test("App empty catalog after creation rejection keeps input and exposes catalog recovery", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "No replacement available{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  fixture.snapshot.models.providers[0].models = [];
+  fixture.snapshot.models.providers[0].errorCode = "no_models";
+  fixture.snapshot.newTaskAdmission.available = false;
+  await fixture.publish();
+  await fixture.rejectCreation("execution_unavailable");
+  const recovery = await screen.findByRole("button", {
+    name: "Retry",
+    exact: true,
+  });
+  assert.equal(recovery.disabled, false);
+  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
+  await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+  assert.equal(fixture.textarea.value, "No replacement available");
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  assert.equal(fixture.creations(), 1);
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("App previous-generation rejection cannot disturb a new connection's creation", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Old connection creation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await fixture.failRevision();
+  await user.click(
+    await screen.findByRole("button", { name: "Retry syncing", exact: true }),
+  );
+  await waitFor(() => assert.equal(fixture.connectionGeneration(), 2));
+  await screen.findByRole("combobox", { name: "Model" });
+  await user.type(fixture.textarea, "New connection creation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.rejectCreation("execution_unavailable", undefined, 0);
+  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
+  assert.equal(fixture.creations(), 2);
+  assert.equal(fixture.inputs.length, 0);
+  await fixture.created(fixture.task, 1);
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.equal(fixture.inputs[0][2].text, "New connection creation");
+  await fixture.settle();
+});
 
 test("App new Task lists all Providers while existing Tasks preserve their source and actual Run model", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });

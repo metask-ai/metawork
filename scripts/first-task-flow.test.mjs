@@ -110,6 +110,7 @@ test("creation is shared and A B C are delivered before any receipt", async () =
     f.session.submit(id, text(id), () => {}),
   );
   assert.equal(f.creates(), 1);
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
   assert.deepEqual(f.calls, []);
   f.creation.resolve(created);
   await new Promise((resolve) => setImmediate(resolve));
@@ -159,6 +160,7 @@ test("definite rejection allows a new explicit creation while unknown creation n
       f.creation.resolve({ accepted: false, reason: "catalog_unavailable" });
     else f.creation.reject(new Error("lost"));
     assert.equal((await a).kind, refused ? "create_rejected" : "unknown");
+    assert.equal(f.session.canReleaseAfterCreationRejection, refused);
     const b = await f.session.submit("B", text("B"), () => {});
     assert.equal(b.kind, refused ? "create_rejected" : "unknown");
     assert.equal(f.creates(), refused ? 2 : 1);
@@ -192,6 +194,7 @@ test("creation buffer is bounded and reserves no additional create request", asy
     await f.session.submit("overflow", text("overflow"), () => {}),
     { kind: "create_rejected", reason: "capacity_reached" },
   );
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
   const stop = f.session.stop();
   f.creation.resolve(created);
   await stop;
@@ -212,9 +215,52 @@ test("stop immediately settles the local cancellation before delayed creation re
   );
   const stopping = f.session.stop();
   assert.equal(cancelled, 1);
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
   assert.deepEqual(f.calls, []);
   f.creation.resolve(created);
   await stopping;
   assert.equal((await a).kind, "cancelled");
   assert.equal(cancelled, 1);
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
+});
+
+test("a shared creation rejection releases only after waiting messages settle", async () => {
+  const f = sessionFixture();
+  const pending = ["A", "B", "C"].map((id) =>
+    f.session.submit(id, text(id), () => {}),
+  );
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
+  f.creation.resolve({ accepted: false, reason: "execution_unavailable" });
+  assert.ok(
+    (await Promise.all(pending)).every(
+      (result) => result.kind === "create_rejected",
+    ),
+  );
+  assert.equal(f.session.canReleaseAfterCreationRejection, true);
+  assert.equal(f.creates(), 1);
+  assert.deepEqual(f.calls, []);
+});
+
+test("stopping a creation does not release identity until its definite rejection", async () => {
+  const f = sessionFixture();
+  const pending = f.session.submit("A", text("A"), () => {});
+  const stopping = f.session.stop();
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
+  f.creation.resolve({ accepted: false, reason: "execution_unavailable" });
+  await stopping;
+  assert.equal((await pending).kind, "create_rejected");
+  assert.equal(f.session.canReleaseAfterCreationRejection, true);
+});
+
+test("a rejected send retains its successfully created Task identity", async () => {
+  const f = sessionFixture();
+  const pending = f.session.submit("A", text("A"), () => {});
+  f.creation.resolve(created);
+  await new Promise((resolve) => setImmediate(resolve));
+  f.receipts
+    .get("A")
+    .resolve({ outcome: "rejected", reason: "capacity_reached" });
+  assert.equal((await pending).kind, "rejected");
+  assert.equal(f.session.canReleaseAfterCreationRejection, false);
+  assert.equal(f.creates(), 1);
 });
