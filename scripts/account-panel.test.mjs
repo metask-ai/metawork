@@ -189,6 +189,7 @@ function renderSettings(account, models = readyModels, options = {}) {
   const feedback = accountFeedback(account);
   return withI18n(
     createElement(SettingsPage, {
+      modelContext: "fixture:1",
       account,
       accountFeedback: feedback
         ? createElement(FeedbackNotice, {

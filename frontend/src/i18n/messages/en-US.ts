@@ -297,7 +297,7 @@ export const enUS = {
   "execution.command_rejected":
     "The model settings were not updated. Refresh and try again.",
   "execution.command_failed":
-    "MetaWork could not update the model settings. Review the configuration and try again.",
+    "Model configuration result not yet confirmed",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
@@ -952,7 +952,7 @@ export const enUS = {
   "run.start_failed":
     "Work could not start. Check your connection and try again.",
   "run.stop_failed":
-    "The stop request could not be confirmed. Refresh and try again.",
+    "The stop request could not be confirmed",
   "run.stop_unconfirmed": "Stop result not yet confirmed",
   "run.stop_requested":
     "Stop requested. Waiting for the current work to finish stopping…",
@@ -1005,6 +1005,10 @@ export const enUS = {
   "run.terminal.partial_reason": "{reason} Response incomplete.",
   "account.diagnostics": "Account diagnostics",
   "feedback.pending": "Working…",
+  "feedback.unconfirmed": "{operation}: result not yet confirmed",
+  "task.archive_unconfirmed": "Archive or restore result not yet confirmed",
+  "task.delete_unconfirmed": "Deletion result not yet confirmed",
+  "task.operation_diagnostics": "Operation diagnostics",
   "workspace.diagnostics": "Workspace diagnostics",
   "run.terminal.stopped": "Work stopped",
   "run.terminal.interrupted": "Work interrupted",
@@ -1337,8 +1341,7 @@ export const enUS = {
   "approval.sending": "Sending your response…",
   "approval.awaiting_snapshot":
     "Response received. Updating this task before another action is allowed…",
-  "approval.retry_response":
-    "The response wasn't sent. Review the request and try again.",
+  "approval.retry_response": "Response result not yet confirmed",
   "ui.kind.permission": "Permission request",
   "ui.state.allowed_once": "Allowed once",
   "ui.state.allowed_always": "Allowed for this session",
@@ -1459,7 +1462,7 @@ export const enUS = {
   "settings.models_reset_confirm": "Recover and continue",
   "settings.models_reset_pending": "Recovering…",
   "settings.models_reset_failed":
-    "Could not recover model configuration. Try again.",
+    "Model configuration recovery result not yet confirmed",
   "permission.profile.approval_required": "Request approval",
   "permission.mode.manual": "Manual approval",
   "permission.mode.manual.help": "Routine edits run; ask when needed.",
@@ -1561,9 +1564,9 @@ export const enUS = {
   "settings.custom_model_address_error.path":
     "Enter an endpoint ending in /chat/completions, /responses, or /v1/messages.",
   "settings.custom_model_test_start_failed":
-    "Could not start the test for {model}. Try again.",
+    "Test start for {model} not yet confirmed",
   "settings.custom_model_remove_failed":
-    "Could not delete the model. Try again.",
+    "Model removal result not yet confirmed",
   "settings.model_edit_partial":
     "Some changes were saved ({fields}). Review the remaining fields and re-enter the API key if needed before saving again.",
   "settings.model_edit_review":

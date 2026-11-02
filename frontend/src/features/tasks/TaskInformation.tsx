@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import type { Ref, ReactNode } from "react";
 import type { ModelsView, TaskView } from "../../bridge/contracts.ts";
 import { Popover } from "../../components/ui/popover.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -9,11 +9,13 @@ export function TaskInformation({
   models,
   permissionProfilesEnabled,
   triggerRef,
+  diagnostics,
 }: {
   task: TaskView;
   models: ModelsView;
   permissionProfilesEnabled: boolean;
   triggerRef?: Ref<HTMLButtonElement>;
+  diagnostics?: ReactNode;
 }) {
   const { t } = useI18n();
   const activeRun = task.activeOperation?.kind === "run";
@@ -42,6 +44,7 @@ export function TaskInformation({
         <Popover.Positioner align="end">
           <Popover.Popup className="task-information">
             <Popover.Title>{t("task.information")}</Popover.Title>
+            {diagnostics}
             <dl className="task-facts">
               <div>
                 <dt>{t("task.selected_provider")}</dt>

@@ -34,6 +34,7 @@ export function SettingsPage({
   accountFeedback,
   accountDiagnostics,
   models,
+  modelContext,
   automaticWorkspaceRoot,
   customProviderCapabilities,
   focusTarget,
@@ -64,6 +65,7 @@ export function SettingsPage({
   accountFeedback?: ReactNode;
   accountDiagnostics?: ReactNode;
   models: ModelsView;
+  modelContext: string;
   automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
   customProviderCapabilities: {
     management: boolean;
@@ -665,6 +667,7 @@ export function SettingsPage({
               )}
               {customProviderSettingsAvailable && (
                 <CustomModelsSettings
+                  key={modelContext}
                   models={models}
                   disabled={disabled || executionDisabled}
                   onCreateCustomProvider={onCreateCustomProvider}

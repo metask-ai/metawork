@@ -277,6 +277,60 @@ test("Inline brand controls retain the App mutation latch across navigation and 
   );
 });
 
+test("committed source settings with a failed read report only the connection problem", async (ctx) => {
+  const { writes } = await fixture(ctx);
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+    throw new Error("source-read-unavailable");
+  });
+  fireEvent.click(screen.getAllByRole("checkbox")[0]);
+  await act(async () =>
+    writes[0].resolve({ applied: true, revision: "2", reason: null }),
+  );
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  assert.ok(
+    document.querySelector(".skill-source-controls .skill-enablement-error") ===
+      null,
+  );
+  assert.equal(writes.length, 1);
+});
+
+test("a source reply from before a security reset cannot overwrite or release a newer request", async (ctx) => {
+  const { snapshot, writes, refreshes } = await fixture(ctx);
+  fireEvent.click(screen.getAllByRole("checkbox")[0]);
+  snapshot.securityEpoch = "2";
+  snapshot.revision = "60";
+  fireEvent.click(screen.getByRole("button", { name: "Refresh", exact: true }));
+  await act(async () => refreshes[0].resolve({ accepted: true, reason: null }));
+  await waitFor(() =>
+    assert.notEqual(
+      screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
+      "true",
+    ),
+  );
+  fireEvent.click(screen.getAllByRole("checkbox")[1]);
+  assert.equal(writes.length, 2);
+  await act(async () =>
+    writes[0].resolve({
+      applied: false,
+      revision: null,
+      reason: "write_failed",
+    }),
+  );
+  assert.ok(
+    document.querySelector(".skill-source-controls .skill-enablement-error") ===
+      null,
+  );
+  assert.equal(
+    screen.getAllByRole("checkbox")[1].getAttribute("aria-disabled"),
+    "true",
+  );
+  await act(async () =>
+    writes[1].resolve({ applied: true, revision: "2", reason: null }),
+  );
+});
+
 test("Unknown and oversized settings stay indeterminate and cannot be reset", async (ctx) => {
   const { snapshot, writes, recoveries } = await fixture(ctx);
   // First request returns an uncertain outcome and a new authoritative snapshot.

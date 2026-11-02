@@ -52,6 +52,25 @@ test("migrated local results stay outside global feedback and legacy scope repla
   assert.equal(state.entries["workspace:selection:draft1"].id, status.id);
 });
 
+test("independent Task operation results coexist and one success cannot retire the other", () => {
+  const audience = { scope: "task", taskId: "t1" };
+  const first = beginFeedback(createFeedbackState(), "compact:t1", {
+    ...quietStatus("feedback.pending", audience),
+    local: true,
+  });
+  let state = settleFeedback(first.state, first.token, {
+    ...attentionStatus("compact.start_failed", audience),
+    local: true,
+  });
+  const second = beginFeedback(state, "task-model:t1", {
+    ...quietStatus("feedback.pending", audience),
+    local: true,
+  });
+  state = settleFeedback(second.state, second.token, null);
+  assert.equal(state.entries["compact:t1"].id, "compact.start_failed");
+  assert.equal(selectCommandBarFeedback(state, context).length, 0);
+});
+
 test("Skills excludes workspace feedback from candidates and announcements while connection stays first", () => {
   const workspace = attentionStatus("workspace.selection_failed", {
     scope: "workspace",

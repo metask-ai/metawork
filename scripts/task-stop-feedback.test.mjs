@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TaskStopFeedbackController } from "../frontend/src/app/task-stop-feedback.ts";
+import { PendingScopes } from "../frontend/src/workbench/pendingScopes.ts";
 
 const run = (id, phase = "running", submissionId) => ({
   id,
@@ -22,6 +23,14 @@ const task = (runs, currentRunId = runs.at(-1)?.id) => ({
   currentRunPhase: "running",
   runs,
   compacts: [],
+});
+
+test("retiring a connection clears its stop latch before a new operation", () => {
+  const pending = new PendingScopes();
+  assert.equal(pending.begin("t1"), true);
+  pending.clear();
+  assert.equal(pending.has("t1"), false);
+  assert.equal(pending.begin("t1"), true);
 });
 function setup() {
   let entries = [];

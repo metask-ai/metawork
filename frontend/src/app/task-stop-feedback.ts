@@ -7,6 +7,7 @@ export type TaskStopFeedback = {
   compactId: string | null;
   submissionIds: readonly string[];
   phase: "requesting" | "awaiting" | "unknown" | "failed";
+  diagnostic?: string;
 };
 
 /** Session-only operation identity; observing an outcome never claims causality. */
@@ -56,9 +57,14 @@ export class TaskStopFeedbackController {
     this.changed();
   }
 
-  settle(token: TaskStopFeedback, phase: TaskStopFeedback["phase"]) {
+  settle(
+    token: TaskStopFeedback,
+    phase: TaskStopFeedback["phase"],
+    diagnostic?: string,
+  ) {
     if (!this.entries.includes(token)) return;
     token.phase = phase;
+    token.diagnostic = diagnostic;
     this.changed();
   }
 

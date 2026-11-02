@@ -390,6 +390,8 @@ export default function App() {
   const renameInput = useRef<HTMLInputElement>(null);
   const renameComposing = useRef(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<MessageId | null>(null);
+  const deleteDialogRevision = useRef(0);
   const confirmDelete = deleteTargetId !== null;
   const [fileChanges, setFileChanges] = useState<FileChangesUiState>({
     kind: "closed",
@@ -401,6 +403,12 @@ export default function App() {
   const [statuses, setStatuses] =
     useState<ShellStatusState>(createFeedbackState);
   const feedbackRef = useRef(statuses);
+  const feedbackContext = useRef({
+    taskId: null as string | null,
+    scope: "",
+    route: "workbench" as ShellRoute,
+    settingsOpen: false,
+  });
   const [stopFeedback, setStopFeedback] = useState<TaskStopFeedback[]>([]);
   const stopFeedbackController = useRef(
     new TaskStopFeedbackController(setStopFeedback),
@@ -688,8 +696,28 @@ export default function App() {
         current,
         token,
         status ? { ...status, local: true } : null,
+        Boolean(status && localFeedbackApplicable(token.key, status.audience)),
       ),
     );
+  }
+  function observeLocalFeedback(source: string, status: ShellStatus | null) {
+    updateFeedbackState((current) =>
+      observeFeedback(
+        current,
+        source,
+        "result",
+        status ? { ...status, local: true } : null,
+        Boolean(status && localFeedbackApplicable(source, status.audience)),
+      ),
+    );
+  }
+  function localFeedbackApplicable(source: string, audience: StatusAudience) {
+    const context = feedbackContext.current;
+    if (context.settingsOpen || context.route !== "workbench") return false;
+    if (audience.scope === "task") return audience.taskId === context.taskId;
+    if (audience.scope === "workspace")
+      return source.endsWith(`:${context.scope}`);
+    return audience.scope === "execution";
   }
   function observeAccountFeedback(
     account: WorkbenchSnapshot["account"],
@@ -737,6 +765,16 @@ export default function App() {
   }
   function resetFeedbackContext() {
     stopFeedbackController.current.reset();
+    submissionSessions.current.clear();
+    setLocalSubmissions((entries) =>
+      entries.map((entry) =>
+        entry.state === "submitting" || entry.state === "accepted"
+          ? { ...entry, state: "unknown" }
+          : entry,
+      ),
+    );
+    cancelPendingTasks.current.clear();
+    setCancelPending({});
     accountFeedbackRequest.current = {
       serial: accountFeedbackRequest.current.serial + 1,
       awaitingSync: false,
@@ -750,6 +788,13 @@ export default function App() {
     accountCancelBusyRef.current = false;
     setAccountBusy(false);
     setAccountCancelBusy(false);
+    executionBusyRef.current = false;
+    setExecutionBusy(false);
+    sourceMutationPending.current = false;
+    setSourceMutationBusy(false);
+    setSourceMutationError(null);
+    skillRefreshPending.current.clear();
+    setSkillRefreshRequests({});
   }
   const snapshot = workbench.snapshot;
   useEffect(() => {
@@ -1299,6 +1344,34 @@ export default function App() {
     : `task:${workbench.activeTaskId ?? "missing"}`;
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
+  useEffect(() => {
+    updateFeedbackState((current) => {
+      const entries = { ...current.entries };
+      let changed = false;
+      for (const [key, entry] of Object.entries(entries)) {
+        const staleDraft =
+          (key.startsWith("workspace:selection:") ||
+            key.startsWith("composer-catalog:")) &&
+          !key.endsWith(`:${composerDraftScope}`);
+        const audience = entry?.audience;
+        const removedTask =
+          entry?.local &&
+          audience?.scope === "task" &&
+          !snapshot.taskIndex.some((task) => task.id === audience.taskId);
+        if (staleDraft || removedTask) {
+          delete entries[key];
+          changed = true;
+        }
+      }
+      return changed ? { ...current, entries } : current;
+    });
+  }, [composerDraftScope, snapshot.taskIndex]);
+  feedbackContext.current = {
+    taskId: newTaskDraftActive ? null : (activeTask?.id ?? null),
+    scope: composerDraftScope,
+    route,
+    settingsOpen,
+  };
   const attachmentAudience = useRef({
     scope: composerDraftScope,
     generation: bridgeGeneration,
@@ -1680,7 +1753,22 @@ export default function App() {
         void cancelAccountOperation();
         break;
       case "refresh":
-        void runExecutionCommand(() => client.refreshModelsCatalog());
+        {
+          const token = beginOperationFeedback("models:catalog", {
+            scope: "execution",
+          });
+          void runExecutionCommand(() => client.refreshModelsCatalog()).then(
+            (accepted) =>
+              settleOperationFeedback(
+                token,
+                accepted
+                  ? null
+                  : attentionStatus("model_setup.catalog_failed", {
+                      scope: "execution",
+                    }),
+              ),
+          );
+        }
         break;
       case "choose_model":
         composerModelTrigger.current?.focus();
@@ -1705,21 +1793,25 @@ export default function App() {
   async function refreshCommittedView() {
     await refreshSnapshot().catch(() => undefined);
   }
+  function notificationUnavailable() {
+    updateFeedbackState((current) =>
+      observeFeedback(
+        current,
+        "notification:navigation",
+        "result",
+        attentionStatus("scheduled.notification_unavailable", {
+          scope: "execution",
+        }),
+      ),
+    );
+  }
   // Subscribe before connection bootstrap, including a queued native click.
   useEffect(() => {
     if (!client.available()) return;
-    return client.onTaskOpen(
-      (target) => {
-        notificationRequest.current++;
-        setNotificationTarget(target);
-      },
-      () =>
-        setStatus(
-          attentionStatus("scheduled.notification_unavailable", {
-            scope: "execution",
-          }),
-        ),
-    );
+    return client.onTaskOpen((target) => {
+      notificationRequest.current++;
+      setNotificationTarget(target);
+    }, notificationUnavailable);
   }, [client]);
   useEffect(() => {
     if (!notificationTarget) return;
@@ -1750,10 +1842,10 @@ export default function App() {
           )
         ) {
           pendingTaskSelection.current = null;
-          setStatus(
-            attentionStatus("scheduled.notification_unavailable", {
-              scope: "execution",
-            }),
+          notificationUnavailable();
+        } else {
+          updateFeedbackState((current) =>
+            observeFeedback(current, "notification:navigation", "result", null),
           );
         }
       })
@@ -1763,11 +1855,7 @@ export default function App() {
           target.generation === bridgeGenerationRef.current
         ) {
           pendingTaskSelection.current = null;
-          setStatus(
-            attentionStatus("scheduled.notification_unavailable", {
-              scope: "execution",
-            }),
-          );
+          // Failed observation belongs to the connection, not notification delivery.
         }
       });
   }, [
@@ -1922,14 +2010,6 @@ export default function App() {
           taskReadingMemory.reading.clear();
           taskReadingMemory.processDisclosure.clear();
           taskReadingMemory.toolDisclosure.clear();
-          setLocalSubmissions((entries) =>
-            entries.map((entry) =>
-              entry.state === "submitting" || entry.state === "accepted"
-                ? { ...entry, state: "unknown" }
-                : entry,
-            ),
-          );
-          submissionSessions.current.clear();
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           latestSnapshotRef.current = null;
@@ -2113,6 +2193,8 @@ export default function App() {
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
   }
   function closeDeleteConfirmation() {
+    deleteDialogRevision.current++;
+    setDeleteError(null);
     const targetId = deleteTargetId;
     setDeleteTargetId(null);
     window.requestAnimationFrame(() => {
@@ -2136,6 +2218,8 @@ export default function App() {
     });
   }
   function requestTaskDeletion(task: TaskSummary) {
+    deleteDialogRevision.current++;
+    setDeleteError(null);
     deleteOpener.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -2361,36 +2445,20 @@ export default function App() {
     if (bridgeUnavailable || executionBusyRef.current) return false;
     executionBusyRef.current = true;
     setExecutionBusy(true);
+    const epoch = feedbackRef.current.epoch;
     try {
       const result = await invoke();
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus("execution.command_rejected", {
-            scope: "execution",
-          }),
-        );
-        return false;
-      }
-      await refreshAfterCommit("execution.updated", {
-        scope: "execution",
-      });
-      return true;
-    } catch (error) {
-      if (
-        await reconcileCommandTimeout(error, "operation.execution", {
-          scope: "execution",
-        })
-      )
-        return false;
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus("execution.command_failed", { scope: "execution" }),
-      );
+      if (epoch !== feedbackRef.current.epoch) return false;
+      await refreshCommittedView();
+      return epoch === feedbackRef.current.epoch && result.accepted;
+    } catch {
+      if (epoch === feedbackRef.current.epoch) await refreshCommittedView();
       return false;
     } finally {
-      executionBusyRef.current = false;
-      setExecutionBusy(false);
+      if (epoch === feedbackRef.current.epoch) {
+        executionBusyRef.current = false;
+        setExecutionBusy(false);
+      }
     }
   }
   async function mutateAutomaticWorkspaceRoot(
@@ -2411,17 +2479,27 @@ export default function App() {
   function publishApprovalObservations(results: ApprovalObservation[]) {
     for (const result of results) {
       const audience = { scope: "task" as const, taskId: result.taskId };
-      if (result.outcome === "completed")
-        setStatus(quietStatus("permission.change.completed", audience));
+      if (
+        result.outcome === "completed" ||
+        (result.outcome === "failed" &&
+          latestSnapshotRef.current?.tasks.find(
+            (task) => task.id === result.taskId,
+          )?.approvalResult?.outcome === "failed")
+      )
+        observeLocalFeedback(`permission:${result.taskId}`, null);
       else if (result.outcome === "failed" && result.reason)
-        setStatus(
+        observeLocalFeedback(
+          `permission:${result.taskId}`,
           attentionStatus(
             `permission.change.failure.${result.reason}`,
             audience,
           ),
         );
       else
-        setStatus(attentionStatus("permission.change.not_confirmed", audience));
+        observeLocalFeedback(
+          `permission:${result.taskId}`,
+          attentionStatus("permission.change.not_confirmed", audience),
+        );
     }
   }
   async function setTaskApprovalMode(targetMode: ApprovalMode) {
@@ -2430,6 +2508,10 @@ export default function App() {
     const requests = approvalRequestsRef.current;
     const intent = requests.begin(task, targetMode);
     if (!intent) return;
+    const feedbackToken = beginOperationFeedback(`permission:${task.id}`, {
+      scope: "task",
+      taskId: task.id,
+    });
     setApprovalRequests(requests.view());
     try {
       const result = await client.setApprovalMode(
@@ -2442,7 +2524,8 @@ export default function App() {
       if (result.accepted) requests.accept(intent, result.approvalRevision);
       else {
         requests.reject(intent);
-        setStatus(
+        settleOperationFeedback(
+          feedbackToken,
           attentionStatus(`permission.change.rejection.${result.reason}`, {
             scope: "task",
             taskId: intent.taskId,
@@ -2474,12 +2557,7 @@ export default function App() {
         setApprovalRequests(approvalRequestsRef.current.view());
       }
     } catch {
-      setStatus(
-        attentionStatus("permission.change.sync_required", {
-          scope: "task",
-          taskId,
-        }),
-      );
+      /* The connection owns failed observation. */
     }
   }
   async function selectModelForTask(selectionId: string) {
@@ -2490,6 +2568,10 @@ export default function App() {
     if (!task || !option || bridgeUnavailable) return;
     const scope = `task:${task.id}`;
     if (!beginTaskPendingOperation(scope, "model")) return;
+    const feedbackToken = beginOperationFeedback(`task-model:${task.id}`, {
+      scope: "task",
+      taskId: task.id,
+    });
     try {
       const result = await client.selectTaskModel(
         task.id,
@@ -2500,7 +2582,8 @@ export default function App() {
       );
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
-        setStatus(
+        settleOperationFeedback(
+          feedbackToken,
           attentionStatus(mutationReasonMessageId(result.reason), {
             scope: "task",
             taskId: task.id,
@@ -2508,20 +2591,22 @@ export default function App() {
         );
         return;
       }
-      await refreshAfterCommit("task.model.updated", {
-        scope: "task",
-        taskId: task.id,
-      });
+      settleOperationFeedback(feedbackToken, null);
+      await refreshCommittedView();
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
-      setStatus(
+      settleOperationFeedback(
+        feedbackToken,
         attentionStatus(
-          "mutation.reason.task_unavailable",
+          "feedback.unconfirmed",
           {
             scope: "task",
             taskId: task.id,
           },
-          { diagnostic: errorText(error) },
+          {
+            diagnostic: errorText(error),
+            values: { operation: t("operation.execution") },
+          },
         ),
       );
     } finally {
@@ -2698,6 +2783,7 @@ export default function App() {
     if (!input) return;
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
+    const feedbackEpoch = feedbackRef.current.epoch;
     const operationId = newComposerOperationId();
     const draftId = newTaskDraftId;
     const taskId = !newTaskDraftActive ? (activeTask?.id ?? null) : null;
@@ -2707,7 +2793,9 @@ export default function App() {
     if (!session) {
       session = new TaskSubmissionSession({
         taskId,
-        current: () => bridgeGenerationRef.current === generation,
+        current: () =>
+          bridgeGenerationRef.current === generation &&
+          feedbackRef.current.epoch === feedbackEpoch,
         send: (id, target, value) => client.sendInput(id, target, value),
         stop: (target) => client.stopTask(target),
         create: () =>
@@ -2796,7 +2884,11 @@ export default function App() {
         );
       },
     );
-    if (bridgeGenerationRef.current !== generation) return;
+    if (
+      bridgeGenerationRef.current !== generation ||
+      feedbackRef.current.epoch !== feedbackEpoch
+    )
+      return;
     const state =
       result.kind === "accepted"
         ? "accepted"
@@ -3023,6 +3115,7 @@ export default function App() {
     const taskId = !newTaskDraftActive ? activeTask?.id : undefined;
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
+    const feedbackEpoch = feedbackRef.current.epoch;
     const controller = stopFeedbackController.current;
     if (controller.requesting(scope, taskId ?? null)) return;
     const session = submissionSessions.current.get(`${generation}:${scope}`);
@@ -3045,7 +3138,9 @@ export default function App() {
         )
         .map((entry) => entry.operationId),
     );
-    const current = () => bridgeGenerationRef.current === generation;
+    const current = () =>
+      bridgeGenerationRef.current === generation &&
+      feedbackRef.current.epoch === feedbackEpoch;
     const target = (id: string) => {
       if (current()) controller.target(token, id);
     };
@@ -3059,6 +3154,7 @@ export default function App() {
         controller.settle(
           token,
           error instanceof BridgeCommandTimeoutError ? "unknown" : "failed",
+          errorText(error),
         );
         await refreshSnapshot().catch(() => undefined);
         return;
@@ -3086,12 +3182,17 @@ export default function App() {
     const taskId = activeTask.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "compact")) return;
+    const feedbackToken = beginOperationFeedback(`compact:${taskId}`, {
+      scope: "task",
+      taskId,
+    });
     try {
       try {
         const result = await client.compact(taskId, activeTask.binding.epoch);
         if (!result.accepted) {
           await refreshSnapshot().catch(() => undefined);
-          setStatus(
+          settleOperationFeedback(
+            feedbackToken,
             attentionStatus(mutationReasonMessageId(result.reason), {
               scope: "task",
               taskId,
@@ -3101,14 +3202,20 @@ export default function App() {
         }
       } catch (error) {
         if (
-          await reconcileCommandTimeout(error, "operation.compact", {
-            scope: "task",
-            taskId,
-          })
+          await reconcileCommandTimeout(
+            error,
+            "operation.compact",
+            {
+              scope: "task",
+              taskId,
+            },
+            feedbackToken,
+          )
         )
           return;
         await refreshSnapshot().catch(() => undefined);
-        setStatus(
+        settleOperationFeedback(
+          feedbackToken,
           attentionStatus(
             "compact.start_failed",
             { scope: "task", taskId },
@@ -3117,10 +3224,8 @@ export default function App() {
         );
         return;
       }
-      await refreshAfterCommit("compact.started", {
-        scope: "task",
-        taskId,
-      });
+      settleOperationFeedback(feedbackToken, null);
+      await refreshCommittedView();
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3158,28 +3263,35 @@ export default function App() {
   }
   async function refreshComposerSkillCatalog() {
     if (bridgeUnavailable || !composerWorkspace || !composerWorkspaceId) return;
-    const key = `${composerWorkspaceId}:${composerWorkspace.epoch}`;
+    const key = `${feedbackRef.current.epoch}:${composerWorkspaceId}:${composerWorkspace.epoch}`;
     if (composerCatalogRefreshPending.current.has(key)) return;
     composerCatalogRefreshPending.current.add(key);
     const audience: StatusAudience = {
       scope: "workspace",
       workspaceId: composerWorkspaceId,
     };
+    const feedbackToken = beginOperationFeedback(
+      `composer-catalog:${composerDraftScope}`,
+      audience,
+    );
     try {
       const result = await client.refreshWorkspaceSkillCatalog(
         composerWorkspaceId,
         composerWorkspace.epoch,
       );
       if (!result.accepted && result.reason !== "catalog_loading") {
-        setStatus(
+        settleOperationFeedback(
+          feedbackToken,
           attentionStatus(mutationReasonMessageId(result.reason!), audience),
         );
         return;
       }
-      await refreshSnapshot();
+      settleOperationFeedback(feedbackToken, null);
+      await refreshCommittedView();
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
-      setStatus(
+      settleOperationFeedback(
+        feedbackToken,
         attentionStatus("slash.catalog_refresh_failed", audience, {
           diagnostic: errorText(error),
         }),
@@ -3189,6 +3301,7 @@ export default function App() {
     }
   }
   async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
+    const epoch = feedbackRef.current.epoch;
     const key = skillRefreshKey(target);
     if (skillRefreshPending.current.has(key) || bridgeUnavailable) return;
     skillRefreshPending.current.add(key);
@@ -3206,16 +3319,18 @@ export default function App() {
               target.expectedWorkspaceEpoch,
             );
       if (!result.accepted) failure = t("skills.catalog_refresh_failed");
-      await refreshSnapshot();
+      await refreshCommittedView();
     } catch {
       await refreshSnapshot().catch(() => undefined);
       failure = t("skills.catalog_refresh_failed");
     } finally {
-      skillRefreshPending.current.delete(key);
-      setSkillRefreshRequests((requests) => ({
-        ...requests,
-        [key]: { busy: false, error: failure },
-      }));
+      if (epoch === feedbackRef.current.epoch) {
+        skillRefreshPending.current.delete(key);
+        setSkillRefreshRequests((requests) => ({
+          ...requests,
+          [key]: { busy: false, error: failure },
+        }));
+      }
     }
   }
   async function commitSkillSourceMutation(
@@ -3228,22 +3343,24 @@ export default function App() {
     sourceMutationPending.current = true;
     setSourceMutationBusy(true);
     setSourceMutationError(null);
-    let applied = false;
+    const epoch = feedbackRef.current.epoch;
     try {
       const result = await mutation();
-      applied = result.applied;
+      if (epoch !== feedbackRef.current.epoch) return;
       if (!result.applied)
         setSourceMutationError(t(`skills.sources.failure.${result.reason}`));
       // Failed commands can also change health and recovery capabilities.
-      await refreshSnapshot();
+      await refreshCommittedView();
     } catch {
+      if (epoch !== feedbackRef.current.epoch) return;
       await refreshSnapshot().catch(() => undefined);
-      setSourceMutationError(
-        t(applied ? "skills.sources.saved_resync" : "skills.sources.uncertain"),
-      );
+      if (epoch === feedbackRef.current.epoch)
+        setSourceMutationError(t("skills.sources.uncertain"));
     } finally {
-      sourceMutationPending.current = false;
-      setSourceMutationBusy(false);
+      if (epoch === feedbackRef.current.epoch) {
+        sourceMutationPending.current = false;
+        setSourceMutationBusy(false);
+      }
     }
   }
   async function commitSkillMutation(
@@ -3288,12 +3405,7 @@ export default function App() {
       await refreshCommittedView();
       return result;
     } catch (error) {
-      if (
-        !(await reconcileCommandTimeout(error, "operation.schedule", {
-          scope: "execution",
-        }))
-      )
-        await refreshSnapshot().catch(() => undefined);
+      await refreshCommittedView();
       throw error;
     }
   }
@@ -3389,12 +3501,7 @@ export default function App() {
       try {
         await client.renameTask(taskId, editor.draft.trim());
       } catch (error) {
-        if (
-          await reconcileCommandTimeout(error, "operation.task_rename", {
-            scope: "task",
-            taskId,
-          })
-        ) {
+        if (await refreshAfterTimeout(error)) {
           const confirmed =
             latestSnapshotRef.current?.taskIndex.find(
               (entry) => entry.id === taskId,
@@ -3417,10 +3524,7 @@ export default function App() {
         return;
       }
       setRenameEditor((current) => (current === editor ? null : current));
-      await refreshAfterCommit("task.renamed", {
-        scope: "task",
-        taskId,
-      });
+      await refreshCommittedView();
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3455,19 +3559,41 @@ export default function App() {
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
+    const feedbackToken = beginOperationFeedback(`task-archive:${taskId}`, {
+      scope: "task",
+      taskId,
+    });
     setTaskArchiveErrors((current) => ({ ...current, [taskId]: "" }));
     try {
       try {
         await client.setTaskArchived(task.id, archived);
       } catch (error) {
-        if (
-          await reconcileCommandTimeout(
-            error,
-            archived ? "operation.task_archive" : "operation.task_restore",
-            { scope: "task", taskId },
-          )
-        ) {
+        if (await refreshAfterTimeout(error)) {
           publishArchiveResult(taskId, archived);
+          if (
+            latestSnapshotRef.current?.taskIndex.find(
+              (item) => item.id === taskId,
+            )?.archived !== archived
+          ) {
+            setTaskArchiveErrors((current) => ({
+              ...current,
+              [taskId]: t("task.archive_unconfirmed"),
+            }));
+            if (archived)
+              setArchiveNotice({
+                id: ++archiveNoticeId.current,
+                taskId,
+                kind: "unconfirmed",
+              });
+          }
+          settleOperationFeedback(
+            feedbackToken,
+            quietStatus(
+              "task.archive_unconfirmed",
+              { scope: "task", taskId },
+              { diagnostic: errorText(error) },
+            ),
+          );
           return;
         }
         if (archived)
@@ -3481,8 +3607,9 @@ export default function App() {
           ...current,
           [taskId]: t(archived ? "task.archive_failed" : "task.restore_failed"),
         }));
-        setStatus(
-          attentionStatus(
+        settleOperationFeedback(
+          feedbackToken,
+          quietStatus(
             archived ? "task.archive_failed" : "task.restore_failed",
             { scope: "task", taskId },
             { diagnostic: errorText(error) },
@@ -3490,11 +3617,9 @@ export default function App() {
         );
         return;
       }
-      await refreshAfterCommit(
-        archived ? "task.archived_status" : "task.restored",
-        { scope: "task", taskId },
-      );
+      await refreshCommittedView();
       publishArchiveResult(taskId, archived);
+      settleOperationFeedback(feedbackToken, null);
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3505,7 +3630,6 @@ export default function App() {
     if (workbenchMutationDisabled || workspaceBusyRef.current)
       return "workspace.remove_failed";
     const generation = bridgeGenerationRef.current;
-    const audience = { scope: "workspace" as const, workspaceId: workspace.id };
     workspaceBusyRef.current = true;
     setWorkspaceBusy(true);
     try {
@@ -3524,13 +3648,7 @@ export default function App() {
     } catch (error) {
       if (bridgeGenerationRef.current !== generation)
         return "workspace.remove_unconfirmed";
-      if (
-        await reconcileCommandTimeout(
-          error,
-          "operation.workspace_remove",
-          audience,
-        )
-      )
+      if (await refreshAfterTimeout(error))
         return "workspace.remove_unconfirmed";
       await refreshSnapshot().catch(() => undefined);
       return "workspace.remove_failed";
@@ -3554,20 +3672,37 @@ export default function App() {
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "delete")) return;
+    const feedbackToken = beginOperationFeedback(`task-delete:${taskId}`, {
+      scope: "task",
+      taskId,
+    });
+    const dialogRevision = deleteDialogRevision.current;
+    const generation = bridgeGenerationRef.current;
+    const current = () =>
+      generation === bridgeGenerationRef.current &&
+      dialogRevision === deleteDialogRevision.current;
+    setDeleteError(null);
     try {
       try {
         await client.deleteTask(task.id);
       } catch (error) {
-        if (
-          await reconcileCommandTimeout(error, "operation.task_delete", {
-            scope: "task",
-            taskId,
-          })
-        )
+        if (await refreshAfterTimeout(error)) {
+          if (current()) setDeleteError("task.delete_unconfirmed");
+          settleOperationFeedback(
+            feedbackToken,
+            quietStatus(
+              "task.delete_unconfirmed",
+              { scope: "task", taskId },
+              { diagnostic: errorText(error) },
+            ),
+          );
           return;
+        }
         await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
+        if (current()) setDeleteError("task.delete_failed");
+        settleOperationFeedback(
+          feedbackToken,
+          quietStatus(
             "task.delete_failed",
             { scope: "task", taskId },
             { diagnostic: errorText(error) },
@@ -3575,11 +3710,9 @@ export default function App() {
         );
         return;
       }
-      setDeleteTargetId(null);
-      await refreshAfterCommit("task.delete_requested", {
-        scope: "task",
-        taskId,
-      });
+      if (current()) setDeleteTargetId(null);
+      settleOperationFeedback(feedbackToken, null);
+      await refreshCommittedView();
     } finally {
       endTaskPendingOperation(scope);
     }
@@ -3606,7 +3739,6 @@ export default function App() {
     const pending = activeTask?.pendingUi;
     if (viewSyncFailed || !bridgeReady || !activeTask || !pending) return;
     const identity = uiRequestIdentity(activeTask.id, pending);
-    const taskId = activeTask.id;
     if (!beginUiResponse(identity)) return;
     try {
       await client.respondUi(
@@ -3615,30 +3747,13 @@ export default function App() {
         pending.requestId,
         payload,
       );
-    } catch (error) {
+    } catch {
       failUiResponse(identity);
-      if (
-        await reconcileCommandTimeout(error, "operation.ui_response", {
-          scope: "task",
-          taskId,
-        })
-      )
-        return;
-      setStatus(
-        attentionStatus(
-          "approval.response_failed",
-          { scope: "task", taskId },
-          { diagnostic: errorText(error) },
-        ),
-      );
       await refreshSnapshot().catch(() => undefined);
       return;
     }
     acceptUiResponse(identity);
-    await refreshAfterCommit("approval.response_sent", {
-      scope: "task",
-      taskId,
-    });
+    await refreshCommittedView();
   }
   const outputEditAudience = attachmentAudience.current;
   function prepareOutputEdit(
@@ -3685,9 +3800,15 @@ export default function App() {
   }
   function prepareRetry(input: RunInputView) {
     if (!activeTask || !taskCanCompose) return;
+    const audience = attachmentAudience.current;
+    const focusPreparedInput = () =>
+      window.requestAnimationFrame(() => {
+        if (attachmentAudience.current === audience) composer.current?.focus();
+      });
     if (input.kind === "skill") {
       if (composerDraftHasContent(composerDraft)) {
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
             taskId: activeTask.id,
@@ -3697,14 +3818,16 @@ export default function App() {
         const reusable = composerDraftFromRunInput(input);
         if (reusable) {
           updateComposerDraft(reusable);
-          setStatus(
+          observeLocalFeedback(
+            `prepare-retry:${activeTask.id}`,
             quietStatus("run.retry_prepared", {
               scope: "task",
               taskId: activeTask.id,
             }),
           );
         } else {
-          setStatus(
+          observeLocalFeedback(
+            `prepare-retry:${activeTask.id}`,
             attentionStatus("mutation.reason.stale_catalog", {
               scope: "task",
               taskId: activeTask.id,
@@ -3712,11 +3835,13 @@ export default function App() {
           );
         }
       }
+      focusPreparedInput();
       return;
     }
     if (input.kind === "multimodal") {
       if (composerDraftHasContent(composerDraft)) {
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
             taskId: activeTask.id,
@@ -3725,21 +3850,23 @@ export default function App() {
       } else {
         const reusable = composerDraftFromRunInput(input);
         if (reusable) updateComposerDraft(reusable);
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           quietStatus("run.retry_prepared", {
             scope: "task",
             taskId: activeTask.id,
           }),
         );
       }
-      window.requestAnimationFrame(() => composer.current?.focus());
+      focusPreparedInput();
       return;
     }
     const prepared = prepareRetryDraft(composerDraft, input.text);
     switch (prepared.kind) {
       case "prepared":
         updateComposerDraft(prepared.draft);
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           quietStatus("run.retry_prepared", {
             scope: "task",
             taskId: activeTask.id,
@@ -3747,7 +3874,8 @@ export default function App() {
         );
         break;
       case "preserved":
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           quietStatus("run.draft_preserved", {
             scope: "task",
             taskId: activeTask.id,
@@ -3755,7 +3883,8 @@ export default function App() {
         );
         break;
       case "too_long":
-        setStatus(
+        observeLocalFeedback(
+          `prepare-retry:${activeTask.id}`,
           attentionStatus("run.retry_too_long", {
             scope: "task",
             taskId: activeTask.id,
@@ -3763,29 +3892,37 @@ export default function App() {
         );
         break;
     }
-    window.requestAnimationFrame(() => composer.current?.focus());
+    focusPreparedInput();
   }
-  async function refreshAfterCommit(
-    success: MessageId,
-    audience: StatusAudience,
-  ) {
-    setStatus(quietStatus(success, audience));
+  async function refreshAfterTimeout(error: unknown) {
+    if (!(error instanceof BridgeCommandTimeoutError)) return false;
     await refreshCommittedView();
+    return true;
   }
   async function reconcileCommandTimeout(
     error: unknown,
     operation: MessageId,
     audience: StatusAudience,
+    token?: FeedbackToken,
   ) {
     if (!(error instanceof BridgeCommandTimeoutError)) return false;
+    if (token)
+      settleOperationFeedback(
+        token,
+        attentionStatus("feedback.unconfirmed", audience, {
+          values: { operation: t(operation) },
+          diagnostic: errorText(error),
+        }),
+      );
     try {
       await refreshSnapshot();
       // Preserve legacy replacement semantics; the caller checks business facts.
-      setStatus(
-        quietStatus("command.timeout_reconciled", audience, {
-          values: { operation: t(operation) },
-        }),
-      );
+      if (!token)
+        setStatus(
+          quietStatus("command.timeout_reconciled", audience, {
+            values: { operation: t(operation) },
+          }),
+        );
     } catch {
       // The connection owns sync failure; do not leave a second stale warning.
     }
@@ -3953,8 +4090,37 @@ export default function App() {
   );
   const workspaceSelectionFeedback =
     statuses.entries[`workspace:selection:${composerDraftScope}`];
+  const taskOperationFeedback = Object.values(statuses.entries).filter(
+    (entry) =>
+      entry?.local &&
+      entry.audience.scope === "task" &&
+      entry.audience.taskId === activeTask?.id,
+  );
+  const composerCatalogFeedback =
+    statuses.entries[`composer-catalog:${composerDraftScope}`];
+  const modelsCatalogFeedback = statuses.entries["models:catalog"];
   const composerFooter = (
     <>
+      {[
+        ...taskOperationFeedback,
+        composerCatalogFeedback,
+        modelsCatalogFeedback,
+      ].map((entry) =>
+        entry && entry.tone === "attention" && !entry.dismissed ? (
+          <FeedbackNotice
+            key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}
+            title={t(entry.id, entry.values)}
+            detailsLabel={t("feedback.details")}
+            dismissLabel={t("feedback.dismiss")}
+            onDismiss={() => {
+              updateFeedbackState((current) =>
+                dismissFeedback(current, entry.key, entry.cycle),
+              );
+              window.requestAnimationFrame(() => composer.current?.focus());
+            }}
+          />
+        ) : null,
+      )}
       {workspaceSelectionFeedback?.tone === "attention" &&
         !workspaceSelectionFeedback.dismissed && (
           <p
@@ -4066,7 +4232,14 @@ export default function App() {
                 )
               : t("workspace.none")
         }
-        workspaceDiagnostic={workspaceSelectionFeedback?.diagnostic}
+        workspaceDiagnostic={
+          [
+            workspaceSelectionFeedback?.diagnostic,
+            composerCatalogFeedback?.diagnostic,
+          ]
+            .filter(Boolean)
+            .join("\n\n") || undefined
+        }
         workspaceOptions={[
           {
             id: automaticWorkspaceOptionId,
@@ -4305,6 +4478,30 @@ export default function App() {
                   snapshot.capabilities.permissionProfiles
                 }
                 triggerRef={taskInformationTrigger}
+                diagnostics={
+                  taskOperationFeedback.some((entry) => entry?.diagnostic) ||
+                  currentStopFeedback?.diagnostic ? (
+                    <DiagnosticDisclosure
+                      label={t("task.operation_diagnostics")}
+                    >
+                      {currentStopFeedback?.diagnostic && (
+                        <pre className="feedback-notice-details">
+                          {currentStopFeedback.diagnostic}
+                        </pre>
+                      )}
+                      {taskOperationFeedback.map((entry) =>
+                        entry?.diagnostic ? (
+                          <pre
+                            className="feedback-notice-details"
+                            key={entry.key}
+                          >
+                            {entry.diagnostic}
+                          </pre>
+                        ) : null,
+                      )}
+                    </DiagnosticDisclosure>
+                  ) : null
+                }
               />
             )}
           </>
@@ -4661,12 +4858,30 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
+            modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
             archiveManagement={{
               tasks: snapshot.taskIndex,
               workspaces: snapshot.workspaces,
               query: archivedQuery,
               pending: taskPending,
               errors: taskArchiveErrors,
+              diagnostics: Object.fromEntries(
+                snapshot.taskIndex
+                  .map((task) => [
+                    task.id,
+                    Object.values(statuses.entries)
+                      .filter(
+                        (entry) =>
+                          entry?.local &&
+                          entry.audience.scope === "task" &&
+                          entry.audience.taskId === task.id &&
+                          entry.diagnostic,
+                      )
+                      .map((entry) => entry?.diagnostic)
+                      .join("\n\n"),
+                  ])
+                  .filter(([, diagnostic]) => diagnostic),
+              ),
               synchronized: !bridgeUnavailable,
               onQuery: setArchivedQuery,
               scrollTop: archiveView.current.scrollTop,
@@ -5321,6 +5536,7 @@ export default function App() {
               <AlertDialog.Description id="task-delete-description">
                 {t("task.delete_confirm_body")}
               </AlertDialog.Description>
+              {deleteError && <p role="alert">{t(deleteError)}</p>}
               <div className="delete-confirmation-actions">
                 <Button
                   autoFocus

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
+import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export type ArchivedTasksProps = {
@@ -9,6 +10,7 @@ export type ArchivedTasksProps = {
   query: string;
   pending: Record<string, string>;
   errors?: Record<string, string>;
+  diagnostics?: Record<string, string>;
   synchronized: boolean;
   scrollTop?: number;
   focusTaskId?: string | null;
@@ -25,6 +27,7 @@ export function ArchivedTasks({
   query,
   pending,
   errors = {},
+  diagnostics = {},
   synchronized,
   focusTaskId = null,
   onQuery,
@@ -127,6 +130,15 @@ export function ArchivedTasks({
                   </button>
                   {workspace && <p>{workspace.displayName}</p>}
                   {errors[task.id] && <p role="alert">{errors[task.id]}</p>}
+                  {diagnostics[task.id] && (
+                    <DiagnosticDisclosure
+                      label={t("task.operation_diagnostics")}
+                    >
+                      <pre className="feedback-notice-details">
+                        {diagnostics[task.id]}
+                      </pre>
+                    </DiagnosticDisclosure>
+                  )}
                   {task.historyReadOnly && (
                     <p>{t("archive.history_read_only")}</p>
                   )}

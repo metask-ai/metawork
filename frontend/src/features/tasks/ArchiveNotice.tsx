@@ -7,7 +7,7 @@ import { useI18n } from "../../i18n/context.ts";
 export type ArchiveNoticeValue = {
   id: number;
   taskId: string;
-  kind: "archived" | "failed";
+  kind: "archived" | "failed" | "unconfirmed";
 };
 
 export function ArchiveNotice({
@@ -60,7 +60,9 @@ export function ArchiveNotice({
         {t(
           notice.kind === "archived"
             ? "archive.success"
-            : "task.archive_failed",
+            : notice.kind === "unconfirmed"
+              ? "task.archive_unconfirmed"
+              : "task.archive_failed",
         )}
       </p>
       {notice.kind === "archived" && (

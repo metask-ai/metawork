@@ -243,7 +243,7 @@ export const zhCN: Record<MessageId, string> = {
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
   "account.recharge_open_failed": "无法打开 Metask 充值页面，请稍后重试。",
   "execution.command_rejected": "模型配置未更新，请刷新后重试。",
-  "execution.command_failed": "MetaWork 无法更新模型配置，请检查配置后重试。",
+  "execution.command_failed": "模型配置结果尚未确认",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
@@ -823,7 +823,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.admission_failed": "当前无法发送，草稿已保留。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",
-  "run.stop_failed": "未能确认停止请求，请刷新后重试。",
+  "run.stop_failed": "未能确认停止请求",
   "run.stop_unconfirmed": "停止结果尚未确认",
   "run.stop_requested": "已请求停止，等待当前工作结束…",
   "run.activity.unsynchronized": "状态尚未同步",
@@ -867,6 +867,10 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_reason": "{reason}回复未完成。",
   "account.diagnostics": "账号诊断",
   "feedback.pending": "正在处理…",
+  "feedback.unconfirmed": "{operation}：结果尚未确认",
+  "task.archive_unconfirmed": "归档或恢复结果尚未确认",
+  "task.delete_unconfirmed": "删除结果尚未确认",
+  "task.operation_diagnostics": "操作诊断",
   "workspace.diagnostics": "工作目录诊断",
   "run.terminal.stopped": "工作已停止",
   "run.terminal.interrupted": "工作意外中断",
@@ -1151,7 +1155,7 @@ export const zhCN: Record<MessageId, string> = {
   "approval.sending": "正在发送回复…",
   "approval.awaiting_snapshot":
     "回复已收到。正在更新此任务，完成前不能再次操作…",
-  "approval.retry_response": "回复未发送。请检查请求后重试。",
+  "approval.retry_response": "回复结果尚未确认",
   "ui.kind.permission": "权限请求",
   "ui.state.allowed_once": "已允许一次",
   "ui.state.allowed_always": "已在本会话中允许",
@@ -1268,7 +1272,7 @@ export const zhCN: Record<MessageId, string> = {
     "MetaWork 会先验证并恢复现有配置。只有文件缺失或确认损坏时，才会清空模型配置；账户、Task、Workspace 与对话会保留。",
   "settings.models_reset_confirm": "恢复并继续",
   "settings.models_reset_pending": "正在恢复…",
-  "settings.models_reset_failed": "模型配置恢复失败，请重试。",
+  "settings.models_reset_failed": "模型配置恢复结果尚未确认",
   "permission.profile.approval_required": "请求批准",
   "permission.mode.manual": "人工审批",
   "permission.mode.manual.help": "常规编辑自动执行，其余按需审批。",
@@ -1358,8 +1362,8 @@ export const zhCN: Record<MessageId, string> = {
     "请使用 HTTPS；仅本机地址支持 HTTP。",
   "settings.custom_model_address_error.path":
     "请填写以 /chat/completions、/responses 或 /v1/messages 结尾的完整端点。",
-  "settings.custom_model_test_start_failed": "无法开始测试 {model}，请重试。",
-  "settings.custom_model_remove_failed": "删除失败，请重试。",
+  "settings.custom_model_test_start_failed": "尚未确认 {model} 的测试是否开始",
+  "settings.custom_model_remove_failed": "模型移除结果尚未确认",
   "settings.model_edit_partial":
     "部分修改已保存（{fields}）。请检查未完成的字段，必要时重新填写 API Key 后再保存。",
   "settings.model_edit_review":

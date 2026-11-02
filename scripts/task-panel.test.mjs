@@ -6444,6 +6444,54 @@ test("App Workspace selection failure stays by its draft with source diagnostics
   assert.ok(document.querySelector(".workspace-selection-feedback") === null);
 });
 
+test("App compact errors stay local and their diagnostics survive dismissing the explanation", async (ctx) => {
+  const f = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      compact: async () => {
+        throw new Error("safe-compact-diagnostic");
+      },
+      refreshWorkspaceSkillCatalog: async () => ({
+        accepted: true,
+        reason: null,
+      }),
+    },
+  );
+  Object.assign(f.snapshot.tasks[0], {
+    currentRunPhase: null,
+    activeOperation: null,
+  });
+  Object.assign(f.snapshot.tasks[0].runs[0], {
+    phase: "completed",
+    terminal: terminal("completed"),
+    activity: null,
+  });
+  f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+  await act(async () => f.publish());
+  await selectRecentTask(/First task/);
+  const input = screen.getByRole("combobox", { name: "" });
+  fireEvent.change(input, { target: { value: "/compact" } });
+  fireEvent.click(
+    await screen.findByRole("option", { name: /Compact context/ }),
+  );
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".feedback-notice")?.textContent ?? "",
+      /Context compaction could not be started/,
+    ),
+  );
+  assert.ok(document.querySelector(".commandbar-alert") === null);
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss this notice" }));
+  await waitFor(() =>
+    assert.ok(document.querySelector(".feedback-notice") === null),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Task information" }));
+  fireEvent.click(await screen.findByText("Operation diagnostics"));
+  await screen.findByText("safe-compact-diagnostic");
+});
+
 test("App opens unreferenced workspace files in preview tabs and revokes them with workspace authority", async (ctx) => {
   const listings = [],
     reads = [];
@@ -6601,6 +6649,41 @@ test("App stop request remains bound to its Task and never fabricates a terminal
     screen.getByRole("button", { name: "Stop task" }).disabled,
     true,
   );
+});
+
+test("old stop replies cannot unlock a newer stop after a security reset", async (ctx) => {
+  const f = await renderAppFixture(ctx, 1440, {
+    phase: "running",
+    terminal: null,
+    activity: { kind: "waiting_model" },
+  });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const stops = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "stopTask",
+    () => new Promise((resolve) => stops.push(resolve)),
+  );
+  await selectRecentTask(/First task/);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(stops.length, 1);
+  f.snapshot.securityEpoch = "2";
+  f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+  await act(async () => f.publish());
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Stop task" }).disabled,
+      false,
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(stops.length, 2);
+  await act(async () => stops[0]());
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  await act(async () => stops[1]());
 });
 
 test("App stop uncertainty survives successful reads and a new Run until its target is observed", async (ctx) => {
