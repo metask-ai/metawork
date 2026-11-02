@@ -25,13 +25,13 @@ export function taskModelSelectionPolicy(
   }
 }
 
-/** Unknown historical sources require an explicit choice, never inference. */
+/** Missing historical sources require an explicit choice, never inference. */
 export function taskModelCandidates(
   models: ModelsView,
   intent: ModelRef | null,
 ) {
-  if (intent) return readyModelOptions(models, intent.sourceId);
-  return [...models.providers, ...models.customProviders].flatMap((provider) =>
-    readyModelOptions(models, provider.id),
-  );
+  const sources = [...models.providers, ...models.customProviders];
+  if (intent && sources.some((provider) => provider.id === intent.sourceId))
+    return readyModelOptions(models, intent.sourceId);
+  return sources.flatMap((provider) => readyModelOptions(models, provider.id));
 }

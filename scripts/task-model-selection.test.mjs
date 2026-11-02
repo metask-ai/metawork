@@ -101,12 +101,26 @@ test("a Task with no model intent lists every ready source without inferring its
   assert.notEqual(options[0].selectionId, options[1].selectionId);
   assert.deepEqual(
     taskModelCandidates(models, {
+      sourceId: "deleted-provider",
+      modelId: "old-model",
+    }).map((option) => option.modelRef.sourceId),
+    ["metask", "other"],
+  );
+  assert.deepEqual(
+    taskModelCandidates(models, {
       sourceId: "metask",
       modelId: "disabled",
     }).map((option) => option.modelRef.sourceId),
     ["metask"],
   );
   models.customProviders[0].enabled = false;
+  assert.deepEqual(
+    taskModelCandidates(models, {
+      sourceId: "other",
+      modelId: model.id,
+    }),
+    [],
+  );
   assert.deepEqual(
     taskModelCandidates(models, null).map((option) => option.modelRef.sourceId),
     ["metask"],

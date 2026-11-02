@@ -1058,7 +1058,6 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
   ];
   const defaultModel = { sourceId: "metask", modelId: "minimax-m3" };
   fixture.snapshot.models.defaultSelection = defaultModel;
-  fixture.snapshot.newTaskAdmission.activeModelRef = defaultModel;
   await fixture.publish();
   const selector = screen.getByRole("combobox", { name: "Model" });
   await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
@@ -1188,8 +1187,6 @@ test("App new Task lists all Providers while existing Tasks preserve their sourc
     sourceId: "cc",
     modelId: "gpt-5.6-sol",
   };
-  fixture.snapshot.newTaskAdmission.activeModelRef =
-    fixture.snapshot.models.defaultSelection;
   await fixture.publish();
   await user.click(screen.getByRole("combobox", { name: "Model" }));
   assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
@@ -1825,66 +1822,80 @@ test("App names the Task blocking Session release and allows a later explicit cr
   await fixture.settle();
 });
 
-test("App lets a historical Task without intent explicitly choose any ready source at revision zero", async (ctx) => {
-  const fixture = await renderSubmissionApp(ctx);
-  fixture.task.modelIntent = null;
-  const model = fixture.snapshot.models.providers[0].models[0];
-  fixture.snapshot.models.customProviders = [
-    {
-      id: "historical-choice",
-      displayName: "Other source",
-      enabled: true,
-      state: "ready",
-      credentialStatus: "ready",
-      sourceGeneration: "7",
-      catalogGeneration: "8",
-      protocol: "openai_responses",
-      normalizedBaseUrl: "https://example.test/responses",
-      providerRevision: "1",
-      builtinProviderId: null,
-      models: [
-        {
-          ...model,
-          id: "other-model",
-          displayName: "Other model",
-          ready: true,
-          testStatus: "connected",
-        },
-      ],
-    },
-  ];
-  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
-  const selection = ctx.mock.method(
-    BridgeClient.prototype,
-    "selectTaskModel",
-    async (taskId, revision, modelRef) => {
-      fixture.task.modelIntent = {
-        modelRef,
-        selectionRevision: "1",
-        state: "committed",
-      };
-      return { accepted: true, taskId, selectionRevision: "1", reason: null };
-    },
-  );
-  await fixture.publish();
-  const user = userEvent.setup({ document });
-  await user.type(fixture.textarea, "Keep this draft");
-  await user.click(screen.getByRole("combobox", { name: "Model" }));
-  await user.click(
-    await screen.findByRole("option", { name: "Other model", exact: true }),
-  );
-  await waitFor(() => assert.equal(selection.mock.callCount(), 1));
-  assert.deepEqual(selection.mock.calls[0].arguments, [
-    fixture.task.id,
-    "0",
-    { sourceId: "historical-choice", modelId: "other-model" },
-    "7",
-    "8",
-  ]);
-  assert.equal(fixture.creations(), 0);
-  assert.equal(fixture.inputs.length, 0);
-  assert.equal(fixture.textarea.value, "Keep this draft");
-});
+for (const missingSource of [false, true]) {
+  test(`App lets a historical Task ${missingSource ? "whose source was deleted" : "without intent"} explicitly choose any ready source`, async (ctx) => {
+    const fixture = await renderSubmissionApp(ctx);
+    fixture.task.modelIntent = missingSource
+      ? {
+          modelRef: { sourceId: "deleted-source", modelId: "old-model" },
+          selectionRevision: "7",
+          state: "committed",
+        }
+      : null;
+    const nextRevision = missingSource ? "8" : "1";
+    const model = fixture.snapshot.models.providers[0].models[0];
+    fixture.snapshot.models.customProviders = [
+      {
+        id: "historical-choice",
+        displayName: "Other source",
+        enabled: true,
+        state: "ready",
+        credentialStatus: "ready",
+        sourceGeneration: "7",
+        catalogGeneration: "8",
+        protocol: "openai_responses",
+        normalizedBaseUrl: "https://example.test/responses",
+        providerRevision: "1",
+        builtinProviderId: null,
+        models: [
+          {
+            ...model,
+            id: "other-model",
+            displayName: "Other model",
+            ready: true,
+            testStatus: "connected",
+          },
+        ],
+      },
+    ];
+    const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+    const selection = ctx.mock.method(
+      BridgeClient.prototype,
+      "selectTaskModel",
+      async (taskId, revision, modelRef) => {
+        fixture.task.modelIntent = {
+          modelRef,
+          selectionRevision: nextRevision,
+          state: "committed",
+        };
+        return {
+          accepted: true,
+          taskId,
+          selectionRevision: nextRevision,
+          reason: null,
+        };
+      },
+    );
+    await fixture.publish();
+    const user = userEvent.setup({ document });
+    await user.type(fixture.textarea, "Keep this draft");
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Other model", exact: true }),
+    );
+    await waitFor(() => assert.equal(selection.mock.callCount(), 1));
+    assert.deepEqual(selection.mock.calls[0].arguments, [
+      fixture.task.id,
+      missingSource ? "7" : "0",
+      { sourceId: "historical-choice", modelId: "other-model" },
+      "7",
+      "8",
+    ]);
+    assert.equal(fixture.creations(), 0);
+    assert.equal(fixture.inputs.length, 0);
+    assert.equal(fixture.textarea.value, "Keep this draft");
+  });
+}
 
 test("App schedule_persistence_failed preserves later edits and permits one explicit retry", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });

@@ -106,7 +106,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect`精确协商后才开放产品路径，snapshot根节点包含无 secret `capabilities`、`account`、`models`、`newTaskAdmission`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks`与 `tasks`且不维护局部版本。Account只发布 Metask identity/authorization状态；Models独立发布 provider catalog、Provider-local/global selection、persistence health与 Custom Provider；Product Control在 `newTaskAdmission`中发布当前安装的 active `ModelRef`、generation、selection revision与新 Task admission。三者可以形成合法的独立状态组合：界面保留账号、模型 intent、历史 Task与恢复动作，只禁用依赖当前 active execution的 New task发送，不把 Models或 Product admission失败误报成账号失效。Workspace独立于 Task发布，durable Task不携带 Account identity、API Key元数据或 connection credential locator。快速开发阶段直接原地 hard cut合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent内部 Session route identity不属于 Renderer产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect`精确协商后才开放产品路径，snapshot根节点包含无 secret `capabilities`、`account`、`models`、`newTaskAdmission`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks`与 `tasks`且不维护局部版本。Account只发布 Metask identity/authorization状态；Models 独立发布 provider catalog、起始偏好、persistence health 与 Custom Provider；Product Control 的 `newTaskAdmission` 只发布通用创建资格，精确 shape 由 [Bridge 合同](renderer-bridge-contract.md)定义。三者可以形成合法的独立状态组合：界面保留账号、模型 intent、历史 Task与恢复动作，只禁用当前选择或通用创建资格不满足的 New task 发送，模型菜单仍可恢复选择，不把 Models或 Product admission失败误报成账号失效。Workspace独立于 Task发布，durable Task不携带 Account identity、API Key元数据或 connection credential locator。快速开发阶段直接原地 hard cut合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent内部 Session route identity不属于 Renderer产品模型。
 
 ### 3.2 规范术语
 
@@ -545,7 +545,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.4 跨重启 Conversation 恢复与 execution rebind
 
-> Capability：**已接通**。Workbench 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式 execution rebind 仍是未来能力。
+> Capability：**已接通**。Workbench 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式模型意图与执行 rebind 遵守 [Product 合同](product-architecture.md#22-workspace-与-task-admission)。
 
 当前恢复规则：
 
@@ -558,7 +558,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 7. checkpoint、Task/Workspace/Execution identity、Agent Runtime 或 checkpoint store 任一恢复事实不满足时显示对应 unavailable 说明，不开放该历史 Conversation 的恢复发送。Workspace 是否因导航语义 `visible=false`、Skill catalog 是否 ready、MCP selection 是否可重建、Permission 是否仍有效、projection capacity 以及 Task persistence health 都不是 Product Task 的全局运行资格；这些可选能力缺失时 Host 可以发布成功但 degraded 的 attachment，普通 Text 立即可用，相关能力按各自现有显式流程恢复。Task store read/corrupt/write/outcome-unknown health 由 Host 发布，Renderer 只提示，不自行清空、修复、迁移或阻塞 mutation；
 8. `closed` 不是 Task 产品状态。非归档 Task 只要 Host gate 允许，就应恢复 attachment 并继续；归档只控制日常列表可见性，删除才永久移除记录。
 
-恢复要求 checkpoint record 与 Task execution binding证明 source Task/binding、protocol、Task binding epoch和 terminal anchor精确，当前 execution authority则作为独立 target readiness：protocol相同、Task pinned model仍在当前 Models catalog，且 restore start→commit期间 target generation不变。历史 H与当前 G可以不同；H≠G时 Host必须先以 durable adoption同步推进 Task execution generation、binding epoch与 checkpoint anchor epoch，commit成功后才安装 attachment，旧 Run的 generation/model/usage不改写。checkpoint的 model只用于满足 AgentCore restore expectation，并与其 terminal Run历史 model自洽校验；candidate提交前由 Host以 Task当前 model binding调用 `session_set_model`，不能把 checkpoint旧 model或 Models当前默认 model静默写回 Task。durable Task不保存 account、API Key或 Custom Provider identity，恢复不能从当前 Account/Models projection反推或补写这些字段。该 adoption只连接同一 Conversation的 source与兼容 target，不允许切换 protocol或 Task model；未来通用 rebind仍必须由用户明确发起，重新校验 Workspace和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage与模型归属；失败不得回退到静默默认值。
+恢复的 checkpoint、Task/binding、目标配置与提交 authority 以 [Product 恢复合同](product-architecture.md#4-产品历史持久化与恢复)为唯一真源。Task 必须具有明确模型意图；无 intent 时先由用户选模。冷恢复与显式 rebind 安装前重新校验当前来源与 Workspace authority，保留历史 Run 的实际模型、protocol 与 generation；失败保留意图、草稿和历史，不回退到起始偏好。
 
 ## 7. 中间区域：Task 内容
 
@@ -758,7 +758,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 - New task 无草稿选择时显示 Host 保存的起始偏好；无偏好显示“选择模型”，不自动取目录首项。候选汇总全部 ready 来源，按 Metask、自定义模型分组；完整 ModelRef 区分同名模型。菜单选择只更新草稿；Host 确认交互 Task 创建或主动 Task 选模后独立记忆起始偏好。
 - 当前偏好或草稿模型不可用时保留名称、原因及草稿，菜单仍允许选择合法候选；无候选时提供授权、目录重试或 Models 配置入口，不自动选择其他来源。所有创建提交明确模型目标，不发设默认命令。
 - Models 来源或目录变化仅改变相应来源的可解析资格。Task/Run 保留自己的意图与实际执行；Task 恢复和 rebind 校验精确目标及来源 authority，起始偏好不参与 binding 安装。
-- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。modelIntent非空时菜单列出其Provider的ready模型；modelIntent为空时例外列出全部ready来源，以revision 0明确提交，不猜测历史来源。菜单不受 global default 的来源变化或忙碌状态约束；当前已知来源不可用时保留模型事实；历史来源未知时允许用户明确选择来源。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
+- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。modelIntent 非空且原来源仍存在时菜单列出其 Provider 的 ready 模型；modelIntent 为空或原来源已不存在时例外列出全部 ready 来源。无 intent 以 revision 0 提交；原来源不存在仍以当前 intent revision 提交，不猜测历史来源或重置 revision。来源仍存在但禁用、加载中或目录为空时不触发跨来源例外。菜单不受 global default 的来源变化或忙碌状态约束；当前已知来源不可用时保留模型事实；历史来源未知时允许用户明确选择来源。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 偏好保存不冻结模型选择、发送、导航、历史阅读或其他 Task；真实模型意图事务结果不确定时仍遵守对应 Task 的恢复保护。
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 
@@ -1019,13 +1019,13 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 ## 14. 首次启动与设置
 
-> Capability：**混合**。当前 Renderer 合同已提供持续可达的 Workbench、长期 Settings overlay，以及设置与 New task 共用的 Models-owned默认 API/模型选择；跨重启 execution rebind仍按独立 capability gate验收。
+> Capability：**混合**。当前 Renderer 合同已提供持续可达的 Workbench、长期 Settings overlay、Models 管理与独立的 Composer 选模；恢复与 execution rebind 按其独立合同验收。
 
 ### 14.1 首次启动
 
 首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
+Account 状态在 Workbench 账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth 成功后由 Host 把 Account 授权交给独立 Models continuation 加载目录；目录完成不自动选择模型，也不覆盖起始偏好或 Task 意图。任何 live Task 始终可查看和停止。
 
 新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Models 页的自定义模型管理复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
 
@@ -1107,7 +1107,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 模型管理不提交模型选择 mutation。New task Composer 直接列出所有来源的 ready 模型；缺少选择但已有可用候选时，恢复动作直接打开输入区模型列表，不能再要求用户进入管理页设置默认值；
 - 模型图标表示模型厂商品牌，使用同一套本地打包的小尺寸标志；未知厂商与自定义来源的通用模型图标使用线框立方体。Metask 官方目录按模型 ID 的已知系列映射对应厂商，无法识别时使用通用模型图标；内置厂商预设按 Host 发布的预设身份显示对应厂商标志；自定义接口始终使用通用模型图标，不根据用户填写的模型 ID、显示名称、服务名称或地址推断厂商。该展示映射不参与模型 identity、protocol、credential 或执行资格判定。添加模型的厂商选择器、模型管理列表、Composer 菜单与当前模型触发器复用同一图标组件，沿用文字颜色适配深浅主题，不增加 Provider 名称文案、独立操作或可访问名称；来源仍由菜单分组表达。
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
-- 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
+- 跨重启历史 Task 保持可读，恢复资格由 Host 发布；设置变化不能使其静默采用起始偏好或伪造 Session；
 - `在 Metask 中管理`只有在 Host发布固定安全入口后才显示；当前没有该 capability时不放置链接或假入口；
 - 用户模型管理不依赖 Metask 登录；Account 或 Metask 官方目录的加载和失败不得隐藏已保存的用户模型或阻塞其管理；
 - 自定义模型列表始终提供新增入口，每个模型提供独立测试、编辑与带确认的删除动作，只有 ready 模型可在任务输入区选择。新增后续模型不得要求删除或覆盖已有模型；
