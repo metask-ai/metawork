@@ -2,33 +2,28 @@ import deepseekUrl from "@lobehub/icons-static-svg/icons/deepseek.svg?url";
 import kimiUrl from "@lobehub/icons-static-svg/icons/kimi.svg?url";
 import minimaxUrl from "@lobehub/icons-static-svg/icons/minimax.svg?url";
 import glmUrl from "@lobehub/icons-static-svg/icons/zai.svg?url";
-import { Icon } from "../../components/ui/Icon.tsx";
-import type { ModelVendor } from "./model-vendor.ts";
+import { Icon } from "./Icon.tsx";
 
-const marks: Record<Exclude<ModelVendor, "custom">, string> = {
+const marks = {
   deepseek: deepseekUrl,
   kimi: kimiUrl,
   minimax: minimaxUrl,
   glm: glmUrl,
 };
 
-export function ModelVendorIcon({
-  vendor = "custom",
-}: {
-  vendor?: ModelVendor;
-}) {
+export type Brand = keyof typeof marks | "custom";
+
+export function BrandIcon({ brand = "custom" }: { brand?: Brand }) {
   return (
     <span
       className="model-vendor-icon"
-      data-vendor={vendor}
+      data-vendor={brand}
       aria-hidden="true"
       style={
-        vendor === "custom"
-          ? undefined
-          : { maskImage: `url("${marks[vendor]}")` }
+        brand === "custom" ? undefined : { maskImage: `url("${marks[brand]}")` }
       }
     >
-      {vendor === "custom" && <Icon name="box" />}
+      {brand === "custom" && <Icon name="box" />}
     </span>
   );
 }

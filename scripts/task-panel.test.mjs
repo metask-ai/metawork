@@ -143,7 +143,7 @@ function terminal(
   cause = null,
   diagnosticDisposition = "absent",
 ) {
-  return { outcome, cause, diagnosticDisposition };
+  return { outcome, cause, diagnosticDisposition, modelError: null };
 }
 
 function run(overrides = {}) {
@@ -916,7 +916,12 @@ function localizedView(component, locale = "en-US") {
   );
 }
 
-function taskContentElement(value, revision = "1", overrides = {}) {
+function taskContentElement(
+  value,
+  revision = "1",
+  overrides = {},
+  locale = "en-US",
+) {
   return localizedView(
     createElement(TaskContent, {
       task: value,
@@ -935,6 +940,7 @@ function taskContentElement(value, revision = "1", overrides = {}) {
       },
       ...overrides,
     }),
+    locale,
   );
 }
 
@@ -1528,9 +1534,7 @@ test("merged continuation displays each original message once after remount and 
         .closest(".additional-input").dataset.inputId,
       "4",
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Copy instruction to Composer" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy to input box" }));
     assert.deepEqual(restoredInputs.at(-1), target.input);
     view.unmount();
   }
@@ -3075,7 +3079,7 @@ test("provider failure notices explain impact without duplicating diagnostics", 
   });
   const absent = renderTaskContent(failedWithoutResponse);
   assert.match(absent, />Model service request failed</);
-  assert.match(absent, /This run did not produce a usable response\./);
+  assert.match(absent, /No response was generated\./);
   assert.doesNotMatch(
     absent,
     /MetaWork did not receive additional diagnostics for this run\./,
@@ -3085,9 +3089,7 @@ test("provider failure notices explain impact without duplicating diagnostics", 
       retryAvailable: true,
     }),
   );
-  assert.ok(
-    screen.getByRole("button", { name: "Copy instruction to Composer" }),
-  );
+  assert.ok(screen.getByRole("button", { name: "Copy to input box" }));
   assert.equal(
     screen.queryByRole("button", { name: "Use instruction again" }),
     null,
@@ -3111,7 +3113,7 @@ test("provider failure notices explain impact without duplicating diagnostics", 
     ],
   });
   const withheld = renderTaskContent(partialWithWithheldDiagnostic);
-  assert.match(withheld, /produced only a partial response/);
+  assert.match(withheld, /response stopped before it was complete/);
   assert.doesNotMatch(withheld, /current security boundary/);
 
   for (const unsupportedGuess of [
@@ -3155,7 +3157,7 @@ test("provider failure details open for the exact historical Run", async () => {
   assert.equal(screen.queryByText("historical-model"), null);
   await user.click(summary);
   assert.equal(diagnostics.open, true);
-  assert.match(diagnostics.textContent, /current security boundary/);
+  assert.match(diagnostics.textContent, /cannot be shown here/);
   assert.match(diagnostics.textContent, /historical-model/);
   assert.match(diagnostics.textContent, /OpenAI Responses/);
   assert.match(diagnostics.textContent, /provider_failure/);
@@ -3163,6 +3165,381 @@ test("provider failure details open for the exact historical Run", async () => {
   await user.click(summary);
   assert.equal(screen.queryByText("historical-model"), null);
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
+});
+
+test("model error notices expose safe details and explicit settings without sending a retry", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  detail.message = "<img src=x onerror=alert(1)>";
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        terminal: {
+          ...terminal("failed", "provider_failure"),
+          modelError: detail,
+        },
+      }),
+    ],
+  });
+  const opened = [],
+    prepared = [];
+  render(
+    taskContentElement(value, "1", {
+      retryAvailable: true,
+      synchronized: true,
+      onOpenSettings: (target) => opened.push(target),
+      onPrepareRetry: (input) => prepared.push(input),
+    }),
+  );
+  assert.ok(
+    screen.getByText("The model service could not verify your credentials."),
+  );
+  assert.equal(screen.queryByText(detail.message), null);
+  await user.click(
+    screen.getByRole("button", { name: "Open account settings" }),
+  );
+  assert.deepEqual(opened, ["account"]);
+  assert.equal(prepared.length, 0);
+  const summary = screen.getByText("View run details");
+  await user.click(summary);
+  assert.ok(screen.getByText(detail.message));
+  assert.equal(summary.closest("details").querySelector("img"), null);
+  assert.ok(screen.getByText("future-code"));
+  assert.ok(screen.getByText("18446744073709551615 ms"));
+  assert.ok(
+    screen.getByText("MetaWork removed sensitive content from this detail."),
+  );
+  assert.ok(screen.getByText("No additional technical details were provided."));
+  await user.click(summary);
+  assert.equal(screen.queryByText(detail.message), null);
+  await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+  assert.equal(prepared.length, 1);
+});
+
+test("model error categories explain the failure in both locales without exposing raw detail", async () => {
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const categories = [
+    "authentication",
+    "permission",
+    "payment_required",
+    "not_found",
+    "invalid_request",
+    "context_window",
+    "rate_limited",
+    "overloaded",
+    "server_error",
+    "timeout",
+    "connection",
+    "stream_interrupted",
+    "output_limit",
+    "unknown",
+  ];
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const category of categories) {
+      const html = renderTaskContent(
+        task({
+          runs: [
+            run({
+              phase: "failed",
+              output: {
+                commentary: [],
+                response: "",
+                responseKind: null,
+                provisional: "",
+                redacted: false,
+                provisionalRedacted: false,
+              },
+              terminal: {
+                ...terminal("failed", "provider_failure"),
+                modelError: {
+                  ...detail,
+                  category,
+                  recovery: "none",
+                  message: "raw-error-hidden-until-open",
+                },
+              },
+            }),
+          ],
+        }),
+        locale,
+      );
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const notice = container.querySelector(".run-terminal-activity");
+      assert.ok(
+        notice.textContent.includes(
+          translate(locale, `run.model_error.category.${category}`),
+        ),
+      );
+      assert.ok(
+        notice.textContent.includes(
+          translate(locale, "run.provider_failure.no_response_title"),
+        ),
+      );
+      assert.equal(
+        notice.textContent.includes("raw-error-hidden-until-open"),
+        false,
+      );
+      assert.equal(
+        notice.querySelectorAll(".run-terminal-detail > span").length,
+        1,
+      );
+    }
+  }
+});
+
+test("payment guidance matches the source and prioritizes settings without claiming completed operations", async () => {
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const source of ["metask", "custom_provider", null]) {
+      for (const partial of [false, true]) {
+        const recovery =
+          source === "metask" ? "account_settings" : "model_settings";
+        const value = task({
+          runs: [
+            run({
+              phase: "failed",
+              output: {
+                commentary: [],
+                response: partial ? "Retained partial answer" : "",
+                responseKind: partial ? "partial" : null,
+                provisional: "",
+                redacted: false,
+                provisionalRedacted: false,
+              },
+              tools: [technicalTool({ state: "failed", isError: true })],
+              fileChanges: { observation: "complete", changes: [] },
+              terminal: {
+                ...terminal("failed", "provider_failure"),
+                modelError: {
+                  ...detail,
+                  category: "payment_required",
+                  source,
+                  recovery,
+                },
+              },
+            }),
+          ],
+        });
+        const opened = [],
+          prepared = [];
+        const view = render(
+          taskContentElement(
+            value,
+            "1",
+            {
+              synchronized: true,
+              retryAvailable: true,
+              fileChangesEnabled: true,
+              onOpenSettings: (target) => opened.push(target),
+              onPrepareRetry: (input) => prepared.push(input),
+            },
+            locale,
+          ),
+        );
+        const notice = view.container.querySelector(".run-terminal-activity");
+        assert.equal(
+          view.container.querySelectorAll(".run-terminal-activity").length,
+          1,
+        );
+        assert.ok(
+          notice.textContent.includes(
+            translate(
+              locale,
+              partial
+                ? "run.provider_failure.partial_title"
+                : "run.provider_failure.no_response_title",
+            ),
+          ),
+        );
+        assert.ok(
+          notice.textContent.includes(
+            translate(
+              locale,
+              source === "metask"
+                ? "run.model_error.recovery.account_payment"
+                : "run.model_error.recovery.provider_payment",
+            ),
+          ),
+        );
+        assert.doesNotMatch(
+          notice.textContent,
+          /登录|sign-in|balance|余额|operations completed|操作完成/i,
+        );
+        assert.equal(
+          view.container.textContent.includes(
+            translate(locale, "file_changes.incomplete_empty"),
+          ),
+          false,
+        );
+        const settings = screen.getByRole("button", {
+          name: translate(
+            locale,
+            source === "metask"
+              ? "run.model_error.open_account"
+              : "run.model_error.open_models",
+          ),
+        });
+        const retry = screen.getByRole("button", {
+          name: translate(locale, "run.prepare_retry"),
+        });
+        assert.equal(settings.dataset.primary, "true");
+        assert.equal(retry.dataset.primary, "false");
+        fireEvent.click(settings);
+        assert.deepEqual(opened, [source === "metask" ? "account" : "models"]);
+        assert.equal(prepared.length, 0);
+        fireEvent.click(retry);
+        assert.deepEqual(prepared, [value.runs[0].input]);
+        if (partial) assert.ok(screen.getByText("Retained partial answer"));
+        view.unmount();
+      }
+    }
+  }
+});
+
+test("historical settings navigation survives while retry stays current and synchronization gated", async () => {
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const value = task({
+    runs: [
+      run({
+        id: "8",
+        phase: "failed",
+        terminal: {
+          ...terminal("failed", "provider_failure"),
+          modelError: detail,
+        },
+      }),
+      run(),
+    ],
+  });
+  for (const synchronized of [true, false]) {
+    const opened = [];
+    const view = render(
+      taskContentElement(value, "1", {
+        synchronized,
+        retryAvailable: true,
+        onOpenSettings: (target) => opened.push(target),
+      }),
+    );
+    const settings = screen.getByRole("button", {
+      name: "Open account settings",
+    });
+    assert.equal(settings.disabled, !synchronized);
+    assert.equal(
+      screen.queryByRole("button", { name: "Copy to input box" }),
+      null,
+    );
+    fireEvent.click(settings);
+    assert.deepEqual(opened, synchronized ? ["account"] : []);
+    view.unmount();
+  }
+});
+
+test("tool records never assert successful effects and only retry advice promotes copying", async () => {
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const state of ["running", "completed", "failed"]) {
+    for (const recovery of ["wait", "prepare_retry"]) {
+      const view = render(
+        taskContentElement(
+          task({
+            runs: [
+              run({
+                phase: "failed",
+                tools: [technicalTool({ state, isError: state === "failed" })],
+                terminal: {
+                  ...terminal("failed", "provider_failure"),
+                  modelError: { ...detail, category: "timeout", recovery },
+                },
+              }),
+            ],
+          }),
+          "1",
+          { synchronized: true, retryAvailable: true },
+        ),
+      );
+      const notice = view.container.querySelector(".run-terminal-activity");
+      assert.ok(
+        notice.textContent.includes("Review the earlier execution records"),
+      );
+      assert.doesNotMatch(
+        notice.textContent,
+        /operations completed|Review completed/i,
+      );
+      assert.equal(
+        screen.getByRole("button", { name: "Copy to input box" }).dataset
+          .primary,
+        String(recovery === "prepare_retry"),
+      );
+      view.unmount();
+    }
+  }
+});
+
+test("supplemental model errors retain the primary failure and do not offer account recovery", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const detail = JSON.parse(
+    await readFile(
+      new URL("../src/product/control/model_error.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  detail.recovery = "none";
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        terminal: {
+          ...terminal("failed", "event_pipeline_failure"),
+          modelError: detail,
+        },
+      }),
+    ],
+  });
+  render(
+    taskContentElement(value, "1", {
+      synchronized: true,
+      onOpenSettings() {
+        throw new Error("must not recover a supplemental error");
+      },
+    }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Open account settings" }),
+    null,
+  );
+  await user.click(screen.getByText("View run details"));
+  assert.ok(
+    screen.getByText(
+      "The following model error also occurred. The main reason this request ended is shown above.",
+    ),
+  );
+  assert.ok(screen.getByText(detail.message));
 });
 
 test("inline diagnostics stay absent for other failures and preserve safe exact Run facts", async () => {
@@ -3192,11 +3569,7 @@ test("inline diagnostics stay absent for other failures and preserve safe exact 
   summary.focus();
   await user.click(summary);
   assert.ok(summary.closest("details").open);
-  assert.ok(
-    screen.getByText(
-      "MetaWork did not receive additional diagnostics for this run.",
-    ),
-  );
+  assert.ok(screen.getByText("No additional technical details are available."));
   assert.ok(within(details).getByText("<img src=x onerror=alert(1)>"));
   assert.ok(summary.closest("details").querySelector("img") === null);
   await user.click(summary);

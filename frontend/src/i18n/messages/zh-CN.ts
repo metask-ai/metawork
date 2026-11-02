@@ -1,5 +1,62 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "run.model_error.category.authentication": "模型服务验证身份失败。",
+  "run.model_error.category.permission": "模型服务未授予这次请求所需的权限。",
+  "run.model_error.category.payment_required": "模型服务返回了付款相关错误。",
+  "run.model_error.category.not_found": "模型服务未找到请求的模型或资源。",
+  "run.model_error.category.invalid_request": "模型服务未接受这次请求。",
+  "run.model_error.category.context_window": "当前对话超出了模型的上下文限制。",
+  "run.model_error.category.rate_limited": "模型服务暂时限制了请求频率。",
+  "run.model_error.category.overloaded": "模型服务当前繁忙。",
+  "run.model_error.category.server_error": "模型服务处理这次请求时发生错误。",
+  "run.model_error.category.timeout": "等待模型服务回复超时。",
+  "run.model_error.category.connection": "未能连接到模型服务。",
+  "run.model_error.category.stream_interrupted": "接收模型回复时传输中断。",
+  "run.model_error.category.output_limit": "这次回复达到了模型的输出限制。",
+  "run.model_error.category.unknown": "模型服务未能完成这次请求。",
+  "run.model_error.recovery.model_settings": "请检查模型及其服务商设置。",
+  "run.model_error.recovery.review_context":
+    "可缩短后续消息，或在功能可用时压缩对话。",
+  "run.model_error.recovery.revise_instruction":
+    "可缩小要求，或发送新消息继续。",
+  "run.model_error.recovery.wait": "请稍后再试。",
+  "run.model_error.recovery.prepare_retry":
+    "可将原指令填回输入框，检查后再发送。",
+  "run.model_error.recovery.account_authentication":
+    "请打开账号设置，检查 Metask 登录情况。",
+  "run.model_error.recovery.account_payment":
+    "可在账号设置中打开 Metask 充值页面。",
+  "run.model_error.recovery.provider_authentication":
+    "请检查模型设置中的服务商凭据。",
+  "run.model_error.recovery.provider_payment":
+    "请到所用模型服务商的账户页面查看。",
+  "run.provider_failure.no_response_title": "无法生成回复",
+  "run.provider_failure.partial_title": "回复未能完整生成",
+  "run.model_error.open_account": "打开账号设置",
+  "run.model_error.open_models": "打开模型设置",
+  "run.model_error.supplemental":
+    "执行过程中还收到了以下模型错误，主要失败原因见上方提示。",
+  "run.model_error.message_hidden": "模型错误正文已因隐私保护而隐藏。",
+  "run.model_error.upstream_truncated": "上游已截断部分模型错误详情。",
+  "run.model_error.host_redacted": "MetaWork 已清洗此详情中的敏感内容。",
+  "run.model_error.host_truncated": "此详情过长，MetaWork 仅显示了部分内容。",
+  "run.model_error.diagnostic_withheld":
+    "另有技术信息保存在本机，无法在此显示。",
+  "run.model_error.diagnostic_absent": "没有附带其他技术信息。",
+  "run.model_error.category_label": "模型错误分类",
+  "run.model_error.agent_run": "Agent 执行 ID",
+  "run.model_error.code": "服务端错误代码",
+  "run.model_error.type": "服务端错误类型",
+  "run.model_error.requestId": "服务端请求 ID",
+  "run.model_error.attempts": "本次请求尝试次数",
+  "run.model_error.retry_label": "再次请求建议",
+  "run.model_error.retry.retryable":
+    "再次请求可能有效，但不代表之前的工具操作适合重复执行。",
+  "run.model_error.retry.not_retryable": "原样再次发送同一请求通常无效。",
+  "run.model_error.retry.unknown": "无法确定再次发送此请求是否有效。",
+  "run.model_error.retry_after": "建议再次请求的等待时间",
+  "run.model_error.empty": "（空字符串）",
+
   "archive.success": "任务已归档，可在“设置 → 已归档任务”中查看。",
   "archive.undo": "撤销",
   "archive.view": "查看",
@@ -803,7 +860,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.process.elapsed": "本轮用时 {duration}",
   "run.process.toggle_tool": "展开或收起 {name} 的详情",
   "run.process.tool_detail": "{name} 的详情",
-  "run.prepare_retry": "重新填入指令",
+  "run.prepare_retry": "填回输入框",
   "run.retry_help": "将这条指令复制到输入区供你检查，不会自动发送。",
   "run.review_draft": "检查当前草稿",
   "run.review_draft_help": "保留当前草稿不变，并将焦点移到输入区。",
@@ -814,16 +871,15 @@ export const zhCN: Record<MessageId, string> = {
   "run.retry_too_long":
     "这条指令超出输入区长度限制，请改写一条更短的后续指令。",
   "run.provider_failure.title": "模型服务请求失败",
-  "run.provider_failure.no_response_impact": "本次运行未生成可用回复。",
+  "run.provider_failure.no_response_impact": "未能生成回复，可稍后再试。",
   "run.provider_failure.partial_impact":
-    "本次运行只生成了部分回复，内容可能不完整。",
-  "run.provider_failure.diagnostic_absent":
-    "MetaWork 未收到本次运行的附加诊断。",
+    "回复未能完整生成，已有内容可能不完整。",
+  "run.provider_failure.diagnostic_absent": "没有可供查看的其他技术信息。",
   "run.provider_failure.diagnostic_withheld":
-    "MetaWork 收到了附加技术诊断，但当前安全边界不允许在界面展示其内容。",
+    "另有技术信息保存在本机，无法在此显示。",
   "run.provider_failure.review_tool_effects":
-    "失败前已有部分操作完成，再次执行前请检查其影响，避免重复操作。",
-  "run.view_diagnostics": "查看运行详情",
+    "再次发送前，可查看此前的执行记录。",
+  "run.view_diagnostics": "错误详情",
   "slash.title": "输入区动作",
   "slash.group.commands": "命令",
   "slash.group.skills": "Skills",

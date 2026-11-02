@@ -411,6 +411,15 @@ pub const PendingInterruption = enum(u8) {
     app_shutdown,
 };
 
+/// Owned safe observation, separate from the decision about the Run outcome.
+pub const RunModelError = struct {
+    pub const Source = models_contract.Source;
+    detail: agent.ModelError,
+    source: ?Source = null,
+    host_redacted: bool = false,
+    host_truncated: bool = false,
+};
+
 pub const TerminalPayload = struct {
     /// Applied by the main thread only when the terminal event drain completes.
     exclude_on_product_terminal: bool,
@@ -421,6 +430,7 @@ pub const TerminalPayload = struct {
     diagnostic_len: usize = 0,
     diagnostic_truncated: bool = false,
     diagnostic_redacted: bool = false,
+    model_error: ?*RunModelError = null,
 };
 
 pub const CompactTerminalPayload = struct {
@@ -973,6 +983,10 @@ pub const RunRecord = struct {
     terminal_drain_rejection: ?OutputProtocolObservation = null,
     drain_rejection_reported: bool = false,
     terminal_diagnostic: []u8,
+    /// Reserved before execution; publication only copies into this owned value.
+    /// Restored history allocates it only when a model error is present.
+    model_error_storage: ?*RunModelError = null,
+    model_error_source: ?models_contract.Source = null,
     initial_credentials: [2][]const u8 = .{ &.{}, &.{} },
     /// Main-thread view of every version that may still reach this operation.
     /// Workers use initialRedactionSecrets and their owned request copies;
@@ -1323,6 +1337,44 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
     };
 }
 
+/// Called only after event drain and all file-change writes have settled.
+/// Completion describes the observation stream, not whether the Run succeeded.
+pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservation {
+    std.debug.assert(run.event_stream_finalized and run.pending_file_change_artifacts == 0);
+    if (run.file_change_observation == .incomplete or run.file_changes_known_loss)
+        return .incomplete;
+    const terminal = productTerminalFacts(run).?;
+    for (run.tools) |entry| {
+        const tool = entry orelse continue;
+        if (tool.state == .running) return .incomplete;
+    }
+    const intact = if (terminal.cause) |cause| switch (cause) {
+        .provider_failure,
+        .tool_failure,
+        .image_input_unsupported,
+        .stale_catalog,
+        .skill_not_found,
+        .invalid_skill_arguments,
+        .skill_policy_violation,
+        .skill_unavailable,
+        => true,
+        .resource_limit => terminal.phase == .stopped,
+        .user_cancel,
+        .timeout,
+        .session_close,
+        .app_shutdown,
+        .permission_required,
+        .event_pipeline_failure,
+        .event_payload_too_large,
+        .queue_capacity_failure,
+        .ui_pipeline_failure,
+        .agent_failure,
+        .dependency_contract_failure,
+        => false,
+    } else terminal.phase == .completed or terminal.phase == .stopped;
+    return if (intact) .complete else .incomplete;
+}
+
 pub fn runProjectionFacts(run: *const RunRecord) RunProjectionFacts {
     if (productTerminalFacts(run)) |terminal| return .{
         .phase = terminal.phase,
@@ -1547,12 +1599,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         if (run.file_change_observation == .collecting and
             run.pending_file_change_artifacts == 0)
         {
-            const terminal = terminalPayload(run).?;
-            run.file_change_observation = if (terminal.phase == .completed and
-                !run.file_changes_known_loss)
-                .complete
-            else
-                .incomplete;
+            run.file_change_observation = finalizedFileChangeObservation(run);
         }
         changed = true;
     }

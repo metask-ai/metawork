@@ -433,6 +433,9 @@ const App = struct {
         self.account_platform_binding = null;
         self.models_platform_binding = null;
         if (self.control) |control| control.shutdownExecutor();
+        // Required-wake producers are joined above. Release the relay and
+        // platform references even if Agent shutdown reports an error.
+        defer self.platform.stop(native_runtime);
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
             self.agent_shutdown = true;
@@ -442,7 +445,6 @@ const App = struct {
             control.syncLifecycle();
             control.relinquishAgentSessionsAfterRuntimeShutdown();
         }
-        self.platform.stop(native_runtime);
         self.control = null;
         self.account_started = false;
         self.models_started = false;
@@ -902,6 +904,48 @@ test "Windows window chrome Application test roots" {
 test "main-loop wake Application test roots" {
     std.testing.refAllDecls(app_platform);
     std.testing.refAllDecls(app_single_instance);
+}
+
+test "main-loop wake joins the required relay after Agent shutdown failure" {
+    const fixture = @import("lifecycle_fixture");
+    const Wake = struct {
+        var calls: std.atomic.Value(usize) = .init(0);
+        fn notify(_: ?*anyopaque) anyerror!void {
+            _ = calls.fetchAdd(1, .monotonic);
+        }
+    };
+    Wake.calls.store(0, .monotonic);
+    fixture.fake_core.reset();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = Wake.notify;
+    const agent_runtime = try agent.Runtime.initWithApi(std.testing.io, std.testing.allocator, &fixture.fake_api, .{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch unreachable;
+        agent_runtime.deinit();
+    }
+    var composition: App = .{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .frontend_asset_root = "",
+        .main_thread_id = std.Thread.getCurrentId(),
+        .automation = undefined,
+        .platform = app_platform.Adapter.init(std.testing.io, std.Thread.getCurrentId()),
+        .completion_transport = undefined,
+        .agent_runtime = agent_runtime,
+    };
+    try composition.platform.start(&harness.runtime);
+    defer composition.platform.stop(&harness.runtime);
+    app_platform.Adapter.notifyRequired(&composition.platform);
+    fixture.fake_core.failNextRuntimeDestroy();
+
+    try std.testing.expectError(error.RuntimeDestroyFailed, App.stop(&composition, &harness.runtime));
+
+    try std.testing.expect(composition.platform.services() == null);
+    try std.testing.expect(composition.platform.native_runtime == null);
+    try std.testing.expect(composition.platform.required_wake == null);
+    try std.testing.expectEqual(@as(usize, 1), Wake.calls.load(.monotonic));
+    try std.testing.expect(!composition.agent_shutdown);
 }
 
 test "SDK consumption Application test roots" {

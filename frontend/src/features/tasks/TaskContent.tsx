@@ -294,6 +294,7 @@ export function TaskContent({
   onPrepareOutputEdit,
   webLink,
   onPrepareRetry,
+  onOpenSettings,
   onPreviewFile,
   loadFilePreview,
   onReviewFileChanges,
@@ -324,6 +325,7 @@ export function TaskContent({
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
+  onOpenSettings?: (target: "account" | "models") => void;
   loadFilePreview?: FilePreviewLoader;
   onPreviewFile: (
     taskId: string,
@@ -681,6 +683,30 @@ export function TaskContent({
           const task = plan.task;
           const isCurrent = run.id === currentRun?.id;
           const terminal = run.terminal;
+          const modelError = terminal?.modelError;
+          const recovery = modelError?.recovery;
+          let recoveryMessage: MessageId | undefined;
+          if (recovery && recovery !== "none") {
+            if (recovery === "account_settings") {
+              recoveryMessage =
+                modelError?.category === "payment_required"
+                  ? "run.model_error.recovery.account_payment"
+                  : "run.model_error.recovery.account_authentication";
+            } else if (
+              recovery === "model_settings" &&
+              modelError?.category === "authentication"
+            ) {
+              recoveryMessage =
+                "run.model_error.recovery.provider_authentication";
+            } else if (
+              recovery === "model_settings" &&
+              modelError?.category === "payment_required"
+            ) {
+              recoveryMessage = "run.model_error.recovery.provider_payment";
+            } else {
+              recoveryMessage = `run.model_error.recovery.${recovery}`;
+            }
+          }
           const responseCopyable = responseCopyEligible(run);
           const submittedTime = formatRunTimestamp(
             locale,
@@ -822,7 +848,11 @@ export function TaskContent({
                   state={outcomeState(terminal.outcome)}
                   label={t(
                     terminal.cause === "provider_failure"
-                      ? "run.provider_failure.title"
+                      ? terminal.modelError
+                        ? run.output.responseKind === "partial"
+                          ? "run.provider_failure.partial_title"
+                          : "run.provider_failure.no_response_title"
+                        : "run.provider_failure.title"
                       : terminalMessage(
                           run.output.responseKind,
                           terminal.outcome,
@@ -833,11 +863,14 @@ export function TaskContent({
                       <span className="run-terminal-detail">
                         <span>
                           {t(
-                            run.output.responseKind === "partial"
-                              ? "run.provider_failure.partial_impact"
-                              : "run.provider_failure.no_response_impact",
+                            terminal.modelError
+                              ? `run.model_error.category.${terminal.modelError.category}`
+                              : run.output.responseKind === "partial"
+                                ? "run.provider_failure.partial_impact"
+                                : "run.provider_failure.no_response_impact",
                           )}
                         </span>
+                        {recoveryMessage && <span>{t(recoveryMessage)}</span>}
                         {run.tools.length > 0 && (
                           <span>
                             {t("run.provider_failure.review_tool_effects")}
@@ -856,13 +889,45 @@ export function TaskContent({
                     (isCurrent &&
                       retryAvailable &&
                       retryable(terminal.outcome)) ||
-                    terminal.cause === "provider_failure" ? (
+                    terminal.cause === "provider_failure" ||
+                    terminal.modelError ? (
                       <div className="run-terminal-actions">
+                        {onOpenSettings &&
+                          terminal.cause === "provider_failure" &&
+                          (terminal.modelError?.recovery ===
+                            "account_settings" ||
+                            terminal.modelError?.recovery ===
+                              "model_settings") && (
+                            <button
+                              className="ai-activity-retry focus-ring"
+                              data-primary="true"
+                              disabled={responseDisabled || !synchronized}
+                              onClick={() =>
+                                onOpenSettings(
+                                  terminal.modelError?.recovery ===
+                                    "account_settings"
+                                    ? "account"
+                                    : "models",
+                                )
+                              }
+                            >
+                              {t(
+                                terminal.modelError.recovery ===
+                                  "account_settings"
+                                  ? "run.model_error.open_account"
+                                  : "run.model_error.open_models",
+                              )}
+                            </button>
+                          )}
                         {isCurrent &&
                           retryAvailable &&
                           retryable(terminal.outcome) && (
                             <button
                               className="ai-activity-retry focus-ring"
+                              data-primary={
+                                terminal.cause !== "provider_failure" ||
+                                recovery === "prepare_retry"
+                              }
                               title={
                                 composerHasDraft
                                   ? t("run.review_draft_help")

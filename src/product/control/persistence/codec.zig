@@ -757,6 +757,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, position: usize) !void
         .diagnostic = b(v.diagnostic),
         .diagnostic_truncated = boolean(v.diagnostic_truncated),
         .diagnostic_redacted = boolean(v.diagnostic_redacted),
+        .model_error_json = try batch.ojson(v.model_error),
         .event_projection_failure = ot(v.event_projection_failure),
         .next_activity_order = try batch.u(v.next_activity_order),
         .input_tokens = try batch.u(v.usage.input_tokens),
@@ -794,6 +795,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.diagnostic = try row.b("diagnostic");
     v.diagnostic_truncated = try row.boolean("diagnostic_truncated");
     v.diagnostic_redacted = try row.boolean("diagnostic_redacted");
+    v.model_error = try row.ojson(wire.ModelErrorWire, "model_error_json");
     v.event_projection_failure = try row.ot("event_projection_failure");
     v.next_activity_order = try row.u("next_activity_order");
     v.usage.input_tokens = try row.u("input_tokens");
@@ -914,8 +916,8 @@ comptime {
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 26) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
-    // outputs are deliberately unsupported above; production retains them in MWTF.
-    if (std.meta.fields(wire.RunWire).len != 32) @compileError("Review every history SQL field mapping after RunWire changes");
+    // model_error is a nullable typed JSON value read and written with its Run.
+    if (std.meta.fields(wire.RunWire).len != 33) @compileError("Review every history SQL field mapping after RunWire changes");
     // batch.json/row.json preserve the full typed input, including its reading anchor.
     if (std.meta.fields(wire.AdditionalInputWire).len != 11) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");

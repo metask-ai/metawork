@@ -262,6 +262,46 @@ pub fn classifyAgentTerminal(
     };
 }
 
+pub const ModelErrorRecovery = enum { account_settings, model_settings, review_context, revise_instruction, wait, prepare_retry, none };
+
+/// Advice never grants execution, login, payment, or model mutation authority.
+pub fn modelErrorRecovery(detail: *const task_state.RunModelError, cause: ?task_state.RunCause) ModelErrorRecovery {
+    if (cause != .provider_failure) return .none;
+    return switch (detail.detail.category) {
+        .authentication, .payment_required => if (detail.source == .metask) .account_settings else .model_settings,
+        .permission, .not_found, .invalid_request => .model_settings,
+        .context_window => .review_context,
+        .output_limit => .revise_instruction,
+        .rate_limited, .overloaded => .wait,
+        .server_error, .timeout, .connection, .stream_interrupted => .prepare_retry,
+        .unknown => .model_settings,
+    };
+}
+
+test "model recovery advice respects exact source and primary cause without granting replay authority" {
+    var detail: task_state.RunModelError = .{ .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .authentication,
+        .message = "provider failure",
+        .retry = .retryable,
+        .attempts = 1,
+    }) };
+    inline for (.{ agent.ModelError.Category.authentication, .payment_required }) |category| {
+        detail.detail.category = category;
+        detail.source = .metask;
+        try std.testing.expectEqual(.account_settings, modelErrorRecovery(&detail, .provider_failure));
+        detail.source = .custom_provider;
+        try std.testing.expectEqual(.model_settings, modelErrorRecovery(&detail, .provider_failure));
+        detail.source = null;
+        try std.testing.expectEqual(.model_settings, modelErrorRecovery(&detail, .provider_failure));
+    }
+    detail.source = .metask;
+    try std.testing.expectEqual(.none, modelErrorRecovery(&detail, .dependency_contract_failure));
+    try std.testing.expectEqual(.none, modelErrorRecovery(&detail, .event_pipeline_failure));
+    detail.detail.category = .context_window;
+    try std.testing.expectEqual(.review_context, modelErrorRecovery(&detail, .provider_failure));
+}
+
 pub fn classifyCompactTerminal(
     result: *const agent.CompactTerminalResult,
 ) CompactTerminalDecision {

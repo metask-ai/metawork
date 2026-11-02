@@ -690,10 +690,53 @@ export type RunOutcome =
   | "interrupted"
   | "failed"
   | "dependency_contract_failure";
+export const modelErrorCategories = [
+  "authentication",
+  "permission",
+  "payment_required",
+  "not_found",
+  "invalid_request",
+  "context_window",
+  "rate_limited",
+  "overloaded",
+  "server_error",
+  "timeout",
+  "connection",
+  "stream_interrupted",
+  "output_limit",
+  "unknown",
+] as const;
+export const modelErrorRecoveries = [
+  "account_settings",
+  "model_settings",
+  "review_context",
+  "revise_instruction",
+  "wait",
+  "prepare_retry",
+  "none",
+] as const;
+export type RunModelError = {
+  agentRunId: string;
+  category: (typeof modelErrorCategories)[number];
+  message: string;
+  code: string | null;
+  type: string | null;
+  requestId: string | null;
+  httpStatus: number | null;
+  retry: "retryable" | "not_retryable" | "unknown";
+  retryAfterMs: string | null;
+  attempts: string;
+  truncated: boolean;
+  hostRedacted: boolean;
+  hostTruncated: boolean;
+  source: "metask" | "custom_provider" | null;
+  recovery: (typeof modelErrorRecoveries)[number];
+};
 export type RunTerminal = {
   outcome: RunOutcome;
   cause: RunCause | null;
   diagnosticDisposition: "absent" | "withheld";
+  modelError: RunModelError | null;
 };
 export type RunOutput = {
   commentary: string[];

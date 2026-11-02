@@ -10,7 +10,7 @@ import {
 } from "../frontend/src/features/tasks/run-presentation.ts";
 
 function terminal(outcome, cause = null) {
-  return { outcome, cause, diagnosticDisposition: "absent" };
+  return { outcome, cause, diagnosticDisposition: "absent", modelError: null };
 }
 
 test("elapsed time uses the snapshot receipt rather than component mount or event count", () => {

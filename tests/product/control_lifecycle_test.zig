@@ -8118,6 +8118,7 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
             "",
             false,
             false,
+            null,
         ));
         try std.testing.expect(terminal.exclude_on_product_terminal);
     }

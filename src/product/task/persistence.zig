@@ -777,6 +777,59 @@ pub const BindingWire = struct {
 
 pub const OperationWire = struct { kind: []const u8, id: u64 };
 
+pub const ModelErrorWire = struct {
+    source: ?task_state.RunModelError.Source = null,
+    run_id: u64,
+    category: agent.ModelError.Category,
+    code: ?[]const u8,
+    type: ?[]const u8,
+    message: []const u8,
+    http_status: ?u16,
+    request_id: ?[]const u8,
+    retry: agent.ModelError.Retry,
+    retry_after_ms: ?u64,
+    attempts: u32,
+    truncated: bool,
+    host_redacted: bool,
+    host_truncated: bool,
+
+    pub fn fromRecord(record: *const task_state.RunModelError) ModelErrorWire {
+        const value = record.detail.view();
+        return .{
+            .source = record.source,
+            .run_id = value.run_id,
+            .category = value.category,
+            .code = value.code,
+            .type = value.type,
+            .message = value.message,
+            .http_status = value.http_status,
+            .request_id = value.request_id,
+            .retry = value.retry,
+            .retry_after_ms = value.retry_after_ms,
+            .attempts = value.attempts,
+            .truncated = value.truncated,
+            .host_redacted = record.host_redacted,
+            .host_truncated = record.host_truncated,
+        };
+    }
+
+    pub fn toRecord(self: ModelErrorWire) error{InvalidModelError}!task_state.RunModelError {
+        return .{ .source = self.source, .detail = try agent.ModelError.init(.{
+            .run_id = self.run_id,
+            .category = self.category,
+            .code = self.code,
+            .type = self.type,
+            .message = self.message,
+            .http_status = self.http_status,
+            .request_id = self.request_id,
+            .retry = self.retry,
+            .retry_after_ms = self.retry_after_ms,
+            .attempts = self.attempts,
+            .truncated = self.truncated,
+        }), .host_redacted = self.host_redacted, .host_truncated = self.host_truncated };
+    }
+};
+
 pub const RunWire = struct {
     id: u64,
     coverage: []const u8,
@@ -808,6 +861,7 @@ pub const RunWire = struct {
     diagnostic: []const u8,
     diagnostic_truncated: bool,
     diagnostic_redacted: bool,
+    model_error: ?ModelErrorWire = null,
     event_projection_failure: ?[]const u8,
     next_activity_order: u64,
 };
@@ -1541,6 +1595,7 @@ fn projectRun(
             "",
         .diagnostic_truncated = if (terminal_payload) |payload| payload.diagnostic_truncated else false,
         .diagnostic_redacted = if (terminal_payload) |payload| payload.diagnostic_redacted else false,
+        .model_error = if (terminal_payload) |payload| if (payload.model_error) |value| ModelErrorWire.fromRecord(value) else null else null,
         .event_projection_failure = if (run.event_projection_failure) |failure| @tagName(failure) else null,
         .next_activity_order = run.next_activity_order,
     };
@@ -2051,6 +2106,13 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             .redacted = output.redacted or !std.mem.eql(u8, locator, output.locator),
         };
     }
+    const model_error_storage: ?*task_state.RunModelError = if (wire.model_error) |value| saved: {
+        const detail = value.toRecord() catch return error.TaskStoreCorrupt;
+        const storage = try projection.allocator.create(task_state.RunModelError);
+        storage.* = detail;
+        break :saved storage;
+    } else null;
+    errdefer if (model_error_storage) |storage| projection.allocator.destroy(storage);
     const phase: task_state.RunPhase = if (interrupted)
         .interrupted
     else
@@ -2126,6 +2188,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             .diagnostic_len = wire.diagnostic.len,
             .diagnostic_truncated = wire.diagnostic_truncated,
             .diagnostic_redacted = wire.diagnostic_redacted,
+            .model_error = model_error_storage,
         },
         .terminal_observed = true,
         .event_stream_finalized = true,
@@ -2135,6 +2198,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         else
             null,
         .terminal_diagnostic = diagnostic,
+        .model_error_storage = model_error_storage,
         .next_activity_order = wire.next_activity_order,
     };
 }
@@ -2584,6 +2648,10 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
     if (run.execution_model_owned)
         projection.free(@constCast(run.execution_model));
     projection.free(run.terminal_diagnostic);
+    if (run.model_error_storage) |storage| {
+        std.crypto.secureZero(u8, std.mem.asBytes(storage));
+        projection.allocator.destroy(storage);
+    }
     run.* = undefined;
 }
 
@@ -3540,6 +3608,10 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
             return error.Invalid;
         if (run.additional_inputs.len > agent.max_submitted_inputs) return error.Invalid;
+        if (run.model_error) |value| {
+            if (!terminalRunPhase(run.phase)) return error.Invalid;
+            _ = value.toRecord() catch return error.Invalid;
+        }
         var previous_input_id: u64 = 0;
         var previous_sequence: u32 = 0;
         for (run.additional_inputs) |record| {
@@ -5749,11 +5821,26 @@ const RestoreTestMemory = struct {
     }
 };
 
-fn restoreHistoryAllocationCase(allocator: std.mem.Allocator) !void {
+fn restoreHistoryAllocationCase(allocator: std.mem.Allocator, with_model_error: bool) !void {
     var memory: RestoreTestMemory = .{ .allocator = allocator };
     const projection = memory.projection();
     var wire = reviewTestRun();
     wire.diagnostic = "safe diagnostic";
+    if (with_model_error) wire.model_error = .{
+        .run_id = std.math.maxInt(u64),
+        .category = .rate_limited,
+        .message = "服务拒绝",
+        .code = "future-code",
+        .type = "",
+        .request_id = null,
+        .http_status = 200,
+        .retry = .unknown,
+        .retry_after_ms = std.math.maxInt(u64),
+        .attempts = 2,
+        .truncated = true,
+        .host_redacted = true,
+        .host_truncated = false,
+    };
     var inputs = [_]AdditionalInputWire{.{ .id = 1, .after_output_count = 0, .operation_id = "input-1", .text = "constraint", .redacted = false, .sequence = null, .adopted_turn = null, .order = null, .state = "unknown" }};
     wire.additional_inputs = &inputs;
     var restored = try restoreRun(projection, wire);
@@ -5776,7 +5863,8 @@ fn restoreHistoryAllocationCase(allocator: std.mem.Allocator) !void {
 }
 
 test "restored history allocates actual contents without Run execution and preserves wire facts under OOM" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, restoreHistoryAllocationCase, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, restoreHistoryAllocationCase, .{false});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, restoreHistoryAllocationCase, .{true});
     // This is a history record memory bound, independent of the input capacity.
     try std.testing.expect(@sizeOf(task_state.RunRecord) < 4096);
 }

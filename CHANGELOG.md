@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-01
+
+### Added
+
+- Task Panel 新增按需展开的工作区文件树，支持分层浏览、键盘导航、刷新及文本和图片预览。
+- Models 设置支持添加、编辑、测试和删除用户模型；任务输入区统一列出已就绪模型，并显示本地厂商品牌图标。
+- Skill 中心支持从 `.skill`、`.zip` 或目录导入，以及导出、重新导入和卸载受管 Skill。
+- Run 新增模型等待、思考、输出、工具调用和收尾等活动状态；脱敏后的模型错误随历史保存，并提供对应恢复提示。
+
+### Changed
+
+- 调整会话阅读区、消息、Composer 和历史导航的排版与操作层级。
+- Skill 在后续交互 Run 前自动采用最新目录；Office Skills 合并共享资源，并补充 XLSX 验证、PPTX 收尾检查及 Windows 归档导入修复。
+- Metask credential 支持续期而无需重建 Session；AgentCore 升级至 `0.13.0-dev+723af0baee8d` / ABI revision 26，并刷新全平台 bundles。
+
+### Fixed
+
+- 修复 HTTP、图片生成、MCP、OAuth 和主循环唤醒在并发取消时可能遗留等待或形成死锁的问题。
+- 修复 Manual Workspace 无法安全移除、项目与 Task 右键菜单行为不一致，以及用量热力图月份标签错误的问题。
+- 修复审批上下文丢失或超出容量，以及模型失败后文件观察状态未正确收口的问题。
+
 ## [0.2.8] - 2026-10-28
 
 ### Added
@@ -473,7 +494,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.8...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/metask-ai/metawork/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/metask-ai/metawork/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/metask-ai/metawork/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/metask-ai/metawork/compare/v0.2.5...v0.2.6

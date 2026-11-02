@@ -4794,6 +4794,7 @@ export default function App() {
                     : undefined
                 }
                 onPrepareRetry={prepareRetry}
+                onOpenSettings={openSettings}
                 onPreviewFile={openFilePreview}
                 loadFilePreview={loadFilePreview}
                 onReviewFileChanges={openFileChanges}

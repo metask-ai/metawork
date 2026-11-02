@@ -1,0 +1,108 @@
+{
+  "id": "E-WIN-PRODUCT-MODEL-ERROR-20261031",
+  "date": "2026-10-31",
+  "platform": "Windows x64",
+  "branch": "feat/product-model-error-delivery",
+  "implementationRevision": "b361943fa8555f679933363d9f85caf4fcdf9b5f",
+  "qaDelta": "Disclosure receives a 44px target; hashes below bind the executed QA harness and final CSS before their commit.",
+  "canonicalCore": {
+    "version": "0.13.0-dev+723af0baee8d",
+    "sourceCommit": "723af0baee8da6b7768f72ab4f869d4d847bde1e",
+    "lockSha256": "7bf8abbe30b4e794db252098c3b67e83501ae2c62b7905c0df82ba4554c021f2",
+    "manifestSha256": "7bf8abbe30b4e794db252098c3b67e83501ae2c62b7905c0df82ba4554c021f2"
+  },
+  "nativeExecutable": {
+    "artifact": "automation Debug",
+    "sha256": "49647fa71b33dc58f12ab3a9a8d3de0eb47eb79cc2a95e9f58ea563d4d581a1b"
+  },
+  "qaFiles": {
+    "scripts/agentcore-model-error-vertical.mjs": "f9cae02d34f4a05424f8c36eeb1aafddbc15d24e47d2867d90fddcd5904ae5b0",
+    "scripts/test-agentcore-vertical-macos.mjs": "d9b161663b9e893522bff77c0a257ece14544a901fab13bbebb85ca30a6e5654",
+    "frontend/src/index.css": "280a99394d015ec5bf27383fc8939a76b355f798b470d485d1f9ef2c55c7603e"
+  },
+  "entry": "METAWORK_MODEL_ERROR_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs",
+  "realDesktop": {
+    "platform": "win32",
+    "taskId": "1",
+    "runId": "1",
+    "modelError": {
+      "agentRunId": "1",
+      "category": "authentication",
+      "message": "MODEL_ERROR_VERTICAL ************************************* rejected",
+      "code": "authentication_error",
+      "type": "authentication_error",
+      "requestId": null,
+      "httpStatus": 401,
+      "retry": "not_retryable",
+      "retryAfterMs": null,
+      "attempts": "1",
+      "truncated": false,
+      "hostRedacted": true,
+      "hostTruncated": false,
+      "source": "custom_provider",
+      "recovery": "model_settings"
+    },
+    "hostCredentialScrubbed": true,
+    "accountAndModelsUnchanged": true,
+    "explicitSettingsAndComposerOnlyRetry": true,
+    "sqliteReopen": true,
+    "retiredStoreUnchanged": true,
+    "keyboardDisclosure": true,
+    "widths": [
+      1320,
+      390
+    ],
+    "themes": [
+      "light",
+      "dark"
+    ]
+  },
+  "checks": {
+    "focusedNative": {
+      "passed": 353,
+      "skipped": 2,
+      "steps": "20/20"
+    },
+    "formalNativeRecheck": {
+      "entry": "node node_modules/@native-sdk/cli/bin/native.js test . --yes -Dtarget=x86_64-windows-msvc",
+      "passed": 1655,
+      "skipped": 8,
+      "steps": "247/247"
+    },
+    "bridgeRendererAndHarness": {
+      "passed": 221,
+      "failed": 0
+    },
+    "fullNode": {
+      "passed": 1070,
+      "failed": 2,
+      "skipped": 9
+    },
+    "nodeBaseline": {
+      "revision": "5ff1ff3b",
+      "suiteCount": 2,
+      "passed": 26,
+      "failed": 2,
+      "sameFailures": [
+        "frontend-boundaries: Composer ModelSelector reaches into feature models",
+        "scheduled-tasks: expected default model or connection changed, actual The model or connection changed"
+      ]
+    },
+    "format": "npm run format:check passed",
+    "migration0001Unchanged": true
+  },
+  "localEvidence": {
+    "desktop": ".zig-cache/model-error-desktop",
+    "formalNative": ".zig-cache/product-model-error-native-recheck.log",
+    "allPhases": ".zig-cache/product-model-error-final-test.log",
+    "baseline": ".zig-cache/product-model-error-baseline.log",
+    "renderer": ".zig-cache/product-model-error-final-renderer.log"
+  },
+  "limitations": [
+    "Full npm test is not green: the two Node failures reproduce in the isolated starting revision; no guard or assertion was weakened.",
+    "The first formal Native attempt timed out in Account credential store and MCP policy runners; the unchanged formal graph passed on recheck. This does not establish the timeout root cause.",
+    "No macOS, Windows ARM64, distribution, real payment, or live Metask authorization claim.",
+    "Product introduces no model-error logging path. The canonical Core itself emits raw HTTP error bodies to stderr under diagnostic capture; global upstream stderr sanitization is not established by this Product acceptance.",
+    "Retired legacy files remain unchanged, may retain plaintext later recognized as credentials, and are neither merged nor deleted."
+  ]
+}

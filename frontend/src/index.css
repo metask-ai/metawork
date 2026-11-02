@@ -3126,6 +3126,11 @@ button.run-process-tool:hover {
   border: 0;
 }
 
+.run-terminal-actions .ai-activity-retry[data-primary="false"] {
+  color: var(--ui-content-muted);
+  font-weight: 500;
+}
+
 .ai-activity-details {
   border: 1px solid var(--ui-border);
   color: var(--ui-content-muted);
@@ -9375,6 +9380,19 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-diagnostics summary {
   cursor: pointer;
   width: fit-content;
+  min-height: 44px;
+  padding-block: 12px;
+}
+.model-error-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.run-diagnostics .task-facts > div {
+  flex-wrap: wrap;
+}
+.run-diagnostics .task-facts dd {
+  min-width: 0;
 }
 .task-facts {
   display: grid;

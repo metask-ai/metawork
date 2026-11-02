@@ -782,6 +782,7 @@ pub const PreparedRun = struct {
                 "",
                 false,
                 true,
+                null,
             );
             run_record.terminal_observed = true;
             task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
@@ -4146,8 +4147,7 @@ pub const Runtime = struct {
             target_run.pending_file_change_artifacts == 0 and
             target_run.file_change_observation == .collecting)
         {
-            const terminal = task_state.terminalPayload(target_run).?;
-            target_run.file_change_observation = if (terminal.phase == .completed and !target_run.file_changes_known_loss) .complete else .incomplete;
+            target_run.file_change_observation = task_state.finalizedFileChangeObservation(target_run);
         }
         task.durable.recent_order = self.takeRecentOrder();
         return true;
@@ -5186,7 +5186,7 @@ pub const Runtime = struct {
         writer.writeAll(",\"nextBeforeRunId\":") catch return error.SnapshotTooLarge;
         if (older) writer.print("\"{d}\"", .{task.durable.runs[start].?.id}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"runManifest\":") catch return error.SnapshotTooLarge;
-        try task_view.writeRunManifest(writer, task);
+        try task_view.writeRunManifest(writer, effects.text, task);
         writer.writeAll(",\"task\":") catch return error.SnapshotTooLarge;
         try task_view.writeProjection(writer, .{
             .task = task,
@@ -6654,6 +6654,45 @@ fn redactInputProjection(input: *task_state.RunInputRecord, credential: []const 
     }
 }
 
+fn redactModelError(observation: *task_state.RunModelError, credential: []const u8, effects: RedactionEffects) void {
+    const message = &observation.detail.message;
+    observation.host_redacted = effects.redact(message.bytes[0..message.len], credential) or observation.host_redacted;
+    inline for (.{ "code", "type", "request_id" }) |field| {
+        if (@field(observation.detail, field)) |*text|
+            observation.host_redacted = effects.redact(text.bytes[0..text.len], credential) or observation.host_redacted;
+    }
+}
+
+test "late model error credential redaction covers every free text field without changing category" {
+    const Noop = struct {
+        fn release(_: *anyopaque, _: usize) void {}
+    };
+    var observation: task_state.RunModelError = .{ .detail = try agent.ModelError.init(.{
+        .run_id = 42,
+        .category = .authentication,
+        .message = "late-credential authentication",
+        .code = "late-credential",
+        .type = "late-credential",
+        .request_id = "late-credential",
+        .retry = .unknown,
+        .attempts = 1,
+    }) };
+    const effects: RedactionEffects = .{
+        .redact_fn = task_persistence.security.redactBytes,
+        .release_projection_bytes_fn = Noop.release,
+        .context = undefined,
+    };
+    redactModelError(&observation, "late-credential", effects);
+    redactModelError(&observation, "authentication", effects);
+    const value = observation.detail.view();
+    try std.testing.expect(observation.host_redacted);
+    try std.testing.expectEqual(.authentication, value.category);
+    try std.testing.expectEqual(.unknown, value.retry);
+    inline for (.{ "code", "type", "request_id" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, @field(value, field).?, "late-credential") == null);
+    try std.testing.expect(std.mem.indexOf(u8, value.message, "authentication") == null);
+}
+
 fn redactTaskProjection(
     task: *task_state.Task,
     credential: []const u8,
@@ -6725,6 +6764,7 @@ fn redactTaskProjection(
                 run.terminal_diagnostic[0..mutable.diagnostic_len],
                 credential,
             ) or mutable.diagnostic_redacted;
+            if (mutable.model_error) |observation| redactModelError(observation, credential, effects);
         }
         if (run.execution != null and run.execution.?.automatic_title.state.load(.acquire) == .ready and
             run.execution.?.automatic_title.generated)
@@ -8145,6 +8185,8 @@ fn reserveRun(
     @memset(additional, null);
     const run_execution = try self.allocator.create(task_state.RunExecution);
     errdefer self.allocator.destroy(run_execution);
+    const model_error_storage = try self.allocator.create(task_state.RunModelError);
+    errdefer self.allocator.destroy(model_error_storage);
     run_execution.* = .{};
     task.durable.next_run_generation += 1;
     var title = task_state.AutomaticTitle{};
@@ -8170,6 +8212,8 @@ fn reserveRun(
         .terminal_diagnostic = diagnostic,
         .initial_credentials = .{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} },
         .execution = run_execution,
+        .model_error_storage = model_error_storage,
+        .model_error_source = if (std.mem.eql(u8, execution.target.provider_id, models_contract.metask_source_id)) .metask else .custom_provider,
     };
     return slot;
 }
@@ -9139,6 +9183,10 @@ fn deinitRun(
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
     releaseProjectedSlice(self, effects, run.terminal_diagnostic);
+    if (run.model_error_storage) |storage| {
+        std.crypto.secureZero(u8, std.mem.asBytes(storage));
+        self.allocator.destroy(storage);
+    }
     run.* = undefined;
 }
 

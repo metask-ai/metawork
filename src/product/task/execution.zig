@@ -337,6 +337,7 @@ pub fn cancelRun(context: *anyopaque) void {
         "",
         false,
         true,
+        null,
     );
     publishAutomaticTitleFallback(run);
     job.notifier.notify();
@@ -502,6 +503,7 @@ pub fn commitRunTerminal(
     diagnostic: []const u8,
     source_diagnostic_truncated: bool,
     exclude_on_product_terminal: bool,
+    model_error: ?state.RunModelError,
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
@@ -515,6 +517,12 @@ pub fn commitRunTerminal(
             .diagnostic_len = projected.len,
             .diagnostic_truncated = source_diagnostic_truncated or projected.truncated,
             .diagnostic_redacted = projected.redacted,
+            .model_error = if (model_error) |value| saved: {
+                const storage = run.model_error_storage.?;
+                storage.* = value;
+                storage.source = run.model_error_source;
+                break :saved storage;
+            } else null,
         };
         run.terminal_publication.store(.published, .release);
         return true;
@@ -570,6 +578,7 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         diagnostic,
         truncated,
         false,
+        if (result.model_error) |detail| projectModelError(projector, detail, &run.initialRedactionSecrets()) else null,
     );
 }
 
@@ -585,7 +594,28 @@ fn commitBeginFailure(projector: TextProjector, run: *state.RunRecord, failure: 
         "",
         false,
         true,
+        null,
     );
+}
+
+fn projectModelError(projector: TextProjector, value: agent.ModelError, secrets: []const []const u8) state.RunModelError {
+    var result: state.RunModelError = .{ .detail = value };
+    const source = value.view();
+    const message = projector.project(&result.detail.message.bytes, source.message, secrets);
+    result.detail.message.len = message.len;
+    @memset(result.detail.message.bytes[message.len..], 0);
+    result.host_redacted = message.redacted;
+    result.host_truncated = message.truncated;
+    inline for (.{ "code", "type", "request_id" }) |field| {
+        if (@field(result.detail, field)) |*target| {
+            const projected = projector.project(&target.bytes, @field(source, field).?, secrets);
+            target.len = projected.len;
+            @memset(target.bytes[projected.len..], 0);
+            result.host_redacted = result.host_redacted or projected.redacted;
+            result.host_truncated = result.host_truncated or projected.truncated;
+        }
+    }
+    return result;
 }
 
 fn commitCompactTerminal(
@@ -852,5 +882,132 @@ test "callback diagnostic enrichment preserves terminal decisions and bounded cr
                 try std.testing.expect(std.mem.indexOf(u8, diagnostic, if (observed) "decode_failed" else "unobserved") != null);
             }
         }
+    }
+}
+
+test "terminal file observation loss is retained even without a file record" {
+    var run: state.RunRecord = .{
+        .id = 7,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .openai_chat_completions,
+        .execution_model = "fixture",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = &.{} } },
+        .commentary_ends = &.{},
+        .tools = &.{},
+        .file_change_observation = .collecting,
+        .terminal_diagnostic = &.{},
+    };
+    const result: agent.TerminalResult = .{
+        .allocator = std.testing.allocator,
+        .diagnostic_storage = &.{},
+        .diagnostic_len = 0,
+        .diagnostic_truncated = false,
+        .abi_status = .ok,
+        .raw_status_code = null,
+        .stop_reason = .end_turn,
+        .raw_stop_reason_code = null,
+        .abort_status = null,
+        .raw_abort_status_code = null,
+        .termination_signal = null,
+        .failure = null,
+        .session_disposition_at_completion = .reusable,
+        .file_changes_lost = true,
+    };
+    try std.testing.expect(commitAgentTerminal(.{ .project_fn = projectSanitized }, &run, &result));
+    run.event_stream_finalized = true;
+    try std.testing.expectEqual(@as(usize, 0), run.file_changes.len);
+    try std.testing.expect(run.file_changes_known_loss);
+    try std.testing.expectEqual(state.FileChangeObservation.incomplete, state.finalizedFileChangeObservation(&run));
+    try std.testing.expectEqual(state.RunOutcome.completed, state.productTerminalFacts(&run).?.outcome);
+}
+
+test "model error publication owns sanitized fields and preserves primary and supplemental terminal facts" {
+    for ([_]bool{ false, true }) |callback_failed| {
+        var storage: [32]u8 = undefined;
+        var model_error_storage: state.RunModelError = undefined;
+        var run: state.RunRecord = .{
+            .id = 7,
+            .generation = 1,
+            .execution_generation = 1,
+            .execution_protocol = .openai_chat_completions,
+            .execution_model = "fixture",
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .input = .{ .text = .{ .value = &.{} } },
+            .commentary_ends = &.{},
+            .tools = &.{},
+            .terminal_diagnostic = &storage,
+            .model_error_storage = &model_error_storage,
+            .initial_credentials = .{ "SECRET", "SECRET-LONG" },
+        };
+        var result: agent.TerminalResult = .{
+            .allocator = std.testing.allocator,
+            .diagnostic_storage = &.{},
+            .diagnostic_len = 0,
+            .diagnostic_truncated = false,
+            .abi_status = if (callback_failed) .callback_failed else .ok,
+            .raw_status_code = null,
+            .stop_reason = if (callback_failed) null else .api_error,
+            .raw_stop_reason_code = null,
+            .abort_status = null,
+            .raw_abort_status_code = null,
+            .termination_signal = if (callback_failed) .{ .event_pump_failure = .invalid_event } else null,
+            .failure = if (callback_failed) .abi_status else null,
+            .session_disposition_at_completion = if (callback_failed) .poisoned else .reusable,
+            .model_error = try agent.ModelError.init(.{
+                .run_id = 900,
+                .category = .authentication,
+                .message = "服务 SECRET-LONG refused",
+                .code = "SECRET-code",
+                .type = "SECRET-type",
+                .request_id = "SECRET-request",
+                .retry = .unknown,
+                .attempts = 2,
+                .http_status = 200,
+                .truncated = true,
+            }),
+        };
+        try std.testing.expect(commitAgentTerminal(.{ .project_fn = projectSanitized }, &run, &result));
+        result.deinit();
+        const terminal = state.terminalPayload(&run).?;
+        const observation = terminal.model_error.?;
+        const detail = observation.detail.view();
+        try std.testing.expectEqual(@as(u64, 900), detail.run_id);
+        try std.testing.expectEqual(.authentication, detail.category);
+        try std.testing.expectEqualStrings("服务 *** refused", detail.message);
+        inline for (.{ "code", "type", "request_id" }) |field|
+            try std.testing.expect(std.mem.indexOf(u8, @field(detail, field).?, "SECRET") == null);
+        try std.testing.expect(observation.host_redacted);
+        try std.testing.expect(!observation.host_truncated);
+        try std.testing.expect(detail.truncated);
+        try std.testing.expectEqual(@as(u32, 2), detail.attempts);
+        try std.testing.expectEqual(@as(?u16, 200), detail.http_status);
+        try std.testing.expect(std.mem.indexOf(u8, &observation.detail.message.bytes, "SECRET") == null);
+        if (callback_failed) {
+            try std.testing.expect(terminal.cause != .provider_failure);
+        } else try std.testing.expectEqual(state.RunCause.provider_failure, terminal.cause.?);
+        run.event_stream_finalized = true;
+        run.event_projection_failure = .dependency_contract_failure;
+        try std.testing.expectEqual(state.RunOutcome.dependency_contract_failure, state.productTerminalFacts(&run).?.outcome);
+        try std.testing.expect(state.terminalPayload(&run).?.model_error != null);
+        try std.testing.expect(!commitAgentTerminal(.{ .project_fn = projectSanitized }, &run, &.{
+            .allocator = std.testing.allocator,
+            .diagnostic_storage = &.{},
+            .diagnostic_len = 0,
+            .diagnostic_truncated = false,
+            .abi_status = .ok,
+            .raw_status_code = null,
+            .stop_reason = .end_turn,
+            .raw_stop_reason_code = null,
+            .abort_status = null,
+            .raw_abort_status_code = null,
+            .termination_signal = null,
+            .failure = null,
+            .session_disposition_at_completion = .reusable,
+        }));
+        try std.testing.expectEqualStrings(detail.message, state.terminalPayload(&run).?.model_error.?.detail.view().message);
     }
 }

@@ -163,7 +163,7 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 
 在正式 owner 测试、Bridge/Renderer fixture 与真实 lifecycle 分层观察；真实桌面另外验证 Windows 原报告、DOM/WebView2 与 New task 加号，macOS picker/Native 路径、两平台图片粘贴、公开 SDK codec 和 writer 取消。模拟不能替代手势和 codec，文本插话 Windows 脚本不能替代附件 vertical。
 
-执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。初验中未归因的权限选择测试，现已在旧基线的延迟帧条件下复现，并通过等待目标选项实际获得焦点修复；原有产品断言保留。当前仓库验证结果统一见收口证据；不以跳过用例、弱化 guard 或更改无关产品行为获得全绿。
+执行按[验证规范](../validation.md)：Renderer typecheck 与受影响 attachment/composer/contract suites；Product Control/Task roots；正式 Native graph；canonical bundle 下的 lifecycle；必要平台与内存压力证据。没有 staged bundle、平台或其他 required evidence 时明确失败或列为未完成，不绕过 verifier。初验中未归因的权限选择测试，已在旧基线的延迟帧条件下复现，并通过等待目标选项实际获得焦点修复；原有产品断言保留。该轮仓库验证结果见收口证据；准备 PR 时合入最新主干后的验证由对应提交和 PR 记录负责，不改写历史证据。不以跳过用例、弱化 guard 或更改无关产品行为获得全绿。
 
 ## 8. 复盘与取舍
 
@@ -196,3 +196,5 @@ Attachment Runtime 每个资源记录最多持有一份编码预览，单图已�
 已提交方案、资源解耦、Host 准入、Renderer 和资源验收；本节随最后的合同收口提交。TinyKG 对最后一条 `1546 depends_on 1545` 返回 `CycleCheckUncertain`，未修改 guard 或替换关系绕过；实际等到 `1545` 完成后才认领收口任务。该依赖边的缺失是跟踪工具限制，不应宣称已成功写入。
 
 自评收口使用新的 TinyKG 根任务 `1570`，子任务 `1571`、`1572` 与 `1573` 跟踪基线产物准入、debt 取消重试及最终验证；最终验证依赖前两项。`d47827f2` 修复基线身份校验与证据生成，`7b6fb3ce` 补齐新版/旧协议在发布前后的饱和取消回归，并修复实际发现的 `cleanup_pending` 重试误报，`e904a09d` 独立修复权限测试的焦点竞态。每项均记录验证及提交决定；基线与测试修复不新增产品接口或改变资源配额。
+
+准备 PR 时合入 `main` 的 `e3c193bf`，保留原实施与证据提交身份。主干已独立修复此前的 ModelSelector 依赖边界、Schedule 文案断言与权限测试；权限测试的重叠处采用主干版本，附件 PR 不再保留该文件的独立差异。交付由 TinyKG 根任务 `1578` 及子任务 `1579`、`1580` 跟踪主干整合和推送/PR。
