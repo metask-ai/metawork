@@ -42,7 +42,7 @@ test("Skills excludes workspace feedback from candidates and announcements while
   state = observeFeedback(state, "connection", "condition", connection);
   state = publishStatus(
     state,
-    attentionStatus("skill.import_failed", { scope: "skills" }),
+    attentionStatus("skills.catalog_refresh_failed", { scope: "skills" }),
   );
   state = observeFeedback(state, "account", "result", account);
   const skills = { ...context, route: "skills" };

@@ -496,6 +496,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
 
+### E-WIN-FEEDBACK-REVIEW-20261102
+
+2026-11-02，Windows x64，Renderer runtime source `5f0010c2`。本轮四项评审反例均先在回归中失败，修复后通过：关闭刷新调度失败说明仍保留实时恢复入口；账号待确认不遮蔽新的错误或安全诊断；Skills 不接收 workspace 范围反馈且连接优先；未迁移来源超时在可信读取成功后退出命令栏，读取失败仅归连接。17 个相关 Renderer/Node suite 共 426 项通过；正式 `npm run check`、生产 Renderer/CSP、隔离 automation Debug 构建通过，Host、Bridge wire 与持久化未变。
+
+隔离 Windows WebView2 测试入口沿用[基础机制验收](#e-win-feedback-foundation-20261102)的生产模块与合成 BridgeClient 边界。除复核 1440/390 px 明暗主题、详情、焦点、连接恢复外，实际操作验证超时后新错误及同错误码的新诊断替换待确认；关闭说明后仍能点击账号操作区的恢复按钮，且只发送一次恢复命令。实机发现的窄窗按钮挤压已收口为统一账号操作位布局，四组视口/主题均确认按钮完整、位于面板内、无横向溢出且命中高度至少 44 px。没有自动重放；窗口错误、未处理 rejection 和捕获的 console error 均为空。
+
+证据为 `.zig-cache/feedback-review-webview-evidence/observations.json`、同目录截图及 `.zig-cache/feedback-review-{final-tests,final-check,build,fixture-build,webview}.log`；观测 JSON 绑定代码 revision、测试入口及 Native/前端资源摘要。此证据不证明真实 Metask、OAuth、系统凭据或定时器故障恢复、系统键盘手势、安装分发或其他平台。此前基础机制证据继续只证明当时版本，不覆盖本轮发现的问题。
+
 ### E-WIN-FEEDBACK-FOUNDATION-20261102
 
 2026-11-02，Windows x64，Renderer runtime source `e00fa3028420fa3ec8ff4d6a4f111b56ae795fe9`。按 [反馈协调与生命周期](ui-design.md#44-反馈协调与生命周期) 验证连接状况与账号最近结果的协调。17 个受影响 Renderer/Node suite 共 421 项通过；正式 `npm run check` 通过 canonical AgentCore 0.13.0 ABI 1 revision 26、Renderer wire/typecheck 与严格 Native manifest 检查。正式 Renderer build/CSP 检查及隔离 automation Debug 构建通过，未改变 Host、Bridge wire 或持久化合同。
