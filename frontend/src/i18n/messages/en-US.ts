@@ -3,8 +3,6 @@ export const enUS = {
   "feedback.dismiss": "Dismiss this notice",
   "feedback.open": "View feedback ({count})",
   "feedback.account": "View account operation result",
-  "feedback.operation_unknown":
-    "The outcome of {operation} is not confirmed. Check the current state before continuing.",
   "account.feedback.title": "Latest account operation result",
   "account.feedback.sending": "Sending account request…",
   "account.feedback.received":

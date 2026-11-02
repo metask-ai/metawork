@@ -3715,12 +3715,17 @@ export default function App() {
     audience: StatusAudience,
   ) {
     if (!(error instanceof BridgeCommandTimeoutError)) return false;
-    setStatus(
-      attentionStatus("feedback.operation_unknown", audience, {
-        values: { operation: t(operation) },
-      }),
-    );
-    await refreshSnapshot().catch(() => undefined);
+    try {
+      await refreshSnapshot();
+      // Preserve legacy replacement semantics; the caller checks business facts.
+      setStatus(
+        quietStatus("command.timeout_reconciled", audience, {
+          values: { operation: t(operation) },
+        }),
+      );
+    } catch {
+      // The connection owns sync failure; do not leave a second stale warning.
+    }
     return true;
   }
   const connectionShellStatus = statuses.entries.connection;

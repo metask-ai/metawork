@@ -4,7 +4,6 @@ export const zhCN: Record<MessageId, string> = {
   "feedback.dismiss": "关闭这条提示",
   "feedback.open": "查看反馈（{count}）",
   "feedback.account": "查看账号操作结果",
-  "feedback.operation_unknown": "无法确认{operation}的结果，请先检查当前状态。",
   "account.feedback.title": "最近的账号操作结果",
   "account.feedback.sending": "正在发送账号请求。",
   "account.feedback.received": "账号请求已接收，结果尚待当前状态确认。",
