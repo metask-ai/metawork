@@ -67,7 +67,7 @@ async function fixture(t, mutateManifest = () => {}) {
     schema_version: 1,
     vendor: "metask",
     name: "agentcore",
-    version: "0.1.0-dev+0123456789ab",
+    version: "0.1.0",
     source: {
       commit: "0123456789abcdef0123456789abcdef01234567",
       dirty: false,
@@ -462,12 +462,17 @@ test("staged preflight refuses a retired revision lock", async (t) => {
 
 test("rejects a self-consistent bundle that differs from the repository lock", async (t) => {
   const { root, manifest } = await fixture(t);
-  const expectedManifest = structuredClone(manifest);
-  expectedManifest.version = "0.1.0-another-build";
-  await assert.rejects(
-    validateAgentCoreBundle(root, { ...injectedChecks, expectedManifest }),
-    /repository lock/,
-  );
+  for (const mutate of [
+    (lock) => (lock.version = "0.1.1"),
+    (lock) => (lock.source.commit = "f".repeat(40)),
+  ]) {
+    const expectedManifest = structuredClone(manifest);
+    mutate(expectedManifest);
+    await assert.rejects(
+      validateAgentCoreBundle(root, { ...injectedChecks, expectedManifest }),
+      /repository lock/,
+    );
+  }
 });
 
 test("rejects a missing or legacy binary ABI revision", async (t) => {
@@ -538,23 +543,37 @@ test("rejects a bundle for another target", async (t) => {
   );
 });
 
-test("rejects dirty provenance and versions that do not match source identity", async (t) => {
+test("rejects dirty provenance for a release bundle", async (t) => {
   const dirty = await fixture(t, (manifest) => {
     manifest.source.dirty = true;
-    manifest.version = "0.1.0-dev+0123456789ab.dirty";
   });
   await assert.rejects(
     validateAgentCoreBundle(dirty.root, injectedChecks),
     /must come from a clean source checkout/,
   );
+});
 
-  const mismatched = await fixture(t, (manifest) => {
-    manifest.version = "0.1.0-dev+0123456789ab.dirty";
-  });
-  await assert.rejects(
-    validateAgentCoreBundle(mismatched.root, injectedChecks),
-    /version does not match source identity/,
-  );
+test("rejects development, prerelease and noncanonical release versions", async (t) => {
+  for (const version of [
+    "0.1.0-dev+0123456789ab",
+    "0.1.0-rc.1",
+    "0.1.0+0123456789ab",
+    "v0.1.0",
+    "00.1.0",
+    "0.01.0",
+    "0.1.00",
+    "0.1",
+    "0.1.0\n",
+  ]) {
+    const candidate = await fixture(t, (manifest) => {
+      manifest.version = version;
+    });
+    await assert.rejects(
+      validateAgentCoreBundle(candidate.root, injectedChecks),
+      /must be a stable release/,
+      version,
+    );
+  }
 });
 
 test("rejects the revision 2 manifest layout", async (t) => {

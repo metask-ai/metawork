@@ -362,15 +362,10 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     manifest.source.dirty === false,
     "AgentCore bundle must come from a clean source checkout",
   );
-  const escapedCommitPrefix = commit.slice(0, 12);
-  const versionPattern = new RegExp(
-    `^[0-9]+\\.[0-9]+\\.[0-9]+-dev\\+${escapedCommitPrefix}${
-      manifest.source.dirty ? "\\.dirty" : ""
-    }$`,
-  );
   requireValue(
-    versionPattern.test(version),
-    "AgentCore version does not match source identity",
+    version === version.trim() &&
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version),
+    "AgentCore version must be a stable release (major.minor.patch)",
   );
 
   const zigVersion = requireString(

@@ -4,7 +4,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以�
 
 ## 当前状态
 
-当前版本已经形成可运行的同进程桌面基线，覆盖 Account 登录与执行准备、Workspace/Task、Text/Skill Run、同步 permission、取消、Renderer reload、产品历史和正常重启后的 Conversation attachment 恢复。正式构建只消费已安装到 `.agentcore/bundles/<target-id>` 的 target-specific Metask AgentCore bundle。
+当前版本已经形成可运行的同进程桌面基线，覆盖 Account 登录与执行准备、Workspace/Task、Text/Skill Run、同步 permission、取消、Renderer reload、产品历史和正常重启后的 Conversation attachment 恢复。
 
 当前仍是同进程 prototype，不宣称具备 AgentCore 进程隔离、crash recovery、跨进程 in-flight Run 恢复、strict Workspace security 或自动更新。精确产品范围见[产品需求](docs/requirements.md)，系统边界见[高层架构](docs/architecture.md)，平台证据和未验证能力见[验证规范](docs/validation.md)。
 
@@ -14,7 +14,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以�
 
 ## 快速开始
 
-需要 Node.js 24+、Zig 0.16.0，以及与仓库 lock 精确匹配的 target-specific AgentCore bundle。
+需要 Node.js 24+、Zig 0.16.0，以及按下文 [AgentCore bundle](#agentcore-bundle) 准备的对应平台依赖包。
 
 桌面框架使用 [zogien/native](https://github.com/zogien/native) 发布的 [`@zogien/native-sdk`](https://www.npmjs.com/package/@zogien/native-sdk)，由依赖清单和 lockfile 固定版本。`npm ci` 同时安装 SDK，并通过其安装脚本下载、校验 SDK 固定的 ScriptC 工具链，无需另行全局安装 ScriptC；首次准备工具链需要访问 npm registry 和 GitHub Releases。依赖来源与接受规则见[高层架构](docs/architecture.md#35-native-sdk)。
 
@@ -76,7 +76,7 @@ npm run package:windows
 
 ## AgentCore bundle
 
-`stage-agentcore-bundle.mjs` 是 candidate bundle 进入仓库 canonical target store 的唯一入口。正式 build、test 和 package 不读取 AgentCore 源码树，也不从环境变量寻找替代实现。
+按[官方发布来源与手动更新流程](docs/agentcore-abi-v1.md#11-官方发布来源与手动更新)下载、校验并解压与当前 target lock 匹配的包，将包含包内 `manifest.json` 的 bundle 根目录传给上述 `stage-agentcore-bundle.mjs` 命令。
 
 需要验证尚未 stage 的 candidate 时运行：
 
@@ -84,7 +84,7 @@ npm run package:windows
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restore-probe.mjs
 ```
 
-bundle 与 ABI 接受规则见 [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md)，产品集成规则见 [AgentCore 集成契约](docs/agentcore-integration.md)。
+产品集成规则见 [AgentCore 集成契约](docs/agentcore-integration.md)。
 
 ## 文档入口
 

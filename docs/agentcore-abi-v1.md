@@ -21,11 +21,21 @@ Windows x86_64 与 arm64 的正式消费目标均为 MSVC；Host、官方 Zig pa
 
 ABI revision、function-table layout、required entry、symbol 或稳定外部格式发生变化时，必须先取得用户显式批准，再同步更新 lock、本文合同与对应验证。MetaWork 不保留旧 revision 分流、类型别名、shim、兼容 parser、双 bundle、target fallback 或静默降级。回退只能回退完整的 MetaWork 变更与对应 exact artifact，运行时没有旧 ABI 替代路径。
 
+### 1.1 官方发布来源与手动更新
+
+AgentCore 正式发布包从 `https://downloads.metask-ai.com/agentcore/v<version>/` 获取，对应版本的下载清单为该目录下的 `manifest.json`。依赖更新由用户明确发起，并确定本次更新的版本；开发环境准备沿用当前 repository lock。
+
+正式发布包的 `version` 使用不带预发布或 build metadata 的 SemVer `major.minor.patch`，不接受开发版版本名。源码 identity 由独立的 `source.commit` 与 target lock 固定，不从版本字符串推导。
+
+下载时按发布清单的 `targets` 条目和 `custom.target` 精确选择所需平台，条目路径相对该版本目录解析；压缩包必须匹配 `length` 与 `hashes.sha256`。解压后，包内 manifest 的版本、source commit、target 和 ABI 必须与发布清单的对应声明一致。发布清单只负责发布包的发现与下载校验，不替代包内 manifest、repository lock 或既有 verifier。
+
+更新须在同一变更中收口所需 target 的 exact lock 与必要的集成适配，并完成 [ABI 与恢复验收](#3-abi-identity-与-function-table)和[验证规范](validation.md)要求的验证。
+
 ## 2. Bundle 与 SDK 接受边界
 
 正式应用只消费 resolved build target 对应的 canonical `.agentcore/bundles/<target-id>`：
 
-- candidate root 只用于 probe 和 stage；
+- candidate root 只用于 probe 和 stage；`scripts/stage-agentcore-bundle.mjs` 是进入 canonical target store 的唯一入口；
 - stage 只复制 manifest whitelist，正式 build、test 与 package 只读取 staged bundle；
 - resolved target 必须精确选择同名 bundle，不读取 last-stage 状态，不跨 target 复用 library；
 - verifier 必须精确校验 schema、target、toolchain、build、link、ABI、唯一 discovery symbol、payload whitelist/checksum 与 repository lock；
