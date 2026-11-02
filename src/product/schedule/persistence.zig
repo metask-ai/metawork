@@ -19,6 +19,27 @@ const recovery_prefix = ".scheduled-tasks.recovery.";
 const recovery_id_hex_bytes = 16;
 const max_recovery_artifacts = 1024;
 
+/// Only retired versions or known retired binding fields authorize the hard
+/// cut. Unknown/current corruption belongs to ordinary explicit recovery.
+pub fn isRetiredStore(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const version = parsed.value.object.get("schema_version") orelse return false;
+    if (version != .integer) return false;
+    if (version.integer == 2) return true;
+    if (version.integer != 1) return false;
+    const items = parsed.value.object.get("items") orelse return false;
+    if (items != .array) return false;
+    for (items.array.items) |item| {
+        if (item != .object) continue;
+        if (item.object.contains("execution_generation")) return true;
+        const binding = item.object.get("binding") orelse continue;
+        if (binding == .object and (binding.object.contains("selection_revision") or binding.object.contains("legacy_execution"))) return true;
+    }
+    return false;
+}
+
 pub const FileStoreError = std.mem.Allocator.Error || error{
     DirectoryUnavailable,
     ReadFailed,
@@ -562,7 +583,7 @@ fn decodeCurrent(
         allocator,
         input,
         .{ .ignore_unknown_fields = false },
-    ) catch return error.ScheduledTaskStoreCorrupt;
+    ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ScheduledTaskStoreCorrupt;
     defer parsed.deinit();
     if (parsed.value.schema_version != schema_version or
         parsed.value.next_id == 0 or

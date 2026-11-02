@@ -90,7 +90,12 @@ fn bootstrapStore(
         allocator,
         persistence_capability.restored_bytes.?,
         limits,
-    ) catch {
+    ) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (!try persistence.isRetiredStore(allocator, persistence_capability.restored_bytes.?)) {
+            health.* = .corrupt;
+            return state.Store.init(allocator, limits);
+        }
         var empty = try state.Store.init(allocator, limits);
         errdefer empty.deinit();
         const output = try allocator.alloc(u8, persistence.max_store_bytes);
@@ -1430,6 +1435,21 @@ test "bootstrap quarantines retired Schedule shapes and continues with an empty 
     try std.testing.expectEqual(@as(usize, 1), effects.recoveries);
     try std.testing.expect(!runtime.persistenceRecoveryAvailable());
     try std.testing.expect(testing.item(&runtime, 7) == null);
+}
+
+test "current Schedule corruption and allocation exhaustion never authorize an automatic hard cut" {
+    for ([_][]const u8{ "not-json", "{\"schema_version\":3,\"next_id\":1,\"items\":[]}", "{\"schema_version\":1,\"next_id\":1,\"items\":[],\"extra\":true}" }) |bytes| {
+        var effects: TestEffects = .{ .restored_bytes = bytes };
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 4096 }, .{ .persistence = effects.persistence() });
+        defer runtime.deinit();
+        try std.testing.expectEqual(PersistenceHealth.corrupt, runtime.persistenceHealth());
+        try std.testing.expectEqual(@as(usize, 0), effects.recoveries);
+        try std.testing.expectEqual(@as(usize, 0), effects.commits);
+    }
+    var effects: TestEffects = .{ .restored_bytes = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}" };
+    var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Runtime.init(allocator.allocator(), .{ .max_items = 1, .max_projection_bytes = 4096 }, .{ .persistence = effects.persistence() }));
+    try std.testing.expectEqual(@as(usize, 0), effects.recoveries);
 }
 
 test "occurrence claim owns launch facts across later store replacement" {
