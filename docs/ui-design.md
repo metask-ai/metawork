@@ -408,7 +408,7 @@ Disabled
 - Host 投影 `automaticWorkspaces = false` 时，Text 模板仍可查看，但创建/编辑不可保存；不得静默采用当前或第一个 Manual Workspace；
 - 时间选项优先呈现一次、每小时、每天与每周，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 保存前提供一句完整确认摘要，例如“每天 08:00 运行「每日工作简报」，结果完成后通知我”；protocol、generation、Unix seconds 和 catalog revision 不进入产品文案；
-- 新建和保存从同一 snapshot 的 Models global default 与 `newTaskAdmission` active authority 构造完整 source-qualified binding；Renderer 不展示 protocol/revision，也不从 Account 或裸 model id 猜测归属。保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
+- 定时任务新建或明确改选从 Models ready候选选择完整目标，提交expected source/catalog generation，由Host解析protocol；已有定义的其他编辑保留固定绑定。保存、暂停/恢复、立即运行和删除使用Host typed result与item epoch。timeout后刷新而不重放，起始偏好不参与已保存计划的执行资格。
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
 - 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时显示 `需要处理`，并要求用户编辑确认；立即运行与恢复启用在确认前禁用。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
@@ -513,7 +513,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task    |
 | View sync            | `ready / syncing / failed`                            | 当前连接已确认、最近一次合格读取成功且无故障 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only、source-qualified 模型选择；发送前必须同时满足相应 Workspace admission 与所选模型 authority，未明确选择模型时还须满足默认执行配置 admission。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
+`draft` 是未创建真实Task的Renderer临时页面，不进入Host生命周期；持有Automatic或Manual Workspace intent与runtime-only完整模型选择。没有草稿选择时显示Host起始偏好，发送始终提交非空明确目标及对应来源/目录generation，不使用全局默认执行配置。
 
 正常通知滞后不构成 View sync 故障：一次合格快照被当前连接消费后，后续仍有更新需求不撤销 readiness；命令的最终接纳仍由 Host 校验。显式恢复在顶栏既有状态入口轻量显示“正在恢复同步”，普通读取失败自动升级一次重建时不闪中间故障；最终失败在同一入口提供“重试同步”和可折叠技术详情，不在对话正文叠加故障卡或重复横幅。恢复动作可直接使用键盘，窄窗保持可访问名称与安全换行；已收到内容和本地草稿保留。启动时尚无可信视图仍使用根连接失败页面。
 
@@ -755,18 +755,18 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 模型选择规则：
 
-- New task 默认显示当前 active 模型；Composer 模型按钮和菜单项只显示模型名称，不展示 Provider 名称。菜单汇总 Metask 与所有 Custom Provider 的 ready 模型，上方列出 Metask 官方模型，下方列出自定义模型；自定义区域仅在有候选时显示一次“自定义模型”分组标识，标识不参与选择。不因当前默认或草稿选择改变该顺序；内部以来源和模型共同区分候选。已有草稿保留其明确选择，初始意图从 Host 当前默认配置确定。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
-- 没有可用 global default 或当前来源不可用时，菜单仍允许明确选择其他可用 Provider 的模型并发送；没有可用候选时提供进入 `Models` 设置的导航，不自动选择其他来源。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
-- Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
-- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。菜单仅列出 Task modelIntent 所属 Provider 的 ready 模型，不受 global default 的来源变化或忙碌状态约束；当前来源不可用或历史来源未知时保留模型事实，不借用其他 Provider 的目录。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
-- 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
+- New task 无草稿选择时显示 Host 保存的起始偏好；无偏好显示“选择模型”，不自动取目录首项。候选汇总全部 ready 来源，按 Metask、自定义模型分组；完整 ModelRef 区分同名模型。菜单选择只更新草稿；Host 确认交互 Task 创建或主动 Task 选模后独立记忆起始偏好。
+- 当前偏好或草稿模型不可用时保留名称、原因及草稿，菜单仍允许选择合法候选；无候选时提供授权、目录重试或 Models 配置入口，不自动选择其他来源。所有创建提交明确模型目标，不发设默认命令。
+- Models 来源或目录变化仅改变相应来源的可解析资格。Task/Run 保留自己的意图与实际执行；Task 恢复和 rebind 校验精确目标及来源 authority，起始偏好不参与 binding 安装。
+- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。modelIntent非空时菜单列出其Provider的ready模型；modelIntent为空时例外列出全部ready来源，以revision 0明确提交，不猜测历史来源。菜单不受 global default 的来源变化或忙碌状态约束；当前已知来源不可用时保留模型事实；历史来源未知时允许用户明确选择来源。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用再次选择；已接收消息由 Task 等待权威确认，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
+- 偏好保存不冻结模型选择、发送、导航、历史阅读或其他 Task；真实模型意图事务结果不确定时仍遵守对应 Task 的恢复保护。
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 
 Composer 布局与输入规则：
 
 - 输入容器使用白色 `panel` 语义面、细中性边框和极轻阴影；新建任务与已有会话共享此表面，不使用紫色投影或聚焦光圈。容器聚焦时通过有足够对比度的中性边框反馈，内部控件保留独立、清楚的键盘焦点。输入正文沿用现有字体，使用 15 px、400 字重与 1.6 行高；工具栏采用常规字重、透明默认底色和中性悬停，所属模型、审批与 Workspace 菜单使用浅中性选中底色及明确的选择标记。可发送按钮保留品牌紫，禁用时使用中性底色和灰色图标；危险、授权与错误状态继续使用各自语义色；
 - 底部工具带左侧放附件与审批，模型选择与唯一的发送或停止主动作组成右侧操作组；中央可用宽度不足时，右侧组整体换到下一行并保持靠右，模型名称可以省略，但发送/停止维持完整点击区。换行由输入框实际可用宽度决定，不只依赖整个窗口的宽度。textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 没有有效模型选择时，Composer 在输入框下方、Workspace 行附近显示单一、可换行的模型准备提示，按 §14.1 区分首次配置、登录、选择、加载与恢复，并提供对应动作；不只依赖发送按钮的禁用样式或 tooltip。已有有效的显式草稿模型选择可沿原准入规则发送，不要求先设置 global default；其他情况等待 Host 确认配置可用。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
+- New task 没有有效模型选择时，在输入框下方显示一份模型准备提示，区分首次配置、授权、目录加载与失效重选。已有候选时直接打开模型列表；所有创建提交明确模型目标，创建失败保留草稿。偏好记忆失败独立反馈，不把已成功 Task 显示成创建失败。
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已保存且可用的 Manual Workspace 之间直接切换，也可以打开原生目录选择器添加目录或重新选择失效目录；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
@@ -1035,7 +1035,7 @@ Account 状态在 Workbench 账号入口、Account 设置及新任务输入区�
 
 点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Models 的自定义模型分组，通过“添加模型”同时准备连接与模型，添加和测试在 Models 完成，选择在任务输入区完成；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
 
-跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，定时任务存储阻止执行配置更新时说明具体原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，实际credential清洗所需的定时任务存储不可用时说明对应操作原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
 
 弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
