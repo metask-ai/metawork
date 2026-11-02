@@ -376,6 +376,7 @@ pub const Runtime = struct {
     pub fn releaseChecked(self: *Runtime, id: u64) Error!bool {
         const index = self.findIndex(id) orelse return false;
         const entry = &self.slots[index].?;
+        if (entry.state == .cleanup_pending) return error.CleanupFailed;
         if (entry.state != .ready) return false;
         if (!self.destroyEntry(entry, false)) return error.CleanupFailed;
         self.slots[index] = null;
@@ -1017,6 +1018,7 @@ test "more than one message of failed deletions remains charged until physical c
         len.* = relative.len;
         try fixture.store.deleteChecked(file);
         try fixture.store.root.createDir(std.testing.io, relative, .default_dir);
+        try std.testing.expectError(error.CleanupFailed, runtime.releaseChecked(id));
         try std.testing.expectError(error.CleanupFailed, runtime.releaseChecked(id));
     }
     try std.testing.expectEqual(@as(usize, 10), runtime.cleanupDebt().count);

@@ -8064,6 +8064,94 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.expect("\"status\":\"cancelled\"");
     try std.testing.expect(try workbench.attachments.releaseChecked(stock[0].id));
     workbench.attachments.limits.max_staged_bytes = old_bytes;
+    const Cancel = struct {
+        fn expect(c: anytype, n: native_sdk.bridge.Dispatcher, source_value: native_sdk.bridge.Source, unified: bool, batch: u64, failed: bool) !void {
+            var key_buffer: [80]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"2\",\"batchId\":\"{d}\"}}", .{batch});
+            if (unified) {
+                try c.invoke(n, source_value, commands.cancel_attachment_add, key);
+                try c.expect(if (failed) "\"status\":\"cleanup_failed\"" else "\"status\":\"cleaned\",\"released\":false");
+            } else {
+                var request_buffer: [256]u8 = undefined;
+                const request = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"cancel-debt\",\"command\":\"{s}\",\"payload\":{s}}}", .{ commands.cancel_attachment_receive, key });
+                var response_buffer: [1024]u8 = undefined;
+                const response = n.dispatch(request, source_value, &response_buffer);
+                const expected = if (failed) "CleanupFailed" else "\"released\":false";
+                if (std.mem.indexOf(u8, response, expected) == null) {
+                    std.debug.print("expected {s} for batch {d} in legacy cancel {s}\n", .{ expected, batch, response });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    };
+    dispatcher.platform.attachment_input = .file_bytes;
+    for ([_]bool{ true, false }, 0..) |unified, protocol| {
+        for ([_]bool{ false, true }, 0..) |published, phase| {
+            const batch = 40 + protocol * 2 + phase;
+            var product_id: u64 = undefined;
+            var file: @TypeOf(workbench.attachments.slots[0].?.file) = undefined;
+            if (published) {
+                _ = try workbench.attachments.stageBatch(&.{.{ .display_name = "saturated", .bytes = "x" }}, &stock);
+                for (workbench.attachments.slots) |slot| if (slot) |entry| {
+                    if (entry.id == stock[0].id) {
+                        product_id = entry.batch_id;
+                        file = entry.file;
+                    }
+                };
+                var issued: [1]attachment_grant.Issued = undefined;
+                _ = try dispatcher.attachment_grants.issueBatch(2, 3, &.{stock[0].id}, &issued, null, Host.uniqueRandom);
+                dispatcher.attachment_grants.tagReceiveBatch(&.{stock[0].id}, batch);
+            } else {
+                product_id = try workbench.beginAttachmentReceive(&.{.{ .display_name = "saturated", .size_bytes = 1 }});
+                for (workbench.attachments.slots) |slot| if (slot) |entry| {
+                    if (entry.batch_id == product_id) file = entry.file;
+                };
+                dispatcher.receive_active = .{ .batch_id = batch, .product_id = product_id, .unified = unified };
+            }
+            var blocker_buffer: [80]u8 = undefined;
+            const blocker = try std.fmt.bufPrint(&blocker_buffer, "0/{s}.{s}", .{ file.name, file.extension.slice() });
+            try store.deleteChecked(file);
+            try store.root.createDir(std.testing.io, blocker, .default_dir);
+            // Fault injection deliberately breaks the one-debt-per-record
+            // invariant. Keep every injected entry live so pruning cannot hide
+            // saturation, then exercise the actual cancel entry points.
+            for (&dispatcher.add_debt, 0..) |*slot, index| slot.* = .{
+                .generation = 2,
+                .window_id = 3,
+                .batch_id = 1000 + index,
+                .product_id = if (published) null else product_id,
+                .attachment_id = if (published) stock[0].id else null,
+            };
+            for (0..2) |_| {
+                try Cancel.expect(&capture, native, source, unified, batch, true);
+                try std.testing.expectEqual(@as(usize, 1), workbench.attachments.used_bytes);
+                if (published) {
+                    var ids: [attachment_grant.max_batch_files]u64 = undefined;
+                    try std.testing.expectEqualSlices(u64, &.{stock[0].id}, dispatcher.attachment_grants.receiveBatchIds(2, 3, batch, &ids));
+                } else {
+                    try std.testing.expectEqual(product_id, dispatcher.receive_active.?.product_id);
+                }
+            }
+            // Once one association is available, cancellation may revoke the
+            // grant/batch but must still report the retained physical debt.
+            dispatcher.add_debt[0] = null;
+            try Cancel.expect(&capture, native, source, unified, batch, true);
+            try std.testing.expect(dispatcher.receive_active == null);
+            var ids: [attachment_grant.max_batch_files]u64 = undefined;
+            try std.testing.expectEqual(@as(usize, 0), dispatcher.attachment_grants.receiveBatchIds(2, 3, batch, &ids).len);
+            try Cancel.expect(&capture, native, source, unified, batch, true);
+            try std.testing.expectEqual(@as(usize, 1), workbench.attachments.used_bytes);
+            try store.root.deleteDir(std.testing.io, blocker);
+            try std.testing.expect(workbench.attachments.retryCleanup());
+            try Cancel.expect(&capture, native, source, unified, batch, false);
+            try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+            try std.testing.expect(!dispatcher.hasAddDebt(2, 3, batch));
+            // Legacy cancellation leaves stale metadata for the next bounded
+            // admission sweep; no remaining entry may own physical debt.
+            for (dispatcher.add_debt) |slot| if (slot) |debt|
+                try std.testing.expect(!workbench.attachmentCleanupPending(debt.product_id, debt.attachment_id));
+        }
+    }
     workbench.attachment_lane.stopAdmission();
     try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
     try capture.expect("shutting_down");
