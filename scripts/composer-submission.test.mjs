@@ -1834,3 +1834,64 @@ test("App names the Task blocking Session release and allows a later explicit cr
   assert.equal(fixture.inputs[0][2].text, "My deliberate retry");
   await fixture.settle();
 });
+
+test("App lets a historical Task without intent explicitly choose any ready source at revision zero", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.task.modelIntent = null;
+  const model = fixture.snapshot.models.providers[0].models[0];
+  fixture.snapshot.models.customProviders = [
+    {
+      id: "historical-choice",
+      displayName: "Other source",
+      enabled: true,
+      state: "ready",
+      credentialStatus: "ready",
+      sourceGeneration: "7",
+      catalogGeneration: "8",
+      protocol: "openai_responses",
+      normalizedBaseUrl: "https://example.test/responses",
+      providerRevision: "1",
+      builtinProviderId: null,
+      models: [
+        {
+          ...model,
+          id: "other-model",
+          displayName: "Other model",
+          ready: true,
+          testStatus: "connected",
+        },
+      ],
+    },
+  ];
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const selection = ctx.mock.method(
+    BridgeClient.prototype,
+    "selectTaskModel",
+    async (taskId, revision, modelRef) => {
+      fixture.task.modelIntent = {
+        modelRef,
+        selectionRevision: "1",
+        state: "committed",
+      };
+      return { accepted: true, taskId, selectionRevision: "1", reason: null };
+    },
+  );
+  await fixture.publish();
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Keep this draft");
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Other model", exact: true }),
+  );
+  await waitFor(() => assert.equal(selection.mock.callCount(), 1));
+  assert.deepEqual(selection.mock.calls[0].arguments, [
+    fixture.task.id,
+    "0",
+    { sourceId: "historical-choice", modelId: "other-model" },
+    "7",
+    "8",
+  ]);
+  assert.equal(fixture.creations(), 0);
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.textarea.value, "Keep this draft");
+});

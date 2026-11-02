@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,9 +12,8 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 
-const { taskModelSelectionPolicy } = await vite.ssrLoadModule(
-  "/src/app/task-model-selection.ts",
-);
+const { taskModelCandidates, taskModelSelectionPolicy } =
+  await vite.ssrLoadModule("/src/app/task-model-selection.ts");
 
 test.after(async () => {
   await vite.close();
@@ -71,4 +71,44 @@ test("busy Tasks can select the next model but an unknown save waits for Host re
     selectable: false,
     pending: true,
   });
+});
+
+test("a Task with no model intent lists every ready source without inferring its old provider", () => {
+  const { models } = JSON.parse(
+    readFileSync(
+      "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      "utf8",
+    ),
+  );
+  const model = models.providers[0].models[0];
+  models.customProviders = [
+    {
+      id: "other",
+      enabled: true,
+      state: "ready",
+      credentialStatus: "ready",
+      sourceGeneration: "7",
+      catalogGeneration: "8",
+      protocol: "openai_responses",
+      models: [{ ...model, ready: true }],
+    },
+  ];
+  const options = taskModelCandidates(models, null);
+  assert.deepEqual(
+    options.map((option) => option.modelRef.sourceId),
+    ["metask", "other"],
+  );
+  assert.notEqual(options[0].selectionId, options[1].selectionId);
+  assert.deepEqual(
+    taskModelCandidates(models, {
+      sourceId: "metask",
+      modelId: "disabled",
+    }).map((option) => option.modelRef.sourceId),
+    ["metask"],
+  );
+  models.customProviders[0].enabled = false;
+  assert.deepEqual(
+    taskModelCandidates(models, null).map((option) => option.modelRef.sourceId),
+    ["metask"],
+  );
 });

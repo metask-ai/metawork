@@ -206,7 +206,10 @@ import {
   readyModelOptions,
   modelOptionId,
 } from "./new-task-model-selection.ts";
-import { taskModelSelectionPolicy } from "./task-model-selection.ts";
+import {
+  taskModelCandidates,
+  taskModelSelectionPolicy,
+} from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
   modelSetupNotice,
@@ -1411,9 +1414,9 @@ export default function App() {
     (provider) => provider.id === "metask",
   );
   const taskIntent = activeTask?.modelIntent;
-  const taskModelOptions = readyModelOptions(
+  const taskModelOptions = taskModelCandidates(
     snapshot.models,
-    taskIntent?.modelRef.sourceId ?? null,
+    taskIntent?.modelRef ?? null,
   );
   const displayedTaskModelId = taskIntent
     ? modelOptionId(taskIntent.modelRef)
