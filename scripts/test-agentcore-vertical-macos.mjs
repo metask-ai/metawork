@@ -46,7 +46,10 @@ import {
   runOfficeDeliveryHostProbe,
 } from "./output-delivery-vertical.mjs";
 
-import { runAttachmentCapacityVertical } from "./attachment-capacity-vertical.mjs";
+import {
+  runAttachmentCapacityVertical,
+  verifyAttachmentBaselineArtifact,
+} from "./attachment-capacity-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -118,6 +121,15 @@ const windowsClipboardProbeScript = path.join(
 // This harness owns the artifact it drives. run-agentcore-vertical-windows.mjs
 // builds the same artifact before importing this module and sets the flag so
 // the automation Debug build does not run twice.
+const attachmentBaseline =
+  process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1"
+    ? await verifyAttachmentBaselineArtifact({
+        prebuilt: process.env.METAWORK_VERTICAL_PREBUILT,
+        binary: process.env.METAWORK_TEST_APP_BINARY ? binary : null,
+        cwd: process.env.METAWORK_TEST_APP_CWD,
+        expectedSha256: process.env.METAWORK_ATTACHMENT_BASELINE_SHA256,
+      })
+    : null;
 if (!process.env.METAWORK_VERTICAL_PREBUILT)
   await buildAutomationDebugArtifact(root, bundleOptions);
 const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
@@ -619,6 +631,12 @@ desktopVertical: try {
       pngFixture: largePngFixture,
       maxOriginalPath: attachmentPngPath,
       baselineOnly: process.env.METAWORK_ATTACHMENT_BASELINE_ONLY === "1",
+      artifact: attachmentBaseline ?? {
+        path: await realpath(binary),
+        sha256: createHash("sha256")
+          .update(await readFile(binary))
+          .digest("hex"),
+      },
     });
     await stopApplication("attachment capacity verification complete");
     break desktopVertical;

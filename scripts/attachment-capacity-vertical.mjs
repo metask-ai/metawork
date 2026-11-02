@@ -1,10 +1,33 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const exec = promisify(execFile);
+
+// Validate before the desktop harness can build or launch anything.
+export async function verifyAttachmentBaselineArtifact({
+  prebuilt,
+  binary,
+  cwd,
+  expectedSha256,
+}) {
+  assert.equal(prebuilt, "1", "baseline requires METAWORK_VERTICAL_PREBUILT=1");
+  assert.ok(binary, "baseline requires explicit METAWORK_TEST_APP_BINARY");
+  assert.ok(cwd, "baseline requires explicit METAWORK_TEST_APP_CWD");
+  assert.match(
+    expectedSha256 ?? "",
+    /^[0-9a-f]{64}$/,
+    "baseline requires METAWORK_ATTACHMENT_BASELINE_SHA256",
+  );
+  const sha256 = createHash("sha256")
+    .update(await readFile(binary))
+    .digest("hex");
+  assert.equal(sha256, expectedSha256, "baseline executable SHA-256 mismatch");
+  return { path: await realpath(binary), sha256 };
+}
 
 // Actual macOS Host/Bridge/store/public SDK codec; no Renderer injection or
 // private capacity query. RSS samples are observations, not a memory ceiling.
@@ -23,8 +46,14 @@ export async function runAttachmentCapacityVertical({
   pngFixture,
   maxOriginalPath,
   baselineOnly = false,
+  artifact,
 }) {
   assert.equal(process.platform, "darwin", "this RSS probe requires macOS");
+  assert.ok(
+    artifact?.path,
+    "capacity evidence requires the executable identity",
+  );
+  assert.match(artifact.sha256, /^[0-9a-f]{64}$/);
   await mkdir(evidenceDir, { recursive: true });
   const small = join(workspaceRoot, "capacity-screenshot.png");
   const large = join(workspaceRoot, "capacity-entropy.png");
@@ -112,6 +141,14 @@ export async function runAttachmentCapacityVertical({
         records: scenario.records,
         stagingMs: Date.now() - started,
       });
+      if (baselineOnly) {
+        // Also reject a mistakenly supplied current executable: the old pool
+        // must exhibit the original eight-record saturation behavior.
+        assert.deepEqual(await add(small, 1), {
+          status: "rejected",
+          reason: "staging_capacity",
+        });
+      }
       if (scenario.records === 128) {
         assert.deepEqual(await add(small, 1), {
           status: "rejected",
@@ -238,6 +275,7 @@ export async function runAttachmentCapacityVertical({
     );
     const evidence = {
       baselineOnly,
+      artifact,
       platform: `${process.platform}-${process.arch}`,
       at: new Date().toISOString(),
       source: baselineOnly

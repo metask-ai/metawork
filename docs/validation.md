@@ -336,7 +336,7 @@ Bridge 与 Renderer 共同消费 active_input fixture，固定 Task 目标、acc
 
 附件定向入口为 `zig build test-attachments`，复用正式 module graph，覆盖 Product 资源、附件 I/O lane、Product Control 与 Bridge 准入；完整关联 root、正式 Native graph 与真实平台输入仍按变更范围执行。
 
-macOS 附件容量与 Host 内存观察使用 `METAWORK_ATTACHMENT_CAPACITY_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，与其他专项 scope 互斥，覆盖草稿存量、Task 接收/Stop、共享字节耗尽和重复释放。旧实现基线比较使用 `METAWORK_ATTACHMENT_BASELINE_ONLY=1`，必须明确设置 `METAWORK_VERTICAL_PREBUILT=1`、旧 `METAWORK_TEST_APP_BINARY` 与隔离 `METAWORK_TEST_APP_CWD`；本次构建不能冒充旧版本基线。20 ms Host RSS 采样不是全应用内存上限，路径注入不替代真实 picker/drop/paste，不能据此关闭 Windows 或交互性能缺口。
+macOS 附件容量与 Host 内存观察使用 `METAWORK_ATTACHMENT_CAPACITY_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，与其他专项 scope 互斥，覆盖草稿存量、Task 接收/Stop、共享字节耗尽和重复释放。旧实现基线比较使用 `METAWORK_ATTACHMENT_BASELINE_ONLY=1`，必须明确设置 `METAWORK_VERTICAL_PREBUILT=1`、旧 `METAWORK_TEST_APP_BINARY`、隔离 `METAWORK_TEST_APP_CWD` 与事先冻结的 `METAWORK_ATTACHMENT_BASELINE_SHA256`；缺失或摘要不符须在构建/启动前拒绝。基线运行还须观察 8 条记录后的容量拒绝，本次构建不能冒充旧版本基线；基线与候选证据均自动记录实际产物路径及 SHA-256。20 ms Host RSS 采样不是全应用内存上限，路径注入不替代真实 picker/drop/paste，不能据此关闭 Windows 或交互性能缺口。
 
 附件输入的最小充分证据必须覆盖：加号、Host 路径拖拽与 DOM 文件拖拽使用同一 Product 批次，比较相同静态文件的类型、格式、原始大小、顺序、内容与领域拒绝原因；整批预留先于创建原件，DOM 读取先于预留成功必须被拒绝，下一块读取只在上一块 worker 写入确认之后；取消响应先于 writer/来源句柄释放必须被拒绝，迟到响应不能发布或移交草稿。删除失败须保留有界资源与额度，下一次显式添加只执行一次有界清理；清理不得删除其他 ready/borrowed 或 Task 命名空间原件。Bridge 必须验证来源协议隔离、generation/window、水位、取消先到、原子 grant 发布和旧 revision 1 fixture；Renderer 必须验证同步草稿提交、连续添加、原失败与清理失败优先级，以及取消未知时连接替换、保留文字并要求重选附件。断连和 shutdown 必须等待旧 worker，启动暂存区清理失败不能开放附件能力。真实 picker/OS 拖拽、最大支持文件和图片 codec 的主线程延迟由目标平台实机承担；路径注入或模拟 DOM File 不替代这些证据，未验证平台与性能边界必须如实登记。
 
