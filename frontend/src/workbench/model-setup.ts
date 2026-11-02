@@ -1,6 +1,5 @@
 import type {
   AccountView,
-  AccountErrorCode,
   ModelsView,
   NewTaskAdmissionView,
   ModelRef,
@@ -33,7 +32,6 @@ export type ModelSetupReason =
   | "checking"
   | "authorizing"
   | "loading"
-  | "account_error"
   | "sign_in"
   | "no_models"
   | "catalog_failed"
@@ -47,7 +45,6 @@ export type ModelSetupReason =
   | "required";
 export type ModelSetupNotice = {
   reason: ModelSetupReason;
-  errorCode?: AccountErrorCode;
   action: ModelSetupAction | null;
 };
 
@@ -124,8 +121,7 @@ export function modelSetupNotice({
   if (needsMetask && account.state === "signed_out") {
     if (account.errorCode !== "none" && account.errorCode !== "user_cancelled")
       return {
-        reason: "account_error",
-        errorCode: account.errorCode,
+        reason: "sign_in",
         action: "login",
       };
     if (selected) return { reason: "sign_in", action: "login" };
