@@ -898,6 +898,8 @@ export const enUS = {
   "run.tokens": "{count} tokens",
   "run.preparing": "Preparing the work…",
   "run.submit": "Send",
+  "run.input_history_loading": "Loading input history…",
+  "run.input_history_failed": "Couldn't load input history. Press ↑ to retry.",
   "run.placeholder": "Describe the outcome you need…",
   "run.context": "Current execution context",
   "run.placeholder_no_task": "Start a task first",

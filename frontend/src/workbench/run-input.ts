@@ -1,4 +1,19 @@
-import type { RunInputView } from "../bridge/contracts.ts";
+import type { RunInputView, RunView } from "../bridge/contracts.ts";
+
+/** Continuation roots are synthesized from the source additional inputs. */
+export function transferredRunIds(
+  runs: readonly Pick<RunView, "additionalInputs">[],
+) {
+  return new Set(
+    runs.flatMap((run) =>
+      run.additionalInputs.flatMap((input) =>
+        input.state === "transferred" && input.transferredToRunId
+          ? [input.transferredToRunId]
+          : [],
+      ),
+    ),
+  );
+}
 
 export function runInputDisplay(input: RunInputView) {
   if (input.kind === "text") return input.text;
