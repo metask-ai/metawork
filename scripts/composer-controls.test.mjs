@@ -12,6 +12,12 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
 });
 if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
+dom.window.matchMedia = (media) => ({
+  media,
+  matches: false,
+  addEventListener() {},
+  removeEventListener() {},
+});
 
 Object.assign(globalThis, {
   window: dom.window,
@@ -105,6 +111,7 @@ const { useNewTaskDrafts, useTaskDrafts } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
 );
@@ -1729,7 +1736,7 @@ function renderComposer(overrides = {}) {
       externalOnDraftChange?.(value);
       return true;
     }
-    return createElement(ComposerFooter, {
+    const footer = createElement(ComposerFooter, {
       textareaRef,
       archived: false,
       closing: false,
@@ -1796,6 +1803,9 @@ function renderComposer(overrides = {}) {
           : undefined,
       onDraftChange: commitDraft,
     });
+    return overrides.shell
+      ? createElement(AppShell, overrides.shell, footer)
+      : footer;
   }
   render(
     createElement(
@@ -2573,6 +2583,110 @@ test("Composer buttons retain native Enter activation without a duplicate submit
   screen.getByRole("button", { name: "Send" }).focus();
   await user.keyboard("{Enter}");
   assert.equal(composer.submissions(), 1);
+});
+
+function composerShell(overrides = {}) {
+  return {
+    taskTitle: "Keyboard test",
+    contextVisible: true,
+    attentionNotice: "Earlier stop failed",
+    attentionContent: createElement("button", null, "Retry stop"),
+    onSearch() {},
+    left: null,
+    rightPanel: createElement("div", null, "Task details"),
+    rightPanelOpen: true,
+    onDismissRightPanel: () =>
+      assert.fail("consumed Escape must not close the right panel"),
+    onToggleRightPanel() {},
+    ...overrides,
+  };
+}
+
+test("Shell closes feedback before Composer can arm Escape and preserves right-panel handling", () => {
+  let stops = 0;
+  const composer = renderComposer({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    onStop: () => stops++,
+    shell: composerShell(),
+  });
+  const details = document.querySelector(".commandbar-alert");
+  const summary = details.querySelector("summary");
+  fireEvent.click(summary);
+  assert.equal(details.open, true);
+  composer.textarea.focus();
+  let preventedAtEditor = false;
+  composer.textarea.addEventListener(
+    "keydown",
+    (event) => {
+      preventedAtEditor = event.defaultPrevented;
+    },
+    { once: true },
+  );
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(preventedAtEditor, true);
+  assert.equal(details.open, false);
+  assert.equal(document.activeElement, summary);
+  assert.ok(screen.getByRole("button", { name: "Stop task" }));
+  composer.textarea.focus();
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 0);
+  assert.ok(screen.getByRole("button", { name: "Press Esc again to stop" }));
+  fireEvent.keyDown(composer.textarea, { key: "Escape" });
+  assert.equal(stops, 1);
+});
+
+for (const feedbackOpen of [false, true]) {
+  test(`Shell preserves IME Escape and native confirmation with feedback ${feedbackOpen ? "open" : "closed"}`, () => {
+    let stops = 0;
+    const composer = renderComposer({
+      stopAction: "run",
+      onStop: () => stops++,
+      shell: composerShell(),
+    });
+    const details = document.querySelector(".commandbar-alert");
+    if (feedbackOpen) fireEvent.click(details.querySelector("summary"));
+    composer.textarea.focus();
+    const original = composer.textarea.value;
+    for (const marker of [{ isComposing: true }, { keyCode: 229 }]) {
+      for (const key of ["Escape", "Enter"]) {
+        assert.equal(
+          fireEvent.keyDown(composer.textarea, { key, ...marker }),
+          true,
+        );
+        assert.equal(details.open, feedbackOpen);
+        assert.equal(document.activeElement, composer.textarea);
+      }
+    }
+    fireEvent.compositionStart(composer.textarea);
+    for (const key of ["Escape", "Enter"]) {
+      assert.equal(
+        fireEvent.keyDown(composer.textarea, { key, isComposing: false }),
+        true,
+      );
+      assert.equal(details.open, feedbackOpen);
+    }
+    fireEvent.compositionEnd(composer.textarea);
+    assert.equal(composer.textarea.value, original);
+    assert.equal(composer.submissions(), 0);
+    assert.equal(stops, 0);
+  });
+}
+
+test("Shell composition latch ends with focus leaving the composing field", () => {
+  let closed = 0;
+  const composer = renderComposer({
+    shell: composerShell({
+      attentionNotice: null,
+      onDismissRightPanel: () => closed++,
+    }),
+  });
+  composer.textarea.focus();
+  fireEvent.compositionStart(composer.textarea);
+  const toggle = document.querySelector(".commandbar-task-panel-toggle");
+  act(() => toggle.focus());
+  fireEvent.keyDown(toggle, { key: "Escape" });
+  assert.equal(closed, 1);
 });
 
 test("Composer recalculates its height when its rendered width changes", () => {

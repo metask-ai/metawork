@@ -15,6 +15,7 @@ import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { bindWindowTitlebar } from "../bridge/window-chrome.ts";
 import { shouldDismissSidePanelForEscape } from "./side-panel-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
+import { isInputMethodKey } from "../platform/keyboard.ts";
 import {
   readLocalPreference,
   writeLocalPreference,
@@ -223,6 +224,7 @@ export function AppShell({
     overlayOpen: Boolean(overlay),
   });
   const attentionDetails = useRef<HTMLDetailsElement>(null);
+  const compositionTarget = useRef<EventTarget | null>(null);
   const attentionHadFocus = useRef(false);
   const attentionFocusedElement = useRef<HTMLElement | null>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
@@ -344,13 +346,40 @@ export function AppShell({
           "--right-panel-width": `${rightPanelPlacement.rightWidth}px`,
         } as CSSProperties
       }
-      onKeyDown={(event) => {
+      onCompositionStartCapture={(event) => {
+        compositionTarget.current = event.target;
+      }}
+      onCompositionEndCapture={(event) => {
+        if (compositionTarget.current === event.target)
+          compositionTarget.current = null;
+      }}
+      onBlurCapture={(event) => {
+        if (compositionTarget.current === event.target)
+          compositionTarget.current = null;
+      }}
+      onKeyDownCapture={(event) => {
+        if (
+          event.defaultPrevented ||
+          isInputMethodKey(
+            event.nativeEvent,
+            compositionTarget.current !== null,
+          )
+        )
+          return;
         if (event.key === "Escape" && attentionDetails.current?.open) {
           event.preventDefault();
           attentionDetails.current.open = false;
           attentionDetails.current.querySelector("summary")?.focus();
-          return;
         }
+      }}
+      onKeyDown={(event) => {
+        if (
+          isInputMethodKey(
+            event.nativeEvent,
+            compositionTarget.current !== null,
+          )
+        )
+          return;
         const target = event.target as HTMLElement;
         if (
           target.closest('[role="dialog"], [role="menu"], [role="alertdialog"]')
