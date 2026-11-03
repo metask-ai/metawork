@@ -752,7 +752,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 
 ## 8. Composer 与执行控制
 
-> Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、默认模型选择和既有 Task execution binding 提示已经由当前 Renderer 合同表达；跨重启恢复与显式 rebind 仍是目标能力。
+> Capability：**混合**。当前 Run gate、停止、本地草稿、New task 主视觉、起始偏好和 Task 模型选择已由 Renderer 合同表达；Conversation 恢复与显式 rebind 遵守 §6.4 的独立资格与交互规则。
 
 已有 Task 的 Composer 固定在中间区域底部，并为滚动内容预留空间。New task 的 Composer 位于工作面的视觉中心；Host 确认创建真实 Task 后，它再通过一次克制过渡落到底部。
 

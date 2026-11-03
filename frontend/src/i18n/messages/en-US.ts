@@ -1,6 +1,6 @@
 export const enUS = {
   "model_setup.preference_not_saved":
-    "Your model preference could not be saved. This task is ready to use.",
+    "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
     "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.schedule_persistence_failed":

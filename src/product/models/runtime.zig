@@ -482,7 +482,10 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         if (self.registry.defaultSelection()) |current| {
-            if (std.mem.eql(u8, current.source_id, target.source_id) and std.mem.eql(u8, current.model_id, target.model_id)) return .acceptedResult();
+            // After an unconfirmed write, retained memory is not evidence of
+            // the canonical preference. Confirm this choice before clearing
+            // the independent failure diagnostic, even if it matches memory.
+            if (self.preference_error == .none and std.mem.eql(u8, current.source_id, target.source_id) and std.mem.eql(u8, current.model_id, target.model_id)) return .acceptedResult();
         }
         var candidate = self.registry.clone() catch return .rejected(.local_resource_exhausted);
         defer candidate.deinit();
@@ -1282,6 +1285,41 @@ test "unconfirmed preference commits reject memory without revoking unchanged so
         try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
         try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
     }
+}
+
+test "choosing the retained preference after an unknown commit confirms the canonical value" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    runtime.store = try registry_impl.FileStore.init(std.testing.io, root);
+    try TestSupport.installMetaskDefault(&runtime, "principal", "synthetic-key", &.{
+        .{ .id = "model-1", .display_name = "One" },
+        .{ .id = "model-2", .display_name = "Two" },
+    }, "model-1", 1, 2, 3, 4);
+
+    var candidate = try runtime.registry.clone();
+    defer candidate.deinit();
+    try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, 5);
+    const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &candidate);
+    defer std.testing.allocator.free(encoded);
+    try runtime.store.?.commit(encoded);
+    // Model an installed candidate whose durability/readback could not be
+    // confirmed. Apply the same failure diagnostic as rememberPreference.
+    const unknown = runtime.finishPreferenceCommit(&candidate, .unresolved);
+    runtime.preference_error = if (unknown.accepted) .none else .preference_not_saved;
+    try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
+
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
+    const saved = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    var restored = try registry_impl.decode(std.testing.allocator, saved);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("model-1", restored.defaultSelection().?.model_id);
+    try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
+    try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
 }
 
 const TestVault = struct {

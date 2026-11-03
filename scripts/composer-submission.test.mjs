@@ -1998,7 +1998,7 @@ test("preference save failure is separate feedback and keeps valid creation and 
   fixture.snapshot.models.errorCode = "preference_not_saved";
   await fixture.publish();
   const message =
-    "Your model preference could not be saved. This task is ready to use.";
+    "Your model preference could not be saved. Confirmed task choices are unchanged.";
   const feedback = await screen.findByLabelText(message, {
     selector: "summary",
   });
