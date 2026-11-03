@@ -137,6 +137,7 @@ const oauth_timeout: std.Io.Clock.Duration = .{
 
 const JobFailure = enum {
     definitive,
+    not_sent,
     cancelled_before_send,
     rejected,
     invalid_grant,
@@ -284,6 +285,7 @@ const Job = struct {
             self.publish(.{ .failed = switch (err) {
                 error.RegistrationRejected => .rejected,
                 error.CancelledBeforeSend => .cancelled_before_send,
+                error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => .not_sent,
                 error.RegistrationOutcomeUnknown => .outcome_unknown,
                 else => .definitive,
             } });
@@ -323,6 +325,7 @@ const Job = struct {
             self.publish(.{ .failed = switch (err) {
                 error.InvalidGrant => .invalid_grant,
                 error.CancelledBeforeSend => .cancelled_before_send,
+                error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => .not_sent,
                 error.TokenOutcomeUnknown => .outcome_unknown,
                 else => .definitive,
             } });
@@ -1553,13 +1556,16 @@ pub const Coordinator = struct {
     }
 
     fn finishFlow(self: *Coordinator, flow: *Flow) void {
+        var requires_recovery = flow.durable_request_started;
         if (flow.job) |job| {
             job.cancel();
             job.join();
+            if (job.result == .failed)
+                requires_recovery = durableFailureRequiresRecovery(job.result.failed);
             self.destroyJob(flow, job);
         }
         if (flow.durable_operation_id != null) {
-            if (flow.durable_request_started)
+            if (requires_recovery)
                 _ = self.recoverDurable(flow)
             else
                 _ = self.clearDurable(flow);
@@ -1636,7 +1642,10 @@ fn containsAuthMethod(
 }
 
 fn durableFailureRequiresRecovery(failure: JobFailure) bool {
-    return failure == .invalid_grant or failure == .outcome_unknown;
+    return switch (failure) {
+        .invalid_grant, .outcome_unknown => true,
+        .definitive, .not_sent, .cancelled_before_send, .rejected => false,
+    };
 }
 
 fn mapManagementOutcome(value: mcp_configuration.ManagementOutcome) Outcome {
@@ -1665,6 +1674,7 @@ test "MCP native confirmation text escapes untrusted field boundaries" {
 
 test "MCP durable request cleanup distinguishes pre-send cancellation" {
     try std.testing.expect(!durableFailureRequiresRecovery(.cancelled_before_send));
+    try std.testing.expect(!durableFailureRequiresRecovery(.not_sent));
     try std.testing.expect(!durableFailureRequiresRecovery(.rejected));
     try std.testing.expect(!durableFailureRequiresRecovery(.definitive));
     try std.testing.expect(durableFailureRequiresRecovery(.invalid_grant));

@@ -2441,6 +2441,19 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
     try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response.body);
 }
 
+pub const testing = if (builtin.is_test) struct {
+    pub fn pendingAuthorizations(allocator: std.mem.Allocator, io: std.Io) !HttpAuthorizations {
+        const slot = try HttpAuthSlot.create(allocator, io, "server", 1, 1, .{ .access_token = "fixture-access" });
+        errdefer slot.release();
+        var lease = slot.lease();
+        defer lease.deinit();
+        slot.recordRuntimeAuthFailure(&lease, &.{});
+        const slots = try allocator.alloc(*HttpAuthSlot, 1);
+        slots[0] = slot;
+        return .{ .allocator = allocator, .slots = slots };
+    }
+} else struct {};
+
 const ProcessFixture = if (builtin.is_test) struct {
     const echo = "require('node:readline').createInterface({input:process.stdin}).on('line',line=>process.stdout.write(line+'\\n'));";
     const hold = "process.stdin.resume();process.stdin.on('data',()=>process.stdout.write('waiting\\n'));";

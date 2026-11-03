@@ -62,6 +62,9 @@ pub const Response = struct {
 
 pub const FetchError = error{
     CancelledBeforeSend,
+    NetworkBeforeSend,
+    DeadlineExceededBeforeSend,
+    InvalidResponseBeforeSend,
     Cancelled,
     DeadlineExceeded,
     Network,
@@ -135,6 +138,8 @@ pub const StdHttpTransport = struct {
     ) FetchError!Response {
         const self: *StdHttpTransport = @ptrCast(@alignCast(raw.?));
         if (self.cancellation.isCancelled()) return error.CancelledBeforeSend;
+        if (self.deadline.raw.nanoseconds <= self.deadline.clock.now(self.io).nanoseconds)
+            return error.DeadlineExceededBeforeSend;
         const Event = union(enum) {
             response: FetchError!Response,
             deadline,
@@ -142,23 +147,37 @@ pub const StdHttpTransport = struct {
         };
         var events: [3]Event = undefined;
         var selection = std.Io.Select(Event).init(self.io, &events);
+        // Only fetchOne writes this fact. Every read follows a join, including
+        // partial Select registration failure, so no guessed error mapping or
+        // extra operation identity is needed.
+        var send_started = false;
         select_start.start(&selection, .{
-            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer } },
+            .{ .response, fetchOne, .{ self, request, body_buffer, header_buffer, &send_started } },
             .{ .deadline, waitDeadline, .{ self.io, self.deadline } },
             .{ .cancelled, waitCancellation, .{self.cancellation} },
-        }) catch return error.Network;
+        }) catch return classifyFailure(error.Network, send_started);
         const outcome = selection.await() catch {
             selection.cancelDiscard();
-            return error.Network;
+            return classifyFailure(error.Network, send_started);
         };
-        defer selection.cancelDiscard();
+        selection.cancelDiscard();
         return switch (outcome) {
-            .response => |response| if (self.cancellation.isCancelled())
-                error.Cancelled
-            else
-                response,
-            .deadline => error.DeadlineExceeded,
-            .cancelled => error.Cancelled,
+            // A complete selected response remains a known remote result;
+            // cancellation during loser cleanup cannot erase it.
+            .response => |response| response catch |err| classifyFailure(err, send_started),
+            .deadline => classifyFailure(error.DeadlineExceeded, send_started),
+            .cancelled => classifyFailure(error.Cancelled, send_started),
+        };
+    }
+
+    fn classifyFailure(cause: FetchError, send_started: bool) FetchError {
+        if (send_started) return cause;
+        return switch (cause) {
+            error.Network => error.NetworkBeforeSend,
+            error.Cancelled => error.CancelledBeforeSend,
+            error.DeadlineExceeded => error.DeadlineExceededBeforeSend,
+            error.InvalidResponse => error.InvalidResponseBeforeSend,
+            else => cause,
         };
     }
 
@@ -167,9 +186,25 @@ pub const StdHttpTransport = struct {
         request: Request,
         body_buffer: []u8,
         header_buffer: []u8,
+        send_started: *bool,
     ) FetchError!Response {
-        if (!validHttpsUrl(request.url) or request.headers.len > 8)
-            return error.InvalidResponse;
+        if (!validHttpsUrl(request.url)) return error.InvalidResponse;
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        defer client.deinit();
+        return fetchWithClient(&client, request, body_buffer, header_buffer, send_started);
+    }
+
+    /// HTTP mechanics only. HTTPS endpoint policy remains at fetchOne; tests
+    /// use a plain loopback peer to observe the actual write boundary without
+    /// changing TLS verification or the production endpoint policy.
+    fn fetchWithClient(
+        client: *std.http.Client,
+        request: Request,
+        body_buffer: []u8,
+        header_buffer: []u8,
+        send_started: *bool,
+    ) FetchError!Response {
+        if (request.headers.len > 8) return error.InvalidResponse;
         const uri = std.Uri.parse(request.url) catch return error.InvalidResponse;
         var headers: [8]std.http.Header = undefined;
         var header_count: usize = 0;
@@ -187,8 +222,6 @@ pub const StdHttpTransport = struct {
             headers[header_count] = .{ .name = header.name, .value = header.value };
             header_count += 1;
         }
-        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
-        defer client.deinit();
         const method: std.http.Method = switch (request.method) {
             .get => .GET,
             .post => .POST,
@@ -205,6 +238,8 @@ pub const StdHttpTransport = struct {
             .extra_headers = headers[0..header_count],
         }) catch return error.Network;
         defer http_request.deinit();
+        if (method == .GET and request.body.len != 0) return error.InvalidResponse;
+        send_started.* = true;
         if (method == .POST) {
             http_request.transfer_encoding = .{ .content_length = request.body.len };
             var request_body = http_request.sendBodyUnflushed(&.{}) catch
@@ -213,7 +248,6 @@ pub const StdHttpTransport = struct {
             request_body.end() catch return error.Network;
             http_request.connection.?.flush() catch return error.Network;
         } else {
-            if (request.body.len != 0) return error.InvalidResponse;
             http_request.sendBodiless() catch return error.Network;
         }
         var response = http_request.receiveHead(&.{}) catch return error.Network;
@@ -794,8 +828,8 @@ pub fn discoverResourceEffect(
     ) catch |err| switch (err) {
         error.CancelledBeforeSend => return error.Cancelled,
         error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded => return error.DeadlineExceeded,
-        error.Network, error.ResponseTooLarge, error.InvalidResponse => null,
+        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+        error.Network, error.NetworkBeforeSend, error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => null,
     };
     if (probe) |response| if (response.status == 401) {
         if (response.www_authenticate) |header|
@@ -826,7 +860,7 @@ pub fn discoverResourceEffect(
         error.OutOfMemory => return error.OutOfMemory,
         error.CancelledBeforeSend => return error.Cancelled,
         error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded => return error.DeadlineExceeded,
+        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
         else => {},
     }
 
@@ -927,7 +961,7 @@ pub fn discoverAuthorizationServer(
             error.OutOfMemory => return error.OutOfMemory,
             error.CancelledBeforeSend => return error.Cancelled,
             error.Cancelled => return error.Cancelled,
-            error.DeadlineExceeded => return error.DeadlineExceeded,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
             else => {
                 last_error = @errorCast(err);
                 continue;
@@ -1380,7 +1414,7 @@ pub fn registerDynamicClientEffect(
         },
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.RegistrationOutcomeUnknown,
     };
     if (response.status == 400 and jsonContentType(response.content_type) and
@@ -1521,7 +1555,7 @@ pub fn exchangeAuthorizationCodeEffect(
         .headers = headers[0..header_count],
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
     if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
@@ -1605,7 +1639,7 @@ pub fn refreshAccessTokenEffect(
         .headers = headers[0..header_count],
         .body = writer.buffered(),
     }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend => return error.CancelledBeforeSend,
+        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
         else => return error.TokenOutcomeUnknown,
     };
     if (response.status == 400 and oauthErrorIs(response.body, "invalid_grant"))
@@ -3013,6 +3047,100 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
     );
 }
 
+test "MCP OAuth records the real HTTP write boundary without weakening HTTPS policy" {
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        reply: bool,
+        seen: bool = false,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn serve(self: *@This()) !void {
+            const io = std.testing.io;
+            var stream = try self.listener.accept(io);
+            defer stream.close(io);
+            var in: [4096]u8 = undefined;
+            var out: [4096]u8 = undefined;
+            var reader = stream.reader(io, &in);
+            var writer = stream.writer(io, &out);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = try server.receiveHead();
+            if (request.head.method != .POST) return error.UnexpectedMethod;
+            self.seen = true;
+            if (self.reply) try request.respond("{}", .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json" }} });
+        }
+    };
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    for ([_]bool{ false, true }) |reply| {
+        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+        defer listener.deinit(std.testing.io);
+        const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/token", .{listener.socket.address.getPort()});
+        defer std.testing.allocator.free(url);
+        var peer: Peer = .{ .listener = &listener, .reply = reply };
+        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+        defer client.deinit();
+        var body: [512]u8 = undefined;
+        var headers: [1024]u8 = undefined;
+        var started = false;
+        const result = StdHttpTransport.fetchWithClient(&client, .{ .method = .post, .url = url, .body = "fixture" }, &body, &headers, &started);
+        thread.join();
+        try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+        try std.testing.expect(peer.seen and started);
+        if (reply) try std.testing.expectEqualStrings("{}", (try result).body) else {
+            try std.testing.expectError(error.Network, result);
+            try std.testing.expectEqual(error.Network, StdHttpTransport.classifyFailure(error.Network, started));
+        }
+        var cancellation = Cancellation.init(std.testing.io);
+        var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = std.testing.io, .cancellation = &cancellation, .deadline = .fromNow(std.testing.io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+        // The production entry still rejects a plain endpoint before sending.
+        try std.testing.expectError(error.InvalidResponseBeforeSend, transport.transport().fetch(.{ .method = .post, .url = url }, &body, &headers));
+    }
+}
+
+test "MCP OAuth partial Select registration joins DNS before classifying no send" {
+    const Probe = struct {
+        var base: std.Io = undefined;
+        var entered: std.Io.Event = .unset;
+        var exited: bool = false;
+        var registered: usize = 0;
+        fn concurrent(userdata: ?*anyopaque, group: *std.Io.Group, bytes: []const u8, alignment: std.mem.Alignment, run: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+            registered += 1;
+            if (registered == 2) {
+                entered.waitUncancelable(base);
+                return error.ConcurrencyUnavailable;
+            }
+            return base.vtable.groupConcurrent(userdata, group, bytes, alignment, run);
+        }
+        fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
+            defer resolved.close(base);
+            defer exited = true;
+            entered.set(base);
+            try std.Io.sleep(base, .fromSeconds(60), .awake);
+            return error.UnknownHostName;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    Probe.base = threaded.io();
+    Probe.entered = .unset;
+    Probe.exited = false;
+    Probe.registered = 0;
+    var vtable = Probe.base.vtable.*;
+    vtable.netLookup = Probe.lookup;
+    vtable.groupConcurrent = Probe.concurrent;
+    const io: std.Io = .{ .userdata = Probe.base.userdata, .vtable = &vtable };
+    var cancellation = Cancellation.init(io);
+    var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .boot }) };
+    var body: [32]u8 = undefined;
+    var headers: [32]u8 = undefined;
+    try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token" }, &body, &headers));
+    try std.testing.expect(Probe.exited);
+}
+
 test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
     const Dns = struct {
         var io: std.Io = undefined;
@@ -3044,15 +3172,15 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         var headers: [32]u8 = undefined;
         const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
         try std.testing.expectError(switch (mode) {
-            .complete => error.Network,
-            .cancel => error.Cancelled,
-            .deadline => error.DeadlineExceeded,
+            .complete => error.NetworkBeforeSend,
+            .cancel => error.CancelledBeforeSend,
+            .deadline => error.DeadlineExceededBeforeSend,
         }, result);
         try std.testing.expect(Dns.exited.load(.acquire));
     }
 }
 
-test "MCP OAuth registration failure remains an uncertain POST outcome" {
+test "MCP OAuth unavailable concurrency proves the POST was not sent" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     defer threaded.deinit();
     const io = threaded.io();
@@ -3060,7 +3188,7 @@ test "MCP OAuth registration failure remains an uncertain POST outcome" {
     var transport: StdHttpTransport = .{ .allocator = std.testing.allocator, .io = io, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
     var body: [32]u8 = undefined;
     var headers: [32]u8 = undefined;
-    try std.testing.expectError(error.Network, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));
+    try std.testing.expectError(error.NetworkBeforeSend, transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers));
 }
 
 test "MCP OAuth well-known derivation omits resource query but preserves identity" {

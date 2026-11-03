@@ -164,7 +164,7 @@ const RefreshJob = struct {
             self.now_unix_ms,
         ) catch |err| {
             self.publish(switch (err) {
-                error.CancelledBeforeSend => .clear_marker,
+                error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => .clear_marker,
                 else => .recover,
             });
             return;
@@ -212,6 +212,7 @@ pub const Coordinator = struct {
     host: Host,
     job: ?*RefreshJob = null,
     retry_not_before_unix_ms: ?u64 = null,
+    auth_delivery_retry_at: ?u64 = null,
     stopping: bool = false,
 
     pub fn init(
@@ -250,16 +251,22 @@ pub const Coordinator = struct {
     pub fn onTimer(self: *Coordinator) bool {
         const now_unix_ms = self.host.nowRequired();
         if (self.stopping or self.job != null) return true;
+        if (self.auth_delivery_retry_at) |due| {
+            if (now_unix_ms >= due) _ = self.drainRuntimeAuthFailures();
+        }
         if (self.retry_not_before_unix_ms) |not_before| {
             if (now_unix_ms < not_before) {
-                self.host.armRequired(not_before);
+                self.armEarliest();
                 return true;
             }
             self.retry_not_before_unix_ms = null;
         }
-        const expiry = self.control.nextMcpOauthExpiry() orelse return true;
+        const expiry = self.control.nextMcpOauthExpiry() orelse {
+            self.armEarliest();
+            return true;
+        };
         if (expiry.expires_at_unix_ms > now_unix_ms) {
-            self.host.armRequired(expiry.expires_at_unix_ms);
+            self.armEarliest();
             return true;
         }
         self.begin(expiry.server_id, now_unix_ms) catch {
@@ -435,7 +442,13 @@ pub const Coordinator = struct {
     }
 
     fn drainRuntimeAuthFailures(self: *Coordinator) bool {
-        var batch = self.authorizations.snapshotRuntimeAuthFailures() catch return false;
+        if (!self.stopping) if (self.auth_delivery_retry_at) |due|
+            if (self.host.nowRequired() < due) return false;
+        var batch = self.authorizations.snapshotRuntimeAuthFailures() catch {
+            self.deferAuthDelivery();
+            return false;
+        };
+        self.auth_delivery_retry_at = null;
         defer batch.deinit();
         var changed = false;
         for (batch.values) |*failure| {
@@ -445,7 +458,10 @@ pub const Coordinator = struct {
                 .token_revision = failure.token_revision,
                 .challenge_scopes = failure.challenge_scopes,
                 .challenge_scopes_complete = failure.challenge_scopes_complete,
-            }) catch continue;
+            }) catch {
+                self.deferAuthDelivery();
+                continue;
+            };
             switch (outcome) {
                 .applied, .stale, .persistence_outcome_unknown => {
                     _ = self.authorizations.acknowledgeRuntimeAuthFailure(failure);
@@ -455,6 +471,11 @@ pub const Coordinator = struct {
             }
         }
         return changed;
+    }
+
+    fn deferAuthDelivery(self: *Coordinator) void {
+        if (!self.stopping)
+            self.auth_delivery_retry_at = self.host.nowRequired() +| retry_delay_ms;
     }
 
     fn resolveSecret(self: *Coordinator, locator: []const u8) ![]u8 {
@@ -484,13 +505,19 @@ pub const Coordinator = struct {
 
     fn armEarliest(self: *Coordinator) void {
         if (self.stopping or self.job != null) return;
-        const expiry = self.control.nextMcpOauthExpiry() orelse {
+        const expiry = self.control.nextMcpOauthExpiry();
+        if (expiry == null and self.auth_delivery_retry_at == null) {
             self.host.cancel();
             return;
-        };
+        }
         const now = self.host.nowRequired();
         const not_before = self.retry_not_before_unix_ms orelse now;
-        self.host.armRequired(@max(expiry.expires_at_unix_ms, not_before));
+        var due = self.auth_delivery_retry_at;
+        if (expiry) |value| {
+            const refresh_due = @max(value.expires_at_unix_ms, not_before);
+            due = if (due) |delivery| @min(delivery, refresh_due) else refresh_due;
+        }
+        self.host.armRequired(due.?);
     }
 };
 
@@ -503,6 +530,74 @@ fn commitRotation(context: *anyopaque) void {
 fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {
     std.crypto.secureZero(u8, secret);
     allocator.free(secret);
+}
+
+test "MCP auth failure delivery survives allocation failure without waiting for another request" {
+    const Fixture = struct {
+        now_ms: u64 = 1000,
+        armed: ?u64 = null,
+        deliveries: usize = 0,
+        fn next(_: *anyopaque) ?mcp_types.McpOauthExpiry {
+            return null;
+        }
+        fn begin(_: *anyopaque, _: []const u8) anyerror!mcp_types.McpOauthRefreshBeginOutcome {
+            return error.UnexpectedCall;
+        }
+        fn complete(_: *anyopaque, _: mcp_types.contract.CompleteRefreshInput, _: mcp_types.McpOauthRuntimeCommit) anyerror!mcp_types.contract.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn clear(_: *anyopaque, _: []const u8) anyerror!mcp_types.contract.ManagementOutcome {
+            return error.UnexpectedCall;
+        }
+        fn reauth(raw: *anyopaque, failure: mcp_types.McpRuntimeAuthorizationFailure) anyerror!mcp_types.McpRuntimeAuthorizationFailureOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("server", failure.server_id);
+            self.deliveries += 1;
+            return .applied;
+        }
+        fn now(raw: *anyopaque) ?u64 {
+            return (@as(*@This(), @ptrCast(@alignCast(raw)))).now_ms;
+        }
+        fn arm(raw: *anyopaque, due: u64) bool {
+            (@as(*@This(), @ptrCast(@alignCast(raw)))).armed = due;
+            return true;
+        }
+        fn cancel(raw: *anyopaque) void {
+            (@as(*@This(), @ptrCast(@alignCast(raw)))).armed = null;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    var fixture: Fixture = .{};
+    var authorizations = try mcp_platform.testing.pendingAuthorizations(std.testing.allocator, std.testing.io);
+    defer authorizations.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    authorizations.allocator = failing.allocator();
+    defer authorizations.allocator = std.testing.allocator;
+    var credentials: mcp_platform.CredentialStore = undefined;
+    var coordinator = Coordinator.init(std.testing.allocator, std.testing.io, .{
+        .context = &fixture,
+        .next_expiry_fn = Fixture.next,
+        .begin_refresh_fn = Fixture.begin,
+        .complete_refresh_fn = Fixture.complete,
+        .require_reauthorization_fn = Fixture.reauth,
+        .clear_operation_fn = Fixture.clear,
+        .recover_operation_fn = Fixture.clear,
+    }, &credentials, &authorizations, .{ .context = &fixture, .now_unix_ms_fn = Fixture.now, .arm_fn = Fixture.arm, .cancel_fn = Fixture.cancel, .notify_fn = Fixture.notify });
+    defer coordinator.deinit();
+    coordinator.start();
+    try std.testing.expectEqual(@as(usize, 0), fixture.deliveries);
+    try std.testing.expectEqual(@as(?u64, 31_000), fixture.armed);
+    authorizations.allocator = std.testing.allocator;
+    // An unrelated wake cannot erase the retry floor or cause a busy loop.
+    _ = coordinator.drain();
+    try std.testing.expectEqual(@as(usize, 0), fixture.deliveries);
+    fixture.now_ms = 31_000;
+    _ = coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 1), fixture.deliveries);
+    try std.testing.expectEqual(@as(?u64, null), fixture.armed);
+    var remaining = try authorizations.snapshotRuntimeAuthFailures();
+    defer remaining.deinit();
+    try std.testing.expectEqual(@as(usize, 0), remaining.values.len);
 }
 
 fn refreshDiscoveryCoveredByConsent(

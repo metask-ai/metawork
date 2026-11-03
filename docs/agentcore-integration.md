@@ -95,6 +95,8 @@ MetaWork MCP Host 工程接线不得改变上述协议 owner。正式 Runtime �
 
 Modern disposable probe 收到完整 HTTP 400 时，MetaWork 保留 status/body，AgentCore 才能判定是否进入 Classic；probe connection 永不升格或与 actual connection 共享 session。OAuth 缺口不要求 AgentCore ABI 扩展：OAuth 是 Streamable HTTP 在产生 preauthorized capability 前的 Host transport authorization，由 Product Control 持有产品状态、Application 执行标准 effect。Product Control 只有在目标 transport 的 approval/auth facts 完整且 secret 满足 Application-owned runtime limits 时才发布 `eligible`；Agent-owned HTTP backend 按成功 response 的 media type 严格分流 JSON 与 event-stream，对非 2xx body 只做有界原样收集，并把 response observation 交给 AgentCore；仅成功消息沿上述最小 envelope 边界路由，MCP 语义仍由 Core 验证。
 
+OAuth effect 的未发送证明只来自首个可能写出 HTTP 字节的操作边界；DNS、连接与 TLS 建立不构成 OAuth 请求已发送。发送阶段只能在全部并发 effect 静止后读取，覆盖部分 Select 注册失败、取消与 deadline；不从错误文案推断。已选中的完整响应不得被 loser 清理期间的取消覆盖；未取得可接纳响应且可能已发送时保留结果不确定性，不重放请求。auth failure 的本地快照或交付因资源错误失败时，Application 保留 pending fact，以现有单一 Host timer 有界重试交付；它不重放网络 effect、不复制 Product 的授权或按服务器刷新政策。
+
 ## 4. Agent binding
 
 Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。
