@@ -983,16 +983,19 @@ pub const Runtime = struct {
     /// later Schedule write scans live owners. A clean store needs no new I/O;
     /// a dirty store must commit before its last protecting owner can leave.
     pub fn prepareCredentialRelease(self: *Runtime, credential: []const u8, redaction: Redaction) bool {
-        if (credential.len == 0) return true;
-        const dirty = for (self.store.items) |entry| {
+        if (!self.containsCredential(credential)) return true;
+        _ = self.prepareCredentialRedaction(credential, redaction) catch return false;
+        return true;
+    }
+
+    fn containsCredential(self: *const Runtime, credential: []const u8) bool {
+        if (credential.len == 0) return false;
+        return for (self.store.items) |entry| {
             const item = entry orelse continue;
             if (std.mem.indexOf(u8, item.title, credential) != null or
                 std.mem.indexOf(u8, item.input.borrowed(), credential) != null or
                 std.mem.indexOf(u8, item.bindingView().model_ref.model_id, credential) != null) break true;
         } else false;
-        if (!dirty) return true;
-        _ = self.prepareCredentialRedaction(credential, redaction) catch return false;
-        return true;
     }
 
     pub fn prepareCredentialRedaction(
@@ -1000,17 +1003,14 @@ pub const Runtime = struct {
         additional_credential: []const u8,
         redaction: Redaction,
     ) Error!bool {
+        // Only a matching durable text creates a Schedule dependency. An
+        // unrelated broken store must not gate Task creation or renewal.
+        if (!self.containsCredential(additional_credential)) return false;
         if (self.persistence.enabled) switch (self.persistence_health) {
             .ready => {},
             .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
             else => return error.ScheduledTaskPersistenceUnavailable,
         };
-        var has_items = false;
-        for (self.store.items) |entry| if (entry != null) {
-            has_items = true;
-            break;
-        };
-        if (!has_items) return false;
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -1414,6 +1414,39 @@ test "credential release retains its protecting owner until a dirty Schedule com
     effects.commit_result = .committed;
     try std.testing.expect(runtime.prepareCredentialRelease("late-secret", redaction));
     try std.testing.expect(std.mem.indexOf(u8, runtime.store.find(id).?.title, "late-secret") == null);
+}
+
+test "clean credential admission ignores unrelated Schedule persistence failures" {
+    for ([_]PersistenceHealth{ .unavailable, .read_failed, .corrupt, .write_failed, .outcome_unknown }) |health| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        runtime.persistence_health = health;
+        try std.testing.expect(!try runtime.prepareCredentialRedaction("new-secret", testRedaction(&effects)));
+        try std.testing.expectEqual(@as(usize, 0), effects.commits);
+        runtime.persistence_health = .ready;
+        _ = try runtime.create(testDefinition("unrelated plan", "inspect"), testBinding(), testRedaction(&effects));
+        runtime.persistence_health = health;
+        const commits = effects.commits;
+        try std.testing.expect(!try runtime.prepareCredentialRedaction("new-secret", testRedaction(&effects)));
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqual(health, runtime.persistence_health);
+    }
+}
+
+test "matching credential admission preserves the dirty Schedule and rejects unhealthy persistence" {
+    for ([_]PersistenceHealth{ .unavailable, .read_failed, .corrupt, .write_failed, .outcome_unknown }) |health| {
+        var effects: TestEffects = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const id = try runtime.create(testDefinition("new-secret", "inspect"), testBinding(), testRedaction(&effects));
+        const commits = effects.commits;
+        runtime.persistence_health = health;
+        const expected: Error = if (health == .outcome_unknown) error.ScheduledTaskPersistenceOutcomeUnknown else error.ScheduledTaskPersistenceUnavailable;
+        try std.testing.expectError(expected, runtime.prepareCredentialRedaction("new-secret", testRedaction(&effects)));
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqualStrings("new-secret", runtime.store.find(id).?.title);
+    }
 }
 
 const retired_schedule_bytes =

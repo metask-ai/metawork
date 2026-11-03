@@ -152,6 +152,10 @@ test "Metask token rotation renews an idle old Task without changing its model i
     try characterizeCredentialExpiry(.rotation);
 }
 
+test "Metask token rotation and Task input survive unrelated corrupt Schedule storage" {
+    try characterizeCredentialExpiryWithSchedule(.rotation, true);
+}
+
 test "Metask hard expiry blocks an old Task before Core without a notification" {
     try characterizeCredentialExpiry(.expiry);
 }
@@ -280,6 +284,10 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
 const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
+    try characterizeCredentialExpiryWithSchedule(scenario, false);
+}
+
+fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule: bool) !void {
     const rotate = scenario != .expiry;
     const continuation = switch (scenario) {
         .continuation_rotation, .continuation_unchanged, .continuation_cancelled, .continuation_stale_auth, .continuation_expired => true,
@@ -312,8 +320,10 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = home;
+    if (corrupt_schedule) configuration.schedule_persistence = .{ .enabled = true, .restored_bytes = "not-json" };
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
     defer control.deinit();
+    if (corrupt_schedule) try std.testing.expectEqual(.corrupt, control.schedule.persistenceHealth());
     defer fake_core.releaseControlledRestore();
     defer fake_core.releaseControlled();
 

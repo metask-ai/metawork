@@ -308,7 +308,7 @@ Task 直接删除与设置归档管理须覆盖：未归档 deleting/failed 的�
 
 当前 AgentCore 系统时钟异常路径尚未完整满足“读取失败时明确报告日期未知”：POSIX 时钟读取失败可能以零 Unix time 继续生成日期。该上游缺口暂不阻塞 Core 日期上下文消费，不通过 Host 时钟、日期 fallback 或平行注入补齐；修复与异常路径回归归 AgentCore 发布方，正常请求、恢复和 Host 传参验证仍必须通过。
 
-Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。New task 模型 override 还必须覆盖默认 null、不修改 global default、同源非默认模型被写入新 Task 与 owned ExecutionConfig、source/catalog generation 漂移或 membership 失效时拒绝且不回退；Renderer、Bridge 和 Product Control 必须各自固定这条 payload/authority 链路。
+Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。New task 模型 override 还必须覆盖默认 null、不修改 global default、同源非默认模型被写入新 Task 与 owned ExecutionConfig、source/catalog generation 漂移或 membership 失效时拒绝且不回退；故障 Schedule 未命中待接纳 credential 时不得阻塞交互创建、恢复、续期或图片准备，命中时仍须 durable scrub。Renderer、Bridge 和 Product Control 必须各自固定这条 payload/authority 链路。
 
 已有 Task 模型选择投影的回归必须覆盖 Host 对 `available | catalog_loading | catalog_unavailable | task_unavailable` 的跨 owner 判定、serializer 与严格 Renderer decoder；Renderer 只消费该枚举，目录更新保留 disabled selector，生命周期不可编辑时显示只读值，缺失、已退休或未知枚举 fail closed。detached、Custom Provider 来源与无关目录刷新不得单独撤销选择。活跃 Run 冻结原执行配置，Task 持久模型意图独立提交，尚未接纳的输入使用最新已提交意图。跨来源或协议变更须通过真实 Product/当前 canonical Core 的 checkpoint 事务回归，覆盖原 Skill/MCP/权限上限、媒体与工具上下文、一次回退、无 effect 重放、closing owner、未知提交的多 witness 保留和确认后的 blob 退休；本地协议 fixture 不替代外部供应商和真实桌面交互验收。
 

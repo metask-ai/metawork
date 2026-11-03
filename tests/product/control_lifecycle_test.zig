@@ -5153,45 +5153,53 @@ const TestScheduleSupport = struct {
 };
 
 test "retired Schedule data starts empty without locking interactive Task creation" {
-    fake_core.reset();
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 1,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
-    }
-    var schedule_support: TestScheduleSupport = .{};
-    const retired_schedule =
-        "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"retired provider\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}";
-    var configuration = productControlConfiguration();
-    configuration.schedule_persistence = schedule_support.persistenceRestored(retired_schedule);
-    var workbench = try product_control.Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        .{
+    for ([_]product_control.SchedulePersistenceCommit{ .committed, .failed, .outcome_unknown }) |recovery| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{
             .worker_count = 1,
             .queue_capacity = 1,
-            .max_tasks = 1,
-            .max_scheduled_tasks = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        configuration,
-    );
-    defer workbench.deinit();
+            .max_sessions = 1,
+        });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var schedule_support: TestScheduleSupport = .{ .commit_result = recovery };
+        const retired_schedule =
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"retired provider\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}";
+        var configuration = productControlConfiguration();
+        configuration.schedule_persistence = schedule_support.persistenceRestored(retired_schedule);
+        var workbench = try product_control.Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_tasks = 1,
+                .max_scheduled_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            configuration,
+        );
+        defer workbench.deinit();
 
-    try installControlExecution(&workbench);
-    try account_contract.validateView(workbench.accountView());
-    try std.testing.expect(workbench.newTaskAdmissionView().available);
-    try std.testing.expectEqual(product_control.SchedulePersistenceHealth.ready, workbench.schedule.persistenceHealth());
-    try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
-    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
-    try std.testing.expect(task_id != 0);
-    for (workbench.schedule.store.items) |item| try std.testing.expect(item == null);
+        try installControlExecution(&workbench);
+        try account_contract.validateView(workbench.accountView());
+        try std.testing.expect(workbench.newTaskAdmissionView().available);
+        try std.testing.expectEqual(switch (recovery) {
+            .committed => product_control.SchedulePersistenceHealth.ready,
+            .failed => .write_failed,
+            .outcome_unknown => .outcome_unknown,
+        }, workbench.schedule.persistenceHealth());
+        try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
+        const commits_before = schedule_support.commits;
+        const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+        try std.testing.expect(task_id != 0);
+        try std.testing.expectEqual(commits_before, schedule_support.commits);
+        for (workbench.schedule.store.items) |item| try std.testing.expect(item == null);
+    }
 }
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {
