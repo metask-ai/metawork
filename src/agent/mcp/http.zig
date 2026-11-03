@@ -421,7 +421,7 @@ const ResponseCollector = struct {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
         if (self.failure != null or self.complete) return .stop;
         if (std.ascii.eqlIgnoreCase(name, HeaderName.content_type)) {
-            if (self.kind != .request) return .continue_reading;
+            if (self.kind != .request or self.error_status) return .continue_reading;
             self.content_type_count += 1;
             if (self.content_type_count != 1)
                 return self.fail(.fatal);
@@ -954,6 +954,7 @@ const FakeEndpoint = struct {
     valid: bool = true,
     failure: ?PortFailure = null,
     status: u16 = 200,
+    content_type: []const u8 = "application/json",
     session_token: []const u8 = &.{},
     expected_protocol_version: ?[]const u8 = null,
     expected_session_token: []const u8 = &.{},
@@ -1001,7 +1002,7 @@ const FakeEndpoint = struct {
         if (!notification and sink.header_fn(
             sink.context,
             "Content-Type",
-            "application/json",
+            self.content_type,
         ) == .stop) return .completed;
         if (self.session_token.len != 0 and sink.header_fn(
             sink.context,
@@ -1250,6 +1251,42 @@ test "HTTP complete protocol rejection preserves raw status and body" {
     defer std.testing.allocator.free(response.body);
     try std.testing.expectEqual(@as(u32, 400), response.http_status);
     try std.testing.expectEqualStrings("legacy evidence", response.body);
+}
+
+test "HTTP error responses preserve status and body regardless of media type" {
+    for ([_]u16{ 400, 401, 403, 502 }) |status| {
+        for ([_][]const u8{ "text/html", "text/plain", "application/octet-stream" }) |media_type| {
+            var endpoint: FakeEndpoint = .{ .status = status, .content_type = media_type };
+            var backend = try Backend.init(.{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .endpoint = endpoint.capability(),
+            });
+            defer backend.deinit() catch unreachable;
+            const transport = backend.transport();
+            const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1000)) {
+                .connection => |value| value,
+                .failure => return error.TestUnexpectedResult,
+            };
+            defer transport.close_fn(connection);
+            const response = switch (transport.request_fn(connection, std.testing.allocator, "error evidence", 1000, .{})) {
+                .response => |value| value,
+                .failure => return error.TestUnexpectedResult,
+            };
+            defer std.testing.allocator.free(response.body);
+            try std.testing.expectEqual(@as(u32, status), response.http_status);
+            try std.testing.expectEqualStrings("error evidence", response.body);
+        }
+    }
+}
+
+test "HTTP successful HTML remains an invalid response" {
+    var collector = try ResponseCollector.init(std.testing.allocator, .request, 128, 128);
+    defer collector.deinit();
+    const sink = collector.sink();
+    try std.testing.expectEqual(SinkFlow.continue_reading, sink.begin_fn(sink.context, 200));
+    try std.testing.expectEqual(SinkFlow.stop, sink.header_fn(sink.context, "Content-Type", "text/html"));
+    try std.testing.expectEqual(@as(?PortFailure, .fatal), collector.failure);
 }
 
 test "HTTP complete successful response may have an empty body" {
