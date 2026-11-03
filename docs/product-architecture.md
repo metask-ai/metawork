@@ -298,6 +298,8 @@ registry commit 明确失败时保持旧 Desired 与 authority；commit 结果�
 
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
 
+损坏记录的隔离必须由持久 pending intent 绑定待处理文件的 exact bytes，先核验 registry 与 journal 的整组物理状态，再移动文件。registry 不可信时先隔离关联 journal，再保存原 registry，确认这些步骤后才建立当前空 registry；只损坏或不匹配的 journal 可以独立隔离并保留可信 registry。重启只完成 pending intent，不读取已完成隔离记录来重建 Desired 或产生凭据 effect；文件内容已变、状态冲突或持久化未确认时保持 recovery required/outcome unknown。每次恢复必须重新确认已移动文件的持久化屏障。
+
 Application 启动时只创建一次 canonical empty Agent Runtime；恢复出的 Desired 必须在 Product Control 与 coordinator 就绪后沿与后续 mutation 相同的 apply 路径安装。empty create 后 apply 是正常启动协议，不是失败 fallback 或第二条 Runtime path。Agent Runtime create 失败终止启动；外部 MCP child、network、handshake 或 catalog failure 只能使相关 MCP authority unavailable，不能关闭普通 Text Task admission。
 
 MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorization 共享 Product Control 的串行化边界；浏览器授权等待不占用该边界，只携带 server-bound operation identity。浏览器等待期间，其他 server 的 OAuth refresh 和 reduced-authority catalog refresh 仍可运行；进入单一 durable `oauth_operation` 后才按事务串行。所有 completion 必须按 operation、server/connection fingerprint、consent epoch 与当前 generation 重新授权，stale 结果只清理自身资源。目标 server 进入 OAuth 或 reauthorization 时必须先提交排除它的 reduced authority，不能无关地冻结其他 server。
