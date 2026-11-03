@@ -10,6 +10,50 @@ type HistoryRun = Pick<
   "id" | "input" | "submission" | "additionalInputs"
 >;
 
+type CachedRun = { contentVersion: string; run: HistoryRun };
+
+/** Only the current Task is retained; scope/security changes release its inputs. */
+export function createTaskInputHistoryReader() {
+  let cache: {
+    taskId: string;
+    securityEpoch: string;
+    historyEpoch: string;
+    runs: Map<string, CachedRun>;
+  } | null = null;
+  return {
+    clear() {
+      cache = null;
+    },
+    load(
+      initial: WorkbenchSnapshot,
+      taskId: string,
+      fetchSnapshot: (scope: ViewScope) => Promise<WorkbenchSnapshot>,
+      isCurrent: () => boolean,
+    ) {
+      if (
+        !cache ||
+        cache.taskId !== taskId ||
+        cache.securityEpoch !== initial.securityEpoch ||
+        cache.historyEpoch !== initial.historyEpoch
+      )
+        cache = {
+          taskId,
+          securityEpoch: initial.securityEpoch,
+          historyEpoch: initial.historyEpoch,
+          runs: new Map(),
+        };
+      const current = cache;
+      return loadTaskInputHistory(
+        initial,
+        taskId,
+        fetchSnapshot,
+        () => cache === current && isCurrent(),
+        current.runs,
+      );
+    },
+  };
+}
+
 function historyRun(run: RunView): HistoryRun {
   return {
     id: run.id,
@@ -90,11 +134,12 @@ function orderedTexts(entries: Entry[]): string[] {
 
 /** Capture current submissions first, then hydrate only the missing older Runs.
  * Reads never publish a Workbench view or advance the conversation reader. */
-export async function loadTaskInputHistory(
+async function loadTaskInputHistory(
   initial: WorkbenchSnapshot,
   taskId: string,
   fetchSnapshot: (scope: ViewScope) => Promise<WorkbenchSnapshot>,
   isCurrent: () => boolean,
+  cache: Map<string, CachedRun>,
 ): Promise<readonly string[]> {
   const task = initial.tasks.find((task) => task.id === taskId);
   const page = initial.taskPage;
@@ -106,11 +151,19 @@ export async function loadTaskInputHistory(
   )
     throw new Error("Input history scope unavailable");
   const manifest = [...page.runManifest];
+  const versions = new Map(manifest.map((run) => [run.id, run.contentVersion]));
   // Retain just input records while paging, not every Run's tool/output bodies.
   const runs = new Map<string, HistoryRun>();
-  const known = new Set(manifest.map((run) => run.id));
+  for (const [id, cached] of cache) {
+    if (versions.get(id) === cached.contentVersion) runs.set(id, cached.run);
+    else cache.delete(id);
+  }
   for (const run of [...task.runs, ...(initial.historyPage?.runs ?? [])])
-    if (known.has(run.id)) runs.set(run.id, historyRun(run));
+    if (versions.has(run.id)) {
+      const input = historyRun(run);
+      runs.set(run.id, input);
+      cache.set(run.id, { contentVersion: versions.get(run.id)!, run: input });
+    }
   const waiting: Entry[] = task.inputSubmissions.map((input) => ({
     operationId: input.submission.operationId,
     text: text(input.input),
@@ -148,14 +201,15 @@ export async function loadTaskInputHistory(
       throw new Error("Input history page unavailable");
     const previousSize = runs.size;
     for (const run of next.historyPage.runs) {
-      if (!known.has(run.id) || runs.has(run.id)) continue;
-      const expected = manifest.find((item) => item.id === run.id)!;
+      if (!versions.has(run.id) || runs.has(run.id)) continue;
       const observed = next.taskPage.runManifest.find(
         (item) => item.id === run.id,
       );
-      if (observed?.contentVersion !== expected.contentVersion)
+      if (observed?.contentVersion !== versions.get(run.id))
         throw new Error("Input history changed during read");
-      runs.set(run.id, historyRun(run));
+      const input = historyRun(run);
+      runs.set(run.id, input);
+      cache.set(run.id, { contentVersion: versions.get(run.id)!, run: input });
     }
     if (runs.size === previousSize)
       throw new Error("Input history page made no progress");

@@ -11,9 +11,11 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { loadTaskInputHistory } = await vite.ssrLoadModule(
+const { createTaskInputHistoryReader } = await vite.ssrLoadModule(
   "/src/features/composer/input-history.ts",
 );
+const loadTaskInputHistory = (...args) =>
+  createTaskInputHistoryReader().load(...args);
 test.after(() => vite.close());
 const base = JSON.parse(
   readFileSync(
@@ -328,4 +330,122 @@ test("input history rejects stale authority, changing older Runs, failed or nonp
     ),
     /scope unavailable/,
   );
+});
+
+test("input history reuses versioned inputs when reentered or after a new Run", async () => {
+  const state = fixture(200);
+  const reader = createTaskInputHistoryReader();
+  let reads = 0;
+  const fetch = async (requested) => {
+    reads++;
+    return productStateFixture(state, requested);
+  };
+  const load = () =>
+    reader.load(productStateFixture(state, scope), "3", fetch, () => true);
+  assert.equal((await load()).length, 200);
+  assert.equal(reads, 49);
+  await load();
+  assert.equal(reads, 49, "reentering must not refetch old Runs");
+  state.tasks[0].runs.push(run(201));
+  assert.equal((await load()).at(-1), "input-201");
+  assert.equal(reads, 49, "a new Run is already in the current page");
+  state.tasks[0].runs[31].contentVersion = "2";
+  state.tasks[0].runs[31].input.text = "updated input";
+  assert.equal((await load())[31], "updated input");
+  assert.equal(reads, 50, "only the page with a changed older Run is reloaded");
+});
+
+test("cached transfer metadata is refreshed before suppressing new continuation roots", async () => {
+  const state = fixture(9);
+  const reader = createTaskInputHistoryReader();
+  const load = () =>
+    reader.load(
+      productStateFixture(state, scope),
+      "3",
+      async (requested) => productStateFixture(state, requested),
+      () => true,
+    );
+  await load();
+  state.tasks[0].runs[0].contentVersion = "2";
+  state.tasks[0].runs[0].additionalInputs = [
+    {
+      operationId: "operation-20",
+      text: "transferred",
+      redacted: false,
+      submission: submission(20),
+      state: "transferred",
+      transferredToRunId: "10",
+    },
+  ];
+  state.tasks[0].runs.push({ ...run(10, "transferred"), submission: null });
+  assert.deepEqual(await load(), [
+    ...Array.from({ length: 9 }, (_, i) => `input-${i + 1}`),
+    "transferred",
+  ]);
+});
+
+test("input history releases cached inputs on Task or epoch changes", async () => {
+  const state = fixture(9);
+  const reader = createTaskInputHistoryReader();
+  let reads = 0;
+  const fetch = async (requested) => {
+    reads++;
+    return productStateFixture(state, requested);
+  };
+  const load = (taskId = "3") =>
+    reader.load(
+      productStateFixture(state, { ...scope, taskId }),
+      taskId,
+      fetch,
+      () => true,
+    );
+  await load();
+  assert.equal(reads, 2);
+  state.securityEpoch = "2";
+  state.tasks[0].runs[0].input = {
+    kind: "text",
+    text: "masked",
+    redacted: true,
+  };
+  assert.ok(!(await load()).includes("input-1"));
+  assert.equal(reads, 4);
+  state.historyEpoch = "2";
+  await load();
+  assert.equal(reads, 6);
+  state.tasks.push({ ...structuredClone(state.tasks[0]), id: "4" });
+  await load("4");
+  assert.equal(reads, 8);
+  await load("3");
+  assert.equal(reads, 10, "only the current Task is cached");
+  reader.clear();
+  await load();
+  assert.equal(reads, 12);
+});
+
+test("clearing the input reader invalidates an in-flight page and cannot repopulate its cache", async () => {
+  const state = fixture(9);
+  const reader = createTaskInputHistoryReader();
+  await assert.rejects(
+    reader.load(
+      productStateFixture(state, scope),
+      "3",
+      async (requested) => {
+        reader.clear();
+        return productStateFixture(state, requested);
+      },
+      () => true,
+    ),
+    /authority changed/,
+  );
+  let reads = 0;
+  await reader.load(
+    productStateFixture(state, scope),
+    "3",
+    async (requested) => {
+      reads++;
+      return productStateFixture(state, requested);
+    },
+    () => true,
+  );
+  assert.equal(reads, 2);
 });

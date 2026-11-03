@@ -78,7 +78,7 @@ import {
 } from "../features/approvals/mode-state.ts";
 import { ApprovalModeMenu } from "../features/approvals/ApprovalModeMenu.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
-import { loadTaskInputHistory } from "../features/composer/input-history.ts";
+import { createTaskInputHistoryReader } from "../features/composer/input-history.ts";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
 import {
   uiRequestIdentity,
@@ -833,6 +833,7 @@ export default function App() {
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   const [taskReadingMemory] = useState(createTaskReadingMemory);
+  const [inputHistoryReader] = useState(createTaskInputHistoryReader);
   useEffect(() => {
     // Reclaim after TaskContent's unmount cleanup has saved its last position.
     taskReadingMemory.prune(
@@ -1576,6 +1577,17 @@ export default function App() {
   };
   const currentComposerDraft = reconcileSkillDraft(composerDraft, skillCatalog);
   useEffect(() => {
+    inputHistoryReader.clear();
+  }, [
+    inputHistoryReader,
+    bridgeGeneration,
+    snapshot.securityEpoch,
+    snapshot.historyEpoch,
+    workbench.activeTaskId,
+    newTaskDraftActive,
+  ]);
+  useEffect(() => () => inputHistoryReader.clear(), [inputHistoryReader]);
+  useEffect(() => {
     if (currentComposerDraft !== composerDraft) {
       composerDraftRef.current = currentComposerDraft;
       updateComposerDraft(currentComposerDraft);
@@ -1895,6 +1907,12 @@ export default function App() {
             latestSnapshotRef.current.securityEpoch !== next.securityEpoch
           )
             setHistoryRequests({});
+          if (
+            latestSnapshotRef.current &&
+            (latestSnapshotRef.current.securityEpoch !== next.securityEpoch ||
+              latestSnapshotRef.current.historyEpoch !== next.historyEpoch)
+          )
+            inputHistoryReader.clear();
           latestSnapshotRef.current = next;
           updateFeedbackState((current) =>
             observeFeedback(
@@ -2019,6 +2037,7 @@ export default function App() {
       },
       onSecurityInvalidated: (securityEpoch, generation) => {
         if (cancelled) return;
+        inputHistoryReader.clear();
         invalidateFeedbackSecurity();
         latestSnapshotRef.current = null;
         setHistoryRequests({});
@@ -2035,6 +2054,7 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
+          inputHistoryReader.clear();
           resetFeedbackContext();
           setHistoryRequests({});
           taskReadingMemory.reading.clear();
@@ -4158,7 +4178,7 @@ export default function App() {
             const draft = taskDrafts.currentDraft(historyTaskId);
             if (!initial || !draft)
               return Promise.reject(new Error("Input history unavailable"));
-            return loadTaskInputHistory(
+            return inputHistoryReader.load(
               initial,
               historyTaskId,
               (scope) => client.fetchSnapshot(scope),

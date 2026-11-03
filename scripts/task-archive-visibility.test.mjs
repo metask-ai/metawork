@@ -314,6 +314,14 @@ test("Composer recalls only the current Task's saved text after remount and page
     fireEvent.change(textarea, { target: { value: "one edited" } });
     fireEvent.keyDown(textarea, { key: "ArrowDown" });
     assert.equal(textarea.value, "one edited");
+    fireEvent.change(textarea, { target: { value: "" } });
+    fireEvent.keyDown(textarea, { key: "ArrowUp" });
+    await waitFor(() => assert.equal(textarea.value, "six"));
+    assert.deepEqual(
+      app.historyReads,
+      ["3"],
+      "reentering recall reuses the App-owned reader",
+    );
     fireEvent.keyDown(window, { key: "n", metaKey: true });
     await waitFor(() => assert.equal(textarea.value, ""));
     fireEvent.keyDown(textarea, { key: "ArrowUp" });
