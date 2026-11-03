@@ -29,15 +29,7 @@ const account = {
   safeDiagnostic: "",
   catalogGeneration: "0",
 };
-const newTaskAdmission = {
-  available: false,
-  reason: "none",
-  activeModelRef: null,
-  activeProtocol: null,
-  activeGeneration: "0",
-  activeSelectionRevision: "0",
-  state: "unavailable",
-};
+const newTaskAdmission = { available: false, reason: "workspace_unavailable" };
 
 function pending(identity) {
   return {

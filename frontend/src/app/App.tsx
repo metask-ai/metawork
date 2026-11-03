@@ -215,7 +215,10 @@ import {
   readyModelOptions,
   modelOptionId,
 } from "./new-task-model-selection.ts";
-import { taskModelSelectionPolicy } from "./task-model-selection.ts";
+import {
+  taskModelCandidates,
+  taskModelSelectionPolicy,
+} from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
   modelSetupNotice,
@@ -396,6 +399,9 @@ export default function App() {
   const [statuses, setStatuses] =
     useState<ShellStatusState>(createFeedbackState);
   const feedbackRef = useRef(statuses);
+  const feedbackContextRef = useRef<
+    Parameters<typeof statusVisibleInCommandBar>[1] | null
+  >(null);
   const accountFeedbackRequest = useRef({
     serial: 0,
     awaitingSync: false,
@@ -651,12 +657,9 @@ export default function App() {
     setStatuses(next);
   }
   function setStatus(status: ShellStatus) {
-    const announce = statusVisibleInCommandBar(status, {
-      route,
-      settingsOpen,
-      workspaceId: composerWorkspaceId ?? null,
-      taskId: activeTask?.id ?? null,
-    });
+    const context = feedbackContextRef.current;
+    const announce =
+      context !== null && statusVisibleInCommandBar(status, context);
     updateFeedbackState((current) => {
       const next = publishStatus(current, status);
       return announce ? next : { ...next, announcement: current.announcement };
@@ -1458,7 +1461,6 @@ export default function App() {
   const composerRunInput = composerDraftToRunInput(currentComposerDraft);
   const newTaskModelState = newTaskModelSelectionState(
     snapshot.models,
-    snapshot.newTaskAdmission,
     newTaskRequestedModel,
   );
   const composerContentReady =
@@ -1480,8 +1482,7 @@ export default function App() {
       `${bridgeGenerationRef.current}:${composerDraftScope}`,
     );
   const canCreateTask =
-    (snapshot.newTaskAdmission.available ||
-      newTaskModelState.intent !== null) &&
+    snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
     newTaskModelState.valid;
   const canSubmit =
@@ -1500,9 +1501,9 @@ export default function App() {
     (provider) => provider.id === "metask",
   );
   const taskIntent = activeTask?.modelIntent;
-  const taskModelOptions = readyModelOptions(
+  const taskModelOptions = taskModelCandidates(
     snapshot.models,
-    taskIntent?.modelRef.sourceId ?? null,
+    taskIntent?.modelRef ?? null,
   );
   const displayedTaskModelId = taskIntent
     ? modelOptionId(taskIntent.modelRef)
@@ -1542,10 +1543,7 @@ export default function App() {
           account: snapshot.account,
           models: snapshot.models,
           admission: snapshot.newTaskAdmission,
-          selected:
-            newTaskRequestedModel ??
-            snapshot.newTaskAdmission.activeModelRef ??
-            snapshot.models.defaultSelection,
+          selected: newTaskRequestedModel ?? snapshot.models.defaultSelection,
           valid: newTaskModelState.valid,
           hasReadyModels,
           customProvidersAvailable,
@@ -1608,6 +1606,7 @@ export default function App() {
       (snapshot.account.errorCode !== "none" &&
         snapshot.account.errorCode !== "user_cancelled") ||
       snapshot.models.customProviders.length > 0 ||
+      snapshot.capabilities.scheduledTaskRecoveryAvailable ||
       newTaskRequestedModel !== null ||
       (setupNotice?.action !== "start" && setupNotice?.action !== "login")
     )
@@ -1631,6 +1630,7 @@ export default function App() {
     snapshot.account.state,
     snapshot.account.errorCode,
     snapshot.models.customProviders.length,
+    snapshot.capabilities.scheduledTaskRecoveryAvailable,
     newTaskRequestedModel,
     setupNotice?.action,
   ]);
@@ -1755,6 +1755,19 @@ export default function App() {
           )
             setHistoryRequests({});
           latestSnapshotRef.current = next;
+          updateFeedbackState((current) =>
+            observeFeedback(
+              current,
+              "models:preference",
+              "condition",
+              next.models.errorCode === "preference_not_saved"
+                ? attentionStatus("model_setup.preference_not_saved", {
+                    scope: "execution",
+                  })
+                : null,
+              accountFeedbackRequest.current.observed,
+            ),
+          );
           observeAccountFeedback(
             next.account,
             accountFeedbackRequest.current.observed,
@@ -2656,6 +2669,7 @@ export default function App() {
     const audience = attachmentAudience.current;
     let session = submissionSessions.current.get(key);
     if (!session) {
+      if (!taskId && !newTaskModelState.intent) return;
       session = new TaskSubmissionSession({
         taskId,
         current: () => bridgeGenerationRef.current === generation,
@@ -2670,9 +2684,7 @@ export default function App() {
                   expectedWorkspaceEpoch: composerWorkspace.epoch,
                 }
               : { kind: "automatic" },
-            snapshot.newTaskAdmission.activeGeneration,
-            snapshot.newTaskAdmission.activeSelectionRevision,
-            newTaskModelState.intent,
+            newTaskModelState.intent!,
             input.kind === "skill" ? input.catalogRevision : null,
             input.kind === "skill" ? input.selectionRevision : null,
             newTaskApprovalMode,
@@ -2748,6 +2760,12 @@ export default function App() {
       },
     );
     if (bridgeGenerationRef.current !== generation) return;
+    if (
+      result.kind === "create_rejected" &&
+      session.canReleaseAfterCreationRejection &&
+      submissionSessions.current.get(key) === session
+    )
+      submissionSessions.current.delete(key);
     const state =
       result.kind === "accepted"
         ? "accepted"
@@ -3781,12 +3799,17 @@ export default function App() {
         }
       : null,
   });
-  const commandBarFeedback = selectCommandBarFeedback(statuses, {
+  const feedbackContext = {
     route,
     settingsOpen,
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
-  });
+  };
+  feedbackContextRef.current = feedbackContext;
+  const commandBarFeedback = selectCommandBarFeedback(
+    statuses,
+    feedbackContext,
+  );
   if (
     connectionBusy &&
     connectionShellStatus &&
@@ -4046,23 +4069,25 @@ export default function App() {
                     )
         }
         modelNotice={
-          setupNotice && (
-            <ModelSetupNotice
-              notice={setupNotice}
-              disabled={
-                bridgeUnavailable ||
-                accountBusy ||
-                executionBusy ||
-                accountCancelBusy
-              }
-              onAction={runModelSetupAction}
-              onChooseSetup={
-                setupNotice.action === "login" && customProvidersAvailable
-                  ? openModelSetup
-                  : undefined
-              }
-            />
-          )
+          <>
+            {setupNotice && (
+              <ModelSetupNotice
+                notice={setupNotice}
+                disabled={
+                  bridgeUnavailable ||
+                  accountBusy ||
+                  executionBusy ||
+                  accountCancelBusy
+                }
+                onAction={runModelSetupAction}
+                onChooseSetup={
+                  setupNotice.action === "login" && customProvidersAvailable
+                    ? openModelSetup
+                    : undefined
+                }
+              />
+            )}
+          </>
         }
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={
@@ -4262,6 +4287,15 @@ export default function App() {
                     : undefined
                 }
                 detailsLabel={t("feedback.details")}
+                dismissLabel={t("feedback.dismiss")}
+                onDismiss={
+                  entry.key === "models:preference"
+                    ? () =>
+                        updateFeedbackState((current) =>
+                          dismissFeedback(current, entry.key, entry.cycle),
+                        )
+                    : undefined
+                }
                 pending={
                   entry.audience.scope === "connection" && connectionBusy
                 }

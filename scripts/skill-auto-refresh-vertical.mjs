@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 
@@ -78,16 +79,15 @@ export async function runSkillAutoRefreshVertical({
       `${operationId} rejected before Run`,
     );
   try {
-    const admission = (await snapshot()).newTaskAdmission;
+    const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
       workspace: {
         kind: "manual",
         workspaceId,
         expectedWorkspaceEpoch: workspaceEpoch,
       },
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: catalog.catalog.revision,
       expectedSkillSelectionRevision: catalog.catalog.selectionRevision,
       approvalMode: "manual",

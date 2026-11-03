@@ -109,8 +109,7 @@ fn createTask(control: *control_api.Runtime, workspace: u64) !u64 {
 fn createTaskWithMode(control: *control_api.Runtime, workspace: u64, mode: control_api.ApprovalMode) !u64 {
     const view = control.modelsView();
     const provider = view.providers[0];
-    const admission = control.newTaskAdmissionView();
-    return control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), admission.active_generation, admission.active_selection_revision, .{
+    return control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), .{
         .target = .{ .source_id = models.metask_source_id, .model_id = model_id },
         .expected_source_generation = provider.source_generation,
         .expected_catalog_generation = provider.catalog_generation,
@@ -151,6 +150,10 @@ fn runAndExpect(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Run
 
 test "Metask token rotation renews an idle old Task without changing its model intent" {
     try characterizeCredentialExpiry(.rotation);
+}
+
+test "Metask token rotation and Task input survive unrelated corrupt Schedule storage" {
+    try characterizeCredentialExpiryWithSchedule(.rotation, true);
 }
 
 test "Metask hard expiry blocks an old Task before Core without a notification" {
@@ -276,12 +279,15 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     account_runtime.commit(&rotated);
     try std.testing.expect(account_runtime.dispatchCommitted(&rotated) == null);
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
-    control.finishAccountCommitNoFail();
 }
 
 const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, relogin, account_switch, logout, detached, catalog_failure, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer };
 
 fn characterizeCredentialExpiry(scenario: Scenario) !void {
+    try characterizeCredentialExpiryWithSchedule(scenario, false);
+}
+
+fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule: bool) !void {
     const rotate = scenario != .expiry;
     const continuation = switch (scenario) {
         .continuation_rotation, .continuation_unchanged, .continuation_cancelled, .continuation_stale_auth, .continuation_expired => true,
@@ -314,8 +320,10 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     configuration.task_persistence = typed_history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoints };
     configuration.directories.canonical_user_home = home;
+    if (corrupt_schedule) configuration.schedule_persistence = .{ .enabled = true, .restored_bytes = "not-json" };
     var control = try control_api.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 2, .max_workspaces = 1, .max_runs_per_task = 5 }, configuration);
     defer control.deinit();
+    if (corrupt_schedule) try std.testing.expectEqual(.corrupt, control.schedule.persistenceHealth());
     defer fake_core.releaseControlledRestore();
     defer fake_core.releaseControlled();
 
@@ -331,7 +339,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
     defer authenticated.deinit();
     account_runtime.commit(&authenticated);
     control.commitAccountFactNoFail(account_runtime.preparedFact(&authenticated));
-    control.finishAccountCommitNoFail();
+
     var coordinator = coordinator_api.Coordinator.init(&account_runtime, .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &network, .notify_fn = Network.wake });
     coordinator.start(home, .{ .context = &network, .generate_slot_fn = Network.generate, .store_fn = Network.store, .get_fn = Network.get, .delete_fn = Network.delete });
@@ -654,7 +662,7 @@ fn characterizeCredentialExpiry(scenario: Scenario) !void {
         try std.testing.expectEqual(scenario != .continuation_unchanged, old_source != control.modelsView().providers[0].source_generation);
         try std.testing.expectEqual(default_revision, control.modelsView().selection_revision);
         if (scenario == .catalog_drift) {
-            try std.testing.expectEqualStrings("catalog-default-model", control.modelsView().metask_selection.?.model_id);
+            try std.testing.expectEqualStrings(model_id, control.modelsView().default_selection.?.model_id);
             try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);
         }
         if (scenario == .update_rejected or scenario == .update_contract) {

@@ -643,11 +643,16 @@ pub const LifecycleSync = struct {
 
 pub const ReleaseEffects = struct {
     context: *anyopaque,
+    prepare_credential_release_fn: *const fn (*anyopaque, []const u8) bool,
     redact_all_fn: *const fn (*anyopaque, []const u8) void,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
 
     fn redactAll(self: ReleaseEffects, credential: []const u8) void {
         self.redact_all_fn(self.context, credential);
+    }
+
+    fn prepareCredentialRelease(self: ReleaseEffects, credential: []const u8) bool {
+        return self.prepare_credential_release_fn(self.context, credential);
     }
 
     fn releaseProjectionBytes(self: ReleaseEffects, bytes: usize) void {
@@ -4375,6 +4380,13 @@ pub const Runtime = struct {
                     .none, .settled => {},
                     .exporting, .failure_ready, .candidate_ready => continue,
                 }
+                if (run.image_execution) |image| {
+                    if (!effects.prepareCredentialRelease(image.candidate.input().bearer)) continue;
+                    const ready = for (image.credential_versions.items) |credential| {
+                        if (!effects.prepareCredentialRelease(credential)) break false;
+                    } else true;
+                    if (!ready) continue;
+                }
                 releaseRunEffects(self, run, effects);
                 releaseAutomaticTitle(&execution.automatic_title);
                 self.allocator.destroy(execution);
@@ -5783,10 +5795,16 @@ pub const Runtime = struct {
             if (join_running and completion == .running) if (self.test_rebind_close_join_observer) |observer|
                 observer.observe_fn(observer.context);
         }
-        task.runtime.close_thread.?.join();
+        if (task.runtime.close_thread) |thread| thread.join();
         completion = task.runtime.close_completion.load(.acquire);
         task.runtime.close_thread = null;
         std.debug.assert(task.runtime.hasClosingSession());
+        if (completion == .closed) {
+            const execution = task.runtime.executionConst().?;
+            if (!effects.prepareCredentialRelease(execution.input().api_key)) return result;
+            for (execution.retired_credentials.items) |credential|
+                if (!effects.prepareCredentialRelease(credential)) return result;
+        }
         task.runtime.close_completion.store(.none, .release);
         switch (completion) {
             .closed => {
@@ -9928,13 +9946,16 @@ const InputTestProjection = struct {
         return result;
     }
     fn redact(_: *anyopaque, _: []const u8) void {}
+    fn prepareRelease(_: *anyopaque, _: []const u8) bool {
+        return true;
+    }
     fn now(_: ?*anyopaque) ?u64 {
         return 1000;
     }
     fn effects(self: *InputTestProjection) OperationEffects {
         return .{
             .text = .{ .context = self, .project_fn = project, .discard_candidate_fn = discard, .discard_previous_fn = discard, .restore_previous_fn = restore, .allocate_capacity_fn = allocate, .reserve_bytes_fn = reserve, .release_bytes_fn = release },
-            .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release },
+            .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release, .prepare_credential_release_fn = prepareRelease },
             .executor = undefined,
             .worker = undefined,
             .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_tools_per_run = 1, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },

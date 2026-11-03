@@ -855,15 +855,7 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     safeDiagnostic: "",
     summary: emptyAccountSummary,
   };
-  catalogUnavailable.newTaskAdmission = {
-    available: false,
-    reason: "credential_unavailable",
-    activeModelRef: null,
-    activeProtocol: null,
-    activeGeneration: "0",
-    activeSelectionRevision: "0",
-    state: "unavailable",
-  };
+  catalogUnavailable.newTaskAdmission = { available: true, reason: "none" };
 
   assert.deepEqual(
     decodeWorkbenchSnapshot(catalogUnavailable).models,
@@ -886,15 +878,7 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   recoveryRequired.models.availability = "unavailable";
   recoveryRequired.models.persistenceHealth = "recovery_required";
   recoveryRequired.models.errorCode = "persistence_unavailable";
-  recoveryRequired.newTaskAdmission = {
-    available: false,
-    reason: "custom_provider_persistence_unavailable",
-    activeModelRef: null,
-    activeProtocol: null,
-    activeGeneration: "0",
-    activeSelectionRevision: "0",
-    state: "unavailable",
-  };
+  recoveryRequired.newTaskAdmission = { available: true, reason: "none" };
 
   assert.deepEqual(decodeWorkbenchSnapshot(recoveryRequired), recoveryRequired);
 });
@@ -1439,7 +1423,6 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },
         sourceGeneration: "1",
-        selectionRevision: "3",
         protocol: "openai_chat_completions",
       },
       input: {
@@ -1482,6 +1465,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   const invalidBlocker = clone(blockerHistory);
   invalidBlocker.scheduledTasks[0].occurrences[1].reason = "capacity_reached";
   assert.throws(() => decodeWorkbenchSnapshot(invalidBlocker), /blocker Task/);
+
+  const retiredRevision = clone(scheduled);
+  retiredRevision.scheduledTasks[0].binding.selectionRevision = "3";
+  assert.throws(() => decodeWorkbenchSnapshot(retiredRevision));
 
   const retiredMigrationShape = clone(scheduled);
   retiredMigrationShape.scheduledTasks[0].enabled = false;
@@ -1985,25 +1972,30 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
 });
 
-test("installed admission protocol is strict and paired with its model identity", () => {
-  for (const protocol of [
-    "anthropic_messages",
-    "openai_responses",
-    "openai_chat_completions",
-    "gemini_native",
+test("new Task admission rejects retired execution fields and inconsistent generic gates", () => {
+  for (const field of [
+    "activeProtocol",
+    "activeModelRef",
+    "activeExecutionGeneration",
+    "activeSelectionRevision",
+    "state",
   ]) {
     const snapshot = clone(fixture);
-    snapshot.newTaskAdmission.activeProtocol = protocol;
-    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+    snapshot.newTaskAdmission[field] = null;
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot), /expected keys/);
   }
-  for (const invalid of [null, "guessed_protocol", undefined]) {
+  for (const gate of [
+    { available: true, reason: "workspace_unavailable" },
+    { available: false, reason: "none" },
+    { available: false, reason: "invalid_candidate" },
+  ]) {
     const snapshot = clone(fixture);
-    snapshot.newTaskAdmission.activeProtocol = invalid;
-    assert.throws(
-      () => decodeWorkbenchSnapshot(snapshot),
-      /protocol|activeProtocol|enum|expected keys/,
-    );
+    snapshot.newTaskAdmission = gate;
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot));
   }
+  const snapshot = clone(fixture);
+  snapshot.newTaskAdmission = { available: false, reason: "shutting_down" };
+  assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
 });
 
 test("Custom Provider readiness survives an isolated failed retest", () => {
@@ -2025,7 +2017,6 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     ...snapshot.models,
     availability: "ready",
     providers: [],
-    metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
     builtinProviderPresets: [],
     customProviders: [
@@ -2054,15 +2045,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
       },
     ],
   };
-  snapshot.newTaskAdmission = {
-    available: true,
-    reason: "none",
-    activeModelRef: { sourceId: "provider-1", modelId: "gpt-5" },
-    activeProtocol: "openai_chat_completions",
-    activeGeneration: "9",
-    activeSelectionRevision: snapshot.models.selectionRevision,
-    state: "ready",
-  };
+  snapshot.newTaskAdmission = { available: true, reason: "none" };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
@@ -2456,13 +2439,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const readyAccountWithoutInstalledExecution = clone(fixture);
   readyAccountWithoutInstalledExecution.newTaskAdmission = {
-    available: false,
+    available: true,
     reason: "none",
-    activeModelRef: null,
-    activeProtocol: null,
-    activeGeneration: "0",
-    activeSelectionRevision: "0",
-    state: "unavailable",
   };
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),
@@ -2476,9 +2454,10 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const modelOutsideCatalog = clone(fixture);
-  modelOutsideCatalog.models.metaskSelection.modelId = "missing-model";
+  modelOutsideCatalog.models.defaultSelection.modelId = "missing-model";
   assert.equal(
-    decodeWorkbenchSnapshot(modelOutsideCatalog).models.metaskSelection.modelId,
+    decodeWorkbenchSnapshot(modelOutsideCatalog).models.defaultSelection
+      .modelId,
     "missing-model",
   );
 
@@ -2582,8 +2561,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   refreshingCatalog.models.operation = "refreshing_catalog";
   refreshingCatalog.models.availability = "loading";
   refreshingCatalog.models.providers[0].catalogState = "loading";
-  refreshingCatalog.newTaskAdmission.state = "replacing";
-  refreshingCatalog.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingCatalog));
 
   const signedOut = clone(fixture);
@@ -2606,12 +2583,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.models.providers[0].catalogGeneration = "0";
   signedOut.models.providers[0].sourceGeneration = "0";
   signedOut.models.providers[0].errorCode = "authorization_unavailable";
-  signedOut.newTaskAdmission.state = "unavailable";
-  signedOut.newTaskAdmission.activeModelRef = null;
-  signedOut.newTaskAdmission.activeProtocol = null;
-  signedOut.newTaskAdmission.activeGeneration = "0";
-  signedOut.newTaskAdmission.activeSelectionRevision = "0";
-  signedOut.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
 
   const leakedSignedOutPhone = clone(signedOut);
@@ -3327,15 +3298,12 @@ test("ready Metask catalog can retain unavailable desired selections", () => {
     const value = clone(fixture);
     value.models.providers[0].models = models;
     value.models.providers[0].errorCode = models.length ? "none" : "no_models";
-    value.models.metaskSelection.modelId = "retired-model";
     value.models.defaultSelection.modelId = "retired-model";
-    value.newTaskAdmission.available = false;
-    value.newTaskAdmission.reason = "invalid_candidate";
     const decoded = decodeWorkbenchSnapshot(value);
     assert.equal(decoded.models.providers[0].catalogState, "ready");
     assert.equal(decoded.models.providers[0].models.length, models.length);
     assert.equal(decoded.models.defaultSelection.modelId, "retired-model");
-    assert.equal(decoded.newTaskAdmission.available, false);
+    assert.equal(decoded.newTaskAdmission.available, true);
   }
 });
 

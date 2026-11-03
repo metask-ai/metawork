@@ -54,6 +54,7 @@ const metadata = {
 function metaskModels() {
   return {
     availability: "ready",
+    persistenceHealth: "ready",
     providers: [
       {
         id: "metask",
@@ -67,27 +68,13 @@ function metaskModels() {
         ],
       },
     ],
-    metaskSelection: { sourceId: "metask", modelId: "model-1" },
     defaultSelection: { sourceId: "metask", modelId: "model-1" },
     customProviders: [],
   };
 }
 
-function admission(activeModelRef) {
-  return {
-    available: true,
-    activeModelRef,
-    activeGeneration: "13",
-    activeSelectionRevision: "17",
-  };
-}
-
-test("a new Task starts from the active default without emitting an override", () => {
-  const state = newTaskModelSelectionState(
-    metaskModels(),
-    admission({ sourceId: "metask", modelId: "model-1" }),
-    null,
-  );
+test("a new Task resolves its starting preference into an explicit source-qualified target", () => {
+  const state = newTaskModelSelectionState(metaskModels(), null);
 
   assert.equal(state.editable, true);
   assert.equal(state.valid, true);
@@ -96,7 +83,11 @@ test("a new Task starts from the active default without emitting an override", (
     modelOptionId({ sourceId: "metask", modelId: "model-1" }),
   );
   assert.equal(state.selectedModelLabel, "Model one");
-  assert.equal(state.intent, null);
+  assert.deepEqual(state.intent, {
+    targetModelRef: { sourceId: "metask", modelId: "model-1" },
+    expectedSourceGeneration: "7",
+    expectedCatalogGeneration: "11",
+  });
   assert.ok(state.options.every((option) => option.vendor === "custom"));
   assert.deepEqual(
     state.options.map((option) => option.selectionId),
@@ -187,11 +178,7 @@ test("a new Task model override is source-qualified and does not mutate the defa
   const models = metaskModels();
   const originalDefault = structuredClone(models.defaultSelection);
   const requested = { sourceId: "metask", modelId: "model-2" };
-  const state = newTaskModelSelectionState(
-    models,
-    admission(models.defaultSelection),
-    requested,
-  );
+  const state = newTaskModelSelectionState(models, requested);
 
   assert.equal(state.selectedModelId, modelOptionId(requested));
   assert.deepEqual(state.intent, {
@@ -203,11 +190,10 @@ test("a new Task model override is source-qualified and does not mutate the defa
 });
 
 test("a catalog change invalidates a draft model instead of silently falling back", () => {
-  const state = newTaskModelSelectionState(
-    metaskModels(),
-    admission({ sourceId: "metask", modelId: "model-1" }),
-    { sourceId: "metask", modelId: "removed-model" },
-  );
+  const state = newTaskModelSelectionState(metaskModels(), {
+    sourceId: "metask",
+    modelId: "removed-model",
+  });
 
   assert.equal(state.editable, true);
   assert.equal(state.valid, false);
@@ -239,8 +225,8 @@ test("model labels show only the model name even when a catalog or source is una
 test("a ready custom source can select another model for only the new Task", () => {
   const models = {
     availability: "ready",
+    persistenceHealth: "ready",
     providers: [],
-    metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "custom-1" },
     customProviders: [
       {
@@ -268,11 +254,7 @@ test("a ready custom source can select another model for only the new Task", () 
     ],
   };
   const requested = { sourceId: "provider-1", modelId: "custom-2" };
-  const state = newTaskModelSelectionState(
-    models,
-    admission(models.defaultSelection),
-    requested,
-  );
+  const state = newTaskModelSelectionState(models, requested);
 
   assert.equal(state.editable, true);
   assert.equal(state.selectedModelLabel, "Custom two");
@@ -283,27 +265,15 @@ test("a ready custom source can select another model for only the new Task", () 
   });
 });
 
-test("explicit choices remain available without default admission and survive default changes", () => {
+test("explicit choices survive a cleared starting preference", () => {
   const models = metaskModels();
   const requested = { sourceId: "metask", modelId: "model-2" };
-  const state = newTaskModelSelectionState(
-    models,
-    {
-      ...admission(null),
-      available: false,
-      activeGeneration: "0",
-      activeSelectionRevision: "0",
-    },
-    requested,
-  );
+  const state = newTaskModelSelectionState(models, requested);
   assert.equal(state.editable, true);
   assert.equal(state.valid, true);
   assert.deepEqual(state.intent.targetModelRef, requested);
-  const changedDefault = newTaskModelSelectionState(
-    models,
-    admission(requested),
-    requested,
-  );
+  models.defaultSelection = null;
+  const changedDefault = newTaskModelSelectionState(models, requested);
   assert.deepEqual(changedDefault.intent.targetModelRef, requested);
 });
 
@@ -324,11 +294,7 @@ test("identical model ids from different connections remain distinct and invalid
     },
   ];
   const requested = { sourceId: "another-source", modelId: "model-1" };
-  const state = newTaskModelSelectionState(
-    models,
-    admission(models.defaultSelection),
-    requested,
-  );
+  const state = newTaskModelSelectionState(models, requested);
   assert.equal(state.options.length, 3);
   assert.deepEqual(
     state.options.map((option) => option.modelRef),
@@ -353,11 +319,7 @@ test("identical model ids from different connections remain distinct and invalid
     expectedCatalogGeneration: "29",
   });
   models.customProviders[0].enabled = false;
-  const unavailable = newTaskModelSelectionState(
-    models,
-    admission(models.defaultSelection),
-    requested,
-  );
+  const unavailable = newTaskModelSelectionState(models, requested);
   assert.equal(unavailable.valid, false);
   assert.equal(unavailable.selectedModelId, modelOptionId(requested));
   assert.equal(unavailable.intent, null);
@@ -388,11 +350,7 @@ test("a new Task lists all ready Providers regardless of the default or draft so
       models: [{ id: "gpt-5.6-sol", displayName: "", metadata, ready: true }],
     },
   ];
-  const metask = newTaskModelSelectionState(
-    models,
-    admission(models.defaultSelection),
-    null,
-  );
+  const metask = newTaskModelSelectionState(models, null);
   assert.deepEqual(
     metask.options.map((option) => option.modelRef.sourceId),
     ["metask", "metask", "cc"],
@@ -401,11 +359,8 @@ test("a new Task lists all ready Providers regardless of the default or draft so
     metask.options.map((option) => option.displayName),
     ["Model one", "Model two", "gpt-5.6-sol"],
   );
-  const custom = newTaskModelSelectionState(
-    models,
-    admission({ sourceId: "cc", modelId: "gpt-5.6-sol" }),
-    null,
-  );
+  models.defaultSelection = { sourceId: "cc", modelId: "gpt-5.6-sol" };
+  const custom = newTaskModelSelectionState(models, null);
   assert.deepEqual(
     custom.options.map((option) => option.modelRef.sourceId),
     ["metask", "metask", "cc"],
@@ -415,30 +370,23 @@ test("a new Task lists all ready Providers regardless of the default or draft so
     custom.options.map((option) => option.displayName),
     ["Model one", "Model two", "gpt-5.6-sol"],
   );
-  const retainedDraft = newTaskModelSelectionState(
-    models,
-    admission({ sourceId: "cc", modelId: "gpt-5.6-sol" }),
-    { sourceId: "metask", modelId: "model-2" },
-  );
+  const retainedDraft = newTaskModelSelectionState(models, {
+    sourceId: "metask",
+    modelId: "model-2",
+  });
   assert.deepEqual(
     retainedDraft.options.map((option) => option.modelRef.sourceId),
     ["metask", "metask", "cc"],
   );
   models.providers[0].catalogState = "unavailable";
   assert.deepEqual(
-    newTaskModelSelectionState(
-      models,
-      admission(models.defaultSelection),
-      null,
-    ).options.map((option) => option.modelRef.sourceId),
+    newTaskModelSelectionState(models, null).options.map(
+      (option) => option.modelRef.sourceId,
+    ),
     ["cc"],
   );
   models.defaultSelection = null;
-  const unselected = newTaskModelSelectionState(
-    models,
-    { ...admission(null), available: false },
-    null,
-  );
+  const unselected = newTaskModelSelectionState(models, null);
   assert.deepEqual(
     unselected.options.map((option) => option.modelRef.sourceId),
     ["cc"],
@@ -447,11 +395,10 @@ test("a new Task lists all ready Providers regardless of the default or draft so
   assert.equal(unselected.valid, false);
   assert.equal(unselected.intent, null);
   assert.equal(unselected.selectedModelId, "");
-  const chosen = newTaskModelSelectionState(
-    models,
-    { ...admission(null), available: false },
-    { sourceId: "cc", modelId: "gpt-5.6-sol" },
-  );
+  const chosen = newTaskModelSelectionState(models, {
+    sourceId: "cc",
+    modelId: "gpt-5.6-sol",
+  });
   assert.equal(chosen.valid, true);
   assert.deepEqual(chosen.intent, {
     targetModelRef: { sourceId: "cc", modelId: "gpt-5.6-sol" },
@@ -485,11 +432,9 @@ test("all-source discovery keeps Provider authority and per-model readiness chec
   ]) {
     models.customProviders = [{ ...provider, ...override }];
     assert.deepEqual(
-      newTaskModelSelectionState(
-        models,
-        admission(models.defaultSelection),
-        null,
-      ).options.map((option) => option.modelRef.sourceId),
+      newTaskModelSelectionState(models, null).options.map(
+        (option) => option.modelRef.sourceId,
+      ),
       ["metask", "metask"],
     );
   }
@@ -503,19 +448,15 @@ test("all-source discovery keeps Provider authority and per-model readiness chec
     },
   ];
   assert.deepEqual(
-    newTaskModelSelectionState(
-      models,
-      admission(models.defaultSelection),
-      null,
-    ).options.map((option) => option.vendor),
+    newTaskModelSelectionState(models, null).options.map(
+      (option) => option.vendor,
+    ),
     ["custom", "custom", "custom", "kimi"],
   );
   assert.deepEqual(
-    newTaskModelSelectionState(
-      models,
-      admission(models.defaultSelection),
-      null,
-    ).options.map((option) => option.modelRef),
+    newTaskModelSelectionState(models, null).options.map(
+      (option) => option.modelRef,
+    ),
     [
       { sourceId: "metask", modelId: "model-1" },
       { sourceId: "metask", modelId: "model-2" },
@@ -524,9 +465,5 @@ test("all-source discovery keeps Provider authority and per-model readiness chec
     ],
   );
   models.availability = "unavailable";
-  assert.deepEqual(
-    newTaskModelSelectionState(models, admission(models.defaultSelection), null)
-      .options,
-    [],
-  );
+  assert.deepEqual(newTaskModelSelectionState(models, null).options, []);
 });

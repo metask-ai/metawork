@@ -97,6 +97,7 @@ pub const ModelsOperation = enum {
 
 pub const ModelsError = enum {
     none,
+    preference_not_saved,
     authorization_unavailable,
     persistence_unavailable,
     catalog_unavailable,
@@ -182,8 +183,6 @@ pub const ModelsView = struct {
     availability: CatalogState,
     persistence_health: PersistenceHealth,
     providers: []const ProviderView = &.{},
-    metask_selection: ?ModelRef = null,
-    metask_selection_revision: u64 = 0,
     default_selection: ?ModelRef = null,
     selection_revision: u64 = 0,
     operation: ModelsOperation = .idle,
@@ -386,12 +385,6 @@ pub const CustomModelRemoveCommand = struct {
     expected_catalog_generation: u64,
 };
 
-pub const ConfigureMetaskSelectionCommand = struct {
-    selection: ModelRef,
-    expected_metask_selection_revision: u64,
-    expected_catalog_generation: u64,
-};
-
 /// Borrowed only during preparation, from the Host's current authorization
 /// lease. Models does not acquire, cache, refresh or persist this authorization.
 pub const ImagePreparationInput = struct {
@@ -410,24 +403,6 @@ pub const ImageCandidateInput = struct {
 pub const ImagePreparation = union(enum) {
     ready: OwnedImageCandidate,
     rejected: ManagementError,
-};
-
-pub const SelectDefaultCommand = struct {
-    selection: ModelRef,
-    expected_selection_revision: u64,
-    expected_source_generation: u64,
-    expected_catalog_generation: u64,
-};
-
-/// Borrowed durable default identity published by Models for Product Control
-/// reconciliation. This describes desired authority only and carries no
-/// credential or Product binding generation.
-pub const DefaultSelectionAuthority = struct {
-    selection: ModelRef,
-    source: Source,
-    source_generation: u64,
-    selection_revision: u64,
-    protocol: Protocol,
 };
 
 pub const CustomProviderCommand = union(enum) {

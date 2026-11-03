@@ -332,16 +332,11 @@ pub const NewTaskModelSelectionInput = struct {
 
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
 
-pub const ScheduledTaskBindingInput = struct {
-    model_ref: models_contract.ModelRef,
-    source_generation: u64,
-    selection_revision: u64,
-    protocol: models_contract.Protocol,
-};
+pub const ScheduledTaskBindingInput = product_schedule.ModelBinding;
 
 pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
-    binding: ScheduledTaskBindingInput,
+    model_selection: ?NewTaskModelSelectionInput,
     input: []const u8,
     recurrence: ScheduledTaskRecurrence,
     permission_profile: PermissionProfile,
@@ -1197,9 +1192,6 @@ const CatalogSnapshot = catalog_snapshot.Snapshot;
 
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
-pub const PreparedCustomProviderBinding =
-    execution_state.PreparedCustomProviderBinding;
-
 // Exists only for one Host read preparation. No credential or borrowed
 // execution pointer enters encoded caches, Bridge storage or worker work items.
 const ProjectionCredentials = struct {
@@ -1381,7 +1373,7 @@ pub const Runtime = struct {
     learned_renewal: ?control_ports.MetaskAuthorization = null,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
-    execution_state: execution_state.State,
+    execution_generations: execution_state.Generations = .{},
     custom_providers: models_aggregate.Runtime,
     canonical_user_home: ?[]u8,
     custom_provider_capabilities: CustomProviderCapabilities,
@@ -1438,8 +1430,6 @@ pub const Runtime = struct {
             return error.ProjectionCapacity;
         var account_projection_state = try account_projection.Projection.init(allocator);
         errdefer account_projection_state.deinit();
-        var execution_state_state = try execution_state.State.init(allocator);
-        errdefer execution_state_state.deinit();
         var custom_providers = models_aggregate.Runtime.init(
             allocator,
             io,
@@ -1724,7 +1714,6 @@ pub const Runtime = struct {
             .file_change_executor = file_change_executor_value,
             .file_change_lane = file_change_lane_value,
             .account_projection = account_projection_state,
-            .execution_state = execution_state_state,
             .custom_providers = custom_providers,
             .canonical_user_home = canonical_user_home,
             .custom_provider_capabilities = configuration.custom_providers,
@@ -2320,7 +2309,7 @@ pub const Runtime = struct {
                 value.length = @max(value.length, secret.len);
             }
         };
-        var value: Max = .{ .length = self.execution_state.credential().len };
+        var value: Max = .{};
         if (self.account_credentials) |source| try source.visit(&value, Max.visit);
         try self.task_runtime.visitExecutionCredentials(&value, Max.visit);
         if (value.length > projection_step_bytes) return error.CredentialCapacity;
@@ -2598,9 +2587,6 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) bool {
-        const current = self.execution_state.credential();
-        if (credentialMayContinueAtCodepoint(value, codepoint_start, current))
-            return true;
         const codepoint_len = utf8CodepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
             if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
@@ -3003,35 +2989,10 @@ pub const Runtime = struct {
         return self.attachments.cancelReceive(id);
     }
 
-    const ScheduleCredentialRedaction = struct {
-        owner: *Runtime,
-
-        pub fn apply(
-            self: ScheduleCredentialRedaction,
-            credential: []const u8,
-        ) Error!void {
-            _ = try self.owner.schedule.prepareCredentialRedaction(
-                credential,
-                self.owner.scheduleRedaction(),
-            );
-        }
-    };
-
-    fn executionProjectionRedaction(
-        self: *Runtime,
-    ) execution_state.ProjectionRedaction {
-        return .{
-            .context = self,
-            .apply_fn = redactExecutionProjection,
-        };
-    }
-
-    fn redactExecutionProjection(
-        context: *anyopaque,
-        credential: []const u8,
-    ) void {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+    fn prepareTaskCredential(self: *Runtime, credential: []const u8) Error!void {
+        defer self.publishScheduleChangesNoFail();
+        _ = try self.schedule.prepareCredentialRedaction(credential, self.scheduleRedaction());
+        self.learnProjectionCredential(credential);
     }
 
     pub fn commitAccountFactNoFail(
@@ -3048,97 +3009,13 @@ pub const Runtime = struct {
     ) void {
         commit.assertValid();
         self.commitAccountFactNoFail(commit.fact);
-        self.finishAccountCommitNoFail();
+        self.publishAdmissionChangesNoFail();
     }
 
-    pub fn installExecutionNoFail(
-        self: *Runtime,
-        execution: *models_contract.OwnedConfig,
-    ) void {
-        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .metask, null)) self.invalidateProjectionSecurity();
-        self.execution_state.installMetaskNoFail(
-            execution,
-            execution.input().execution_generation,
-            self.executionProjectionRedaction(),
-        );
-    }
-
-    /// Installs a Host-resolved user Custom Provider execution without
-    /// pretending that it is a Metask OAuth account/catalog. The active
-    /// execution still uses the same Runtime-owned secret and generation
-    /// machinery as the built-in path.
-    pub fn prepareCustomProviderBinding(
-        self: *Runtime,
-        provider_id: []const u8,
-        model_id: []const u8,
-    ) std.mem.Allocator.Error!PreparedCustomProviderBinding {
-        return PreparedCustomProviderBinding.init(
-            self.allocator,
-            provider_id,
-            model_id,
-        );
-    }
-
-    pub fn installCustomProviderExecutionNoFail(
-        self: *Runtime,
-        execution: *models_contract.OwnedConfig,
-        prepared_binding: *PreparedCustomProviderBinding,
-    ) void {
-        if (!self.execution_state.projectionAuthorityMatches(execution.input(), .custom_provider, prepared_binding.provider_id)) self.invalidateProjectionSecurity();
-        self.execution_state.installCustomProviderNoFail(
-            execution,
-            prepared_binding,
-            self.executionProjectionRedaction(),
-        );
-    }
-
-    pub fn clearExecutionNoFail(self: *Runtime) void {
-        self.invalidateProjectionSecurity();
-        self.execution_state.clearNoFail(self.executionProjectionRedaction());
-    }
-
-    /// Durably removes every credential that the candidate execution could
-    /// expose from Schedule projections before the execution becomes live.
-    /// Account and Product Control are separate saga owners: failure leaves
-    /// the old execution installed while the committed Account fact closes
-    /// admission through the generation mismatch.
-    pub fn prepareExecutionInstall(
-        self: *Runtime,
-        input: models_contract.ConfigInput,
-    ) Error!void {
-        defer self.publishScheduleChangesNoFail();
-        try self.execution_state.prepareInstall(
-            input,
-            ScheduleCredentialRedaction{ .owner = self },
-        );
-    }
-
-    /// Durably scrubs the execution being released before its final owned
-    /// credential can be cleared and secure-zeroed.
-    pub fn prepareExecutionClear(self: *Runtime) Error!void {
-        defer self.publishScheduleChangesNoFail();
-        try self.execution_state.prepareClear(
-            ScheduleCredentialRedaction{ .owner = self },
-        );
-    }
-
-    pub fn finishAccountCommitNoFail(self: *Runtime) void {
-        self.finishDefaultExecutionCommitNoFail();
-    }
-
-    fn finishDefaultExecutionCommitNoFail(self: *Runtime) void {
-        if (self.canCreateTask()) {
-            _ = self.schedule.refreshBindingNoFail(
-                self.scheduleExecutionBinding(),
-                self.scheduleRedaction(),
-            );
-            _ = self.schedule.rearmNoFail(
-                self.scheduleExecutionBinding(),
-                self.scheduleRedaction(),
-            );
-        } else {
-            self.schedule.cancelTimer();
-        }
+    /// Reconcile independent Schedule sources after Models or Account facts change.
+    fn publishAdmissionChangesNoFail(self: *Runtime) void {
+        _ = self.schedule.refreshBindingNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
+        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
         self.bumpRevision();
     }
@@ -3147,16 +3024,8 @@ pub const Runtime = struct {
         return self.account_projection.view();
     }
 
-    pub fn newTaskAdmissionView(self: *Runtime) execution_state.NewTaskAdmissionView {
-        return .{
-            .available = self.canCreateTask(),
-            .reason = self.execution_state.availabilityError(),
-            .active_model_ref = self.execution_state.activeModelRef(),
-            .active_protocol = self.execution_state.protocol(),
-            .active_generation = self.execution_state.generation(),
-            .active_selection_revision = self.execution_state.activeSelectionRevision(),
-            .state = self.execution_state.availability(),
-        };
+    pub fn newTaskAdmissionView(self: *Runtime) NewTaskAdmissionView {
+        return .{ .available = self.canCreateTask(), .reason = if (self.shutting_down) .shutting_down else if (!self.skill.identitySourceTrusted()) .workspace_unavailable else .none };
     }
 
     pub fn modelsView(self: *Runtime) models_contract.ModelsView {
@@ -3169,8 +3038,8 @@ pub const Runtime = struct {
         vault: models_ports.CredentialVault,
     ) models_aggregate.StartError!void {
         try self.custom_providers.start(absolute_directory, vault);
-        self.reconcileModelsDefaultNoFail(false, false);
-        self.finishExecutionCommitNoFail();
+
+        self.finishModelsCommitNoFail();
     }
 
     pub fn startCustomProvidersUnavailable(self: *Runtime) void {
@@ -3192,46 +3061,13 @@ pub const Runtime = struct {
             return .rejected(.operation_in_progress);
         if (expected_revision != self.revision)
             return .rejected(.generation_mismatch);
-        if (self.executionReplacementPending())
-            return .rejected(.operation_in_progress);
+
         if (self.modelsView().persistence_health != .recovery_required)
             return .rejected(.persistence_unavailable);
         const result = self.custom_providers.resetStore();
         if (!result.accepted) return result;
-        self.reconcileModelsDefaultNoFail(false, false);
-        self.finishExecutionCommitNoFail();
-        return result;
-    }
 
-    pub fn selectModelsDefault(
-        self: *Runtime,
-        command: models_contract.SelectDefaultCommand,
-    ) models_contract.CommandResult {
-        if (self.shutting_down)
-            return .rejected(.operation_in_progress);
-        if (self.executionReplacementPending())
-            return .rejected(.operation_in_progress);
-        const result = self.custom_providers.selectDefault(command);
-        if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
-            self.finishExecutionCommitNoFail();
-        }
-        return result;
-    }
-
-    pub fn configureMetaskSelection(
-        self: *Runtime,
-        command: models_contract.ConfigureMetaskSelectionCommand,
-    ) models_contract.CommandResult {
-        if (self.shutting_down)
-            return .rejected(.operation_in_progress);
-        if (self.executionReplacementPending())
-            return .rejected(.operation_in_progress);
-        const result = self.custom_providers.configureMetaskSelection(command);
-        if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
-            self.finishExecutionCommitNoFail();
-        }
+        self.finishModelsCommitNoFail();
         return result;
     }
 
@@ -3243,8 +3079,7 @@ pub const Runtime = struct {
             return .rejected(.test_unavailable);
         const result = self.custom_providers.submitCommand(command);
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(true, false);
-            self.finishExecutionCommitNoFail();
+            self.finishModelsCommitNoFail();
         }
         return result;
     }
@@ -3268,7 +3103,7 @@ pub const Runtime = struct {
             execution.deinit();
             return .{ .rejected = result.error_code.? };
         }
-        self.finishExecutionCommitNoFail();
+        self.finishModelsCommitNoFail();
         return .{ .ready = execution };
     }
 
@@ -3279,8 +3114,7 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.completeTest(command, succeeded);
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(true, false);
-            self.finishExecutionCommitNoFail();
+            self.finishModelsCommitNoFail();
         }
         return result;
     }
@@ -3307,9 +3141,7 @@ pub const Runtime = struct {
             authorization_generation,
             completion,
         );
-        if (result == .none)
-            self.reconcileModelsDefaultNoFail(true, false);
-        self.finishExecutionCommitNoFail();
+        self.finishModelsCommitNoFail();
         return result;
     }
 
@@ -3326,13 +3158,13 @@ pub const Runtime = struct {
             error_code,
             safe_diagnostic,
         );
-        self.finishExecutionCommitNoFail();
+        self.finishModelsCommitNoFail();
     }
 
     pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
         self.custom_providers.setMetaskAuthorizationUnavailable();
-        self.reconcileModelsDefaultNoFail(false, true);
-        self.finishExecutionCommitNoFail();
+
+        self.finishModelsCommitNoFail();
     }
 
     pub fn createCustomProviderWithCredential(
@@ -3344,7 +3176,7 @@ pub const Runtime = struct {
             secret,
             spec,
         );
-        if (result.accepted) self.finishExecutionCommitNoFail();
+        if (result.accepted) self.finishModelsCommitNoFail();
         return result;
     }
 
@@ -3361,7 +3193,7 @@ pub const Runtime = struct {
             base_url,
             initial_model,
         );
-        if (result.accepted) self.finishExecutionCommitNoFail();
+        if (result.accepted) self.finishModelsCommitNoFail();
         return result;
     }
 
@@ -3372,8 +3204,7 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.updateBuiltinBaseUrl(selection, base_url);
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
-            self.finishExecutionCommitNoFail();
+            self.finishModelsCommitNoFail();
         }
         return result;
     }
@@ -3386,172 +3217,30 @@ pub const Runtime = struct {
         const result = self.custom_providers.replaceCredential(secret, selection);
         // The fail-closed first phase may revoke stale readiness even when the
         // subsequent credential write or final commit fails.
-        self.reconcileModelsDefaultNoFail(false, false);
-        self.finishExecutionCommitNoFail();
+
+        self.finishModelsCommitNoFail();
         return result;
     }
 
     pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
         const result = self.custom_providers.clearDefault();
         if (result.accepted) {
-            self.reconcileModelsDefaultNoFail(false, false);
-            self.finishExecutionCommitNoFail();
+            self.finishModelsCommitNoFail();
         }
         return result;
     }
 
     pub fn nextExecutionGeneration(self: *Runtime, current: u64) !u64 {
-        return self.custom_providers.nextGeneration(current);
+        return self.execution_generations.next(current);
     }
 
-    fn reconcileModelsDefaultNoFail(
-        self: *Runtime,
-        refresh_aligned: bool,
-        clear_unresolvable: bool,
-    ) void {
-        const desired = self.custom_providers.defaultAuthority() orelse {
-            if (self.execution_state.hasRecordedDefaultAuthority())
-                self.clearRecordedModelsDefaultNoFail();
-            return;
-        };
-        const default_aligned = self.execution_state.defaultAuthorityMatches(desired);
-        const execution_authority_aligned = self.execution_state.executionAuthorityMatches(desired);
-        if (default_aligned and !refresh_aligned and !clear_unresolvable) return;
-
-        var candidate = (self.custom_providers.resolveDefault() catch {
-            if (clear_unresolvable and
-                self.execution_state.hasRecordedDefaultAuthority() and
-                self.execution_state.activeSource() == .metask)
-                self.clearRecordedModelsDefaultNoFail()
-            else
-                self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }) orelse {
-            if (clear_unresolvable and
-                self.execution_state.hasRecordedDefaultAuthority() and
-                self.execution_state.activeSource() == .metask)
-                self.clearRecordedModelsDefaultNoFail()
-            else
-                self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        defer candidate.deinit();
-        const candidate_input = candidate.input();
-        if (candidate.source != desired.source or
-            candidate_input.source_generation != desired.source_generation or
-            candidate_input.target.protocol != desired.protocol or
-            !std.mem.eql(
-                u8,
-                candidate_input.target.model,
-                desired.selection.model_id,
-            ))
-        {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-
-        const installed = self.execution_state.executionInput();
-        const image_declarations_aligned = installed != null and models_contract.sameImageCapabilities(installed.?.target.image_capabilities, candidate_input.target.image_capabilities);
-        const execution_generation = if (execution_authority_aligned and image_declarations_aligned)
-            self.executionGeneration()
-        else
-            self.nextExecutionGeneration(self.executionGeneration()) catch {
-                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
-                return;
-            };
-        var execution = candidate.intoConfig(execution_generation) catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        defer execution.deinit();
-        var prepared_binding: ?PreparedCustomProviderBinding = if (desired.source == .custom_provider)
-            self.prepareCustomProviderBinding(
-                desired.selection.source_id,
-                desired.selection.model_id,
-            ) catch {
-                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
-                return;
-            }
-        else
-            null;
-        defer if (prepared_binding) |*binding| binding.deinit();
-
-        if (self.executionReplacementPending()) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-        self.beginDefaultExecutionReplacement() catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        var replacement_started = true;
-        defer if (replacement_started) self.endExecutionReplacementNoFail();
-        self.execution_state.prepareInstall(
-            execution.input(),
-            ScheduleCredentialRedaction{ .owner = self },
-        ) catch |err| {
-            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
-            return;
-        };
-        if (!self.execution_state.projectionAuthorityMatches(execution.input(), desired.source, if (prepared_binding) |binding| binding.provider_id else null)) self.invalidateProjectionSecurity();
-        switch (desired.source) {
-            .metask => self.execution_state.installMetaskNoFail(
-                &execution,
-                desired.source_generation,
-                self.executionProjectionRedaction(),
-            ),
-            .custom_provider => self.execution_state.installCustomProviderNoFail(
-                &execution,
-                &prepared_binding.?,
-                self.executionProjectionRedaction(),
-            ),
-        }
-        self.execution_state.recordDefaultAuthorityNoFail(desired);
-        prepared_binding = null;
-        replacement_started = false;
-        self.endExecutionReplacementNoFail();
+    pub fn finishModelsCommitNoFail(self: *Runtime) void {
+        self.publishAdmissionChangesNoFail();
     }
 
-    fn clearRecordedModelsDefaultNoFail(self: *Runtime) void {
-        if (!self.execution_state.hasRecordedDefaultAuthority()) return;
-        if (self.executionReplacementPending()) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-        self.beginDefaultExecutionReplacement() catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        var replacement_started = true;
-        defer if (replacement_started) self.endExecutionReplacementNoFail();
-        self.execution_state.prepareClear(
-            ScheduleCredentialRedaction{ .owner = self },
-        ) catch |err| {
-            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
-            return;
-        };
-        self.clearExecutionNoFail();
-        replacement_started = false;
-        self.endExecutionReplacementNoFail();
-    }
-
-    pub fn finishExecutionCommitNoFail(self: *Runtime) void {
-        self.finishDefaultExecutionCommitNoFail();
-    }
-
-    pub fn customProviderExecutionActive(
-        self: *const Runtime,
-        provider_id: []const u8,
-    ) bool {
-        return self.execution_state.customProviderActive(provider_id);
-    }
-
-    pub fn customProviderExecutionSelected(self: *const Runtime) bool {
-        return self.execution_state.customProviderSelected();
-    }
-
+    /// Allocation high-water mark, never a current model binding.
     pub fn executionGeneration(self: *const Runtime) u64 {
-        return self.execution_state.generation();
+        return self.execution_generations.last;
     }
 
     /// Automation composes its fixture through the same Models authority and
@@ -3591,15 +3280,37 @@ pub const Runtime = struct {
             } }).accepted) return error.InvalidAutomationExecution;
         } else {
             const restored = view.custom_providers[0];
-            if (restored.credential_status != .missing or
-                !std.mem.eql(u8, restored.display_name, "Automation fixture") or
+            if (!std.mem.eql(u8, restored.display_name, "Automation fixture") or
                 restored.protocol != input.protocol or
                 !std.mem.eql(u8, restored.normalized_base_url, input.base_url) or
                 restored.models.len != 1 or
-                !std.mem.eql(u8, restored.models[0].id, input.model) or
+                !std.mem.eql(u8, restored.models[0].id, input.model))
+                return error.InvalidAutomationExecution;
+            // The automation vault is process-local. Resolve the exact fixture
+            // to discover a missing key instead of relying on default execution
+            // reconciliation to have touched this provider during bootstrap.
+            const restored_id = try self.allocator.dupe(u8, restored.id);
+            defer self.allocator.free(restored_id);
+            if (restored.credential_status == .ready) {
+                const candidate = self.custom_providers.resolveModel(
+                    .{ .source_id = restored_id, .model_id = input.model },
+                    restored.source_generation,
+                    restored.catalog_generation,
+                ) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidAutomationExecution,
+                };
+                if (candidate) |existing| {
+                    var owned = existing;
+                    owned.deinit();
+                    return error.InvalidAutomationExecution;
+                }
+            }
+            const current = self.modelsView().custom_providers[0];
+            if (current.credential_status != .missing or
                 !self.replaceCustomProviderCredential(input.credential, .{
-                    .source_id = restored.id,
-                    .expected_provider_revision = restored.provider_revision,
+                    .source_id = restored_id,
+                    .expected_provider_revision = current.provider_revision,
                 }).accepted) return error.InvalidAutomationExecution;
         }
 
@@ -3636,54 +3347,8 @@ pub const Runtime = struct {
         if (view.custom_providers.len != 1)
             return error.InvalidAutomationExecution;
         const ready = view.custom_providers[0];
-        if (!self.selectModelsDefault(.{
-            .selection = .{ .source_id = provider_id, .model_id = input.model },
-            .expected_selection_revision = view.selection_revision,
-            .expected_source_generation = ready.source_generation,
-            .expected_catalog_generation = ready.catalog_generation,
-        }).accepted) return error.InvalidAutomationExecution;
-
-        const default_authority = self.custom_providers.defaultAuthority() orelse
-            return error.InvalidAutomationExecution;
-        if (default_authority.source != .custom_provider or
-            default_authority.source_generation == 0 or
-            default_authority.selection_revision == 0 or
-            !self.customProviderExecutionActive(provider_id) or
-            !self.canCreateTask()) return error.InvalidAutomationExecution;
-    }
-
-    pub fn beginExecutionReplacement(self: *Runtime) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
-        // Identity replacement changes only Account-owned admission defaults.
-        // Live Tasks keep their owned ExecutionConfig until their own runtime
-        // lifecycle releases it, so their references cannot block this gate.
-        try self.execution_state.beginIdentityReplacement();
-        self.schedule.cancelTimer();
-    }
-
-    pub fn beginDefaultExecutionReplacement(self: *Runtime) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
-        try self.execution_state.beginDefaultReplacement();
-        self.schedule.cancelTimer();
-    }
-
-    pub fn endExecutionReplacementNoFail(self: *Runtime) void {
-        self.execution_state.endReplacementNoFail();
-        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
-    }
-
-    pub fn executionReplacementPending(self: *const Runtime) bool {
-        return self.execution_state.replacementPending();
-    }
-
-    pub fn identityReplacementPending(self: *const Runtime) bool {
-        return self.execution_state.identityReplacementPending();
-    }
-
-    pub fn defaultExecutionReplacementPending(self: *const Runtime) bool {
-        return self.execution_state.defaultReplacementPending();
+        if (ready.source_generation == 0 or !self.canCreateTask() or
+            self.custom_providers.sourceModelProtocol(.{ .source_id = provider_id, .model_id = input.model }, ready.source_generation, ready.catalog_generation) == null) return error.InvalidAutomationExecution;
     }
 
     /// Registers or reauthorizes a manually selected Workspace.
@@ -3707,7 +3372,7 @@ pub const Runtime = struct {
                 .explicitly_trusted => .explicitly_trusted,
                 .temporary => |root| .{ .temporary = root },
             },
-            self.execution_state.credential(),
+            "",
             self.workspaceStorage(),
             .{
                 .context = self,
@@ -3743,10 +3408,6 @@ pub const Runtime = struct {
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
-        self.workspace.redactNoFail(
-            self.execution_state.credential(),
-            self.workspaceStorage(),
-        );
         self.recoverSkillTransactionsForScopeNoFail(.{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -4167,63 +3828,33 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn createTask(
-        self: *Runtime,
-        input: TaskCreateInput,
-    ) Error!u64 {
+    pub fn createTask(self: *Runtime, input: TaskCreateInput, model_selection: NewTaskModelSelectionInput) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.executionReplacementPending())
-            return error.ExecutionInUse;
-        if (!self.canCreateTask())
-            return error.ExecutionUnavailable;
+        try self.validateNewTaskModelAdmission(model_selection);
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
-        const workspace_id = try self.openWorkspaceInternal(input);
-        return self.createTaskInWorkspaceInternal(
-            workspace_id,
-            (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
-            self.execution_state.generation(),
-            self.execution_state.activeSelectionRevision(),
-            null,
-            null,
-            null,
-            .{ .interactive = input.approval_mode },
-            false,
-        );
+        const workspace = try self.openWorkspaceInternal(input);
+        return self.createTaskInWorkspaceInternal(workspace, (self.workspace.facts(workspace) orelse return error.UnknownWorkspace).epoch, model_selection, null, null, .{ .interactive = input.approval_mode }, false);
     }
 
     pub fn createTaskInWorkspace(
         self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
-        expected_execution_generation: u64,
-        expected_selection_revision: u64,
-        model_selection: ?NewTaskModelSelectionInput,
+        model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        return self.createTaskInWorkspaceInternal(
-            workspace_id,
-            expected_workspace_epoch,
-            expected_execution_generation,
-            expected_selection_revision,
-            model_selection,
-            expected_skill_catalog_revision,
-            expected_skill_selection_revision,
-            permission,
-            false,
-        );
+        return self.createTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false);
     }
 
     pub fn createTaskForWorkspace(
         self: *Runtime,
         request: TaskWorkspaceRequest,
-        expected_execution_generation: u64,
-        expected_selection_revision: u64,
-        model_selection: ?NewTaskModelSelectionInput,
+        model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -4231,25 +3862,8 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         return switch (request) {
-            .manual => |manual| self.createTaskInWorkspaceInternal(
-                manual.workspace_id,
-                manual.expected_epoch,
-                expected_execution_generation,
-                expected_selection_revision,
-                model_selection,
-                expected_skill_catalog_revision,
-                expected_skill_selection_revision,
-                permission,
-                false,
-            ),
-            .automatic => self.createAutomaticTask(
-                expected_execution_generation,
-                expected_selection_revision,
-                model_selection,
-                expected_skill_catalog_revision,
-                expected_skill_selection_revision,
-                permission,
-            ),
+            .manual => |manual| self.createTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false),
+            .automatic => self.createAutomaticTask(model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission),
         };
     }
 
@@ -4257,9 +3871,7 @@ pub const Runtime = struct {
         self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
-        expected_execution_generation: u64,
-        expected_selection_revision: u64,
-        model_selection: ?NewTaskModelSelectionInput,
+        model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -4270,17 +3882,7 @@ pub const Runtime = struct {
             .noninteractive => null,
         };
         const previous_default_mode = self.default_approval_mode;
-        var prepared = try self.prepareTaskInWorkspaceInternal(
-            workspace_id,
-            expected_workspace_epoch,
-            expected_execution_generation,
-            expected_selection_revision,
-            model_selection,
-            expected_skill_catalog_revision,
-            expected_skill_selection_revision,
-            permission,
-            allow_unowned_automatic,
-        );
+        var prepared = try self.prepareTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, allow_unowned_automatic);
         if (remembered_mode) |mode| self.default_approval_mode = mode;
         self.commitTaskStateBestEffort() catch |err| {
             self.default_approval_mode = previous_default_mode;
@@ -4288,6 +3890,7 @@ pub const Runtime = struct {
             return err;
         };
         const task_id = prepared.complete(self);
+        if (permission == .interactive) self.rememberTaskModelPreference(task_id);
         self.bumpRevision();
         return task_id;
     }
@@ -4296,16 +3899,14 @@ pub const Runtime = struct {
         self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
-        expected_execution_generation: u64,
-        expected_selection_revision: u64,
-        model_selection: ?NewTaskModelSelectionInput,
+        model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
     ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.validateNewTaskModelAdmission(expected_execution_generation, expected_selection_revision, model_selection);
+        try self.validateNewTaskModelAdmission(model_selection);
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
             expected_workspace_epoch,
@@ -4355,18 +3956,16 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        var explicit_execution: ?models_contract.OwnedConfig = null;
-        defer if (explicit_execution) |*execution| execution.deinit();
-        const execution_input = if (model_selection) |selection| selected: {
-            var source = (self.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.ExecutionUnavailable,
-            }) orelse return error.ModelSelectionChanged;
-            defer source.deinit();
-            const generation = self.nextExecutionGeneration(self.executionGeneration()) catch return error.ExecutionUnavailable;
-            explicit_execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
-            break :selected explicit_execution.?.input();
-        } else self.execution_state.executionInput().?;
+        var source = (self.custom_providers.resolveModel(model_selection.target, model_selection.expected_source_generation, model_selection.expected_catalog_generation) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ExecutionUnavailable,
+        }) orelse return error.ExecutionUnavailable;
+        defer source.deinit();
+        const generation = self.nextExecutionGeneration(self.executionGeneration()) catch return error.ExecutionUnavailable;
+        var execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
+        defer execution.deinit();
+        const execution_input = execution.input();
+        try self.prepareTaskCredential(execution_input.api_key);
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
@@ -4399,8 +3998,8 @@ pub const Runtime = struct {
             .metask_authorization_scope = try self.metaskAuthorizationScope(execution_input.target.provider_id),
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
-            .model_ref = if (model_selection) |selection| selection.target else self.execution_state.activeModelRef(),
-            .source_generation = if (model_selection) |selection| selection.expected_source_generation else self.execution_state.activeSourceGeneration(),
+            .model_ref = model_selection.target,
+            .source_generation = model_selection.expected_source_generation,
             .permission_profile = permission_profile,
             .permission_review_delegated = switch (permission) {
                 .interactive => |mode| (mode orelse self.default_approval_mode) == .auto_review,
@@ -4458,15 +4057,13 @@ pub const Runtime = struct {
 
     fn createAutomaticTask(
         self: *Runtime,
-        expected_execution_generation: u64,
-        expected_selection_revision: u64,
-        model_selection: ?NewTaskModelSelectionInput,
+        model_selection: NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.validateNewTaskModelAdmission(expected_execution_generation, expected_selection_revision, model_selection);
+        try self.validateNewTaskModelAdmission(model_selection);
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
@@ -4476,17 +4073,7 @@ pub const Runtime = struct {
         var automatic = try self.prepareAutomaticWorkspace();
         errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        const task_id = try self.createTaskInWorkspaceInternal(
-            workspace.id,
-            workspace.epoch,
-            expected_execution_generation,
-            expected_selection_revision,
-            model_selection,
-            null,
-            null,
-            permission,
-            true,
-        );
+        const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true);
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         automatic.complete(self);
         _ = self.syncInitialAutomaticCatalogsNoFail();
@@ -4504,17 +4091,8 @@ pub const Runtime = struct {
         var automatic_live = true;
         errdefer if (automatic_live) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        var task = try self.prepareTaskInWorkspaceInternal(
-            workspace.id,
-            workspace.epoch,
-            self.execution_state.generation(),
-            self.execution_state.activeSelectionRevision(),
-            null,
-            null,
-            null,
-            .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
-            true,
-        );
+        const selection = try self.scheduledSelection(.{ .model_ref = input.model_ref, .source_generation = input.source_generation, .protocol = input.protocol });
+        var task = try self.prepareTaskInWorkspaceInternal(workspace.id, workspace.epoch, selection, null, null, .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) }, true);
         var task_live = true;
         errdefer if (task_live) task.rollback(self);
         self.workspace.setAutomaticOwner(workspace.id, task.id());
@@ -4676,7 +4254,7 @@ pub const Runtime = struct {
         const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
-        self.learnProjectionCredential(target.input().api_key);
+        try self.prepareTaskCredential(target.input().api_key);
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (attached) {
@@ -4704,12 +4282,7 @@ pub const Runtime = struct {
         // A cold restore may reuse an already resolved immutable connection.
         // Only exact full authority permits reuse; an absent or unrelated
         // global default still resolves independently and gets a new identity.
-        const active = self.execution_state.executionInput();
-        const same_connection = !attached and active != null and self.execution_state.activeSourceGeneration() == execution.source_generation and
-            models_contract.sameImageCapabilities(active.?.target.image_capabilities, execution.target.image_capabilities) and
-            active.?.target.protocol == execution.target.protocol and std.mem.eql(u8, active.?.target.provider_id, execution.target.provider_id) and
-            std.mem.eql(u8, active.?.target.base_url, execution.target.base_url) and std.mem.eql(u8, active.?.api_key, execution.api_key);
-        const generation = if (same_connection) active.?.execution_generation else self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
+        const generation = self.nextExecutionGeneration(task.durable.execution_generation) catch return error.ExecutionUnavailable;
         const config: models_contract.ConfigInput = .{ .execution_generation = generation, .target = execution.target, .api_key = execution.api_key };
         const attempt = try self.task_runtime.startRecovery(task_id, .{
             .expected_binding_epoch = expected_binding_epoch,
@@ -4752,67 +4325,26 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         self.syncLifecycle();
-        if (self.task_runtime.findConst(task_id)) |task| {
-            if (task.runtime.active_operation != .none) return error.RecoveryUnavailable;
-            var target = try self.resolveTaskRunModel(task_id);
-            defer if (target) |*value| value.deinit();
-            if (task.runtime.attachment == .detached) {
-                _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
-                    error.SessionCapacity => return self.sessionPressureError(task_id),
-                    else => return err,
-                };
-                switch (self.agent_runtime.restoreAdmission(null)) {
-                    .available => {},
-                    .capacity_reached => return self.sessionPressureError(task_id),
-                    .mcp_busy, .unavailable => return error.RecoveryUnavailable,
-                }
+        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
+        if (task.durable.model_intent == null or task.runtime.active_operation != .none)
+            return error.RecoveryUnavailable;
+        var target = try self.resolveTaskRunModel(task_id);
+        defer if (target) |*value| value.deinit();
+        if (task.runtime.attachment == .detached) {
+            _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
+                error.SessionCapacity => return self.sessionPressureError(task_id),
+                else => return err,
+            };
+            switch (self.agent_runtime.restoreAdmission(null)) {
+                .available => {},
+                .capacity_reached => return self.sessionPressureError(task_id),
+                .mcp_busy, .unavailable => return error.RecoveryUnavailable,
             }
-            if (target) |*value| if (task.runtime.attachment == .detached or
-                (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
-                return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
         }
-        self.syncLifecycle();
-        const facts = try self.task_runtime.recoveryStartFacts(
-            task_id,
-            expected_binding_epoch,
-            self.taskRuntimeRecoveryAdmissionEffects(),
-        );
-        const workspace = self.workspace.recoveryBinding(facts.workspace_id) orelse unreachable;
-        const canonical_user_home = self.canonical_user_home orelse unreachable;
-        const execution = self.execution_state.executionInput().?;
-        const workspace_trust: task_runtime.RecoveryWorkspaceTrust = switch (workspace.trust) {
-            .explicitly_trusted => .explicitly_trusted,
-            .temporary => .temporary,
-        };
-        const attempt_id = try self.task_runtime.startRecovery(task_id, .{
-            .expected_binding_epoch = expected_binding_epoch,
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-            .workspace_root = workspace.canonical_root,
-            .canonical_user_home = canonical_user_home,
-            .workspace_trust = workspace_trust,
-            .workspace_kind = switch (workspace.kind) {
-                .manual => .manual,
-                .automatic => .automatic,
-            },
-            .execution = execution,
-            .source_generation = self.execution_state.activeSourceGeneration(),
-            .metask_authorization_scope = try self.metaskAuthorizationScope(execution.target.provider_id),
-            .agent_runtime = self.agent_runtime,
-            .checkpoint_store = self.checkpoint_store,
-            .checkpoint_limits = checkpoint_export_limits,
-            .notifier = .{
-                .context = self.change_notifier.context,
-                .notify_fn = self.change_notifier.wake,
-            },
-            .executor = .{
-                .context = self,
-                .enqueue_fn = enqueueTaskRuntimeExecutor,
-                .cancel_fn = cancelTaskRuntimeExecutor,
-            },
-        });
-        self.bumpRevision();
-        return attempt_id;
+        if (target) |*value| if (task.runtime.attachment == .detached or
+            (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
+            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null);
+        return error.RecoveryUnavailable;
     }
 
     pub fn setApprovalMode(self: *Runtime, task_id: u64, target: product_task.ApprovalMode, expected_binding_epoch: u64, expected_revision: u64) Error!u64 {
@@ -4935,7 +4467,11 @@ pub const Runtime = struct {
                             .committed, .failed => {
                                 if (resolve_only) {
                                     if (self.pending_model_intent) |*intent| {
-                                        if (result == .committed) intent.complete() else intent.rollback();
+                                        if (result == .committed) {
+                                            const intent_task_id = intent.task.durable.id;
+                                            intent.complete();
+                                            self.rememberTaskModelPreference(intent_task_id);
+                                        } else intent.rollback();
                                         self.pending_model_intent = null;
                                     }
 
@@ -5360,8 +4896,15 @@ pub const Runtime = struct {
             }
         }
         prepared.complete();
+        self.rememberTaskModelPreference(task_id);
         self.bumpRevision();
         return revision;
+    }
+
+    fn rememberTaskModelPreference(self: *Runtime, task_id: u64) void {
+        const task = self.task_runtime.findConst(task_id) orelse return;
+        const intent = task.durable.model_intent orelse return;
+        _ = self.custom_providers.rememberPreference(intent.modelRef());
     }
 
     /// Close admission before any Application shutdown drain can reconcile.
@@ -5476,6 +5019,7 @@ pub const Runtime = struct {
         if (current_task.durable.archived or current_task.read_only_history != null or current_task.deletion != .idle or
             current_task.runtime.close_failed or current_task.runtime.close_requested or current_task.runtime.hasClosingSession()) return error.TaskClosing;
         if (current_task.runtime.attachedConst()) |attached| if (attached.health != .available) return error.TaskClosing;
+        _ = self.workspace.taskRunAuthority(current_task.durable.workspace_id, current_task.durable.workspace_epoch) catch return error.TaskClosing;
         if (current_task.runtime.attachedConst()) |attached| if (attached.health == .available and !current_task.runtime.close_failed)
             try self.task_runtime.validateExecutionBinding(task_id);
         var model_target = try self.resolveTaskRunModel(task_id);
@@ -5489,10 +5033,7 @@ pub const Runtime = struct {
                 return error.RestoreBusy;
             };
         }
-        if (!self.task_runtime.continuationAvailable(
-            task_id,
-            self.taskRuntimeProjectionEffects(),
-        )) return error.TaskClosing;
+        if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects())) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
             return error.UnknownTask;
         const task_workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse
@@ -5751,7 +5292,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input);
+        const definition = try self.scheduledTaskDefinition(input, null);
         const id = try self.schedule.create(
             definition,
             self.scheduleExecutionBinding(),
@@ -5769,7 +5310,7 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const definition = try self.scheduledTaskDefinition(input);
+        const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch));
         try self.schedule.update(
             id,
             expected_epoch,
@@ -6004,8 +5545,7 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
-                self.reconcileModelsDefaultNoFail(false, false);
-                self.finishDefaultExecutionCommitNoFail();
+                self.publishAdmissionChangesNoFail();
                 break :recovered .recovered;
             },
             .unavailable => .unavailable,
@@ -7191,7 +6731,6 @@ pub const Runtime = struct {
         self.view_preparation.credentials = .{ .allocator = self.allocator };
         const credentials = &self.view_preparation.credentials.?;
         if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
-        try credentials.add(self.execution_state.credential());
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         self.view_credentials = credentials.values.items;
         defer self.view_credentials = null;
@@ -7760,11 +7299,7 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, provider.safe_diagnostic);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"metaskSelection\":") catch return error.SnapshotTooLarge;
-        try self.writeOptionalModelRef(writer, view.metask_selection);
-        writer.print(",\"metaskSelectionRevision\":\"{d}\",\"defaultSelection\":", .{
-            view.metask_selection_revision,
-        }) catch return error.SnapshotTooLarge;
+        writer.writeAll("],\"defaultSelection\":") catch return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.default_selection);
         writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"builtinProviderPresets\":[", .{
             view.selection_revision,
@@ -7873,27 +7408,9 @@ pub const Runtime = struct {
         }
     }
 
-    fn writeNewTaskAdmission(
-        self: *Runtime,
-        writer: *std.Io.Writer,
-    ) Error!void {
-        const view = self.newTaskAdmissionView();
-        writer.print("{{\"available\":{},\"reason\":\"{s}\",\"activeModelRef\":", .{
-            view.available,
-            @tagName(view.reason),
-        }) catch
-            return error.SnapshotTooLarge;
-        try self.writeOptionalModelRef(writer, view.active_model_ref);
-        writer.writeAll(",\"activeProtocol\":") catch return error.SnapshotTooLarge;
-        if (view.active_protocol) |protocol|
-            writer.print("\"{s}\"", .{@tagName(protocol)}) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"activeGeneration\":\"{d}\",\"activeSelectionRevision\":\"{d}\",\"state\":\"{s}\"}}", .{
-            view.active_generation,
-            view.active_selection_revision,
-            @tagName(view.state),
-        }) catch return error.SnapshotTooLarge;
+    fn writeNewTaskAdmission(self: *Runtime, writer: *std.Io.Writer) Error!void {
+        const value = self.newTaskAdmissionView();
+        writer.print("{{\"available\":{},\"reason\":\"{s}\"}}", .{ value.available, @tagName(value.reason) }) catch return error.SnapshotTooLarge;
     }
 
     fn workspaceViewSignals(
@@ -7984,7 +7501,6 @@ pub const Runtime = struct {
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
         self.custom_providers.deinit();
-        self.execution_state.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.output_checks.deinit();
@@ -8280,17 +7796,7 @@ pub const Runtime = struct {
         const execution_available = if (task != null and task.?.durable.model_intent != null) intent: {
             const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
             break :intent self.custom_providers.sourceModelProtocol(task.?.durable.model_intent.?.modelRef(), authority.source_generation, authority.catalog_generation) != null;
-        } else self.modelsDefaultCurrent() and
-            self.execution_state.supportsTaskExecution(
-                query.execution_protocol,
-                query.execution_model,
-                self.metaskBindingCurrent(),
-                self.custom_providers.metaskModelAvailable(
-                    null,
-                    query.execution_protocol,
-                    query.execution_model,
-                ),
-            );
+        } else self.installedTaskModelAvailable(query.task_id);
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
@@ -8368,7 +7874,6 @@ pub const Runtime = struct {
         // Account identity replacement revokes new Metask credential use.
         // Independent Custom Providers do not inherit that Account gate.
         if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id)) {
-            if (self.execution_state.identityReplacementPending()) return null;
             self.validateTaskMetaskAuthorization(task_id) catch return null;
         }
         const models = self.modelsView();
@@ -8379,23 +7884,57 @@ pub const Runtime = struct {
         return null;
     }
 
+    fn installedTaskModelAvailable(self: *Runtime, task_id: u64) bool {
+        const task = self.task_runtime.findConst(task_id) orelse return false;
+        const installed = task.runtime.executionConst() orelse return false;
+        self.validateTaskMetaskAuthorization(task_id) catch return false;
+        const source = if (std.mem.eql(u8, installed.provider_id, models_contract.metask_source_id))
+            models_contract.metask_source_id
+        else if (std.mem.startsWith(u8, installed.provider_id, "custom_provider:"))
+            installed.provider_id["custom_provider:".len..]
+        else
+            return false;
+        const target: models_contract.ModelRef = .{ .source_id = source, .model_id = installed.model };
+        const models = self.modelsView();
+        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, source)) {
+            if (provider.source_generation != installed.source_generation) return false;
+            if (std.mem.eql(u8, source, models_contract.metask_source_id) and
+                (provider.catalog_state == .loading or provider.catalog_state == .failed or provider.catalog_state == .unavailable)) return true;
+            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
+        };
+        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, source))
+            return self.custom_providers.sourceModelProtocol(target, installed.source_generation, provider.catalog_generation) == installed.protocol;
+        return false;
+    }
+
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
         const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
         if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         try self.validateTaskMetaskAuthorization(task_id);
-        const intent = task.durable.model_intent orelse return null;
+        const intent = task.durable.model_intent orelse {
+            if (!self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
+            return null;
+        };
+        const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         if (task.runtime.executionConst()) |installed|
             if (installed.model_intent_revision == intent.revision) {
+                // Membership is checked against current source authority. A
+                // renewed Metask credential must reach the renewal path below,
+                // rather than being rejected for the old owned generation.
+                if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null and
+                    !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
                 if (task.runtime.metask_authorization_scope == 0) return null;
                 const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
                 if (!task.runtime.credential_update_failed and installed.source_generation == current.source_generation) return null;
             };
-        const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+        if (self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == null)
+            return error.ExecutionUnavailable;
         var candidate = (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
+        try self.prepareTaskCredential(candidate.input().api_key);
         if (task.runtime.executionConst()) |installed| if (task.runtime.metask_authorization_scope != 0 and installed.matchesTarget(candidate.input())) {
             const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
             const current = check.current() orelse return error.ExecutionUnavailable;
@@ -8518,34 +8057,7 @@ pub const Runtime = struct {
     }
 
     fn canCreateTask(self: *const Runtime) bool {
-        // A new Task allocates an Automatic Workspace id; that is refused while
-        // the Skill stores that name ids could not be read, and the admission
-        // view says so before any command is sent.
-        return !self.shutting_down and self.modelsDefaultCurrent() and
-            self.skill.identitySourceTrusted();
-    }
-
-    fn cloneCurrentTaskExecution(
-        self: *const Runtime,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error!OwnedTaskExecution {
-        const input = self.execution_state.executionInput().?;
-        return OwnedTaskExecution.clone(
-            allocator,
-            input,
-        );
-    }
-
-    fn validNewTaskAdmission(
-        self: *const Runtime,
-        generation: u64,
-        selection_revision: u64,
-    ) bool {
-        return selection_revision != 0 and
-            selection_revision == self.execution_state.activeSelectionRevision() and
-            generation != 0 and
-            generation == self.execution_state.generation() and
-            self.modelsDefaultCurrent();
+        return !self.shutting_down and self.skill.identitySourceTrusted();
     }
 
     fn newTaskModelSelectionAuthorized(
@@ -8568,42 +8080,54 @@ pub const Runtime = struct {
         ) != null;
     }
 
-    fn validateNewTaskModelAdmission(self: *Runtime, expected_execution_generation: u64, expected_selection_revision: u64, selection: ?NewTaskModelSelectionInput) Error!void {
-        if (selection) |explicit| {
-            if (!self.newTaskModelSelectionAuthorized(explicit)) return error.ModelSelectionChanged;
-        } else {
-            if (self.executionReplacementPending()) return error.ExecutionInUse;
-            if (!self.canCreateTask()) return error.ExecutionUnavailable;
-            if (!self.validNewTaskAdmission(expected_execution_generation, expected_selection_revision))
-                return error.ExecutionGenerationMismatch;
-        }
+    fn validateNewTaskModelAdmission(self: *Runtime, selection: NewTaskModelSelectionInput) Error!void {
+        if (!self.canCreateTask()) return error.ExecutionUnavailable;
+        if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
+        _ = try self.metaskAuthorizationScope(selection.target.source_id);
     }
 
-    fn modelsDefaultCurrent(self: *const Runtime) bool {
-        // Product Control records alignment only after consuming an exact
-        // Models authority. Consumer admission and recovery read that local
-        // fact; worker threads never call back into the main-thread Models
-        // aggregate.
-        return self.execution_state.ready() and
-            !self.execution_state.replacementPending() and
-            self.execution_state.hasRecordedDefaultAuthority() and
-            self.execution_state.availabilityError() == .none;
-    }
-
-    fn metaskBindingCurrent(self: *const Runtime) bool {
-        return self.execution_state.activeSource() == .metask and
-            self.modelsDefaultCurrent();
-    }
-
-    fn scheduleExecutionBinding(self: *const Runtime) product_schedule.ExecutionBinding {
+    fn scheduleExecutionBinding(self: *Runtime) product_schedule.ExecutionBinding {
         return .{
-            .available = self.canCreateTask(),
-            .model_ref = self.execution_state.activeModelRef(),
-            .source_generation = self.execution_state.activeSourceGeneration(),
-            .selection_revision = self.execution_state.activeSelectionRevision(),
-            .protocol = self.execution_state.protocol(),
+            .available = !self.shutting_down and self.skill.identitySourceTrusted(),
             .automatic_workspace_available = self.automaticWorkspacesAvailable(),
+            .context = self,
+            .validate_fn = scheduleBindingAvailability,
         };
+    }
+
+    fn scheduleBindingAvailability(context: ?*anyopaque, binding: product_schedule.ModelBinding) product_schedule.BindingAvailability {
+        const self: *Runtime = @ptrCast(@alignCast(context.?));
+        const models = self.modelsView();
+        if (models.availability != .ready) return .unavailable;
+        for (models.providers) |provider| {
+            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
+            if (provider.catalog_state != .ready) return .unavailable;
+            if (provider.source_generation != binding.source_generation) return .invalid;
+            const protocol = self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) orelse return .invalid;
+            if (protocol != binding.protocol) return .invalid;
+            _ = self.metaskAuthorizationScope(provider.id) catch return .unavailable;
+            return .ready;
+        }
+        for (models.custom_providers) |provider| {
+            if (!std.mem.eql(u8, provider.id, binding.model_ref.source_id)) continue;
+            if (!provider.enabled or provider.source_generation != binding.source_generation or provider.protocol != binding.protocol) return .invalid;
+            if (provider.credential_status != .ready) return .unavailable;
+            return if (self.custom_providers.sourceModelProtocol(binding.model_ref, binding.source_generation, provider.catalog_generation) != null) .ready else .invalid;
+        }
+        return .invalid;
+    }
+
+    fn scheduledSelection(self: *Runtime, binding: ScheduledTaskBindingInput) Error!NewTaskModelSelectionInput {
+        if (self.shutting_down or !self.skill.identitySourceTrusted()) return error.ExecutionUnavailable;
+        if (scheduleBindingAvailability(self, binding) != .ready) return error.ExecutionGenerationMismatch;
+        const models = self.modelsView();
+        for (models.providers) |provider| {
+            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
+        }
+        for (models.custom_providers) |provider| {
+            if (std.mem.eql(u8, provider.id, binding.model_ref.source_id)) return .{ .target = binding.model_ref, .expected_source_generation = binding.source_generation, .expected_catalog_generation = provider.catalog_generation };
+        }
+        return error.ExecutionUnavailable;
     }
 
     fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
@@ -8623,21 +8147,11 @@ pub const Runtime = struct {
 
     fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.validateScheduledBinding(.{
+        try self.validateScheduledBinding(.{
             .model_ref = input.model_ref,
             .source_generation = input.source_generation,
-            .selection_revision = input.selection_revision,
             .protocol = input.protocol,
-        }) catch |err| {
-            if (err == error.ExecutionUnavailable) {
-                if (self.canCreateTask()) {
-                    self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-                    self.bumpRevision();
-                }
-                self.schedule.cancelTimer();
-            }
-            return err;
-        };
+        });
     }
 
     fn scheduleTaskLaunch(
@@ -8717,38 +8231,9 @@ pub const Runtime = struct {
     ) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
         var changed = false;
-        const current_credential = self.execution_state.credential();
-        if (current_credential.len != 0) {
-            const title_changed = redactFixedWidthNoFail(
-                projection.title,
-                current_credential,
-            );
-            const model_changed = redactFixedWidthNoFail(
-                projection.binding_model,
-                current_credential,
-            );
-            const input_changed = redactFixedWidthNoFail(
-                projection.input,
-                current_credential,
-            );
-            projection.title_redacted.* =
-                projection.title_redacted.* or title_changed;
-            projection.input_redacted.* =
-                projection.input_redacted.* or input_changed;
-            changed = title_changed or model_changed or input_changed;
-        }
-        const title_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
-            projection.title,
-            redactFixedWidthNoFail,
-        );
-        const model_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
-            projection.binding_model,
-            redactFixedWidthNoFail,
-        );
-        const input_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
-            projection.input,
-            redactFixedWidthNoFail,
-        );
+        const title_changed = self.redactWithKnownCredentialsNoFail(projection.title);
+        const model_changed = self.redactWithKnownCredentialsNoFail(projection.binding_model);
+        const input_changed = self.redactWithKnownCredentialsNoFail(projection.input);
         projection.title_redacted.* = projection.title_redacted.* or title_changed;
         projection.input_redacted.* = projection.input_redacted.* or input_changed;
         changed = changed or title_changed or model_changed or input_changed;
@@ -8786,69 +8271,32 @@ pub const Runtime = struct {
     fn scheduledTaskDefinition(
         self: *Runtime,
         input: ScheduledTaskDefinitionInput,
+        retained: ?ScheduledTaskBindingInput,
     ) Error!product_schedule.Definition {
-        try self.validateScheduledBinding(input.binding);
+        const binding: ScheduledTaskBindingInput = if (input.model_selection) |selection| selected: {
+            if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
+            const protocol = self.custom_providers.sourceModelProtocol(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) orelse return error.ExecutionUnavailable;
+            _ = try self.metaskAuthorizationScope(selection.target.source_id);
+            break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = protocol };
+        } else retained orelse return error.InvalidScheduledTaskInput;
         const title = std.mem.trim(u8, input.title, " \t\r\n");
-        if (title.len == 0 or title.len > self.limits.max_task_title_bytes or
-            !std.unicode.utf8ValidateSlice(title))
-            return error.InvalidTaskTitle;
+        if (title.len == 0 or title.len > self.limits.max_task_title_bytes or !std.unicode.utf8ValidateSlice(title)) return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        if (!self.workspace.automaticRootAvailable())
-            return error.WorkspaceUnavailable;
+        if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
         try input.recurrence.validate();
-        const scheduled_input = std.mem.trim(u8, input.input, " \t\r\n");
-        if (scheduled_input.len == 0 or
-            scheduled_input.len > self.limits.max_user_message_bytes or
-            !std.unicode.utf8ValidateSlice(scheduled_input))
-            return error.InvalidScheduledTaskInput;
-        return .{
-            .title = title,
-            .binding = .{
-                .model_ref = input.binding.model_ref,
-                .source_generation = input.binding.source_generation,
-                .selection_revision = input.binding.selection_revision,
-                .protocol = input.binding.protocol,
-            },
-            .permission_profile = scheduledPermissionProfile(
-                input.permission_profile,
-            ),
-            .input = scheduled_input,
-            .recurrence = input.recurrence,
-        };
+        const instruction = std.mem.trim(u8, input.input, " \t\r\n");
+        if (instruction.len == 0 or instruction.len > self.limits.max_user_message_bytes or !std.unicode.utf8ValidateSlice(instruction)) return error.InvalidScheduledTaskInput;
+        return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = input.recurrence };
     }
 
-    fn validateScheduledBinding(
-        self: *Runtime,
-        expected: ScheduledTaskBindingInput,
-    ) Error!void {
-        if (!self.canCreateTask() or expected.source_generation == 0 or
-            expected.selection_revision == 0)
-            return error.ExecutionUnavailable;
-        const authority = self.custom_providers.defaultAuthority() orelse
-            return error.ExecutionUnavailable;
-        if (!sameModelRef(authority.selection, expected.model_ref) or
-            authority.source_generation != expected.source_generation or
-            authority.selection_revision != expected.selection_revision or
-            authority.protocol != expected.protocol or
-            !self.execution_state.defaultAuthorityMatches(authority) or
-            !self.custom_providers.defaultResolvable())
-            return error.ExecutionGenerationMismatch;
-        var candidate = (self.custom_providers.resolveDefault() catch |err| switch (err) {
+    fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {
+        const selection = try self.scheduledSelection(expected);
+        var candidate = (self.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         defer candidate.deinit();
-        const resolved = candidate.input();
-        const provider_matches = switch (authority.source) {
-            .metask => std.mem.eql(u8, resolved.target.provider_id, expected.model_ref.source_id),
-            .custom_provider => std.mem.startsWith(u8, resolved.target.provider_id, "custom_provider:") and
-                std.mem.eql(u8, resolved.target.provider_id["custom_provider:".len..], expected.model_ref.source_id),
-        };
-        if (candidate.source != authority.source or !provider_matches or
-            !std.mem.eql(u8, resolved.target.model, expected.model_ref.model_id) or
-            resolved.target.protocol != expected.protocol or
-            resolved.source_generation != expected.source_generation)
-            return error.ExecutionGenerationMismatch;
+        if (candidate.input().target.protocol != expected.protocol) return error.ExecutionGenerationMismatch;
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
@@ -9402,9 +8850,16 @@ pub const Runtime = struct {
     fn taskRuntimeReleaseEffects(self: *Runtime) task_runtime.ReleaseEffects {
         return .{
             .context = self,
+            .prepare_credential_release_fn = prepareTaskRuntimeCredentialRelease,
             .redact_all_fn = redactTaskRuntimeProducts,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
         };
+    }
+
+    fn prepareTaskRuntimeCredentialRelease(context: *anyopaque, credential: []const u8) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        defer self.publishScheduleChangesNoFail();
+        return self.schedule.prepareCredentialRelease(credential, self.scheduleRedaction());
     }
 
     fn taskRuntimeRecoveryAuthority(
@@ -9437,27 +8892,14 @@ pub const Runtime = struct {
             const current = check.current() orelse break :scope false;
             break :scope current.scope == expected;
         };
-        const execution_exact = if (query.model_intent != null or query.original_restore) model_intent_exact else self.modelsDefaultCurrent() and
-            self.execution_state.recoveryAuthorityExact(
-                query.target_execution_generation,
-                query.protocol,
-                query.task_model,
-                self.metaskBindingCurrent(),
-                // A Task restore consumes Product Control's already-recorded
-                // source authority. A later provider catalog refresh must not
-                // let Models retroactively veto a consumer-owned binding.
-                true,
-            );
+        const execution_exact = model_intent_exact;
         return .{
             .workspace_root = workspace.canonical_root,
             .workspace_kind = switch (workspace.kind) {
                 .manual => .manual,
                 .automatic => .automatic,
             },
-            .target_execution_generation = if (query.model_intent != null or query.original_restore) query.target_execution_generation else if (self.execution_state.ready())
-                self.execution_state.generation()
-            else
-                0,
+            .target_execution_generation = query.target_execution_generation,
             .shutting_down = self.shutting_down,
             .workspace_authority_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
@@ -9609,14 +9051,10 @@ pub const Runtime = struct {
         }
     }
 
-    /// Product projections may contain a credential that became known only
-    /// after those facts were recorded. Every Task-owned secret release must
-    /// pass through this function so the final live copy scrubs all retained
-    /// projections before secure-zero makes the credential unavailable.
     fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
         try self.skill.reserveWorkspaceCapacity(self.workspace.historyCount() + 1);
         var preparation = self.workspace.prepareAutomatic(
-            self.execution_state.credential(),
+            "",
             self.workspaceStorage(),
             self.skill.identitySourceTrusted(),
         ) catch |err| {
@@ -9850,8 +9288,6 @@ pub const Runtime = struct {
 
     fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
         if (credential.len == 0) return false;
-        const installed = self.execution_state.credential();
-        if ((releasing == null or installed.ptr != releasing.?) and std.mem.eql(u8, installed, credential)) return true;
         if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
         return self.task_runtime.retainsCredential(credential, releasing);
     }
@@ -9889,9 +9325,6 @@ pub const Runtime = struct {
         defer collected.values.deinit(self.allocator);
         var complete = true;
         if (extra) |value| Collection.visit(&collected, value) catch {
-            complete = false;
-        };
-        Collection.visit(&collected, self.execution_state.credential()) catch {
             complete = false;
         };
         if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
@@ -10195,7 +9628,6 @@ pub const Runtime = struct {
         var known: Collection = .{ .allocator = self.allocator };
         defer known.values.deinit(self.allocator);
         for (credentials) |secret| try Collection.visit(&known, secret);
-        try Collection.visit(&known, self.execution_state.credential());
         if (self.account_credentials) |source| try source.visit(&known, Collection.visit);
         try self.task_runtime.visitExecutionCredentials(&known, Collection.visit);
         const capacity = @min(value.len, max);
@@ -10289,8 +9721,6 @@ pub const Runtime = struct {
             for (credentials) |known| if (std.mem.indexOf(u8, value, known) != null) return true;
             return false;
         }
-        const current = self.execution_state.credential();
-        if (containsKnownSecret(value, current)) return true;
         if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
@@ -10304,7 +9734,6 @@ pub const Runtime = struct {
     fn containsKnownHistoryCredential(self: *Runtime, state: task_persistence.StateWire, preserved: task_persistence.PreservedFrames) bool {
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        credentials.add(self.execution_state.credential()) catch return true;
         if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
         self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         for (credentials.values.items) |secret| {
@@ -10318,14 +9747,10 @@ pub const Runtime = struct {
         self: *const Runtime,
         value: []u8,
     ) bool {
-        var changed = redactFixedWidthNoFail(
-            value,
-            self.execution_state.credential(),
-        );
-        changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
+        const changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
             value,
             redactFixedWidthNoFail,
-        ) or changed;
+        );
         var account_redaction: AccountCredentialRedaction = .{ .value = value };
         if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
         return account_redaction.changed or changed;
@@ -10342,9 +9767,6 @@ pub const Runtime = struct {
             };
             return longest;
         }
-        const current = self.execution_state.credential();
-        if (current.len != 0 and std.mem.startsWith(u8, value, current))
-            longest = current.len;
         longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
@@ -10631,7 +10053,14 @@ pub const Runtime = struct {
         if (credential) |value| {
             const previous = self.learned_renewal;
             if (previous == null or previous.?.scope != authority.scope or previous.?.generation != authority.generation) {
-                self.learnProjectionCredential(value);
+                self.prepareTaskCredential(value) catch {
+                    for (self.task_runtime.tasks) |entry| if (entry) |task| {
+                        if (self.task_runtime.metaskCredentialScope(task.durable.id) == authority.scope)
+                            task.runtime.credential_renewal_deferred = true;
+                    };
+                    self.bumpRevision();
+                    return;
+                };
                 self.learned_renewal = authority;
             }
         }
@@ -10670,6 +10099,7 @@ pub const Runtime = struct {
             } else false;
             if (reviewing) continue;
             while (self.task_runtime.retiredCredential(task.durable.id)) |value| {
+                if (!prepareTaskRuntimeCredentialRelease(self, value)) break;
                 self.retireProjectionCredential(value);
                 // Unfinished history maintenance owns its own secret copy.
                 // Do not reissue retirement and its wake on every drain.
@@ -10712,9 +10142,12 @@ pub const Runtime = struct {
 
     fn prepareRunImage(self: *Runtime, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
         const preparation = self.image_run_preparation orelse return null;
-        const image = preparation.prepare(workspace) orelse return null;
+        var image = preparation.prepare(workspace) orelse return null;
         // Scrub facts written before this newly acquired credential was known.
-        self.learnProjectionCredential(image.candidate.input().bearer);
+        self.prepareTaskCredential(image.candidate.input().bearer) catch {
+            image.deinit();
+            return null;
+        };
         return image;
     }
 
@@ -10899,6 +10332,9 @@ test "updates Control publishes committed facts through the canonical live conte
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn clearModelPreference(control: *Runtime) void {
+        models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
+    }
     pub fn captureHistoryFixture(control: *Runtime) !task_persistence.OwnedCandidate {
         return control.captureTaskHistoryCandidate(null);
     }
@@ -11077,15 +10513,37 @@ pub const TestSupport = if (builtin.is_test) struct {
         return control.taskRuntimeTextProjection();
     }
 
+    pub fn fixtureExecution(control: *Runtime) *task_test_execution_binding.OwnedTaskExecution {
+        return control.task_runtime.find(3).?.runtime.execution().?;
+    }
+
+    pub fn installFixtureCredential(control: *Runtime, value: []const u8) !void {
+        const execution = fixtureExecution(control);
+        const owned = try execution.prepareCredential(value);
+        execution.installCredential(owned, execution.credential_generation + 1);
+    }
+
+    pub fn fixtureModelSelection(owner: anytype) !NewTaskModelSelectionInput {
+        const control: *Runtime = if (@TypeOf(owner) == **Runtime) owner.* else owner;
+        const models = control.modelsView();
+        const target = models.default_selection orelse models_contract.ModelRef{ .source_id = "metask", .model_id = "fixture-model" };
+        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return .{ .target = target, .expected_source_generation = provider.source_generation, .expected_catalog_generation = provider.catalog_generation };
+        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return .{ .target = target, .expected_source_generation = provider.source_generation, .expected_catalog_generation = provider.catalog_generation };
+        return error.ExecutionUnavailable;
+    }
+
+    pub fn cloneFixtureExecution(control: *Runtime, allocator: std.mem.Allocator) !OwnedTaskExecution {
+        for (control.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.executionConst()) |execution| return OwnedTaskExecution.clone(allocator, execution.input());
+        const selection = try fixtureModelSelection(control);
+        var source = (try control.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation)) orelse return error.ExecutionUnavailable;
+        defer source.deinit();
+        const value = source.input();
+        return OwnedTaskExecution.clone(allocator, .{ .execution_generation = @max(control.executionGeneration(), 1), .target = value.target, .api_key = value.api_key });
+    }
+
     pub fn scheduledBinding(control: *Runtime) ScheduledTaskBindingInput {
-        const authority = control.custom_providers.defaultAuthority() orelse
-            unreachable;
-        return .{
-            .model_ref = authority.selection,
-            .source_generation = authority.source_generation,
-            .selection_revision = authority.selection_revision,
-            .protocol = authority.protocol,
-        };
+        const selection = fixtureModelSelection(control) catch unreachable;
+        return .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = control.custom_providers.sourceModelProtocol(selection.target, selection.expected_source_generation, selection.expected_catalog_generation).? };
     }
 
     pub fn replaceMetaskCatalog(
@@ -11099,10 +10557,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             if (value.source_generation == 0) control.executionGeneration() else value.source_generation
         else
             control.executionGeneration();
-        const metask_revision = if (current.metask_selection_revision == std.math.maxInt(u64))
-            return error.InvalidExecutionGeneration
-        else
-            current.metask_selection_revision + 1;
+        const metask_revision: u64 = 1;
         const default_revision = if (current.selection_revision == std.math.maxInt(u64))
             return error.InvalidExecutionGeneration
         else
@@ -11125,53 +10580,14 @@ pub const TestSupport = if (builtin.is_test) struct {
             default_revision,
             catalog_generation,
         );
-        control.execution_state.recordDefaultAuthorityNoFail(
-            control.custom_providers.defaultAuthority().?,
-        );
-        control.finishExecutionCommitNoFail();
+        control.finishModelsCommitNoFail();
     }
 
-    pub fn installMetaskExecution(control: *Runtime, generation: u64) !void {
-        return installMetaskExecutionWithCredential(control, generation, "SECRET-KEY");
+    pub fn configureMetaskSource(control: *Runtime, generation: u64) !void {
+        try configureMetaskSourceWithCredential(control, generation, "SECRET-KEY");
     }
 
-    pub fn installMetaskExecutionWithCredential(
-        control: *Runtime,
-        generation: u64,
-        credential: []const u8,
-    ) !void {
-        if (generation == 0 or generation > std.math.maxInt(u64) - 3)
-            return error.InvalidExecutionGeneration;
-        try prepareMetaskDefault(control, generation);
-        var execution = try models_contract.OwnedConfig.initOwned(
-            std.testing.allocator,
-            .metask,
-            .anthropic_messages,
-            try std.testing.allocator.dupe(u8, "fixture-model"),
-            try std.testing.allocator.dupe(
-                u8,
-                models_contract.metask_anthropic_messages_url,
-            ),
-            generation,
-            try std.testing.allocator.dupe(u8, credential),
-            "",
-        );
-        errdefer execution.deinit();
-        var source = (try control.custom_providers.resolveDefault()).?;
-        defer source.deinit();
-        execution.image_capabilities = source.image_capabilities.take();
-        try control.beginExecutionReplacement();
-        errdefer control.endExecutionReplacementNoFail();
-        try control.prepareExecutionInstall(execution.input());
-        control.installExecutionNoFail(&execution);
-        control.execution_state.recordDefaultAuthorityNoFail(
-            control.custom_providers.defaultAuthority().?,
-        );
-        control.endExecutionReplacementNoFail();
-        control.finishExecutionCommitNoFail();
-    }
-
-    pub fn prepareMetaskDefault(control: *Runtime, generation: u64) !void {
+    pub fn configureMetaskSourceWithCredential(control: *Runtime, generation: u64, credential: []const u8) !void {
         if (generation == 0 or generation > std.math.maxInt(u64) - 3)
             return error.InvalidExecutionGeneration;
         const models = [_]models_contract.ModelView{.{
@@ -11211,7 +10627,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         try models_aggregate.TestSupport.installMetaskDefault(
             &control.custom_providers,
             "account-1",
-            "fixture-secret",
+            credential,
             &models,
             "fixture-model",
             generation,
@@ -11230,6 +10646,12 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .concurrency_limit = 5,
             },
         });
+
+        control.execution_generations.last = @max(control.execution_generations.last, generation);
+    }
+
+    pub fn prepareMetaskSource(control: *Runtime, generation: u64) !void {
+        try configureMetaskSourceWithCredential(control, generation, "fixture-secret");
     }
 } else struct {};
 
@@ -11515,16 +10937,6 @@ fn taskProfileFromSchedule(
     return switch (profile) {
         .approval_required => .approval_required,
         .full_access => .full_access,
-    };
-}
-
-fn metaskStageError(err: anyerror) execution_state.AdmissionReason {
-    return switch (err) {
-        error.ScheduledTaskPersistenceUnavailable => .schedule_persistence_unavailable,
-        error.ScheduledTaskPersistenceFailed => .schedule_persistence_failed,
-        error.ScheduledTaskPersistenceOutcomeUnknown => .schedule_persistence_outcome_unknown,
-        error.OutOfMemory => .resource_exhausted,
-        else => .invalid_candidate,
     };
 }
 
@@ -12333,7 +11745,7 @@ fn testTaskPersistenceLimits() task_persistence.Limits {
 }
 
 fn installTestExecution(control: *Runtime) !void {
-    try TestSupport.installMetaskExecution(control, 1);
+    try TestSupport.configureMetaskSource(control, 1);
 }
 
 fn testRuntime() !Runtime {
@@ -12426,7 +11838,7 @@ fn testTaskModelSelectionInput(
     return .{
         .expected_selection_revision = expected_revision,
         .target = .{
-            .source_id = models.metask_selection.?.source_id,
+            .source_id = models_contract.metask_source_id,
             .model_id = target_model,
         },
         .expected_source_generation = models.providers[0].source_generation,
@@ -12459,8 +11871,10 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         fixture_configuration,
     );
     try installTestExecution(control);
-    var task_execution = try control.cloneCurrentTaskExecution(control.allocator);
+    var task_execution = try TestSupport.cloneFixtureExecution(control, control.allocator);
     errdefer task_execution.deinit();
+    task_execution.source_generation = control.modelsView().providers[0].source_generation;
+    try control.prepareTaskCredential(task_execution.input().api_key);
     control.revision = 0;
     const workspace = try control.copyBounded("/tmp/metawork-test", control.limits.max_workspace_bytes);
     product_workspace.testing.installOwned(&control.workspace, 0, .{
@@ -12491,7 +11905,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
     control.task_runtime.next_task_id = 4;
     control.task_runtime.next_recent_order = 2;
     const execution_model = try control.copyBounded(
-        control.execution_state.model(),
+        task_execution.input().target.model,
         models_contract.Limits.model_id_bytes,
     );
     const runs = try control.allocator.alloc(?TestRunRecord, control.limits.max_runs_per_task);
@@ -12542,7 +11956,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
         .file_change_observation = .collecting,
         .file_changes = file_changes,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
-        .initial_credentials = .{ control.execution_state.credential(), &.{} },
+        .initial_credentials = .{ task_execution.input().api_key, &.{} },
     };
     control.task_runtime.tasks[0] = try control.allocator.create(TestTask);
     control.task_runtime.tasks[0].?.* = .{
@@ -12853,15 +12267,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try installTestExecution(&unavailable);
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        unavailable.createTaskForWorkspace(
-            .automatic,
-            1,
-            unavailable.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        unavailable.createTaskForWorkspace(.automatic, try TestSupport.fixtureModelSelection(&unavailable), null, null, .{ .interactive = null }),
     );
     unavailable.deinit();
 
@@ -13402,7 +12808,6 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
         .binding = .{
             .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" },
             .source_generation = 1,
-            .selection_revision = 1,
             .protocol = .openai_chat_completions,
         },
         .input = "Inspect",
@@ -14486,8 +13891,6 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     defer control.deinit();
     const task_id = control.task_runtime.tasks[0].?.durable.id;
     const before = control.modelsView();
-    const metask_selection = before.metask_selection orelse
-        return error.TestUnexpectedResult;
     const default_selection = before.default_selection orelse
         return error.TestUnexpectedResult;
     const binding_epoch = try control.taskBindingEpoch(task_id);
@@ -14496,7 +13899,7 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
         .kind = .signed_out,
         .view = .{ .state = .signed_out },
     });
-    control.finishAccountCommitNoFail();
+    control.publishAdmissionChangesNoFail();
     control.setMetaskAuthorizationUnavailable();
 
     try std.testing.expectEqual(account_contract.AccountState.signed_out, control.accountView().state);
@@ -14507,14 +13910,10 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     );
     try std.testing.expectEqual(@as(usize, 0), after.providers[0].models.len);
     try std.testing.expectEqualStrings(
-        metask_selection.model_id,
-        after.metask_selection.?.model_id,
-    );
-    try std.testing.expectEqualStrings(
         default_selection.model_id,
         after.default_selection.?.model_id,
     );
-    try std.testing.expect(!control.canCreateTask());
+    try std.testing.expect(control.canCreateTask());
     try std.testing.expectEqual(binding_epoch, try control.taskBindingEpoch(task_id));
 
     var models_storage: [4096]u8 = undefined;
@@ -14544,16 +13943,10 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
     defer control.stopCustomProviders();
     const selection = try createReadyTestCustomProvider(&control);
-    const provider = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }).accepted);
+    try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
 
     const binding = TestSupport.scheduledBinding(&control);
-    try std.testing.expectEqual(models_contract.Protocol.openai_responses, control.newTaskAdmissionView().active_protocol.?);
+    try std.testing.expectEqual(models_contract.Protocol.openai_responses, binding.protocol);
     try control.validateScheduledBinding(binding);
     var stale = binding;
     stale.model_ref.source_id = "another-provider";
@@ -14563,9 +13956,6 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
     stale = binding;
     stale.source_generation += 1;
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
-    stale = binding;
-    stale.selection_revision += 1;
     try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
     stale = binding;
     stale.protocol = .anthropic_messages;
@@ -14582,48 +13972,28 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     defer product_schedule.testing.configure(&control.schedule, .{}, .{}, .unavailable);
     const id = try control.createScheduledTask(.{
         .title = "Replacement",
-        .binding = binding,
+        .model_selection = try control.scheduledSelection(binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
     });
     control.setScheduleBackgroundAvailableNoFail(true);
     const commits = persistence.commits;
-    // Normal timer expiry inside either replacement window must never claim.
-    for ([_]bool{ false, true }) |identity| {
-        if (identity) try control.beginExecutionReplacement() else try control.beginDefaultExecutionReplacement();
-        try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
-        clock.now = 2000;
-        control.onScheduledTaskTimer();
-        try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
-        try std.testing.expectEqual(commits, persistence.commits);
-        try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
-        try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
-        control.endExecutionReplacementNoFail();
-    }
-    // canCreateTask is still true, but resolveDefault can now fail reading its
-    // credential. This must be observed before any durable claim.
+    // Resolve failures happen before the durable claim, without invalidating
+    // another consumer's default or changing this plan's captured authority.
+    clock.now = 2000;
     vault.read_fails = true;
     control.onScheduledTaskTimer();
     try std.testing.expectEqual(commits, persistence.commits);
     try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
     try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
-    try std.testing.expect(!control.canCreateTask());
     vault.read_fails = false;
-    control.reconcileModelsDefaultNoFail(true, false);
-    control.finishDefaultExecutionCommitNoFail();
-    try std.testing.expect(control.canCreateTask());
-    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
-    // A missing Models authority can also precede Control's alignment wake.
-    // Exercise that second full-preflight branch with local admission ready.
     try std.testing.expect(control.custom_providers.clearDefault().accepted);
-    try std.testing.expect(control.canCreateTask());
-    try std.testing.expectError(error.ExecutionUnavailable, control.runScheduledTaskNow(id, 1));
+    try control.validateScheduledBinding(try control.schedule.bindingAt(id, 1));
+    _ = control.schedule.rearmNoFail(control.scheduleExecutionBinding(), control.scheduleRedaction());
+    try std.testing.expectEqual(@as(?u64, 2000), clock.armed_at);
     try std.testing.expectEqual(commits, persistence.commits);
-    try std.testing.expectEqual(@as(usize, 0), control.schedule.store.find(id).?.occurrence_count);
-    try std.testing.expectEqual(product_schedule.Health.ready, control.schedule.store.find(id).?.health);
-    try std.testing.expectEqual(@as(?u64, null), clock.armed_at);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -14669,7 +14039,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         error.WorkspaceUnavailable,
         control.createScheduledTask(.{
             .title = "Independent review",
-            .binding = TestSupport.scheduledBinding(&control),
+            .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
             .permission_profile = .approval_required,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -14682,7 +14052,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
-        .binding = TestSupport.scheduledBinding(&control),
+        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
         .permission_profile = .full_access,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
@@ -14751,181 +14121,6 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
 }
 
-test "execution replacement durably scrubs Schedule before ownership transfer" {
-    var control = try testRuntime();
-    defer control.deinit();
-    try replaceTaskCredentialForTest(
-        control.task_runtime.tasks[0].?,
-        "TASK-SECRET",
-    );
-    var automatic_tmp = std.testing.tmpDir(.{});
-    defer automatic_tmp.cleanup();
-    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const automatic_root_len = try automatic_tmp.dir.realPath(
-        std.testing.io,
-        &automatic_root_storage,
-    );
-    var automatic_root = try product_workspace.AutomaticRoot.open(
-        std.testing.io,
-        std.testing.allocator,
-        automatic_root_storage[0..automatic_root_len],
-    );
-    defer automatic_root.deinit();
-    var clock: TestScheduleClock = .{ .now = 1_000 };
-    const persistence_storage = try std.testing.allocator.alloc(
-        u8,
-        product_schedule.testing.max_store_bytes,
-    );
-    defer std.testing.allocator.free(persistence_storage);
-    var persistence: TestSchedulePersistence = .{
-        .storage = persistence_storage,
-    };
-    product_schedule.testing.configure(
-        &control.schedule,
-        clock.timer(),
-        persistence.capability(),
-        .ready,
-    );
-    defer {
-        product_schedule.testing.configure(
-            &control.schedule,
-            .{},
-            .{},
-            .unavailable,
-        );
-    }
-    product_workspace.testing.installAutomaticRoot(
-        &control.workspace,
-        &automatic_root,
-    );
-
-    const id = try control.createScheduledTask(.{
-        .title = "Use NEXT-SECRET and TASK-SECRET",
-        .binding = TestSupport.scheduledBinding(&control),
-        .permission_profile = .approval_required,
-        .input = "Review NEXT-SECRET with TASK-SECRET",
-        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
-    });
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        persistence_storage[0..persistence.len],
-        "TASK-SECRET",
-    ) == null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        persistence_storage[0..persistence.len],
-        "NEXT-SECRET",
-    ) != null);
-
-    var replacement = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            models_contract.metask_anthropic_messages_url,
-        ),
-        2,
-        try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
-        "",
-    );
-    errdefer replacement.deinit();
-    try TestSupport.prepareMetaskDefault(&control, 2);
-    try control.beginDefaultExecutionReplacement();
-    try control.prepareExecutionInstall(replacement.input());
-    try std.testing.expect(persistence.commits >= 2);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        persistence_storage[0..persistence.len],
-        "NEXT-SECRET",
-    ) == null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        product_schedule.testing.item(&control.schedule, id).?.input,
-        "NEXT-SECRET",
-    ) == null);
-    control.installExecutionNoFail(&replacement);
-    control.execution_state.recordDefaultAuthorityNoFail(
-        control.custom_providers.defaultAuthority().?,
-    );
-    control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
-    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
-
-    const blocked_id = try control.createScheduledTask(.{
-        .title = "Use BLOCKED-SECRET",
-        .binding = TestSupport.scheduledBinding(&control),
-        .permission_profile = .approval_required,
-        .input = "Review BLOCKED-SECRET",
-        .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
-    });
-    var blocked = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            models_contract.metask_anthropic_messages_url,
-        ),
-        3,
-        try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
-        "",
-    );
-    var blocked_owned = true;
-    defer if (blocked_owned) blocked.deinit();
-    try TestSupport.prepareMetaskDefault(&control, 3);
-    persistence.result = .failed;
-    try control.beginDefaultExecutionReplacement();
-    try std.testing.expectError(
-        error.ScheduledTaskPersistenceFailed,
-        control.prepareExecutionInstall(blocked.input()),
-    );
-    control.execution_state.rejectReplacementNoFail(
-        .schedule_persistence_failed,
-    );
-    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        product_schedule.testing.item(&control.schedule, blocked_id).?.input,
-        "BLOCKED-SECRET",
-    ) != null);
-    control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
-    try std.testing.expect(!control.canCreateTask());
-    try std.testing.expectEqual(
-        SchedulePersistenceHealth.write_failed,
-        control.schedule.persistenceHealth(),
-    );
-
-    blocked.deinit();
-    blocked_owned = false;
-    persistence.result = .committed;
-    product_schedule.testing.setPersistenceHealth(&control.schedule, .ready);
-    product_schedule.testing.overwriteInputPrefix(
-        &control.schedule,
-        id,
-        "NEXT-SECRET",
-    );
-    try control.beginDefaultExecutionReplacement();
-    control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
-        .view = .{ .state = .signed_out },
-    });
-    control.setMetaskAuthorizationUnavailable();
-    try control.prepareExecutionClear();
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        persistence_storage[0..persistence.len],
-        "NEXT-SECRET",
-    ) == null);
-    control.clearExecutionNoFail();
-    control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
-    try std.testing.expect(!control.execution_state.ready());
-}
-
 test "Scheduled Task ignores Product binding generation drift for stable source authority" {
     var control = try testRuntime();
     defer control.deinit();
@@ -14957,14 +14152,14 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     control.setScheduleBackgroundAvailableNoFail(true);
     const id = try control.createScheduledTask(.{
         .title = "Review current work",
-        .binding = TestSupport.scheduledBinding(&control),
+        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
         .permission_profile = .approval_required,
         .input = "Review current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
 
-    execution_state.testing.setGeneration(&control.execution_state, 2);
+    control.execution_generations.last = 2;
     try std.testing.expect(!control.schedule.refreshBindingNoFail(
         control.scheduleExecutionBinding(),
         control.scheduleRedaction(),
@@ -15669,7 +14864,6 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     run.input = history_input;
 
     control.redactAllProductProjectionsNoFail("SECRET-KEY");
-    execution_state.testing.clearExecutionNoFail(&control.execution_state);
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
@@ -15691,48 +14885,19 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     try std.testing.expect(task.runtime.pinnedCatalogConst() == null);
 }
 
-test "mutation admission rejects stale execution and binding facts" {
+test "mutation admission rejects stale model source catalog and Task binding facts" {
     var control = try testRuntime();
     defer control.deinit();
 
-    try std.testing.expectError(
-        error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(
-            1,
-            1,
-            0,
-            control.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
-    );
-    try std.testing.expectError(
-        error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(
-            1,
-            1,
-            2,
-            control.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
-    );
+    var stale = try TestSupport.fixtureModelSelection(&control);
+    stale.expected_source_generation += 1;
+    try std.testing.expectError(error.ModelSelectionChanged, control.createTaskInWorkspace(1, 1, stale, null, null, .{ .interactive = null }));
+    stale = try TestSupport.fixtureModelSelection(&control);
+    stale.expected_catalog_generation += 1;
+    try std.testing.expectError(error.ModelSelectionChanged, control.createTaskInWorkspace(1, 1, stale, null, null, .{ .interactive = null }));
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        control.createTaskInWorkspace(
-            1,
-            2,
-            1,
-            control.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        control.createTaskInWorkspace(1, 2, try TestSupport.fixtureModelSelection(&control), null, null, .{ .interactive = null }),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
@@ -15850,7 +15015,7 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     control.discardRunRecord(task, reused_slot);
 }
 
-test "Runtime starts without execution and fails Task admission closed" {
+test "Runtime without a ready model rejects explicit creation before Workspace effects" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -15865,71 +15030,13 @@ test "Runtime starts without execution and fails Task admission closed" {
     );
     defer control.deinit();
     try std.testing.expectError(
-        error.ExecutionUnavailable,
+        error.ModelSelectionChanged,
         control.createTask(.{
             .workspace_root = "/tmp",
             .trust = .{ .temporary = "/tmp" },
-        }),
+        }, try TestSupport.fixtureModelSelection(&control)),
     );
     try std.testing.expectEqual(@as(u64, 0), control.currentRevision());
-}
-
-test "Runtime publishes a user custom provider as an independent execution source" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        .{
-            .max_tasks = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        .{},
-    );
-    defer control.deinit();
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .custom_provider,
-        .openai_chat_completions,
-        try std.testing.allocator.dupe(u8, "gpt-5"),
-        try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
-        1,
-        try std.testing.allocator.dupe(u8, "secret-key"),
-        "fixture-provider",
-    );
-    errdefer execution.deinit();
-    var prepared_binding = try control.prepareCustomProviderBinding(
-        "provider-1",
-        "gpt-5",
-    );
-    var prepared_binding_owned = true;
-    defer if (prepared_binding_owned) prepared_binding.deinit();
-    try control.beginDefaultExecutionReplacement();
-    try control.prepareExecutionInstall(execution.input());
-    control.installCustomProviderExecutionNoFail(
-        &execution,
-        &prepared_binding,
-    );
-    prepared_binding_owned = false;
-    control.endExecutionReplacementNoFail();
-    const view = control.accountView();
-    try std.testing.expectEqual(models_contract.Source.custom_provider, control.execution_state.activeSource().?);
-    try std.testing.expectEqual(account_contract.AccountState.checking, view.state);
-    // An active execution installed without a Models desired selection cannot
-    // authorize new Task admission by itself.
-    try std.testing.expect(!control.canCreateTask());
-    try std.testing.expectEqualStrings(
-        "provider-1",
-        control.execution_state.selectedCustomProviderId(),
-    );
-    try std.testing.expect(control.customProviderExecutionActive("provider-1"));
-    try std.testing.expect(!control.customProviderExecutionActive("connection-2"));
-    try models_contract.validateCustomProviderSpec(.{
-        .display_name = "Team OpenAI",
-        .protocol = .openai_chat_completions,
-        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-    });
 }
 
 const TestCustomProviderVault = struct {
@@ -16034,15 +15141,13 @@ test "automation installs one ordinary Custom Provider without publishing its cr
     try std.testing.expect(provider.models[0].ready);
     try std.testing.expectEqualStrings(fixture.model, provider.models[0].id);
     try std.testing.expectEqualStrings(fixture.base_url, provider.normalized_base_url);
-    try std.testing.expectEqualStrings(provider.id, view.default_selection.?.source_id);
-    try std.testing.expectEqualStrings(fixture.model, view.default_selection.?.model_id);
-    const authority = control.custom_providers.defaultAuthority().?;
-    try std.testing.expectEqual(models_contract.Source.custom_provider, authority.source);
-    try std.testing.expect(authority.source_generation != 0);
-    try std.testing.expect(authority.selection_revision != 0);
-    try std.testing.expect(control.customProviderExecutionActive(provider.id));
+    try std.testing.expect(view.default_selection == null);
+    try std.testing.expect(provider.source_generation != 0);
     try std.testing.expect(control.newTaskAdmissionView().available);
+    // The model probe consumes an execution identity without installing any
+    // process-wide configuration or creating a Task.
     try std.testing.expect(control.executionGeneration() != 0);
+    try std.testing.expectEqual(@as(usize, 0), control.task_runtime.taskCount());
 
     var snapshot_storage: [256 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
@@ -16138,7 +15243,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         try restored.startCustomProviders(directory, restored_vault.port());
         defer restored.stopCustomProviders();
         try std.testing.expectEqual(
-            models_contract.CustomProviderCredentialStatus.missing,
+            models_contract.CustomProviderCredentialStatus.ready,
             restored.modelsView().custom_providers[0].credential_status,
         );
 
@@ -16146,7 +15251,7 @@ test "automation cold restore rehydrates the persisted connection through creden
         const view = restored.modelsView();
         try std.testing.expectEqual(@as(usize, 1), view.custom_providers.len);
         try std.testing.expectEqual(models_contract.CustomProviderState.ready, view.custom_providers[0].state);
-        try std.testing.expect(view.default_selection != null);
+        try std.testing.expect(view.default_selection == null);
         try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqualStrings(
             fixture.credential,
@@ -16200,202 +15305,6 @@ fn createReadyTestCustomProvider(
     return selection;
 }
 
-test "Product Control atomically manages and installs a Custom Provider default" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        .{
-            .max_tasks = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        .{},
-    );
-    defer control.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestCustomProviderVault = .{};
-    try control.startCustomProviders(
-        directory_storage[0..directory_len],
-        vault.port(),
-    );
-    defer control.stopCustomProviders();
-
-    const selection = try createReadyTestCustomProvider(&control);
-    const ready_connection = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = ready_connection.source_generation,
-        .expected_catalog_generation = ready_connection.catalog_generation,
-    }).accepted);
-
-    try std.testing.expectEqual(
-        models_contract.Source.custom_provider,
-        control.execution_state.activeSource().?,
-    );
-    try std.testing.expectEqualStrings(
-        TestCustomProviderVault.slot,
-        control.execution_state.selectedCustomProviderId(),
-    );
-    const rejected = control.submitCustomProviderCommand(.{ .update = .{
-        .selection = selection,
-        .spec = .{
-            .display_name = "Renamed",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://api.openai.com/v1/responses",
-        },
-    } });
-    // Models commits desired configuration without querying active consumers;
-    // existing Tasks keep their owned binding while Product Control reconciles
-    // the next admission default independently.
-    try std.testing.expect(rejected.accepted);
-
-    try control.beginDefaultExecutionReplacement();
-    try control.prepareExecutionClear();
-    control.clearExecutionNoFail();
-    control.endExecutionReplacementNoFail();
-    control.finishExecutionCommitNoFail();
-    control.stopCustomProviders();
-    try control.startCustomProviders(
-        directory_storage[0..directory_len],
-        vault.port(),
-    );
-    try std.testing.expectEqual(
-        models_contract.Source.custom_provider,
-        control.execution_state.activeSource().?,
-    );
-    try std.testing.expectEqualStrings(
-        TestCustomProviderVault.slot,
-        control.execution_state.selectedCustomProviderId(),
-    );
-}
-
-test "credential replacement revokes Product Control admission after every durable revoke" {
-    for ([_]bool{ false, true }) |vault_write_fails| {
-        test_agent_runtime.io = std.testing.io;
-        var control = try Runtime.init(
-            std.testing.allocator,
-            std.testing.io,
-            &test_agent_runtime,
-            .{
-                .max_tasks = 1,
-                .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
-            },
-            .{},
-        );
-        defer control.deinit();
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-        var vault: TestCustomProviderVault = .{};
-        try control.startCustomProviders(
-            directory_storage[0..directory_len],
-            vault.port(),
-        );
-        defer control.stopCustomProviders();
-
-        const selection = try createReadyTestCustomProvider(&control);
-        const ready_connection = control.modelsView().custom_providers[0];
-        try std.testing.expect(control.selectModelsDefault(.{
-            .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-            .expected_selection_revision = control.modelsView().selection_revision,
-            .expected_source_generation = ready_connection.source_generation,
-            .expected_catalog_generation = ready_connection.catalog_generation,
-        }).accepted);
-        try std.testing.expect(control.canCreateTask());
-        try std.testing.expect(control.newTaskAdmissionView().active_selection_revision != 0);
-
-        vault.write_fails = vault_write_fails;
-        const result = control.replaceCustomProviderCredential("next-secret", selection);
-        if (vault_write_fails) {
-            try std.testing.expect(!result.accepted);
-            try std.testing.expectEqual(
-                models_contract.ManagementError.credential_write_failed,
-                result.error_code.?,
-            );
-        } else {
-            try std.testing.expect(result.accepted);
-        }
-
-        try std.testing.expect(control.modelsView().default_selection == null);
-        const admission = control.newTaskAdmissionView();
-        try std.testing.expect(!admission.available);
-        try std.testing.expect(admission.active_model_ref == null);
-        try std.testing.expectEqual(@as(u64, 0), admission.active_generation);
-        try std.testing.expectEqual(@as(u64, 0), admission.active_selection_revision);
-        try std.testing.expectError(
-            error.ExecutionUnavailable,
-            control.createTask(.{
-                .workspace_root = "/tmp",
-                .trust = .{ .temporary = "/tmp" },
-            }),
-        );
-    }
-}
-
-test "Account authorization loss leaves a custom Models default available" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        .{
-            .max_tasks = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        .{},
-    );
-    defer control.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestCustomProviderVault = .{};
-    try control.startCustomProviders(
-        directory_storage[0..directory_len],
-        vault.port(),
-    );
-    defer control.stopCustomProviders();
-
-    const connection = try createReadyTestCustomProvider(&control);
-    const ready_connection = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = connection.source_id, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = ready_connection.source_generation,
-        .expected_catalog_generation = ready_connection.catalog_generation,
-    }).accepted);
-
-    control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
-        .view = .{ .state = .signed_out },
-    });
-    control.finishAccountCommitNoFail();
-    control.setMetaskAuthorizationUnavailable();
-
-    try std.testing.expectEqual(
-        models_contract.CatalogState.needs_authentication,
-        control.modelsView().providers[0].catalog_state,
-    );
-    try std.testing.expectEqualStrings(
-        TestCustomProviderVault.slot,
-        control.modelsView().default_selection.?.source_id,
-    );
-    try std.testing.expectEqual(
-        models_contract.Source.custom_provider,
-        control.execution_state.activeSource().?,
-    );
-    try std.testing.expect(control.canCreateTask());
-}
-
 test "Account identity and Models execution publish through separate projections" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -16410,57 +15319,15 @@ test "Account identity and Models execution publish through separate projections
         .{},
     );
     defer control.deinit();
-    try TestSupport.installMetaskExecution(&control, 1);
+    try TestSupport.configureMetaskSource(&control, 1);
 
     const account = control.accountView();
     try std.testing.expectEqual(account_contract.AccountState.authenticated, account.state);
     try std.testing.expectEqualStrings("account-1", account.account_id);
     const models = control.modelsView();
     try std.testing.expectEqual(models_contract.CatalogState.ready, models.providers[0].catalog_state);
-    try std.testing.expectEqualStrings("fixture-model", models.metask_selection.?.model_id);
+    try std.testing.expectEqualStrings("fixture-model", models.default_selection.?.model_id);
     try std.testing.expect(control.newTaskAdmissionView().available);
-}
-
-test "explicit Metask default activation restores admission from an empty global default" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        testLimits(),
-        .{},
-    );
-    defer control.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestCustomProviderVault = .{};
-    try control.startCustomProviders(
-        directory_storage[0..directory_len],
-        vault.port(),
-    );
-    defer control.stopCustomProviders();
-    try TestSupport.installMetaskExecution(&control, 1);
-
-    try std.testing.expect(control.custom_providers.clearDefault().accepted);
-    control.reconcileModelsDefaultNoFail(false, false);
-    control.finishExecutionCommitNoFail();
-    try std.testing.expect(control.modelsView().default_selection == null);
-    try std.testing.expect(!control.newTaskAdmissionView().available);
-
-    const view = control.modelsView();
-    const provider = view.providers[0];
-    const selection = view.metask_selection orelse return error.TestUnexpectedResult;
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = selection,
-        .expected_selection_revision = view.selection_revision,
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }).accepted);
-    try std.testing.expect(control.modelsView().default_selection != null);
-    try std.testing.expect(control.newTaskAdmissionView().available);
-    try std.testing.expect(control.newTaskAdmissionView().active_generation != 0);
 }
 
 test "Product Control non-destructively recovers Models admission without touching task state" {
@@ -16478,13 +15345,7 @@ test "Product Control non-destructively recovers Models admission without touchi
     try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
     defer control.stopCustomProviders();
     const selection = try createReadyTestCustomProvider(&control);
-    const connection = control.modelsView().custom_providers[0];
-    try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-        .expected_selection_revision = control.modelsView().selection_revision,
-        .expected_source_generation = connection.source_generation,
-        .expected_catalog_generation = connection.catalog_generation,
-    }).accepted);
+    try std.testing.expect(control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
     try std.testing.expect(control.canCreateTask());
     const task_route = control.task_runtime.tasks[0].?.runtime.routeId();
     const task_execution = control.task_runtime.tasks[0].?.runtime.executionConst().?;
@@ -16526,18 +15387,13 @@ test "Product Control non-destructively recovers Models admission without touchi
 test "identity replacement does not disturb live Task runtime references" {
     var control = try testRuntime();
     defer control.deinit();
-    try control.beginDefaultExecutionReplacement();
-    try std.testing.expect(control.executionReplacementPending());
-    try std.testing.expect(!control.canCreateTask());
-    control.endExecutionReplacementNoFail();
     const task = control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
-    try control.beginExecutionReplacement();
-    try std.testing.expect(control.executionReplacementPending());
+    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
+    control.setMetaskAuthorizationUnavailable();
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
-    control.endExecutionReplacementNoFail();
 
     const run = &task.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
@@ -16552,135 +15408,14 @@ test "identity replacement does not disturb live Task runtime references" {
     run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     var replacement_lease = try task.runtime.worker_leases.acquire();
-    try control.beginExecutionReplacement();
-    try std.testing.expect(control.executionReplacementPending());
+    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .checking } });
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(!control.canCreateTask());
-    control.endExecutionReplacementNoFail();
     try std.testing.expect(control.canCreateTask());
     replacement_lease.deinit();
-}
-
-test "default replacement preserves Task generation and installs the next admission default" {
-    var control = try testRuntime();
-    defer control.deinit();
-
-    const task = control.task_runtime.tasks[0].?;
-    try control.replaceTracked(
-        &task.durable.title,
-        "review future metawork credential",
-        control.limits.max_task_title_bytes,
-    );
-    const old_input = try control.task_runtime.testExecutionInput(task.durable.id);
-    try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
-    try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
-
-    var replacement = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model-2"),
-        try std.testing.allocator.dupe(
-            u8,
-            models_contract.metask_anthropic_messages_url,
-        ),
-        2,
-        try std.testing.allocator.dupe(u8, "metawork"),
-        "",
-    );
-    errdefer replacement.deinit();
-    const replacement_models = [_]models_contract.ModelView{.{
-        .id = "fixture-model-2",
-        .display_name = "Fixture model 2",
-    }};
-    try control.beginDefaultExecutionReplacement();
-    try std.testing.expect(control.task_runtime.continuationAvailable(
-        task.durable.id,
-        control.taskRuntimeProjectionEffects(),
-    ));
-    try std.testing.expectEqual(
-        @as(u64, 1),
-        (try control.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
-    );
-    try std.testing.expect(!control.canCreateTask());
-    try models_aggregate.TestSupport.installMetaskDefault(
-        &control.custom_providers,
-        "account-1",
-        "metawork",
-        &replacement_models,
-        "fixture-model-2",
-        2,
-        5,
-        6,
-        7,
-    );
-    try control.prepareExecutionInstall(replacement.input());
-    control.installExecutionNoFail(&replacement);
-    control.execution_state.recordDefaultAuthorityNoFail(
-        control.custom_providers.defaultAuthority().?,
-    );
-    control.endExecutionReplacementNoFail();
-    control.finishExecutionCommitNoFail();
-
-    const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
-    try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
-    try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
-    try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
-    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
-    try std.testing.expectEqualStrings("fixture-model-2", control.execution_state.model());
-    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model-2"));
-    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(task.durable.model_intent != null);
-    try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
-    var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
-    const scrubbed_snapshot = try control.writeAggregateFixture(&scrubbed_snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
-    var workspace_storage: [2]WorkspaceProjection = undefined;
-    const workspace_projection = try control.copyWorkspaceProjections(&workspace_storage);
-    try std.testing.expect(workspace_projection[0].canonical_root.len != 0);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        workspace_projection[0].canonical_root,
-        "metawork",
-    ) == null);
-
-    var next_task_execution = try control.cloneCurrentTaskExecution(std.testing.allocator);
-    defer next_task_execution.deinit();
-    try std.testing.expectEqual(
-        @as(u64, 2),
-        next_task_execution.input().execution_generation,
-    );
-
-    const slot = try control.reserveRunRecord(
-        task,
-        .{ .text = "old SECRET-KEY remains private" },
-    );
-    defer control.discardRunRecord(task, slot);
-    try std.testing.expectEqual(@as(u64, 1), task.durable.runs[slot].?.execution_generation);
-    try std.testing.expectEqualStrings(
-        "old *** remains private",
-        task.durable.runs[slot].?.input.text.value,
-    );
-    try std.testing.expectEqualStrings("SECRET-KEY", task.durable.runs[slot].?.initial_credentials[0]);
-
-    task.durable.execution_generation = 2;
-    try std.testing.expectError(
-        error.ExecutionGenerationMismatch,
-        control.task_runtime.testExecutionInput(task.durable.id),
-    );
-    try std.testing.expectError(
-        error.ExecutionGenerationMismatch,
-        control.runTask(
-            task.durable.id,
-            .{ .text = "must reject a mismatched binding" },
-        ),
-    );
-    task.durable.execution_generation = 1;
 }
 
 test "busy Task model selection commits the last intent without changing installed execution" {
@@ -16741,86 +15476,6 @@ test "busy Task model selection commits the last intent without changing install
     );
 }
 
-test "same-source default model change preserves execution generation and advances admission revision" {
-    var control = try testRuntime();
-    defer control.deinit();
-
-    const models = [_]models_contract.ModelView{
-        .{ .id = "fixture-model", .display_name = "Fixture model", .metadata = .{ .capabilities = .{ .image_input = false } } },
-        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
-    };
-    try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
-    const before = control.newTaskAdmissionView();
-    const initial_view = control.modelsView();
-    const initial_provider = initial_view.providers[0];
-    try models_aggregate.TestSupport.installMetaskDefault(
-        &control.custom_providers,
-        "account-1",
-        "fixture-secret",
-        &models,
-        "fixture-model-2",
-        initial_provider.source_generation,
-        initial_view.metask_selection_revision + 1,
-        initial_view.selection_revision + 1,
-        initial_provider.catalog_generation + 1,
-    );
-    control.reconcileModelsDefaultNoFail(false, false);
-    control.finishExecutionCommitNoFail();
-    const view = control.modelsView();
-    const provider = view.providers[0];
-
-    const after = control.newTaskAdmissionView();
-    try std.testing.expectEqual(before.active_generation, after.active_generation);
-    try std.testing.expect(after.active_selection_revision != before.active_selection_revision);
-    try std.testing.expectEqualStrings("fixture-model-2", after.active_model_ref.?.model_id);
-    try std.testing.expect(!control.validNewTaskAdmission(
-        before.active_generation,
-        before.active_selection_revision,
-    ));
-    try std.testing.expect(control.validNewTaskAdmission(
-        after.active_generation,
-        after.active_selection_revision,
-    ));
-    try std.testing.expectError(
-        error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(
-            1,
-            1,
-            before.active_generation,
-            before.active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
-    );
-    const task = control.task_runtime.tasks[0].?;
-    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(control.newTaskModelSelectionAuthorized(.{
-        .target = .{ .source_id = after.active_model_ref.?.source_id, .model_id = "fixture-model-2" },
-        .expected_source_generation = provider.source_generation,
-        .expected_catalog_generation = provider.catalog_generation,
-    }));
-
-    try models_aggregate.TestSupport.installMetaskDefault(
-        &control.custom_providers,
-        "account-1",
-        "fixture-secret",
-        &models,
-        "fixture-model",
-        provider.source_generation,
-        view.metask_selection_revision + 1,
-        view.selection_revision + 1,
-        provider.catalog_generation + 1,
-    );
-    control.reconcileModelsDefaultNoFail(false, false);
-    control.finishExecutionCommitNoFail();
-    const reverted = control.newTaskAdmissionView();
-    try std.testing.expectEqual(before.active_generation, reverted.active_generation);
-    try std.testing.expect(reverted.active_selection_revision != after.active_selection_revision);
-    try std.testing.expectEqualStrings("fixture-model", reverted.active_model_ref.?.model_id);
-}
-
 test "Product Control publishes Task model selection availability from cross-owner authority" {
     var control = try testRuntime();
     defer control.deinit();
@@ -16863,12 +15518,10 @@ test "Product Control publishes Task model selection availability from cross-own
 
     const ready_models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
     try TestSupport.replaceMetaskCatalog(&control, &ready_models, "fixture-model");
-    try control.beginDefaultExecutionReplacement();
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
-    control.endExecutionReplacementNoFail();
 
     query.runtime_attached = false;
     try std.testing.expectEqual(
@@ -16883,15 +15536,7 @@ test "Product Control publishes Task model selection availability from cross-own
     );
     query.execution_generation -= 1;
 
-    var binding = try PreparedCustomProviderBinding.init(
-        std.testing.allocator,
-        "provider-1",
-        "fixture-model",
-    );
-    execution_state.testing.installCustomProviderBinding(
-        &control.execution_state,
-        &binding,
-    );
+    models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
@@ -16980,38 +15625,27 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
     try std.testing.expectError(error.ExecutionUnavailable, control.resolveTaskRunModel(3));
 }
 
-test "Task model selection does not depend on the global Custom Provider binding" {
+test "Task model selection does not depend on a starting preference" {
     var control = try testRuntime();
     defer control.deinit();
-    var binding = try PreparedCustomProviderBinding.init(std.testing.allocator, "provider-1", "fixture-model");
-    execution_state.testing.installCustomProviderBinding(&control.execution_state, &binding);
+    models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
     const task = control.task_runtime.tasks[0].?;
     _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     try std.testing.expectEqualStrings("metask", task.durable.model_intent.?.source_id);
     try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
 }
 
-test "clearing the admission default preserves active Task execution" {
+test "a removed installed model cannot start another Run while its Task retains explicit alternatives" {
     var control = try testRuntime();
     defer control.deinit();
-
-    const task = control.task_runtime.tasks[0].?;
-    const task_execution = try control.task_runtime.testExecutionInput(task.durable.id);
-    try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
-
-    control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
-        .view = .{ .state = .signed_out },
-    });
-    control.finishAccountCommitNoFail();
-    control.setMetaskAuthorizationUnavailable();
-
-    try std.testing.expect(!control.execution_state.ready());
-    try std.testing.expect(!control.newTaskAdmissionView().available);
-    const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
-    try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
-    try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
-    try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
+    const task = control.task_runtime.find(3).?;
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
+    try models_aggregate.TestSupport.installMetaskDefault(&control.custom_providers, "account-1", "SECRET-KEY", &.{.{ .id = "fixture-model-2", .display_name = "Second", .metadata = .{} }}, "fixture-model-2", 1, 1, 1, 5);
+    try std.testing.expectError(error.ExecutionUnavailable, control.resolveTaskRunModel(3));
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 1, "fixture-model-2"));
+    try std.testing.expectEqualStrings("fixture-model-2", task.durable.model_intent.?.model_id);
 }
 
 test "released Task credential is permanently scrubbed from every product projection" {
@@ -17150,7 +15784,6 @@ test "released Task credential is permanently scrubbed from every product projec
     run.event_stream_finalized = true;
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
-    try control.beginExecutionReplacement();
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(@as(usize, 0), run.initial_credentials[0].len);
     try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
@@ -17174,68 +15807,12 @@ test "released Task credential is permanently scrubbed from every product projec
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\"") == null,
     );
-    control.endExecutionReplacementNoFail();
-}
-
-test "clearing the last default execution scrubs its credential before secure zero" {
-    test_agent_runtime.io = std.testing.io;
-    var control = try Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        .{
-            .max_tasks = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        .{},
-    );
-    defer control.deinit();
-    try installTestExecution(&control);
-    product_workspace.testing.installOwned(&control.workspace, 0, .{
-        .id = 1,
-        .canonical_root = try control.copyBounded("/tmp", control.limits.max_workspace_bytes),
-        .projected_root_storage = try control.copyBounded(
-            "path-SECRET-KEY",
-            control.limits.max_workspace_bytes,
-        ),
-        .projected_root_len = "path-SECRET-KEY".len,
-        .display_name_storage = try control.copyBounded(
-            "SECRET-KEY",
-            control.limits.max_workspace_bytes,
-        ),
-        .display_name_len = "SECRET-KEY".len,
-        .recent_order = 1,
-    });
-    control.skill.registerWorkspaceOwned(.{
-        .id = 1,
-        .epoch = 1,
-        .catalog_authorized = true,
-        .canonical_root = try control.allocator.dupe(u8, "/tmp"),
-    }, control.skillProjectionBudget());
-    try control.beginDefaultExecutionReplacement();
-    control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
-        .view = .{ .state = .signed_out },
-    });
-    try control.prepareExecutionClear();
-    control.clearExecutionNoFail();
-    control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
-
-    try std.testing.expectEqual(@as(usize, 0), control.execution_state.credential().len);
-    var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 }
 
 test "known credential matching chooses the longest overlapping secret" {
     var control = try testRuntime();
     defer control.deinit();
-    execution_state.testing.setCredentialBytes(
-        &control.execution_state,
-        "SECRET",
-    );
+    try TestSupport.installFixtureCredential(&control, "SECRET");
 
     try std.testing.expectEqual(
         @as(usize, "SECRET-KEY".len),
@@ -17274,10 +15851,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
 test "opaque credential redaction preserves UTF-8 projection validity" {
     var control = try testRuntime();
     defer control.deinit();
-    execution_state.testing.setCredentialBytes(
-        &control.execution_state,
-        &[_]u8{0xa9},
-    );
+    try TestSupport.installFixtureCredential(&control, &[_]u8{0xa9});
 
     var output: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
@@ -18457,27 +17031,10 @@ test "event projection failure routes by Agent Session identity not product Task
     ));
 }
 
-test "Runtime shutdown releases current and Task-owned execution generations" {
+test "Runtime shutdown releases Task-owned credential versions" {
     var control = try testRuntime();
-    try TestSupport.prepareMetaskDefault(&control, 2);
-    try control.beginDefaultExecutionReplacement();
-    var replacement = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model-2"),
-        try std.testing.allocator.dupe(
-            u8,
-            models_contract.metask_anthropic_messages_url,
-        ),
-        2,
-        try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
-        "",
-    );
-    errdefer replacement.deinit();
-    try control.prepareExecutionInstall(replacement.input());
-    control.installExecutionNoFail(&replacement);
-    control.endExecutionReplacementNoFail();
+    try TestSupport.installFixtureCredential(&control, "SECRET-KEY-2");
+    try std.testing.expectEqual(@as(usize, 1), TestSupport.fixtureExecution(&control).retired_credentials.items.len);
     control.deinit();
 }
 
@@ -19070,7 +17627,7 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .safe_diagnostic = &diagnostic,
         },
     });
-    control.finishAccountCommitNoFail();
+    control.publishAdmissionChangesNoFail();
 }
 
 fn maximumProjectionFixture(control: *Runtime) !void {
@@ -20376,10 +18933,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     // This mirrors a later credential installation. The immutable artifact is
     // intentionally left untouched; the read boundary must protect it using
     // the complete set of credentials that is live at read time.
-    execution_state.testing.setCredentialBytes(
-        &control.execution_state,
-        late_credential,
-    );
+    try TestSupport.installFixtureCredential(&control, late_credential);
     control.redactAllProductProjectionsNoFail(late_credential);
 
     const Capture = struct {
@@ -21005,13 +19559,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
 
     for (0..4096) |_| {
         try control.appendTrackedText(assistant, "x", control.limits.max_assistant_message_bytes);
-        try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
+        try std.testing.expect(!control.redactTrackedText(assistant, TestSupport.fixtureExecution(&control).input().api_key));
         try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     }
     try std.testing.expectEqual(@as(usize, 4096), assistant.list.items.len);
 
     try control.appendTrackedText(assistant, "SECRET-", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
+    try std.testing.expect(!control.redactTrackedText(assistant, TestSupport.fixtureExecution(&control).input().api_key));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     run.commentary_count = 1;
@@ -21022,13 +19576,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
     try control.appendTrackedText(assistant, "KEY", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(control.redactTrackedText(assistant, control.execution_state.credential()));
+    try std.testing.expect(control.redactTrackedText(assistant, TestSupport.fixtureExecution(&control).input().api_key));
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
     run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     try control.appendTrackedText(assistant, " tail SECRET-", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
+    try std.testing.expect(!control.redactTrackedText(assistant, TestSupport.fixtureExecution(&control).input().api_key));
     run.commentary_ends[0] = @intCast(assistant.committed_len);
     try std.testing.expect(commitTerminal(
         run,
@@ -21335,7 +19889,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     const projected = try control.copyProjected(
         long,
         control.limits.max_tool_field_bytes,
-        control.execution_state.credential(),
+        TestSupport.fixtureExecution(&control).input().api_key,
     );
     defer control.freeTracked(projected.value);
     try std.testing.expect(projected.truncated);
@@ -22278,17 +20832,8 @@ test "MCP startup activation failure stays globally unavailable without inventin
     mcp_testing.state(&control.mcp.?).refresh_request_generation = 1;
     mcp_testing.installRefreshJob(&control.mcp.?, blocked_job);
     try std.testing.expectError(
-        error.ExecutionUnavailable,
-        control.createTaskInWorkspace(
-            1,
-            1,
-            1,
-            control.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+        error.ModelSelectionChanged,
+        control.createTaskInWorkspace(1, 1, try TestSupport.fixtureModelSelection(&control), null, null, .{ .interactive = null }),
     );
     mcp_testing.state(&control.mcp.?).activation_failed = false;
     blocked_job.outcome = .unavailable;
@@ -22620,27 +21165,25 @@ test "approval projection writes deferred facts off-thread and unknown readback 
     }
 }
 
-test "authoritative empty catalog closes new default admission and preserves Task execution" {
+test "empty catalog rejects its explicit model without closing generic admission or changing owned execution" {
     var control = try testRuntime();
     defer control.deinit();
     const task_id = control.task_runtime.tasks[0].?.durable.id;
     const old_admission = control.newTaskAdmissionView();
     try std.testing.expect(old_admission.available);
     // This case changes only the catalog; credential rotation is tested separately.
-    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&control.custom_providers, "account-1", "fixture-secret", &.{}));
-    control.reconcileModelsDefaultNoFail(true, false);
-    control.finishExecutionCommitNoFail();
-    try std.testing.expect(!control.newTaskAdmissionView().available);
-    try std.testing.expect(!control.validNewTaskAdmission(old_admission.active_generation, old_admission.active_selection_revision));
-    try std.testing.expect(!control.scheduleExecutionBinding().available);
-    try std.testing.expectError(error.ExecutionUnavailable, control.createTask(.{
+    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&control.custom_providers, "account-1", "SECRET-KEY", &.{}));
+    control.finishModelsCommitNoFail();
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    try std.testing.expect(control.scheduleExecutionBinding().available);
+    try std.testing.expectError(error.ModelSelectionChanged, control.createTask(.{
         .workspace_root = "/must-not-be-opened",
         .trust = .explicitly_trusted,
-    }));
+    }, try TestSupport.fixtureModelSelection(&control)));
     const pinned = try control.task_runtime.testExecutionInput(task_id);
     try std.testing.expectEqualStrings("fixture-model", pinned.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", pinned.api_key);
-    try std.testing.expectEqual(old_admission.active_generation, pinned.execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), pinned.execution_generation);
     try std.testing.expectEqual(@as(@TypeOf(control.accountView().state), .authenticated), control.accountView().state);
 }
 
@@ -22701,11 +21244,11 @@ test "active input wire identity borrows stable Run memory until history encodin
     try std.testing.expectEqualStrings(operation_id, projected.operation_id);
 }
 
-test "complete model metadata image refresh changes default generation while existing Task stays frozen" {
+test "catalog capability refresh leaves Task execution frozen until explicit preparation" {
     var control = try testRuntime();
     defer control.deinit();
     const task_id = control.task_runtime.tasks[0].?.durable.id;
-    const old_execution = control.execution_state.executionInput().?;
+    const old_execution = try control.task_runtime.testExecutionInput(task_id);
     const generation = old_execution.execution_generation;
     const old_capabilities = (try control.task_runtime.testExecutionInput(task_id)).target.image_capabilities;
     try std.testing.expectEqual(@as(usize, 1), old_capabilities.len);
@@ -22718,15 +21261,15 @@ test "complete model metadata image refresh changes default generation while exi
         "SECRET-KEY",
         &models,
         "fixture-model",
-        control.execution_state.activeSourceGeneration(),
-        current.metask_selection_revision + 1,
+        current.providers[0].source_generation,
+        1,
         current.selection_revision + 1,
         current.providers[0].catalog_generation + 1,
     );
-    control.reconcileModelsDefaultNoFail(true, false);
-    const refreshed = control.execution_state.executionInput().?;
-    try std.testing.expect(refreshed.execution_generation > generation);
-    try std.testing.expect(refreshed.target.image_capabilities[0].supported);
+    var refreshed = (try control.custom_providers.resolveModel(.{ .source_id = "metask", .model_id = "fixture-model" }, current.providers[0].source_generation, current.providers[0].catalog_generation + 1)).?;
+    defer refreshed.deinit();
+    try std.testing.expectEqual(generation, control.executionGeneration());
+    try std.testing.expect(refreshed.input().target.image_capabilities[0].supported);
     const pinned = try control.task_runtime.testExecutionInput(task_id);
     try std.testing.expectEqual(generation, pinned.execution_generation);
     try std.testing.expect(!pinned.target.image_capabilities[0].supported);
@@ -22765,7 +21308,7 @@ test "Product view cached delivery confirms versions without rebuilding stable b
 test "Product view credential matcher preserves UTF-8 and clears its owned scan set after reads" {
     var control = try testRuntime();
     defer control.deinit();
-    execution_state.testing.setCredentialBytes(&control.execution_state, &.{0xa9});
+    try TestSupport.installFixtureCredential(&control, &.{0xa9});
     try control.replaceTracked(&control.task_runtime.tasks[0].?.durable.title, "caf\xc3\xa9 SECRET-KEY", control.limits.max_task_title_bytes);
     var storage: [96 * 1024]u8 = undefined;
     const bytes = try control.writeViewFixture(&storage, .{ .task_id = 3 });
@@ -22831,7 +21374,7 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
     const epoch = control.projectionSecurityEpoch();
     const wakes = host.wakes.load(.monotonic);
-    const duplicate = try control.allocator.dupe(u8, control.execution_state.credential());
+    const duplicate = try control.allocator.dupe(u8, TestSupport.fixtureExecution(&control).input().api_key);
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
     control.retireProjectionCredential(duplicate);
@@ -22845,11 +21388,8 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
     const next = try control.writeSnapshot(&output, .{});
-    // The Task retains a different owned copy of SECRET-KEY. Retiring the
-    // installed copy preserves the set; retiring the remaining Task copy does not.
-    control.retireProjectionCredential(control.execution_state.credential());
-    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
-    execution_state.testing.setCredentialBytes(&control.execution_state, "GLOBAL");
+    // The separately owned duplicate above preserved the live credential set;
+    // retiring the remaining Task owner must invalidate captured reads.
     const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
     control.retireProjectionCredential(task_credential);
     try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
@@ -22948,7 +21488,7 @@ test "Product view failed formatter stage releases partially prepared source and
     try std.testing.expectEqual(@as(usize, 0), control.view_preparation.tools.items.len);
 }
 
-test "Account image token protects Custom Provider views between Runs and rotation revokes reads" {
+test "Account image token protects Task views between Runs and rotation revokes reads" {
     const Account = struct {
         token: []const u8 = "account-image-token",
         epoch: u64 = 1,
@@ -22963,26 +21503,10 @@ test "Account image token protects Custom Provider views between Runs and rotati
     };
     var control = try testRuntime();
     defer control.deinit();
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .custom_provider,
-        .openai_chat_completions,
-        try std.testing.allocator.dupe(u8, "custom-model"),
-        try std.testing.allocator.dupe(u8, "https://custom.example/v1/chat/completions"),
-        2,
-        try std.testing.allocator.dupe(u8, "custom-api-key"),
-        "fixture-provider",
-    );
-    errdefer execution.deinit();
-    var binding = try control.prepareCustomProviderBinding("provider-1", "custom-model");
-    try control.beginDefaultExecutionReplacement();
-    try control.prepareExecutionInstall(execution.input());
-    control.installCustomProviderExecutionNoFail(&execution, &binding);
-    control.endExecutionReplacementNoFail();
-    try std.testing.expectEqual(models_contract.Source.custom_provider, control.execution_state.activeSource().?);
+    try TestSupport.installFixtureCredential(&control, "custom-api-key");
     var account: Account = .{};
     control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
-    try std.testing.expect(!std.mem.eql(u8, account.token, control.execution_state.credential()));
+    try std.testing.expect(!std.mem.eql(u8, account.token, TestSupport.fixtureExecution(&control).input().api_key));
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"account-tool\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo account\\\\u002dimage-token\\\"}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer event.deinit();
     try control.applyEvent(&event);
@@ -23070,37 +21594,6 @@ test "learned short credentials scrub Runtime retained and readonly originals wi
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
     control.redactAllProductProjectionsNoFail("none");
     try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
-}
-
-test "execution reinstall preserves projection for equal authority and revokes changed source target or credential" {
-    var control = try testRuntime();
-    defer control.deinit();
-    const initial_epoch = control.projectionSecurityEpoch();
-    const cases = [_]struct { source: models_contract.Source = .metask, endpoint: []const u8 = models_contract.metask_anthropic_messages_url, secret: []const u8 = "SECRET-KEY", provider: []const u8 = "", revoked: bool }{
-        .{ .revoked = false },
-        .{ .secret = "replacement-secret", .revoked = true },
-        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = true },
-        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .revoked = false },
-        .{ .source = .custom_provider, .secret = "replacement-secret", .provider = "fixture-provider", .endpoint = "https://changed.example/v1/messages", .revoked = true },
-    };
-    var epoch = initial_epoch;
-    var output: [96 * 1024]u8 = undefined;
-    for (cases, 0..) |case, index| {
-        var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
-        while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
-        var execution = try models_contract.OwnedConfig.initOwned(std.testing.allocator, case.source, .anthropic_messages, try std.testing.allocator.dupe(u8, "fixture-model"), try std.testing.allocator.dupe(u8, case.endpoint), @intCast(index + 2), try std.testing.allocator.dupe(u8, case.secret), case.provider);
-        errdefer execution.deinit();
-        try control.beginDefaultExecutionReplacement();
-        try control.prepareExecutionInstall(execution.input());
-        if (case.source == .metask) control.installExecutionNoFail(&execution) else {
-            var binding = try control.prepareCustomProviderBinding("provider-1", "fixture-model");
-            control.installCustomProviderExecutionNoFail(&execution, &binding);
-        }
-        control.endExecutionReplacementNoFail();
-        if (case.revoked) epoch += 1;
-        try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
-        if (case.revoked) try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64)) else try control.writeSnapshotRange(read.id, &output, 0, 64);
-    }
 }
 
 test "transport cancellation cannot revoke a replacement Product read" {

@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -42,9 +43,8 @@ export async function runModelErrorVertical({
       workspaceId: workspace.id,
       expectedWorkspaceEpoch: workspace.epoch,
     },
-    expectedExecutionGeneration: ready.newTaskAdmission.activeGeneration,
-    expectedSelectionRevision: ready.newTaskAdmission.activeSelectionRevision,
-    modelSelection: null,
+
+    modelSelection: fixtureModelSelection(ready),
     expectedSkillCatalogRevision: null,
     expectedSkillSelectionRevision: null,
     approvalMode: "manual",
@@ -134,13 +134,19 @@ export async function runModelErrorVertical({
     "replacement credential passes the explicit connection test",
   );
   source = connected.models.customProviders[0];
+  // Admit the new credential to a real independent Task while the original
+  // Run keeps its frozen execution. Its owned copy protects shared projections.
   accepted(
-    await invoke("metawork.models.selectDefault", {
-      sourceId: source.id,
-      modelId: "claude-sonnet-4-20250514",
-      expectedSelectionRevision: connected.models.selectionRevision,
-      expectedSourceGeneration: source.sourceGeneration,
-      expectedCatalogGeneration: source.catalogGeneration,
+    await invoke("metawork.tasks.create", {
+      workspace: {
+        kind: "manual",
+        workspaceId: workspace.id,
+        expectedWorkspaceEpoch: workspace.epoch,
+      },
+      modelSelection: fixtureModelSelection(connected),
+      expectedSkillCatalogRevision: null,
+      expectedSkillSelectionRevision: null,
+      approvalMode: "manual",
     }),
   );
   const prepared = await poll(
@@ -150,8 +156,8 @@ export async function runModelErrorVertical({
         (item) => item.testStatus === "connected",
       ) &&
         current.newTaskAdmission.available &&
-        current.newTaskAdmission.activeGeneration !==
-          ready.newTaskAdmission.activeGeneration
+        current.models.customProviders[0].sourceGeneration !==
+          ready.models.customProviders[0].sourceGeneration
         ? current
         : null;
     },
@@ -404,10 +410,8 @@ export async function runModelErrorVertical({
       workspaceId: paymentWorkspace.id,
       expectedWorkspaceEpoch: paymentWorkspace.epoch,
     },
-    expectedExecutionGeneration: paymentReady.newTaskAdmission.activeGeneration,
-    expectedSelectionRevision:
-      paymentReady.newTaskAdmission.activeSelectionRevision,
-    modelSelection: null,
+
+    modelSelection: fixtureModelSelection(paymentReady),
     expectedSkillCatalogRevision: null,
     expectedSkillSelectionRevision: null,
     approvalMode: "manual",

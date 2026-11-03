@@ -140,19 +140,7 @@ pub const WindowChromeControl = struct {
 };
 pub const WindowChromeDisconnect = struct { generation: []const u8 };
 pub const ExternalLinkOpen = struct { url: []const u8 };
-pub const ModelDefaultSelection = struct {
-    sourceId: []const u8,
-    modelId: []const u8,
-    expectedSelectionRevision: []const u8,
-    expectedSourceGeneration: []const u8,
-    expectedCatalogGeneration: []const u8,
-};
-pub const ConfigureMetaskSelection = struct {
-    sourceId: []const u8,
-    modelId: []const u8,
-    expectedMetaskSelectionRevision: []const u8,
-    expectedCatalogGeneration: []const u8,
-};
+
 pub const ModelCapabilities = struct {
     textInput: ?bool = null,
     audioInput: ?bool = null,
@@ -395,9 +383,7 @@ pub const NewTaskModelSelection = struct {
 };
 pub const TaskCreate = struct {
     workspace: TaskWorkspaceIntent,
-    expectedExecutionGeneration: []const u8,
-    expectedSelectionRevision: []const u8,
-    modelSelection: ?NewTaskModelSelection,
+    modelSelection: NewTaskModelSelection,
     expectedSkillCatalogRevision: ?[]const u8,
     expectedSkillSelectionRevision: ?[]const u8,
     approvalMode: []const u8,
@@ -526,7 +512,7 @@ pub const TaskDelete = struct { taskId: []const u8 };
 pub const PersistenceRecovery = struct { expectedRevision: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
-    binding: ScheduledTaskBinding,
+    modelSelection: NewTaskModelSelection,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
@@ -535,16 +521,10 @@ pub const ScheduledTaskUpdate = struct {
     scheduledTaskId: []const u8,
     expectedEpoch: []const u8,
     title: []const u8,
-    binding: ScheduledTaskBinding,
+    modelSelection: ?NewTaskModelSelection,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
-};
-pub const ScheduledTaskBinding = struct {
-    modelRef: ModelRef,
-    sourceGeneration: []const u8,
-    selectionRevision: []const u8,
-    protocol: []const u8,
 };
 pub const ScheduledTaskIdentity = struct {
     scheduledTaskId: []const u8,
@@ -901,13 +881,13 @@ test "dropped attachment paths use one exact bounded payload" {
 
 test "Task creation requires explicit nullable model and skill selections" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":null,"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-1"},"expectedSourceGeneration":"3","expectedCatalogGeneration":"4"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
-    try std.testing.expect(text.value.modelSelection == null);
-    try std.testing.expectEqualStrings("4", text.value.expectedSelectionRevision);
+    try std.testing.expectEqualStrings("model-1", text.value.modelSelection.targetModelRef.modelId);
+    try std.testing.expectEqualStrings("4", text.value.modelSelection.expectedCatalogGeneration);
     try std.testing.expectEqual(
         product_control.ApprovalMode.manual,
         approvalMode(text.value.approvalMode).?,
@@ -915,24 +895,24 @@ test "Task creation requires explicit nullable model and skill selections" {
     try std.testing.expect(permissionProfile("full_access") != null);
     try std.testing.expect(permissionProfile("accept_edits") == null);
     var selected = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"automatic"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
+        \\{"workspace":{"kind":"automatic"},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"full_access"}
     );
     defer selected.deinit();
     try std.testing.expectEqualStrings(
         "metask",
-        selected.value.modelSelection.?.targetModelRef.sourceId,
+        selected.value.modelSelection.targetModelRef.sourceId,
     );
     try std.testing.expectEqualStrings(
         "model-2",
-        selected.value.modelSelection.?.targetModelRef.modelId,
+        selected.value.modelSelection.targetModelRef.modelId,
     );
     try std.testing.expectEqualStrings(
         "5",
-        selected.value.modelSelection.?.expectedSourceGeneration,
+        selected.value.modelSelection.expectedSourceGeneration,
     );
     try std.testing.expectEqualStrings(
         "6",
-        selected.value.modelSelection.?.expectedCatalogGeneration,
+        selected.value.modelSelection.expectedCatalogGeneration,
     );
     try std.testing.expectError(
         error.InvalidBridgePayload,
@@ -1080,17 +1060,16 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
 
 test "Scheduled Task payload rejects Workspace and Skill configuration" {
     var current = try parsePayload(ScheduledTaskMutation,
-        \\{"title":"Current","binding":{"modelRef":{"sourceId":"metask","modelId":"model-1"},"sourceGeneration":"7","selectionRevision":"9","protocol":"openai_chat_completions"},"permissionProfile":"approval_required","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
+        \\{"title":"Current","modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"model-1"},"expectedSourceGeneration":"7","expectedCatalogGeneration":"9"},"permissionProfile":"approval_required","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
     );
     defer current.deinit();
     try std.testing.expectEqualStrings(
         "metask",
-        current.value.binding.modelRef.sourceId,
+        current.value.modelSelection.targetModelRef.sourceId,
     );
-    try std.testing.expectEqualStrings("model-1", current.value.binding.modelRef.modelId);
-    try std.testing.expectEqualStrings("7", current.value.binding.sourceGeneration);
-    try std.testing.expectEqualStrings("9", current.value.binding.selectionRevision);
-    try std.testing.expectEqualStrings("openai_chat_completions", current.value.binding.protocol);
+    try std.testing.expectEqualStrings("model-1", current.value.modelSelection.targetModelRef.modelId);
+    try std.testing.expectEqualStrings("7", current.value.modelSelection.expectedSourceGeneration);
+    try std.testing.expectEqualStrings("9", current.value.modelSelection.expectedCatalogGeneration);
 
     try std.testing.expectError(
         error.InvalidBridgePayload,

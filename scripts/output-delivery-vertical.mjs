@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
@@ -50,16 +51,15 @@ export async function runOutputDeliveryVertical({
     })()`);
   }
   try {
-    const admission = (await snapshot()).newTaskAdmission;
+    const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
       workspace: {
         kind: "manual",
         workspaceId,
         expectedWorkspaceEpoch: workspaceEpoch,
       },
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: catalog.revision,
       expectedSkillSelectionRevision: catalog.selectionRevision,
       approvalMode: "full_access",

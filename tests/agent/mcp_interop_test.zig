@@ -269,7 +269,7 @@ fn managementConfiguration(
 }
 
 fn installExecution(workbench_value: *product_control.Runtime) !void {
-    try product_control.TestSupport.installMetaskExecution(workbench_value, 1);
+    try product_control.TestSupport.configureMetaskSource(workbench_value, 1);
 }
 
 fn shutdownProduct(workbench_value: *product_control.Runtime, runtime: *agent.Runtime) void {
@@ -965,7 +965,7 @@ fn expectProductMcpPermission(refresh_pressure: bool, shutdown_inflight: bool) !
     const provider = try configureTaskSwitchProvider(&control, fixture.provider_endpoint, "source-model", .anthropic_messages);
     const workspace = try control.openWorkspace(.{ .workspace_root = workspace_root, .trust = .explicitly_trusted });
     const catalog = try waitTaskSwitchCatalog(&control, workspace, 1);
-    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, provider, catalog.revision, catalog.selection_revision, .{ .interactive = if (refresh_pressure) .manual else .auto_review });
+    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), provider, catalog.revision, catalog.selection_revision, .{ .interactive = if (refresh_pressure) .manual else .auto_review });
     try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try control.taskMcpAuthority(task_id));
     if (refresh_pressure) {
         const run_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Call the selected echo tool." });
@@ -2110,16 +2110,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         .trust = .explicitly_trusted,
     });
     const workspace_epoch = try restarted_workbench.workspaceEpoch(workspace_id);
-    const fresh_task_id = try restarted_workbench.createTaskInWorkspace(
-        workspace_id,
-        workspace_epoch,
-        1,
-        restarted_workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const fresh_task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
     try std.testing.expectEqual(
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(fresh_task_id),
@@ -2152,7 +2143,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             restarted_workbench.onMcpRefreshTimer();
             _ = restarted_workbench.mcp.?.selectionForNewTask();
         }
-        const unavailable_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, 1, restarted_workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        const unavailable_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
         try std.testing.expectEqual(.unavailable, try restarted_workbench.taskMcpAuthority(unavailable_task));
         try std.testing.expect(state.refresh_paused);
         try std.testing.expect(!restarted_workbench.mcp.?.hasRefreshJob());
@@ -2170,7 +2161,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         try std.testing.expect(!state.refresh_paused);
         try std.testing.expectEqual(@as(u8, 0), state.refresh_failures);
         try std.testing.expectEqual(.unavailable, try restarted_workbench.taskMcpAuthority(unavailable_task));
-        const recovered_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, 1, restarted_workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        const recovered_task = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
         try std.testing.expectEqual(.ready_with_selection, try restarted_workbench.taskMcpAuthority(recovered_task));
         return;
     }
@@ -2188,16 +2179,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
             break;
         } else return error.TestUnexpectedResult;
         try std.testing.expect(restarted_workbench.mcp.?.authorityStable());
-        const during = try restarted_workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            1,
-            restarted_workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        );
+        const during = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
         try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.ready_with_selection, try restarted_workbench.taskMcpAuthority(during));
         var output: [512 * 1024]u8 = undefined;
         const snapshot = try restarted_workbench.writeAggregateFixture(&output);
@@ -2238,30 +2220,12 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
                 newer.deinit();
             }
         }
-        const task_id = try restarted_workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            1,
-            restarted_workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        );
+        const task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
         try std.testing.expectEqual(fresh_task_id + 1, task_id);
         try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.unavailable, try restarted_workbench.taskMcpAuthority(task_id));
         try std.testing.expect(restarted_workbench.mcp.?.hasRefreshJob() or mcp_types.testing.state(&restarted_workbench.mcp.?).refresh_pending);
         // A failed candidate must leave the third and last Session slot free.
-        const third = try restarted_workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            1,
-            restarted_workbench.newTaskAdmissionView().active_selection_revision,
-            null,
-            null,
-            null,
-            .{ .interactive = null },
-        );
+        const third = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
         try std.testing.expectEqual(task_id + 1, third);
         try std.testing.expectEqual(product_control.TaskMcpAuthorityAtCreation.unavailable, try restarted_workbench.taskMcpAuthority(task_id));
         var output: [512 * 1024]u8 = undefined;
@@ -2288,16 +2252,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         .clock = .awake,
     } }, std.testing.io) catch return error.TestUnexpectedResult;
     refresh_timer.now_ms += 2_500;
-    const task_id = try restarted_workbench.createTaskInWorkspace(
-        workspace_id,
-        workspace_epoch,
-        1,
-        restarted_workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
     try std.testing.expectEqual(
         product_control.TaskMcpAuthorityAtCreation.unavailable,
         try restarted_workbench.taskMcpAuthority(task_id),
@@ -2318,16 +2273,7 @@ fn expectMcpProductAdmissionCase(protocol_version: []const u8, transport: agent.
         snapshot,
         "\"newTaskAccess\":\"available\"",
     ) != null);
-    const refreshed_task_id = try restarted_workbench.createTaskInWorkspace(
-        workspace_id,
-        workspace_epoch,
-        1,
-        restarted_workbench.newTaskAdmissionView().active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = null },
-    );
+    const refreshed_task_id = try restarted_workbench.createTaskInWorkspace(workspace_id, workspace_epoch, try product_control.TestSupport.fixtureModelSelection(&restarted_workbench), null, null, .{ .interactive = null });
     try std.testing.expectEqual(
         product_control.TaskMcpAuthorityAtCreation.ready_with_selection,
         try restarted_workbench.taskMcpAuthority(refreshed_task_id),
@@ -2702,7 +2648,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try std.testing.expectEqual(@as(usize, 2), catalog.skills.len);
     _ = try control.setSkillEnabled(.{ .scope = .{ .project = .{ .workspace_id = workspace, .expected_workspace_epoch = try control.workspaceEpoch(workspace) } }, .skill_policy_key = "blocked", .state = .disabled, .expected_catalog_revision = catalog.revision, .expected_selection_revision = catalog.selection_revision.? });
     catalog = try control.workspaceCatalog(workspace);
-    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, initial, catalog.revision, catalog.selection_revision, .{ .interactive = approval_mode });
+    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), initial, catalog.revision, catalog.selection_revision, .{ .interactive = approval_mode });
     const task = control.task_runtime.find(task_id).?;
     var original_catalog = try task.runtime.pinnedCatalogConst().?.clone(std.testing.allocator, .{
         .max_catalog_skills = control.limits.max_catalog_skills,

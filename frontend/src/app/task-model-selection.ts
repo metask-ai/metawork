@@ -1,4 +1,5 @@
-import type { TaskView } from "../bridge/contracts.ts";
+import { readyModelOptions } from "./new-task-model-selection.ts";
+import type { ModelsView, ModelRef, TaskView } from "../bridge/contracts.ts";
 
 export type TaskModelSelectionPolicy = {
   showsSelector: boolean;
@@ -22,4 +23,15 @@ export function taskModelSelectionPolicy(
     default:
       return { showsSelector: false, selectable: false, pending: false };
   }
+}
+
+/** Missing historical sources require an explicit choice, never inference. */
+export function taskModelCandidates(
+  models: ModelsView,
+  intent: ModelRef | null,
+) {
+  const sources = [...models.providers, ...models.customProviders];
+  if (intent && sources.some((provider) => provider.id === intent.sourceId))
+    return readyModelOptions(models, intent.sourceId);
+  return sources.flatMap((provider) => readyModelOptions(models, provider.id));
 }

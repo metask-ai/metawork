@@ -3385,7 +3385,7 @@ pub fn installProductControlExecutionGeneration(
     workbench: *product_control.Runtime,
     generation: u64,
 ) !void {
-    try product_control.TestSupport.installMetaskExecutionWithCredential(
+    try product_control.TestSupport.configureMetaskSourceWithCredential(
         workbench,
         generation,
         "fixture-secret",

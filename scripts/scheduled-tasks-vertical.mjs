@@ -22,25 +22,35 @@ export async function runScheduledTasksVertical({
   const now = () => Math.floor(Date.now() / 1000);
   const read = async (id) =>
     (await snapshot()).scheduledTasks.find((item) => item.id === id);
-  const binding = async () => {
+  let selectedTarget = null;
+  const modelSelection = async () => {
     const current = await snapshot();
-    const admission = current.newTaskAdmission;
-    assert.equal(admission.available, true);
-    assert.deepEqual(current.models.defaultSelection, admission.activeModelRef);
+    const target = selectedTarget ?? current.models.defaultSelection;
     const source = [
       ...current.models.providers,
       ...current.models.customProviders,
-    ].find((item) => item.id === admission.activeModelRef.sourceId);
+    ].find((item) =>
+      target
+        ? item.id === target.sourceId
+        : item.models.some((model) => model.ready !== false),
+    );
+    assert.ok(
+      source,
+      "the vertical fixture must configure an executable source",
+    );
+    const model = target
+      ? source.models.find((item) => item.id === target.modelId)
+      : source.models.find((item) => item.ready !== false);
+    assert.ok(model);
     return {
-      modelRef: admission.activeModelRef,
-      sourceGeneration: source.sourceGeneration,
-      selectionRevision: admission.activeSelectionRevision,
-      protocol: admission.activeProtocol,
+      targetModelRef: { sourceId: source.id, modelId: model.id },
+      expectedSourceGeneration: source.sourceGeneration,
+      expectedCatalogGeneration: source.catalogGeneration,
     };
   };
   const definition = async (title, recurrence) => ({
     title,
-    binding: await binding(),
+    modelSelection: await modelSelection(),
     permissionProfile: "approval_required",
     input: { kind: "text", text: title },
     recurrence,
@@ -379,19 +389,7 @@ export async function runScheduledTasksVertical({
           ? current
           : null;
       }, "custom source probe");
-      const state = await snapshot();
-      assert.equal(
-        (
-          await invoke("metawork.models.selectDefault", {
-            sourceId: source.id,
-            modelId: "schedule-model",
-            expectedSelectionRevision: state.models.selectionRevision,
-            expectedSourceGeneration: source.sourceGeneration,
-            expectedCatalogGeneration: source.catalogGeneration,
-          })
-        ).accepted,
-        true,
-      );
+      selectedTarget = { sourceId: source.id, modelId: "schedule-model" };
       const custom = await create("Custom source scheduled review");
       assert.equal(custom.binding.protocol, "openai_responses");
       const manual = await invoke("metawork.scheduledTasks.runNow", {

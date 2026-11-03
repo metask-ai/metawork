@@ -524,31 +524,14 @@ test("Product Models owns custom providers independently of Account", () => {
   assert.doesNotMatch(settings, /CUSTOM_PROVIDER_SETTINGS_ENABLED/);
   assert.match(windowsBringup, /test-custom-provider-readiness-windows\.mjs/);
   assert.match(identity, /pub fn customProviderCredentialService/);
-  const selectDefault = control.indexOf("pub fn selectModelsDefault(");
-  const registryCommit = control.indexOf(
-    "self.custom_providers.selectDefault(command)",
-    selectDefault,
+  assert.doesNotMatch(
+    control,
+    /pub fn selectModelsDefault|reconcileModelsDefault|beginDefaultExecutionReplacement/,
   );
-  const reconcile = control.indexOf(
-    "self.reconcileModelsDefaultNoFail(false, false)",
-    registryCommit,
-  );
-  assert.ok(selectDefault >= 0 && registryCommit > selectDefault);
-  assert.ok(
-    reconcile > registryCommit,
-    "Models desired state must commit before consumer reconciliation",
-  );
-  const reconcileOwner = control.indexOf("fn reconcileModelsDefaultNoFail(");
-  const scrubPreparation = control.indexOf(
-    "self.execution_state.prepareInstall(",
-    reconcileOwner,
-  );
-  const activeInstall = control.indexOf(
-    "self.execution_state.installMetaskNoFail(",
-    scrubPreparation,
-  );
-  assert.ok(reconcileOwner >= 0 && scrubPreparation > reconcileOwner);
-  assert.ok(activeInstall > scrubPreparation);
+  assert.match(control, /rememberTaskModelPreference/);
+  assert.match(control, /custom_providers\.rememberPreference/);
+  assert.match(control, /schedule\.prepareCredentialRedaction/);
+  assert.match(control, /schedule\.prepareCredentialRelease/);
   assert.match(app, /models_platform_binding\.Adapter\.init/);
   assert.match(app, /models_management\.start\(/);
   assert.doesNotMatch(app, /startWithAccountUnavailable/);
@@ -881,7 +864,7 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(runtime, /@import\("product_control_account_projection"\)/);
   assert.match(runtime, /@import\("product_control_execution_state"\)/);
   assert.match(runtime, /account_projection: account_projection\.Projection/);
-  assert.match(runtime, /execution_state: execution_state\.State/);
+  assert.match(runtime, /execution_generations: execution_state\.Generations/);
   assert.match(accountProjection, /@import\("metawork_account_contract"\)/);
   assert.doesNotMatch(accountProjection, /metawork_product_models/);
   assert.match(accountProjection, /pub const Projection = struct/);
@@ -893,11 +876,11 @@ test("Product Control is the only composition owner identity", () => {
     executionState,
     /metawork_account_contract|AccountProjection|AccountFact|AccountView|account_id|catalog_generation|selected_model/,
   );
-  assert.match(executionState, /@import\("metawork_product_models_contract"\)/);
-  assert.match(executionState, /pub const State = struct/);
-  assert.match(executionState, /pub const ProjectionRedaction = struct/);
-  assert.match(executionState, /const ActiveExecution = struct/);
-  assert.match(executionState, /pub const testing = if \(builtin\.is_test\)/);
+  assert.match(executionState, /pub const Generations = struct/);
+  assert.doesNotMatch(
+    executionState,
+    /OwnedConfig|ActiveExecution|api_key|prepareInstall|prepareClear/,
+  );
   assertNoImports(
     ["src/product/control/execution_state.zig"],
     [
@@ -939,10 +922,7 @@ test("Product Control is the only composition owner identity", () => {
     runtime,
     /const AccountProjection = struct|const ActiveExecution = struct|const ReplacementKind = enum|const RedactionPreparation = union|custom_execution_binding:|execution_replacement:|execution_redaction_preparation:/,
   );
-  assert.match(
-    runtime,
-    /pub const PreparedCustomProviderBinding\s*=\s*[\s\S]*execution_state\.PreparedCustomProviderBinding/,
-  );
+  assert.doesNotMatch(runtime, /pub const PreparedCustomProviderBinding/);
   assert.doesNotMatch(
     ports,
     /PreparedCustomProviderBinding|execution_state\.State|AccountProjection|ActiveExecution/,
@@ -1060,10 +1040,12 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /schedule\.reconcileNoFail/);
   assert.match(runtime, /product_schedule\.TaskEffects/);
   assert.match(runtime, /schedule\.writeProjection/);
-  assert.match(runtime, /execution_state\.prepareInstall/);
-  assert.match(runtime, /execution_state\.prepareClear/);
-  assert.match(executionState, /fn consumeInstallPreparation/);
-  assert.match(executionState, /fn consumeClearPreparation/);
+  assert.match(runtime, /prepareTaskCredential/);
+  assert.match(runtime, /schedule\.prepareCredentialRelease/);
+  assert.doesNotMatch(
+    executionState,
+    /consumeInstallPreparation|consumeClearPreparation/,
+  );
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
   assert.match(ports, /pub const AccountCommitSink = struct/);
@@ -1297,7 +1279,7 @@ test("Account authorization and Models provider state remain separate owners", (
     /OwnedSourceCandidateTransfer|source_candidate|Account.*Models|Models.*Account/,
   );
   const commitStart = control.indexOf("pub fn commitAccountChangeNoFail");
-  const nextMethod = control.indexOf("\n    pub fn ", commitStart + 1);
+  const nextMethod = control.indexOf("\n    }", commitStart + 1);
   const accountCommit = control.slice(commitStart, nextMethod);
   assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
   assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);

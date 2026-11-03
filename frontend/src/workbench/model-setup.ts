@@ -72,34 +72,8 @@ export function modelSetupNotice({
   if (valid) return null;
   if (models.persistenceHealth !== "ready")
     return { reason: "persistence", action: "models" };
-  if (admission.state === "replacing")
+  if (admission.reason === "shutting_down")
     return { reason: "preparing", action: null };
-  // Admission failures stay with their actual owner, not with Account/Models.
-  switch (admission.reason) {
-    case "schedule_persistence_unavailable":
-      return {
-        reason: "schedule_unavailable",
-        action: schedulesAvailable ? "schedules" : null,
-      };
-    case "schedule_persistence_failed":
-      return {
-        reason: "schedule_failed",
-        action: schedulesAvailable ? "schedules" : null,
-      };
-    case "schedule_persistence_outcome_unknown":
-      return {
-        reason: "schedule_unknown",
-        action: schedulesAvailable ? "schedules" : null,
-      };
-    case "resource_exhausted":
-      return { reason: "resources_unavailable", action: null };
-    case "custom_provider_persistence_unavailable":
-      return { reason: "persistence", action: "models" };
-    case "none":
-    case "credential_unavailable":
-    case "invalid_candidate":
-      break;
-  }
 
   const metask = models.providers.find((provider) => provider.id === "metask");
   const needsMetask =
@@ -137,13 +111,6 @@ export function modelSetupNotice({
     if (metask?.catalogState === "needs_authentication")
       return { reason: "execution_unavailable", action: "models" };
   }
-  // Logout can leave a retained Metask intent with no resolvable execution
-  // candidate. Explain its authorization state before the generic failure.
-  if (admission.reason === "invalid_candidate")
-    return {
-      reason: "execution_unavailable",
-      action: hasReadyModels ? "choose_model" : "models",
-    };
   if (selected) {
     const customProvider = models.customProviders.find(
       (provider) => provider.id === selected.sourceId,
@@ -156,8 +123,6 @@ export function modelSetupNotice({
         reason: "provider_unavailable",
         action: customProvidersAvailable ? "models" : null,
       };
-    if (admission.reason === "credential_unavailable")
-      return { reason: "execution_unavailable", action: "models" };
     return {
       reason: "model_unavailable",
       action: hasReadyModels ? "choose_model" : "models",

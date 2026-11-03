@@ -312,10 +312,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-execution", .root_module = test_modules.product_task_execution },
         .{ .name = "metawork-product-task-view", .root_module = test_modules.product_task_view },
     };
+    const schedule_tests = b.step("test-product-schedule", "Run Schedule state, persistence and timer authority tests");
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_schedule_state or spec.root_module == test_modules.product_schedule_persistence or spec.root_module == test_modules.product_schedule_view or spec.root_module == test_modules.product_schedule_runtime)
+            schedule_tests.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)

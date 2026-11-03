@@ -154,8 +154,6 @@ export const initialWorkbenchState: WorkbenchState = {
       availability: "needs_authentication",
       persistenceHealth: "unavailable",
       providers: [],
-      metaskSelection: null,
-      metaskSelectionRevision: "0",
       defaultSelection: null,
       selectionRevision: "0",
       operation: "idle",
@@ -165,12 +163,7 @@ export const initialWorkbenchState: WorkbenchState = {
     },
     newTaskAdmission: {
       available: false,
-      reason: "none",
-      activeModelRef: null,
-      activeProtocol: null,
-      activeGeneration: "0",
-      activeSelectionRevision: "0",
-      state: "unavailable",
+      reason: "workspace_unavailable",
     },
     skillCatalog: {
       availability: "uninitialized",

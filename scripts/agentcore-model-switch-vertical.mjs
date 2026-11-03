@@ -1,3 +1,4 @@
+import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -167,16 +168,15 @@ export async function runModelSwitchVertical({
     const workspace = (await snapshot()).workspaces.find(
       (item) => item.id === chosen.workspaceId,
     );
-    const admission = (await snapshot()).newTaskAdmission;
+    const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
       workspace: {
         kind: "manual",
         workspaceId: workspace.id,
         expectedWorkspaceEpoch: workspace.epoch,
       },
-      expectedExecutionGeneration: admission.activeGeneration,
-      expectedSelectionRevision: admission.activeSelectionRevision,
-      modelSelection: null,
+
+      modelSelection: fixtureModelSelection(modelSnapshot),
       expectedSkillCatalogRevision: null,
       expectedSkillSelectionRevision: null,
       approvalMode: "manual",
@@ -335,7 +335,7 @@ export async function runModelSwitchVertical({
         "model menu closes after capture",
       );
       await inspectRunModel(
-        admission.activeModelRef.modelId,
+        fixtureModelSelection(modelSnapshot).targetModelRef.modelId,
         `model-information-${name}`,
         source.displayName,
       );
@@ -375,7 +375,10 @@ export async function runModelSwitchVertical({
     }, "Renderer saves Task model intent");
     assert.equal(busy.activeOperation.kind, "run");
     assert.equal(busy.runs[0].execution.protocol, "anthropic_messages");
-    assert.equal(busy.binding.model, admission.activeModelRef.modelId);
+    assert.equal(
+      busy.binding.model,
+      fixtureModelSelection(modelSnapshot).targetModelRef.modelId,
+    );
     await wait(
       () =>
         webview.evaluate(
@@ -392,7 +395,7 @@ export async function runModelSwitchVertical({
       Buffer.from(pending.data, "base64"),
     );
     await inspectRunModel(
-      admission.activeModelRef.modelId,
+      fixtureModelSelection(modelSnapshot).targetModelRef.modelId,
       "model-information-after-selection",
       source.displayName,
     );
@@ -442,10 +445,11 @@ export async function runModelSwitchVertical({
     assert.equal(final.runs[0].execution.protocol, "anthropic_messages");
     assert.equal(final.runs[1].execution.protocol, "openai_responses");
     assert.ok(final.runs[1].output.response.includes("TARGET_DESKTOP_CONTEXT"));
-    assert.deepEqual(
-      (await snapshot()).models.defaultSelection,
-      defaultBeforeSelection,
-    );
+    const preferenceAfterSelection = (await snapshot()).models.defaultSelection;
+    assert.deepEqual(preferenceAfterSelection, {
+      sourceId: source.id,
+      modelId: targetModel,
+    });
     assert.ok(!JSON.stringify(await snapshot()).includes(targetKey));
     await writeFile(
       path.join(evidenceDir, "model-switch.json"),
@@ -454,8 +458,9 @@ export async function runModelSwitchVertical({
           taskId,
           sourceProtocol: final.runs[0].execution.protocol,
           targetProtocol: final.runs[1].execution.protocol,
-          defaultUnchangedByTaskSelection: true,
-          defaultAtTaskSelection: defaultBeforeSelection,
+          preferenceRememberedAfterConfirmedTaskSelection: true,
+          preferenceBeforeTaskSelection: defaultBeforeSelection,
+          preferenceAfterTaskSelection: preferenceAfterSelection,
           contextPreserved: true,
           views,
         },
@@ -464,7 +469,7 @@ export async function runModelSwitchVertical({
       ),
     );
     console.log(
-      "Model switch desktop WebView vertical passed: busy Renderer selection, full endpoint/credential/protocol rebind, original context, immutable Runs, independent default, keyboard menu, themes and 390px. OS foreground input remains a separate gate.",
+      "Model switch desktop WebView vertical passed: busy Renderer selection, full endpoint/credential/protocol rebind, original context, immutable Runs, remembered starting preference, keyboard menu, themes and 390px. OS foreground input remains a separate gate.",
     );
   } finally {
     releaseSource();

@@ -199,7 +199,7 @@ test("Account states never replace or reinterpret the Workbench", async () => {
   // Once identity acquisition began, continuous delivery uses that same Task.
   assert.match(
     app,
-    /const canCreateTask =\s*\(snapshot\.newTaskAdmission\.available \|\|\s*newTaskModelState\.intent !== null\) &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid/,
+    /const canCreateTask =\s*snapshot\.newTaskAdmission\.available &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid/,
   );
   assert.match(
     app,
