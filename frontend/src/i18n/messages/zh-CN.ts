@@ -1,5 +1,7 @@
 import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
+  "run.input_history_loading": "正在读取输入历史…",
+  "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
   "model_setup.preference_not_saved":
     "未能记住模型偏好，已确认的任务模型选择不受影响。",
   "mutation.reason.schedule_persistence_unavailable":

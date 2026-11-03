@@ -39,6 +39,20 @@ import {
 } from "./slash.ts";
 import { WorkspaceContextSelector } from "./WorkspaceContextSelector.tsx";
 
+export type ComposerInputHistory = {
+  load: () => Promise<readonly string[]>;
+  currentDraft: () => ComposerDraft | null;
+  commitDraft: (draft: ComposerDraft) => boolean;
+};
+
+function canEnterInputHistory(draft: ComposerDraft) {
+  return (
+    draft.kind === "text" &&
+    draft.text === "" &&
+    !draft.attachmentsReloadRequired
+  );
+}
+
 function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
   const maxHeight = Math.min(180, window.innerHeight * 0.28);
   textarea.style.height = "auto";
@@ -95,6 +109,7 @@ export function ComposerFooter({
   unavailableReason,
   draft,
   draftScope = "",
+  inputHistory,
   attachmentsEnabled,
   attachmentMaxFileBytes,
   attachmentBusy,
@@ -152,6 +167,7 @@ export function ComposerFooter({
   unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
   draftScope?: string;
+  inputHistory?: ComposerInputHistory;
   attachmentsEnabled: boolean;
   attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
@@ -214,6 +230,29 @@ export function ComposerFooter({
   );
   const [composing, setComposing] = useState(false);
   const [fileDragActive, setFileDragActive] = useState(false);
+  const historyBrowse = useRef<{
+    scope: string;
+    draft: ComposerDraft;
+    initialDraft: ComposerDraft;
+    entries: readonly string[] | null;
+    index: number;
+  } | null>(null);
+  const [historyRead, setHistoryRead] = useState<"loading" | "failed" | null>(
+    null,
+  );
+  useEffect(() => {
+    const browse = historyBrowse.current;
+    if (browse && (browse.scope !== draftScope || browse.draft !== draft)) {
+      historyBrowse.current = null;
+    }
+    setHistoryRead(null);
+  }, [draft, draftScope]);
+  useEffect(
+    () => () => {
+      historyBrowse.current = null;
+    },
+    [],
+  );
   const footerRef = useRef<HTMLElement>(null);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
@@ -450,10 +489,89 @@ export function ComposerFooter({
         return;
       }
     }
+    if (
+      !event.defaultPrevented &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+      navigateInputHistory(event.key === "ArrowUp" ? -1 : 1)
+    ) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && sendEnabled) {
       event.preventDefault();
       submitPrimary();
     }
+  }
+
+  function navigateInputHistory(direction: -1 | 1): boolean {
+    if (!inputHistory || composeDisabled) return false;
+    // Read the owner's ref: an external commit may precede its React render.
+    const current = inputHistory.currentDraft();
+    let browse = historyBrowse.current;
+    if (browse && (browse.scope !== draftScope || browse.draft !== current)) {
+      historyBrowse.current = null;
+      setHistoryRead(null);
+      return false;
+    }
+    if (!browse) {
+      if (!current || direction !== -1 || !canEnterInputHistory(current))
+        return false;
+      const request = {
+        scope: draftScope,
+        draft: current,
+        initialDraft: current,
+        entries: null as readonly string[] | null,
+        index: 0,
+      };
+      historyBrowse.current = request;
+      setHistoryRead("loading");
+      void inputHistory.load().then(
+        (entries) => {
+          if (
+            historyBrowse.current !== request ||
+            inputHistory.currentDraft() !== request.draft
+          )
+            return;
+          setHistoryRead(null);
+          if (!entries.length) {
+            historyBrowse.current = null;
+            return;
+          }
+          request.entries = [...entries];
+          request.index = entries.length - 1;
+          const next: ComposerDraft = {
+            kind: "text",
+            text: entries[request.index]!,
+          };
+          request.draft = next;
+          if (!inputHistory.commitDraft(next)) historyBrowse.current = null;
+        },
+        () => {
+          if (historyBrowse.current !== request) return;
+          historyBrowse.current = null;
+          setHistoryRead(
+            inputHistory.currentDraft() === request.draft ? "failed" : null,
+          );
+        },
+      );
+      return true;
+    }
+    if (!browse.entries) return true;
+    const index = Math.max(0, browse.index + direction);
+    if (index === browse.index) return true;
+    const finished = index === browse.entries.length;
+    const next: ComposerDraft = finished
+      ? browse.initialDraft
+      : { kind: "text", text: browse.entries[index]! };
+    browse.index = index;
+    browse.draft = next;
+    if (!inputHistory.commitDraft(next) || finished)
+      historyBrowse.current = null;
+    return true;
   }
 
   function updateText(value: string) {
@@ -688,6 +806,11 @@ export function ComposerFooter({
                 onKeyDown={handleTextKeyDown}
                 onPaste={pasteImages}
               />
+              {historyRead && (
+                <p className="composer-attachment-notice" role="status">
+                  {t(`run.input_history_${historyRead}`)}
+                </p>
+              )}
               {!draftWithinLimits && (
                 <p className="composer-attachment-error" role="status">
                   {t("run.text_input_too_large")}
