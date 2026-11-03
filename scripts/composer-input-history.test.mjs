@@ -101,7 +101,7 @@ test("input history pages older Runs without changing the reader or including ne
   );
 });
 
-test("input history preserves accepted text order, collapses transfers and consecutive exact duplicates", async () => {
+test("input history excludes real continuation roots and collapses consecutive exact duplicates", async () => {
   const state = fixture(4);
   const task = state.tasks[0];
   task.runs[0] = run(1, "A");
@@ -109,19 +109,29 @@ test("input history preserves accepted text order, collapses transfers and conse
     {
       id: "2",
       operationId: "operation-2",
-      text: "B",
+      text: "X",
       redacted: false,
       submission: submission(2),
       state: "transferred",
       transferredToRunId: "2",
     },
+    {
+      id: "3",
+      operationId: "operation-3",
+      text: "Y",
+      redacted: false,
+      submission: submission(3),
+      state: "transferred",
+      transferredToRunId: "2",
+    },
   ];
-  task.runs[1] = run(2, "B");
-  task.runs[2] = run(3, "B");
-  task.runs[3] = run(4, " B ");
+  task.runs[1] = run(2, "X\n\nY");
+  task.runs[1].submission = null;
+  task.runs[2] = { ...run(3, "Y"), submission: submission(4) };
+  task.runs[3] = { ...run(4, " Y "), submission: submission(5) };
   task.inputSubmissions = [
     {
-      submission: submission(5),
+      submission: submission(6),
       input: { kind: "text", text: "queued", redacted: false },
       state: "waiting",
       reason: null,
@@ -133,7 +143,51 @@ test("input history preserves accepted text order, collapses transfers and conse
     () => assert.fail("already loaded"),
     () => true,
   );
-  assert.deepEqual(history, ["A", "B", " B ", "queued"]);
+  assert.deepEqual(history, ["A", "X", "Y", " Y ", "queued"]);
+});
+
+test("input history suppresses a continuation root even when its source arrives on an older page", async () => {
+  const state = fixture(6);
+  const task = state.tasks[0];
+  task.runs[0] = run(1, "A");
+  task.runs[0].additionalInputs = [
+    {
+      id: "101",
+      operationId: "operation-101",
+      text: "X",
+      redacted: false,
+      submission: submission(101, 2),
+      state: "transferred",
+      transferredToRunId: "5",
+    },
+    {
+      id: "102",
+      operationId: "operation-102",
+      text: "Y",
+      redacted: false,
+      submission: submission(102, 3),
+      state: "transferred",
+      transferredToRunId: "5",
+    },
+  ];
+  for (const [index, value] of [
+    [1, "B"],
+    [2, "C"],
+    [3, "D"],
+    [5, "Z"],
+  ])
+    task.runs[index] = {
+      ...run(index + 1, value),
+      submission: submission(index + 1, index + 3),
+    };
+  task.runs[4] = { ...run(5, "X\n\nY"), submission: null };
+  const history = await loadTaskInputHistory(
+    productStateFixture(state, scope),
+    "3",
+    async (requested) => productStateFixture(state, requested),
+    () => true,
+  );
+  assert.deepEqual(history, ["A", "X", "Y", "B", "C", "D", "Z"]);
 });
 
 test("input history excludes attachments, Skills, whitespace, redacted text and other Tasks", async () => {

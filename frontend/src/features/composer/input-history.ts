@@ -3,6 +3,21 @@ import type {
   ViewScope,
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
+import { transferredRunIds } from "../../workbench/run-input.ts";
+
+type HistoryRun = Pick<
+  RunView,
+  "id" | "input" | "submission" | "additionalInputs"
+>;
+
+function historyRun(run: RunView): HistoryRun {
+  return {
+    id: run.id,
+    input: run.input,
+    submission: run.submission,
+    additionalInputs: run.additionalInputs,
+  };
+}
 
 type Entry = {
   operationId: string | null;
@@ -16,15 +31,19 @@ function text(input: RunView["input"]): string | null {
     : null;
 }
 
-function runEntries(run: RunView): Entry[] {
+function runEntries(run: HistoryRun, showRoot: boolean): Entry[] {
   return [
-    {
-      operationId: run.submission?.operationId ?? null,
-      text: text(run.input),
-      order: run.submission?.presentationOrder
-        ? BigInt(run.submission.presentationOrder)
-        : null,
-    },
+    ...(showRoot
+      ? [
+          {
+            operationId: run.submission?.operationId ?? null,
+            text: text(run.input),
+            order: run.submission?.presentationOrder
+              ? BigInt(run.submission.presentationOrder)
+              : null,
+          },
+        ]
+      : []),
     ...run.additionalInputs.map((input) => ({
       operationId: input.operationId,
       text: !input.redacted && input.text.trim() ? input.text : null,
@@ -88,10 +107,10 @@ export async function loadTaskInputHistory(
     throw new Error("Input history scope unavailable");
   const manifest = [...page.runManifest];
   // Retain just input records while paging, not every Run's tool/output bodies.
-  const runs = new Map<string, Entry[]>();
+  const runs = new Map<string, HistoryRun>();
   const known = new Set(manifest.map((run) => run.id));
   for (const run of [...task.runs, ...(initial.historyPage?.runs ?? [])])
-    if (known.has(run.id)) runs.set(run.id, runEntries(run));
+    if (known.has(run.id)) runs.set(run.id, historyRun(run));
   const waiting: Entry[] = task.inputSubmissions.map((input) => ({
     operationId: input.submission.operationId,
     text: text(input.input),
@@ -136,14 +155,17 @@ export async function loadTaskInputHistory(
       );
       if (observed?.contentVersion !== expected.contentVersion)
         throw new Error("Input history changed during read");
-      runs.set(run.id, runEntries(run));
+      runs.set(run.id, historyRun(run));
     }
     if (runs.size === previousSize)
       throw new Error("Input history page made no progress");
   }
   if (!isCurrent()) throw new Error("Input history scope changed");
+  const transferred = transferredRunIds([...runs.values()]);
   return orderedTexts([
-    ...manifest.flatMap((run) => runs.get(run.id)!),
+    ...manifest.flatMap((run) =>
+      runEntries(runs.get(run.id)!, !transferred.has(run.id)),
+    ),
     ...waiting,
   ]);
 }

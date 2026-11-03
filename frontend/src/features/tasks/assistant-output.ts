@@ -6,6 +6,7 @@ import type {
   TaskView,
 } from "../../bridge/contracts.ts";
 import { deriveRunPresentation } from "./run-presentation.ts";
+import { transferredRunIds } from "../../workbench/run-input.ts";
 
 export type AssistantOutputDisposition =
   "commentary" | "provisional" | "final" | "partial";
@@ -78,15 +79,7 @@ export function deriveTaskReadingPlan(
   local: readonly LocalReadingInput[] = [],
 ) {
   const ids = new Set(task.runs.map((run) => run.id));
-  const transferred = new Set(
-    task.runs.flatMap((run) =>
-      run.additionalInputs.flatMap((input) =>
-        input.state === "transferred" && input.transferredToRunId
-          ? [input.transferredToRunId]
-          : [],
-      ),
-    ),
-  );
+  const transferred = transferredRunIds(task.runs);
   const additional = new Set(
     task.runs.flatMap((run) =>
       run.additionalInputs.map((input) => input.operationId),
